@@ -1,4 +1,3 @@
-.env
 data/
 .venv/
 .idea/
@@ -8,9 +7,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-.coverage
-htmlcov/
-dist/
-build/
 .venv-setup.py
 .venv-setup.log
