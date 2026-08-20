@@ -8,3 +8,5 @@ __pycache__/
 .mypy_cache/
 .venv-setup.py
 .venv-setup.log
+.coverage
+htmlcov/

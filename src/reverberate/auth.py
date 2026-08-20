@@ -1,4 +1,5 @@
 """KeePassXC secrets: inject() into os.environ, require() to read them back."""
+
 from __future__ import annotations
 
 import os
