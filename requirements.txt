@@ -1,1 +1,7 @@
 keepassify @ git+https://github.com/gil-c/keepassify.git@v0.1.1
+trimesh>=4.4
+pyvista>=0.44
+trame>=3.6
+trame-vtk>=2.8
+trame-vuetify>=2.7
+nest_asyncio2>=1.6
