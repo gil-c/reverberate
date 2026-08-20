@@ -1,0 +1,1 @@
+keepassify @ git+https://github.com/gil-c/keepassify.git@v0.1.1

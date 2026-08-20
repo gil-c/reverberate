@@ -30,7 +30,7 @@ run = lambda *cmd: subprocess.call(cmd, stdout=log, stderr=log)
 
 if run(sys.executable, "-m", "venv", ".venv") == 0:
     run(os.path.join(".venv", "Scripts" if os.name == "nt" else "bin", "pip"),
-        "install", "-e", ".[dev]")
+        "install", "-r", "requirements-dev.txt")
     version = "%d.%d" % sys.version_info[:2]
     os.makedirs(".idea", exist_ok=True)
     with open(os.path.join(".idea", "misc.xml"), "w") as f:

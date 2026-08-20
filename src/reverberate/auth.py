@@ -8,7 +8,9 @@ from keepassify import KeePassXCError, SecretStore, write_association
 
 __all__ = ["KeePassXCError", "inject", "require"]
 
-URLS = ("https://dev-common.local", "https://reverberate.local")
+#: KeePassXC entry-URL namespace: the "site" these secrets are stored under
+#: in the vault (get-logins looks entries up by URL, same as a browser would).
+URL = "https://reverberate.local"
 
 _cache: dict[str, str] | None = None
 
@@ -20,7 +22,7 @@ def _running_in_ci() -> bool:
 def _fetch() -> dict[str, str]:
     global _cache
     if _cache is None:
-        _cache = {} if _running_in_ci() else SecretStore(urls=URLS, skip_in_ci=False).fetch()
+        _cache = {} if _running_in_ci() else SecretStore(urls=[URL], skip_in_ci=False).fetch()
     return _cache
 
 
@@ -52,7 +54,7 @@ def require(name: str) -> str:
 
 def _main(argv: list[str] | None = None) -> int:
     command = (argv or sys.argv[1:] or ["list"])[0]
-    store = SecretStore(urls=URLS)
+    store = SecretStore(urls=[URL])
     if command == "associate":
         association = store.associate()
         path = write_association(association, store.association_path)
