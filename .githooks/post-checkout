@@ -1,0 +1,57 @@
+#!/bin/sh
+# On a new worktree: create .venv via uv and point PyCharm at it.
+# Enable with: git config core.hooksPath .githooks
+
+[ "$3" = "1" ] || exit 0
+[ -d .venv ] && exit 0
+
+command -v uv >/dev/null 2>&1 || { echo "post-checkout: uv not found, skipping venv setup" >&2; exit 0; }
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+    *)                    IS_WINDOWS=0 ;;
+esac
+
+for candidate in python3 python py; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    PYTHON=$candidate
+    break
+done
+if [ -z "$PYTHON" ]; then
+    echo "post-checkout: no python found to launch the venv setup, skipping" >&2
+    exit 0
+fi
+
+cat > .venv-setup.py <<'PYEOF'
+import os, re, subprocess, sys
+
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+log = open(".venv-setup.log", "w")
+run = lambda *cmd: subprocess.call(cmd, stdout=log, stderr=log)
+
+if run("uv", "sync", "--extra", "dev") == 0:
+    python_bin = os.path.join(".venv", "Scripts" if os.name == "nt" else "bin", "python")
+    version_out = subprocess.run([python_bin, "--version"], capture_output=True, text=True).stdout
+    match = re.search(r"(\d+)\.(\d+)", version_out)
+    version = "%s.%s" % match.groups() if match else "3.12"
+    os.makedirs(".idea", exist_ok=True)
+    with open(os.path.join(".idea", "misc.xml"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<project version="4">\n'
+                '  <component name="ProjectRootManager" version="2" '
+                'project-jdk-name="Python %s (.venv)" project-jdk-type="Python SDK" />\n'
+                '</project>\n' % version)
+    log.write("Done\n")
+
+log.close()
+os.remove(__file__)
+PYEOF
+
+# Detach from git's process tree, which would otherwise wait for the setup.
+if [ "$IS_WINDOWS" = 1 ]; then
+    powershell.exe -NoProfile -Command "Start-Process -FilePath '$(cygpath -w "$(command -v "$PYTHON")")' -ArgumentList '$(pwd -W)/.venv-setup.py' -WindowStyle Hidden" </dev/null >/dev/null 2>&1
+else
+    nohup "$PYTHON" "$(pwd)/.venv-setup.py" </dev/null >/dev/null 2>&1 &
+fi
+
+echo "Venv setup started in background (see .venv-setup.log)"
+exit 0

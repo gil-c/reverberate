@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reverberate"
+version = "0.1.0"
+description = "A machine learning surrogate that predicts room acoustic response from 3D mesh and material properties"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "keepassify @ git+https://github.com/gil-c/keepassify.git@v0.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.8",
+    "mypy>=1.10",
+    "PyNaCl>=1.5",  # only used by tests exercising the local KeePassXC fake server
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that exercise external integrations and real APIs",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
