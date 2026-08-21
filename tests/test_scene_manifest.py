@@ -115,16 +115,18 @@ def instance(template: str) -> FurnitureInstance:
     )
 
 
-def test_manifest_reports_a_door_as_placed_but_lacking_a_collider(tmp_path: Path) -> None:
-    """Doors are real furniture acoustically, and must not vanish from counts."""
+def test_a_door_is_simulated_from_its_render_mesh_rather_than_dropped(tmp_path: Path) -> None:
+    """Doors have no collider file, and are acoustically the opposite of negligible."""
     build_hssd_stub(tmp_path)
     entries, report = build_instances(
         tmp_path, [instance("abc"), instance("219-1")], tmp_path / "site"
     )
     assert report.placed == 2
-    assert report.without_collider == ["219-1"]
+    assert report.render_as_collider == ["219-1"]
     assert report.layouts == {"shard": 1, "openings": 1}
-    assert [entry.collider_url for entry in entries][1] is None
+    door = entries[1]
+    assert door.collider_url == door.render_url
+    assert door.collider_is_render
 
 
 def test_manifest_counts_an_unresolvable_template_instead_of_dropping_it(

@@ -36,12 +36,15 @@ class AssetPaths:
     """Where one template's meshes live, and which layout it came from."""
 
     render: Path
-    collider: Path | None
+    collider: Path
     layout: str
-
-    @property
-    def has_collider(self) -> bool:
-        return self.collider is not None
+    #: True when no ``.collider.glb`` exists and the render mesh is standing in
+    #: for it. This is the dataset's own rule, not a workaround: an
+    #: ``object_config.json`` without a ``collision_asset`` key means Habitat
+    #: collides against the render asset itself. 1790 of HSSD's 16539 objects
+    #: are in that case, doors and windows among them, and treating them as
+    #: colliderless drops them from the simulation while leaving them visible.
+    collider_is_render: bool
 
 
 def candidate_directories(objects_dir: Path, template_name: str) -> list[tuple[Path, str]]:
@@ -59,7 +62,7 @@ def candidate_directories(objects_dir: Path, template_name: str) -> list[tuple[P
 
 
 def resolve_asset(objects_dir: Path, template_name: str) -> AssetPaths | None:
-    """Find a template's render mesh, and its collider when one exists.
+    """Find a template's render mesh, and the mesh to collide and simulate with.
 
     Returns ``None`` when no render mesh is found anywhere, so callers can
     count and report unresolved instances instead of losing them silently.
@@ -69,10 +72,12 @@ def resolve_asset(objects_dir: Path, template_name: str) -> AssetPaths | None:
         if not render.is_file():
             continue
         collider = directory / f"{template_name}.collider.glb"
+        has_collider = collider.is_file()
         return AssetPaths(
             render=render,
-            collider=collider if collider.is_file() else None,
+            collider=collider if has_collider else render,
             layout=layout,
+            collider_is_render=not has_collider,
         )
     return None
 
