@@ -21,7 +21,7 @@ import pyroomacoustics as pra
 SEMANTIC_MATERIAL_TABLE: dict[str, str] = {
     "wall": "plasterboard",
     "floor": "carpet_cotton",
-    "ceiling": "ceiling_plasterboard",
+    "ceiling": "ceiling_fibre_absorber",
     "window": "glass_window",
     "door": "wood_1.6cm",
     "sofa": "curtains_cotton_0.5",

@@ -96,8 +96,18 @@ def simulate_and_validate(
     fs: int = 16000,
     max_order: int = 3,
     n_rays: int = 10000,
+    room_volume: float | None = None,
 ) -> SimulationResult:
-    """Run the hybrid ISM + ray tracing simulation and compute the Sabine/Eyring guard."""
+    """Run the hybrid ISM + ray tracing simulation and compute the Sabine/Eyring guard.
+
+    ``room_volume`` should be passed explicitly whenever the shell is split
+    across more than one ``MeshMaterialAssignment`` (for example floor, wall
+    and ceiling assigned separately so each can carry its own material): each
+    part's own ``.mesh.volume`` is not the enclosed air volume in that case,
+    only the volume of a thin, degenerate slab. When omitted, the volume of
+    ``assignments[0].mesh`` is used, which is only correct when the first
+    assignment is the single, complete, watertight shell.
+    """
     room = build_room(assignments, fs=fs, max_order=max_order, n_rays=n_rays)
     room.add_source(source)
     room.add_microphone_array(np.c_[mic])
@@ -116,10 +126,13 @@ def simulate_and_validate(
         weighted_absorption += area * mean_coeff
     mean_absorption = weighted_absorption / total_area if total_area else 0.0
 
-    volume = float(assignments[0].mesh.volume) if assignments else 0.0
-    # The room shell mesh (first assignment, by convention) carries the
-    # enclosed volume; furniture obstacles do not add to it here since they
-    # are treated as internal reflectors, not removed air volume.
+    if room_volume is not None:
+        volume = room_volume
+    else:
+        # Fallback for the common single-mesh-shell case (roadmap 5.1's own
+        # example): the first assignment, by convention, carries the whole
+        # enclosed shell. Callers with a split shell must pass room_volume.
+        volume = float(assignments[0].mesh.volume) if assignments else 0.0
 
     return SimulationResult(
         rt60_broadband=rt60,
