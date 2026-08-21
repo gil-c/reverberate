@@ -24,13 +24,12 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from shapely.geometry import Point
 
 from reverberate.geometry.apartment import (
-    DOORWAY_SEARCH_DISTANCE,
     Storey,
     build_apartment,
     extrude_storey,
+    instances_on_storey,
 )
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
@@ -210,21 +209,6 @@ def shell_meshes(
         },
         absorptions,
     )
-
-
-def instances_on_storey(
-    instances: list[FurnitureInstance], storey: Storey
-) -> list[FurnitureInstance]:
-    """Furniture belonging to this storey, by height and by standing inside it."""
-    kept = []
-    for instance in instances:
-        x, y, z = instance.translation
-        if not storey.floor_height - 0.5 <= y <= storey.ceiling_height + 0.5:
-            continue
-        if not storey.walkable.buffer(DOORWAY_SEARCH_DISTANCE).contains(Point(x, z)):
-            continue
-        kept.append(instance)
-    return kept
 
 
 def outline_json(storey: Storey) -> list[dict[str, object]]:
