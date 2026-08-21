@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>reverberate — reconstructed room</title>
+    <style>
+      body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; background: #14161a; }
+      #ui {
+        position: absolute; top: 12px; left: 12px; z-index: 10;
+        background: rgba(20, 22, 26, 0.85); color: #eee;
+        padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6;
+        max-width: 340px;
+      }
+      button {
+        background: #2d3038; color: #eee; border: 1px solid #454a55;
+        border-radius: 5px; padding: 5px 10px; cursor: pointer; font-size: 13px;
+      }
+      button.active { background: #3f6ea5; border-color: #5b8fd0; }
+      #legend { margin-top: 8px; display: none; }
+      #ramp {
+        height: 10px; border-radius: 3px; margin: 4px 0;
+        background: linear-gradient(to right, rgb(0,40,255), rgb(255,40,0));
+      }
+      .row { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; }
+      #hint { margin-top: 8px; color: #99aabb; font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div><strong id="title">loading…</strong></div>
+      <div style="margin-top: 8px">
+        <button id="btn-render" class="active">Render</button>
+        <button id="btn-acoustic">Acoustic</button>
+        <button id="btn-walk">Walk</button>
+      </div>
+      <div id="legend">
+        <div>Assigned absorption coefficient</div>
+        <div id="ramp"></div>
+        <div class="row"><span>0.0 reflective</span><span>1.0 absorptive</span></div>
+      </div>
+      <div id="hint">Orbit: drag to rotate, scroll to zoom.</div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+
+      // Eye height of a standing adult, in metres. The walk camera holds this
+      // constant: a person's head does not rise when they look up, which is
+      // the difference between walking through a room and orbiting a model.
+      const EYE_HEIGHT = 1.6;
+      const WALK_SPEED = 2.4;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x14161a);
+      const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 500);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      document.body.appendChild(renderer.domElement);
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 2.2));
+      const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+      sun.position.set(4, 8, 5);
+      scene.add(sun);
+
+      const orbit = new OrbitControls(camera, renderer.domElement);
+      const walk = new PointerLockControls(camera, renderer.domElement);
+      scene.add(walk.getObject());
+
+      let walking = false;
+      let floorY = 0;
+      const pressed = new Set();
+      addEventListener("keydown", (event) => pressed.add(event.code));
+      addEventListener("keyup", (event) => pressed.delete(event.code));
+
+      const loader = new GLTFLoader();
+      let current = null;
+
+      function frameObject(root) {
+        const box = new THREE.Box3().setFromObject(root);
+        const size = box.getSize(new THREE.Vector3());
+        const centre = box.getCenter(new THREE.Vector3());
+        floorY = box.min.y;
+        orbit.target.copy(centre);
+        camera.position.set(centre.x + size.x, box.max.y + size.y * 0.4, centre.z + size.z);
+        orbit.update();
+      }
+
+      function load(mode) {
+        loader.load(`${mode}.glb`, (gltf) => {
+          if (current) scene.remove(current);
+          current = gltf.scene;
+          // glTF is Y-up and so is our world convention, so there is no axis
+          // fix here on purpose: if the model looks rotated or mirrored, the
+          // reconstruction is wrong, not the viewer. That is the whole point.
+          scene.add(current);
+          if (!walking) frameObject(current);
+          document.getElementById("legend").style.display =
+            mode === "acoustic" ? "block" : "none";
+        });
+      }
+
+      function setMode(mode) {
+        document.getElementById("btn-render").classList.toggle("active", mode === "render");
+        document.getElementById("btn-acoustic").classList.toggle("active", mode === "acoustic");
+        load(mode);
+      }
+
+      document.getElementById("btn-render").onclick = () => setMode("render");
+      document.getElementById("btn-acoustic").onclick = () => setMode("acoustic");
+      document.getElementById("btn-walk").onclick = () => {
+        walking = !walking;
+        document.getElementById("btn-walk").classList.toggle("active", walking);
+        orbit.enabled = !walking;
+        document.getElementById("hint").textContent = walking
+          ? "Click to capture the mouse. WASD to walk, mouse to look, Esc to release."
+          : "Orbit: drag to rotate, scroll to zoom.";
+        if (walking) {
+          camera.position.y = floorY + EYE_HEIGHT;
+          walk.lock();
+        } else {
+          walk.unlock();
+        }
+      };
+
+      const clock = new THREE.Clock();
+      function animate() {
+        requestAnimationFrame(animate);
+        const delta = clock.getDelta();
+        if (walking && walk.isLocked) {
+          const distance = WALK_SPEED * delta;
+          if (pressed.has("KeyW")) walk.moveForward(distance);
+          if (pressed.has("KeyS")) walk.moveForward(-distance);
+          if (pressed.has("KeyA")) walk.moveRight(-distance);
+          if (pressed.has("KeyD")) walk.moveRight(distance);
+          // Body translation only; looking up or down never changes eye height.
+          camera.position.y = floorY + EYE_HEIGHT;
+        }
+        renderer.render(scene, camera);
+      }
+
+      addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      fetch("scene.json")
+        .then((response) => response.json())
+        .then((info) => {
+          document.getElementById("title").textContent = info.title;
+          document.getElementById("hint").textContent = info.hint;
+        })
+        .catch(() => {
+          document.getElementById("title").textContent = "reconstructed room";
+        });
+
+      setMode("render");
+      animate();
+    </script>
+  </body>
+</html>
