@@ -1,8 +1,10 @@
 """Serve the reconstructed-room web viewer for one HSSD region.
 
-Exports both views of *our* reconstruction (``render.glb`` and
-``acoustic.glb``) into a temporary directory alongside the static viewer, then
-serves that directory over plain HTTP. The browser does the rendering, so this
+Writes the manifest describing *our* reconstruction, plus the room shells,
+into a temporary directory alongside the static viewer, then serves that
+directory over plain HTTP. Furniture assets are symlinked in place and decoded
+by the browser, because their KTX2 textures do not survive a Python side
+merge. The browser does the rendering, so this
 process needs no renderer, no GPU binding and no simulator: the whole
 visualisation is a standard glTF web component that can be lifted into the
 Gradio demo later, or replaced, without touching the reconstruction code.
@@ -15,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import http.server
-import json
 import shutil
 import socketserver
 import sys
@@ -23,29 +24,17 @@ import tempfile
 import webbrowser
 from pathlib import Path
 
-from reverberate.viz.scene_export import ExportReport, export_region
+from reverberate.viz.scene_manifest import ManifestReport, write_manifest
 
 STATIC_DIR = Path(__file__).parent / "web"
 
 
 def prepare_site(
     hssd_root: Path, scene_id: str, region_name: str | None, target: Path
-) -> tuple[ExportReport, ExportReport]:
-    """Write the viewer plus both exported scenes into ``target``."""
+) -> ManifestReport:
+    """Write the static viewer, the room shells and the scene manifest."""
     shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
-    render_report = export_region(hssd_root, scene_id, region_name, "render", target / "render.glb")
-    acoustic_report = export_region(
-        hssd_root, scene_id, region_name, "acoustic", target / "acoustic.glb"
-    )
-    (target / "scene.json").write_text(
-        json.dumps(
-            {
-                "title": f"{scene_id} / {render_report.region_name}",
-                "hint": render_report.summary(),
-            }
-        )
-    )
-    return render_report, acoustic_report
+    return write_manifest(hssd_root, scene_id, region_name, target)
 
 
 def serve(directory: Path, port: int, open_browser: bool) -> None:
@@ -83,21 +72,17 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     if arguments.build_only is not None:
-        render_report, acoustic_report = prepare_site(
+        report = prepare_site(
             arguments.hssd_root, arguments.scene_id, arguments.region, arguments.build_only
         )
-        print(f"render:   {render_report.summary()}")
-        print(f"acoustic: {acoustic_report.summary()}")
+        print(report.summary())
         print(f"wrote {arguments.build_only}")
         return 0
 
     with tempfile.TemporaryDirectory(prefix="reverberate-viewer-") as temporary:
         target = Path(temporary)
-        render_report, acoustic_report = prepare_site(
-            arguments.hssd_root, arguments.scene_id, arguments.region, target
-        )
-        print(f"render:   {render_report.summary()}")
-        print(f"acoustic: {acoustic_report.summary()}")
+        report = prepare_site(arguments.hssd_root, arguments.scene_id, arguments.region, target)
+        print(report.summary())
         serve(target, arguments.port, not arguments.no_browser)
     return 0
 
