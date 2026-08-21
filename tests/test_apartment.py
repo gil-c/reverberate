@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import trimesh
@@ -9,14 +11,16 @@ from shapely.geometry import MultiPolygon, Polygon
 
 from reverberate.geometry.apartment import (
     Storey,
+    build_apartment,
     build_storey,
     clean_outline,
     extrude_storey,
     find_doorways,
     group_by_storey,
+    instances_on_storey,
     wall_footprint,
 )
-from reverberate.geometry.hssd_room import RoomRegion
+from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
 
 
 def room(x0: float, x1: float, z0: float, z1: float, floor: float = 0.0) -> RoomRegion:
@@ -152,3 +156,78 @@ def test_storey_summary_mentions_rooms_doorways_and_area() -> None:
     )
     assert "1 rooms" in storey.summary()
     assert "3 doorways" in storey.summary()
+
+
+def storey_at(floor: float) -> Storey:
+    return build_storey([room(0, 6, 0, 6, floor=floor)], trimesh.creation.box(extents=(0.01,) * 3))
+
+
+def furniture_at(y: float) -> FurnitureInstance:
+    return FurnitureInstance(
+        template_name="thing",
+        translation=np.array([3.0, y, 3.0]),
+        rotation_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+        non_uniform_scale=np.ones(3),
+    )
+
+
+def test_a_piece_in_the_overlap_band_belongs_to_one_storey_only() -> None:
+    """A 2.8 m ceiling under a floor 2.5 m up overlaps; both would claim it."""
+    storeys = [storey_at(0.0), storey_at(2.5)]
+    piece = furniture_at(2.6)
+    lower = instances_on_storey([piece], storeys[0], storeys)
+    upper = instances_on_storey([piece], storeys[1], storeys)
+    assert len(lower) + len(upper) == 1
+
+
+def test_furniture_is_kept_by_the_storey_it_stands_on() -> None:
+    storeys = [storey_at(0.0), storey_at(2.5)]
+    assert instances_on_storey([furniture_at(0.4)], storeys[0], storeys)
+    assert instances_on_storey([furniture_at(2.7)], storeys[1], storeys)
+
+
+def test_a_rug_dipping_below_the_floor_is_still_kept() -> None:
+    assert instances_on_storey([furniture_at(-0.2)], storey_at(0.0))
+
+
+def test_outdoor_regions_are_excluded_from_the_acoustic_geometry(tmp_path: Path) -> None:
+    """A garden inside a sealed volume would wreck the volume and the RT60."""
+    scene = write_scene(tmp_path, [("living room", "living room"), ("garden", "outdoor")])
+    indoor_only = build_apartment(tmp_path, scene)
+    with_outdoor = build_apartment(tmp_path, scene, include_outdoor=True)
+    assert sum(len(s.rooms) for s in indoor_only) == 1
+    assert sum(len(s.rooms) for s in with_outdoor) == 2
+
+
+def write_scene(root: Path, labelled: list[tuple[str, str]]) -> str:
+    """A minimal scene: one region per (name, label), side by side."""
+    import json
+
+    scene_id = "scene"
+    (root / "semantics" / "scenes").mkdir(parents=True)
+    (root / "stages").mkdir()
+    regions = []
+    for index, (name, label) in enumerate(labelled):
+        x0 = index * 10.0
+        regions.append(
+            {
+                "name": name,
+                "label": label,
+                "poly_loop": [
+                    [x0, 0, 0],
+                    [x0 + 4, 0, 0],
+                    [x0 + 4, 0, 4],
+                    [x0, 0, 4],
+                ],
+                "floor_height": 0.0,
+                "extrusion_height": 2.8,
+            }
+        )
+    (root / "semantics" / "scenes" / f"{scene_id}.semantic_config.json").write_text(
+        json.dumps({"region_annotations": regions})
+    )
+    stage = trimesh.creation.box(extents=(0.01, 0.01, 0.01))
+    exported = stage.export(file_type="glb")
+    assert isinstance(exported, bytes)
+    (root / "stages" / f"{scene_id}.glb").write_bytes(exported)
+    return scene_id

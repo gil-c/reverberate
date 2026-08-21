@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pyroomacoustics as pra
 import trimesh
+from shapely.geometry import Point
 
 from reverberate.geometry.apartment import (
     Storey,
@@ -154,9 +155,22 @@ def obstacle_assignments(
 
 
 def simulation_geometry(
-    hssd_root: Path, storey: Storey, instances: list[FurnitureInstance], seed: int = 0
+    hssd_root: Path,
+    storey: Storey,
+    instances: list[FurnitureInstance],
+    seed: int = 0,
+    storeys: list[Storey] | None = None,
 ) -> tuple[list[MeshMaterialAssignment], GeometrySummary]:
-    """Everything pyroomacoustics receives for one apartment storey."""
+    """Everything pyroomacoustics receives for one apartment storey.
+
+    ``instances`` is filtered to this storey here rather than trusting the
+    caller to have remembered: on a multi-storey scene, passing a whole
+    scene's furniture would otherwise simulate the floor above as well.
+    Filtering is idempotent, so pre-filtered input is safe. Pass ``storeys``
+    when the scene has more than one, so pieces in the overlap band between a
+    ceiling and the floor above are assigned to exactly one of them.
+    """
+    instances = instances_on_storey(instances, storey, storeys)
     shell = shell_assignments(storey, seed=seed)
     obstacles, unresolved = obstacle_assignments(hssd_root, instances, seed=seed)
     whole_shell = extrude_storey(storey)
@@ -172,7 +186,11 @@ def simulation_geometry(
 
 
 def apartment_geometry(
-    hssd_root: Path, scene_id: str, storey_index: int = 0, seed: int = 0
+    hssd_root: Path,
+    scene_id: str,
+    storey_index: int = 0,
+    seed: int = 0,
+    include_outdoor: bool = False,
 ) -> tuple[list[MeshMaterialAssignment], GeometrySummary, Storey]:
     """One call from a scene id to everything the simulator needs.
 
@@ -185,14 +203,14 @@ def apartment_geometry(
     acoustic mode, which is the property worth preserving: if the simulation
     and the picture ever disagree, one of them stopped calling this function.
     """
-    storeys = build_apartment(hssd_root, scene_id)
+    storeys = build_apartment(hssd_root, scene_id, include_outdoor=include_outdoor)
     if not storeys:
         raise ValueError(f"scene {scene_id} has no walkable storey")
     storey = storeys[storey_index]
-    instances = instances_on_storey(
-        load_object_instances(hssd_root / "scenes" / f"{scene_id}.scene_instance.json"), storey
+    instances = load_object_instances(hssd_root / "scenes" / f"{scene_id}.scene_instance.json")
+    assignments, summary = simulation_geometry(
+        hssd_root, storey, instances, seed=seed, storeys=storeys
     )
-    assignments, summary = simulation_geometry(hssd_root, storey, instances, seed=seed)
     return assignments, summary, storey
 
 
@@ -208,3 +226,88 @@ def build_pra_room(
     from reverberate.geometry.pra_room import build_room
 
     return build_room(assignments, fs=fs, max_order=max_order)
+
+
+#: How far a source or receiver is kept from any wall, in metres. Close to a
+#: surface the image source model produces very early, very strong reflections
+#: that dominate the response and are not what a listener in the room hears.
+MIN_WALL_DISTANCE = 0.5
+
+
+@dataclass(frozen=True)
+class SourceReceiver:
+    """One source and one receiver placed in the apartment, with provenance."""
+
+    source: np.ndarray
+    receiver: np.ndarray
+    source_room: str
+    receiver_room: str
+
+    @property
+    def same_room(self) -> bool:
+        """Whether the pair is intra-room; inter-room pairs travel through doorways."""
+        return self.source_room == self.receiver_room
+
+
+def room_of(storey: Storey, x: float, z: float) -> str:
+    """Which annotated room a point falls in, or ``"doorway"`` between them."""
+    for region in storey.rooms:
+        if region.polygon_xz.buffer(0).contains(Point(x, z)):
+            return region.name
+    return "doorway"
+
+
+def sample_points(
+    storey: Storey,
+    count: int,
+    rng: np.random.Generator,
+    height: float = 1.2,
+    min_wall_distance: float = MIN_WALL_DISTANCE,
+) -> list[np.ndarray]:
+    """Points inside the walkable area, kept clear of the walls.
+
+    Rejection sampling over the outline's bounding box: the walkable area is
+    an arbitrary polygon with holes, so there is no closed form, and the
+    apartment is dense enough that rejection converges quickly.
+    """
+    interior = storey.walkable.buffer(-min_wall_distance)
+    if interior.is_empty:
+        raise ValueError("no point in this storey is far enough from every wall")
+    min_x, min_z, max_x, max_z = interior.bounds
+    points: list[np.ndarray] = []
+    for _ in range(count * 400):
+        if len(points) == count:
+            break
+        x = rng.uniform(min_x, max_x)
+        z = rng.uniform(min_z, max_z)
+        if interior.contains(Point(x, z)):
+            points.append(np.array([x, storey.floor_height + height, z]))
+    if len(points) < count:
+        raise ValueError(f"only placed {len(points)} of {count} points in this storey")
+    return points
+
+
+def sample_source_receiver(
+    storey: Storey,
+    rng: np.random.Generator,
+    same_room: bool | None = None,
+    min_wall_distance: float = MIN_WALL_DISTANCE,
+) -> SourceReceiver:
+    """A source/receiver pair, optionally constrained to one room or to two.
+
+    ``same_room=None`` accepts whatever comes out, ``True`` keeps drawing until
+    both land in the same annotated room, and ``False`` until they land in
+    different ones, which is how an inter-room response through a doorway gets
+    sampled deliberately rather than by luck.
+    """
+    for _ in range(200):
+        source, receiver = sample_points(storey, 2, rng, min_wall_distance=min_wall_distance)
+        pair = SourceReceiver(
+            source=source,
+            receiver=receiver,
+            source_room=room_of(storey, float(source[0]), float(source[2])),
+            receiver_room=room_of(storey, float(receiver[0]), float(receiver[2])),
+        )
+        if same_room is None or pair.same_room == same_room:
+            return pair
+    raise ValueError(f"could not sample a pair with same_room={same_room} in this storey")
