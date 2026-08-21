@@ -47,7 +47,11 @@ class InstanceEntry:
     template: str
     category: str
     render_url: str
-    collider_url: str | None
+    collider_url: str
+    #: True when this piece has no dedicated collider and its render mesh is
+    #: what gets simulated, so the viewer can say so rather than imply a
+    #: precision the data does not have.
+    collider_is_render: bool
     #: Column-major 4x4, the layout ``THREE.Matrix4.fromArray`` expects.
     matrix: list[float]
     label_colour: list[int]
@@ -61,7 +65,7 @@ class ManifestReport:
 
     placed: int = 0
     unresolved: list[str] = field(default_factory=list)
-    without_collider: list[str] = field(default_factory=list)
+    render_as_collider: list[str] = field(default_factory=list)
     layouts: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> str:
@@ -69,7 +73,7 @@ class ManifestReport:
         return (
             f"{self.placed} pieces placed ({layouts}); "
             f"{len(self.unresolved)} unresolved, "
-            f"{len(self.without_collider)} without a collider"
+            f"{len(self.render_as_collider)} simulated from their render mesh"
         )
 
 
@@ -111,14 +115,15 @@ def build_instances(
         category = category_for_template(hssd_root, instance.template_name) or "unknown"
         material = material_for_label(category, rng)
         absorption = float(np.mean(material.energy_absorption["coeffs"]))
-        if asset.collider is None:
-            report.without_collider.append(instance.template_name)
+        if asset.collider_is_render:
+            report.render_as_collider.append(instance.template_name)
         entries.append(
             InstanceEntry(
                 template=instance.template_name,
                 category=category,
                 render_url=link_asset(asset.render, asset_target),
-                collider_url=(link_asset(asset.collider, asset_target) if asset.collider else None),
+                collider_url=link_asset(asset.collider, asset_target),
+                collider_is_render=asset.collider_is_render,
                 matrix=column_major(instance.transform_matrix()),
                 label_colour=list(category_colour(category)),
                 acoustic_colour=absorption_colour(absorption)[:3].tolist(),
