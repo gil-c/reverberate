@@ -92,13 +92,21 @@ def test_link_asset_is_idempotent(tmp_path: Path) -> None:
     assert link_asset(source, target) == link_asset(source, target)
 
 
+def write_glb(path: Path) -> None:
+    """A real GLB: the manifest now loads colliders to decimate them."""
+    mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    exported = mesh.export(file_type="glb")
+    assert isinstance(exported, bytes)
+    path.write_bytes(exported)
+
+
 def build_hssd_stub(root: Path) -> None:
-    """A minimal HSSD tree: one resolvable object and one missing collider."""
+    """A minimal HSSD tree: one object with a collider, one door without."""
     (root / "objects" / "a").mkdir(parents=True)
-    (root / "objects" / "a" / "abc.glb").write_bytes(b"render")
-    (root / "objects" / "a" / "abc.collider.glb").write_bytes(b"collider")
+    write_glb(root / "objects" / "a" / "abc.glb")
+    write_glb(root / "objects" / "a" / "abc.collider.glb")
     (root / "objects" / "openings").mkdir()
-    (root / "objects" / "openings" / "219-1.glb").write_bytes(b"door")
+    write_glb(root / "objects" / "openings" / "219-1.glb")
     metadata = root / "metadata"
     metadata.mkdir()
     (metadata / "hssd_obj_semantics_condensed.csv").write_text(
@@ -125,8 +133,10 @@ def test_a_door_is_simulated_from_its_render_mesh_rather_than_dropped(tmp_path: 
     assert report.render_as_collider == ["219-1"]
     assert report.layouts == {"shard": 1, "openings": 1}
     door = entries[1]
-    assert door.collider_url == door.render_url
+    # The door is simulated from its render mesh, and the browser is pointed
+    # at the decimated copy the simulator will actually receive.
     assert door.collider_is_render
+    assert door.collider_url == "sim/219-1.glb"
 
 
 def test_manifest_counts_an_unresolvable_template_instead_of_dropping_it(
