@@ -52,6 +52,12 @@ MIN_DOORWAY_AREA = 0.05
 #: Regions within this distance in height belong to the same storey.
 STOREY_TOLERANCE = 0.1
 
+#: Region labels that are not interior air. A garden inside a sealed acoustic
+#: volume ruins both the volume and the RT60 it implies, so these are left out
+#: of the simulated shell by default. `balcony` is included here for the same
+#: reason; `garage` is not, since it is enclosed even when it is unheated.
+OUTDOOR_LABELS = frozenset({"outdoor", "balcony"})
+
 #: Tolerance used to clean the walkable outline before it is extruded. The
 #: union of rooms and doorways leaves slivers and near-duplicate vertices
 #: where buffered edges meet, and those make the triangulated prism
@@ -173,14 +179,36 @@ def build_storey(regions: list[RoomRegion], stage: trimesh.Trimesh) -> Storey:
     )
 
 
+#: How far below a storey's floor a piece may sit and still belong to it.
+#: Rugs and thresholds dip slightly under the authored floor height.
+FLOOR_UNDERSHOOT = 0.5
+
+
 def instances_on_storey(
-    instances: list[FurnitureInstance], storey: Storey
+    instances: list[FurnitureInstance],
+    storey: Storey,
+    storeys: list[Storey] | None = None,
 ) -> list[FurnitureInstance]:
-    """Furniture belonging to this storey, by height and by standing inside it."""
+    """Furniture belonging to this storey, by height and by standing inside it.
+
+    Pass ``storeys`` whenever the scene has more than one: heights alone
+    double count, because a storey 2.5 m up and a 2.8 m ceiling below it
+    overlap, and a piece in that band would otherwise be simulated twice. With
+    the full list, each piece goes to the highest floor it stands on, and
+    nowhere else.
+    """
+    if storeys and len(storeys) > 1:
+        others = [other for other in storeys if other.floor_height > storey.floor_height]
+    else:
+        others = []
     kept = []
     for instance in instances:
         x, y, z = instance.translation
-        if not storey.floor_height - 0.5 <= y <= storey.ceiling_height + 0.5:
+        if y < storey.floor_height - FLOOR_UNDERSHOOT:
+            continue
+        if y > storey.ceiling_height + FLOOR_UNDERSHOOT:
+            continue
+        if any(y >= other.floor_height - FLOOR_UNDERSHOOT for other in others):
             continue
         if not storey.walkable.buffer(DOORWAY_SEARCH_DISTANCE).contains(Point(x, z)):
             continue
@@ -201,9 +229,19 @@ def load_stage(hssd_root: Path, scene_id: str) -> trimesh.Trimesh:
     return stage
 
 
-def build_apartment(hssd_root: Path, scene_id: str) -> list[Storey]:
-    """Every walkable storey of one apartment, largest floor area first."""
+def build_apartment(hssd_root: Path, scene_id: str, include_outdoor: bool = False) -> list[Storey]:
+    """Every walkable storey of one apartment, largest floor area first.
+
+    ``include_outdoor`` keeps gardens and balconies in the geometry. It is off
+    by default because they are not interior air: a garden inside a sealed
+    volume wrecks both the volume and the reverberation time derived from it.
+    Turn it on to *look* at the outside, not to simulate it.
+    """
     regions = load_regions(hssd_root / "semantics" / "scenes" / f"{scene_id}.semantic_config.json")
+    if not include_outdoor:
+        regions = [region for region in regions if region.label not in OUTDOOR_LABELS]
+    if not regions:
+        return []
     stage = load_stage(hssd_root, scene_id)
     storeys = [build_storey(group, stage) for group in group_by_storey(regions).values()]
     return sorted(storeys, key=lambda storey: -storey.walkable.area)

@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import trimesh
+from shapely.geometry import Point
 
 from reverberate.geometry.apartment import Storey, build_storey
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
@@ -18,6 +19,8 @@ from reverberate.geometry.sim_geometry import (
     OBSTACLE_FACE_BUDGET,
     decimate,
     obstacle_assignments,
+    sample_points,
+    sample_source_receiver,
     shell_assignments,
     simulation_collider,
     simulation_geometry,
@@ -140,3 +143,54 @@ def test_instances_keep_their_placement_in_the_simulated_geometry(tmp_path: Path
     build_object_tree(tmp_path)
     assignments, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
     assert assignments[0].mesh.centroid[0] == pytest.approx(3.0, abs=0.1)
+
+
+def test_sampled_points_stay_clear_of_the_walls() -> None:
+    """Close to a surface the image source model is dominated by one early
+    reflection, which is not what a listener in the room hears."""
+    storey = square_storey(size=8.0)
+    rng = np.random.default_rng(0)
+    points = sample_points(storey, 20, rng, min_wall_distance=0.5)
+    for point in points:
+        assert storey.walkable.exterior.distance(Point(point[0], point[2])) >= 0.5 - 1e-9
+
+
+def test_sampled_points_sit_at_the_requested_height_above_the_floor() -> None:
+    storey = square_storey()
+    points = sample_points(storey, 5, np.random.default_rng(0), height=1.2)
+    assert all(point[1] == pytest.approx(storey.floor_height + 1.2) for point in points)
+
+
+def test_sampling_is_reproducible_from_its_seed() -> None:
+    storey = square_storey()
+    first = sample_points(storey, 4, np.random.default_rng(7))
+    second = sample_points(storey, 4, np.random.default_rng(7))
+    assert np.allclose(first, second)
+
+
+def test_a_room_too_narrow_for_the_clearance_is_reported_not_fudged() -> None:
+    storey = square_storey(size=0.6)
+    with pytest.raises(ValueError):
+        sample_points(storey, 1, np.random.default_rng(0), min_wall_distance=0.5)
+
+
+def test_a_pair_in_one_room_is_labelled_as_such() -> None:
+    storey = square_storey(size=8.0)
+    pair = sample_source_receiver(storey, np.random.default_rng(1), same_room=True)
+    assert pair.same_room
+    assert pair.source_room == pair.receiver_room
+
+
+def test_instances_from_another_storey_are_not_simulated(tmp_path: Path) -> None:
+    """The caller should not have to remember to filter; passing a whole
+    scene's furniture must not simulate the floor above."""
+    build_object_tree(tmp_path)
+    storey = square_storey()
+    upstairs = FurnitureInstance(
+        template_name="abc",
+        translation=np.array([1.0, 9.0, 1.0]),
+        rotation_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+        non_uniform_scale=np.ones(3),
+    )
+    _, summary = simulation_geometry(tmp_path, storey, [instance("abc", x=1.0), upstairs])
+    assert summary.obstacle_count == 1
