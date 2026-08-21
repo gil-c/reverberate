@@ -36,7 +36,8 @@ def test_sharded_object_is_found_with_its_collider(objects_dir: Path) -> None:
     asset = resolve_asset(objects_dir, "abc123")
     assert asset is not None
     assert asset.layout == "shard"
-    assert asset.has_collider
+    assert asset.collider.name == "abc123.collider.glb"
+    assert not asset.collider_is_render
 
 
 def test_door_in_openings_is_found_despite_not_being_a_hash(objects_dir: Path) -> None:
@@ -44,7 +45,13 @@ def test_door_in_openings_is_found_despite_not_being_a_hash(objects_dir: Path) -
     asset = resolve_asset(objects_dir, "219-1")
     assert asset is not None
     assert asset.layout == "openings"
-    assert not asset.has_collider
+
+
+def test_render_stands_in_as_collider(objects_dir: Path) -> None:
+    asset = resolve_asset(objects_dir, "219-1")
+    assert asset is not None
+    assert asset.collider == asset.render
+    assert asset.collider_is_render
 
 
 def test_articulated_part_is_found_under_its_base_hash(objects_dir: Path) -> None:
