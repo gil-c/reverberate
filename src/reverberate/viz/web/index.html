@@ -22,12 +22,23 @@
       .entry { display: flex; align-items: center; gap: 7px; font-size: 11px; padding: 1px 0; }
       .swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; }
       #hint { margin-top: 9px; color: #99aabb; font-size: 11px; }
+      select {
+        width: 100%; background: #2d3038; color: #eee; border: 1px solid #454a55;
+        border-radius: 5px; padding: 5px; font-size: 12px;
+      }
+      #busy { margin-top: 6px; color: #d8a95f; font-size: 11px; }
+      select {
+        width: 100%; background: #2d3038; color: #eee; border: 1px solid #454a55;
+        border-radius: 5px; padding: 5px; font-size: 12px;
+      }
+      #busy { margin-top: 6px; color: #d0a860; font-size: 11px; }
       #report { margin-top: 5px; color: #7a8290; font-size: 10px; }
     </style>
   </head>
   <body>
     <div id="ui">
-      <div><strong id="title">loading…</strong></div>
+      <select id="scene-select"><option>loading apartments…</option></select>
+      <div style="margin-top: 6px"><strong id="title">loading…</strong></div>
       <div style="margin-top: 8px">
         <button id="btn-colour" class="active">Colour</button>
         <button id="btn-label">Label</button>
@@ -36,6 +47,7 @@
       <div id="legend"></div>
       <div id="hint">Drag to look around. W A S D to walk.</div>
       <div id="report"></div>
+      <div id="busy"></div>
     </div>
 
     <script type="importmap">
@@ -59,7 +71,7 @@
       const WALK_SPEED = 2.2;
       // Stay this far from the walls, so the near plane never slips through a
       // surface and the room cannot be left.
-      const WALL_MARGIN = 0.35;
+      const WALL_MARGIN = 0.22;
       const MAX_PITCH = Math.PI / 2 - 0.05;
       const LOOK_SENSITIVITY = 0.0032;
       const MODES = ["colour", "label", "acoustic"];
@@ -106,21 +118,32 @@
       const groups = {};
       let activeMode = null;
 
-      function pointInsidePolygon(x, z, polygon) {
+      function ringContains(x, z, ring) {
         let inside = false;
-        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-          const [xi, zi] = polygon[i];
-          const [xj, zj] = polygon[j];
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const [xi, zi] = ring[i];
+          const [xj, zj] = ring[j];
           if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
         }
         return inside;
       }
 
-      function distanceToPolygonEdge(x, z, polygon) {
+      // A part is walkable where it is inside the exterior ring and outside
+      // every hole: holes are the columns and shafts the apartment really has.
+      function partContains(x, z, part) {
+        if (!ringContains(x, z, part.exterior)) return false;
+        return !part.holes.some((hole) => ringContains(x, z, hole));
+      }
+
+      function outlineContains(x, z) {
+        return manifest.outline.some((part) => partContains(x, z, part));
+      }
+
+      function ringClearance(x, z, ring) {
         let best = Infinity;
-        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-          const [xi, zi] = polygon[i];
-          const [xj, zj] = polygon[j];
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const [xi, zi] = ring[i];
+          const [xj, zj] = ring[j];
           const dx = xj - xi;
           const dz = zj - zi;
           const lengthSquared = dx * dx + dz * dz;
@@ -132,44 +155,50 @@
         return best;
       }
 
-      // "Inside" here is the authored floor polygon, the same one the
-      // reconstruction extrudes and the placement audit tests against, so the
-      // viewer cannot disagree with the rest of the project about the room.
+      // "Inside" is the walkable outline: the rooms joined through the
+      // doorways found in the stage's own walls, and the very same polygon the
+      // shell is extruded from and the simulator receives. A doorway is only
+      // about 0.9 m wide, so the clearance kept here has to be small enough to
+      // pass through one.
       function canStandAt(x, z) {
         if (!manifest) return false;
-        return (
-          pointInsidePolygon(x, z, manifest.polygon) &&
-          distanceToPolygonEdge(x, z, manifest.polygon) >= WALL_MARGIN
-        );
+        if (!outlineContains(x, z)) return false;
+        for (const part of manifest.outline) {
+          if (!partContains(x, z, part)) continue;
+          const rings = [part.exterior, ...part.holes];
+          if (Math.min(...rings.map((ring) => ringClearance(x, z, ring))) < WALL_MARGIN) {
+            return false;
+          }
+          return true;
+        }
+        return false;
       }
 
-      function startingPosition(polygon) {
-        const xs = polygon.map((p) => p[0]);
-        const zs = polygon.map((p) => p[1]);
-        const centroid = [
-          xs.reduce((a, b) => a + b, 0) / xs.length,
-          zs.reduce((a, b) => a + b, 0) / zs.length,
-        ];
-        if (canStandAt(centroid[0], centroid[1])) return centroid;
-        // A concave room can put its centroid inside a wall, so fall back to
-        // the most open sampled point rather than spawning outside the room.
-        const [minX, maxX] = [Math.min(...xs), Math.max(...xs)];
-        const [minZ, maxZ] = [Math.min(...zs), Math.max(...zs)];
-        let best = centroid;
+      function startingPosition() {
+        // Spawn at the most open point of the largest part, so a narrow
+        // doorway or a cluttered corner never traps the viewer at start.
+        let best = null;
         let bestClearance = -Infinity;
-        for (let i = 1; i < 24; i++) {
-          for (let j = 1; j < 24; j++) {
-            const x = minX + ((maxX - minX) * i) / 24;
-            const z = minZ + ((maxZ - minZ) * j) / 24;
-            if (!pointInsidePolygon(x, z, manifest.polygon)) continue;
-            const clearance = distanceToPolygonEdge(x, z, manifest.polygon);
-            if (clearance > bestClearance) {
-              bestClearance = clearance;
-              best = [x, z];
+        for (const part of manifest.outline) {
+          const xs = part.exterior.map((p) => p[0]);
+          const zs = part.exterior.map((p) => p[1]);
+          const [minX, maxX] = [Math.min(...xs), Math.max(...xs)];
+          const [minZ, maxZ] = [Math.min(...zs), Math.max(...zs)];
+          for (let i = 1; i < 30; i++) {
+            for (let j = 1; j < 30; j++) {
+              const x = minX + ((maxX - minX) * i) / 30;
+              const z = minZ + ((maxZ - minZ) * j) / 30;
+              if (!partContains(x, z, part)) continue;
+              const rings = [part.exterior, ...part.holes];
+              const clearance = Math.min(...rings.map((ring) => ringClearance(x, z, ring)));
+              if (clearance > bestClearance) {
+                bestClearance = clearance;
+                best = [x, z];
+              }
             }
           }
         }
-        return best;
+        return best || [0, 0];
       }
 
       const pressed = new Set();
@@ -241,7 +270,7 @@
 
       async function buildMode(mode) {
         const group = new THREE.Group();
-        const shell = await loadGltf(`shell_${mode}.glb`);
+        const shell = await loadGltf(`${base}shell_${mode}.glb`);
         applyDisplaySettings(shell.scene, { flatColour: null, shadows: mode === "colour" });
         group.add(shell.scene);
 
@@ -250,7 +279,7 @@
         for (const entry of manifest.instances) {
           const url = useCollider ? entry.collider_url : entry.render_url;
           if (!url) continue; // counted in the report, not silently ignored
-          if (!cache.has(url)) cache.set(url, loadGltf(url));
+          if (!cache.has(url)) cache.set(url, loadGltf(base + url));
           const gltf = await cache.get(url);
           const piece = gltf.scene.clone(true);
           const flatColour =
@@ -301,6 +330,7 @@
         renderLegend(mode);
         if (!groups[mode]) groups[mode] = await buildMode(mode);
         if (activeMode && groups[activeMode]) scene.remove(groups[activeMode]);
+        if (!manifest) return;
         scene.add(groups[mode]);
         fitSunTo(groups[mode]);
         activeMode = mode;
@@ -361,15 +391,47 @@
         canStandAt,
       };
 
-      fetch("manifest.json")
+      let base = "";
+
+      function setBusy(text) {
+        document.getElementById("busy").textContent = text;
+      }
+
+      async function loadApartment(sceneId) {
+        setBusy("building apartment… (first load of a scene takes a while)");
+        // The server assembles a scene on demand: 168 apartments could not be
+        // exported up front, and each one is cached after its first build.
+        const response = await fetch(`scenes/${sceneId}/manifest.json`);
+        if (!response.ok) {
+          setBusy(`failed to build ${sceneId}: ${response.status}`);
+          return;
+        }
+        manifest = await response.json();
+        base = `scenes/${sceneId}/`;
+        for (const mode of MODES) groups[mode] = null;
+        if (activeMode && scene.children.includes(groups[activeMode])) {
+          scene.remove(groups[activeMode]);
+        }
+        activeMode = null;
+        document.getElementById("title").textContent = manifest.title;
+        document.getElementById("report").textContent = manifest.hint;
+        const [x, z] = startingPosition();
+        camera.position.set(x, manifest.floorHeight + EYE_HEIGHT, z);
+        yaw = 0;
+        pitch = 0;
+        await setMode("colour");
+        setBusy("");
+      }
+
+      fetch("apartments.json")
         .then((response) => response.json())
-        .then(async (data) => {
-          manifest = data;
-          document.getElementById("title").textContent = data.title;
-          document.getElementById("report").textContent = data.hint;
-          const [x, z] = startingPosition(data.polygon);
-          camera.position.set(x, data.floorHeight + EYE_HEIGHT, z);
-          await setMode("colour");
+        .then(async (apartments) => {
+          const select = document.getElementById("scene-select");
+          select.innerHTML = apartments
+            .map((a) => `<option value="${a.id}">${a.label}</option>`)
+            .join("");
+          select.onchange = () => loadApartment(select.value);
+          await loadApartment(apartments[0].id);
         })
         .catch((error) => {
           document.getElementById("title").textContent = `failed to load: ${error}`;
