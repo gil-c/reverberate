@@ -4,41 +4,38 @@
     <meta charset="utf-8" />
     <title>reverberate — reconstructed room</title>
     <style>
-      body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; background: #14161a; }
+      body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; background: #0d0f12; }
+      canvas { display: block; cursor: grab; }
+      canvas.dragging { cursor: grabbing; }
       #ui {
         position: absolute; top: 12px; left: 12px; z-index: 10;
-        background: rgba(20, 22, 26, 0.85); color: #eee;
-        padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.6;
-        max-width: 340px;
+        background: rgba(20, 22, 26, 0.88); color: #eee;
+        padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+        max-width: 290px; user-select: none;
       }
       button {
         background: #2d3038; color: #eee; border: 1px solid #454a55;
         border-radius: 5px; padding: 5px 10px; cursor: pointer; font-size: 13px;
       }
       button.active { background: #3f6ea5; border-color: #5b8fd0; }
-      #legend { margin-top: 8px; display: none; }
-      #ramp {
-        height: 10px; border-radius: 3px; margin: 4px 0;
-        background: linear-gradient(to right, rgb(0,40,255), rgb(255,40,0));
-      }
-      .row { display: flex; justify-content: space-between; font-size: 11px; color: #aaa; }
-      #hint { margin-top: 8px; color: #99aabb; font-size: 11px; }
+      #legend { margin-top: 10px; max-height: 42vh; overflow-y: auto; }
+      .entry { display: flex; align-items: center; gap: 7px; font-size: 11px; padding: 1px 0; }
+      .swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; }
+      #hint { margin-top: 9px; color: #99aabb; font-size: 11px; }
+      #report { margin-top: 5px; color: #7a8290; font-size: 10px; }
     </style>
   </head>
   <body>
     <div id="ui">
       <div><strong id="title">loading…</strong></div>
       <div style="margin-top: 8px">
-        <button id="btn-render" class="active">Render</button>
+        <button id="btn-colour" class="active">Colour</button>
+        <button id="btn-label">Label</button>
         <button id="btn-acoustic">Acoustic</button>
-        <button id="btn-walk">Walk</button>
       </div>
-      <div id="legend">
-        <div>Assigned absorption coefficient</div>
-        <div id="ramp"></div>
-        <div class="row"><span>0.0 reflective</span><span>1.0 absorptive</span></div>
-      </div>
-      <div id="hint">Orbit: drag to rotate, scroll to zoom.</div>
+      <div id="legend"></div>
+      <div id="hint">Drag to look around. W A S D to walk.</div>
+      <div id="report"></div>
     </div>
 
     <script type="importmap">
@@ -53,102 +50,301 @@
     <script type="module">
       import * as THREE from "three";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-      import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+      import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 
-      // Eye height of a standing adult, in metres. The walk camera holds this
-      // constant: a person's head does not rise when they look up, which is
-      // the difference between walking through a room and orbiting a model.
+      // Eye height of a standing adult, in metres, held constant: a person's
+      // head does not rise when they look up. Body translation and head
+      // rotation are the only things that ever move this camera.
       const EYE_HEIGHT = 1.6;
-      const WALK_SPEED = 2.4;
+      const WALK_SPEED = 2.2;
+      // Stay this far from the walls, so the near plane never slips through a
+      // surface and the room cannot be left.
+      const WALL_MARGIN = 0.35;
+      const MAX_PITCH = Math.PI / 2 - 0.05;
+      const LOOK_SENSITIVITY = 0.0032;
+      const MODES = ["colour", "label", "acoustic"];
 
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x14161a);
-      const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 500);
+      scene.background = new THREE.Color(0x0d0f12);
+      const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+      camera.rotation.order = "YXZ";
+
       const renderer = new THREE.WebGLRenderer({ antialias: true });
       renderer.setSize(innerWidth, innerHeight);
-      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       document.body.appendChild(renderer.domElement);
 
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 2.2));
-      const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-      sun.position.set(4, 8, 5);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x555560, 1.4));
+      const sun = new THREE.DirectionalLight(0xfff2e0, 1.8);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.bias = -0.0008;
       scene.add(sun);
+      scene.add(sun.target);
+      // A lamp travelling with the viewer keeps the interior readable: the
+      // ceiling we reconstruct blocks most of the directional light.
+      const headLamp = new THREE.PointLight(0xffffff, 14, 20, 2);
+      scene.add(headLamp);
 
-      const orbit = new OrbitControls(camera, renderer.domElement);
-      const walk = new PointerLockControls(camera, renderer.domElement);
-      scene.add(walk.getObject());
+      // HSSD stores its textures as KTX2/Basis (KHR_texture_basisu). Decoding
+      // them here is exactly why the room is composed in the browser rather
+      // than merged into one glTF in Python, where those textures are lost.
+      const ktx2 = new KTX2Loader()
+        .setTranscoderPath("https://unpkg.com/three@0.160.0/examples/jsm/libs/basis/")
+        .detectSupport(renderer);
+      const loader = new GLTFLoader().setKTX2Loader(ktx2);
 
-      let walking = false;
-      let floorY = 0;
-      const pressed = new Set();
-      addEventListener("keydown", (event) => pressed.add(event.code));
-      addEventListener("keyup", (event) => pressed.delete(event.code));
+      const loadGltf = (url) =>
+        new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
 
-      const loader = new GLTFLoader();
-      let current = null;
+      let manifest = null;
+      let yaw = 0;
+      let pitch = 0;
+      const groups = {};
+      let activeMode = null;
 
-      function frameObject(root) {
-        const box = new THREE.Box3().setFromObject(root);
-        const size = box.getSize(new THREE.Vector3());
-        const centre = box.getCenter(new THREE.Vector3());
-        floorY = box.min.y;
-        orbit.target.copy(centre);
-        camera.position.set(centre.x + size.x, box.max.y + size.y * 0.4, centre.z + size.z);
-        orbit.update();
+      function pointInsidePolygon(x, z, polygon) {
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+          const [xi, zi] = polygon[i];
+          const [xj, zj] = polygon[j];
+          if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+        }
+        return inside;
       }
 
-      function load(mode) {
-        loader.load(`${mode}.glb`, (gltf) => {
-          if (current) scene.remove(current);
-          current = gltf.scene;
-          // glTF is Y-up and so is our world convention, so there is no axis
-          // fix here on purpose: if the model looks rotated or mirrored, the
-          // reconstruction is wrong, not the viewer. That is the whole point.
-          scene.add(current);
-          if (!walking) frameObject(current);
-          document.getElementById("legend").style.display =
-            mode === "acoustic" ? "block" : "none";
+      function distanceToPolygonEdge(x, z, polygon) {
+        let best = Infinity;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+          const [xi, zi] = polygon[i];
+          const [xj, zj] = polygon[j];
+          const dx = xj - xi;
+          const dz = zj - zi;
+          const lengthSquared = dx * dx + dz * dz;
+          const t = lengthSquared === 0
+            ? 0
+            : Math.max(0, Math.min(1, ((x - xi) * dx + (z - zi) * dz) / lengthSquared));
+          best = Math.min(best, Math.hypot(x - (xi + t * dx), z - (zi + t * dz)));
+        }
+        return best;
+      }
+
+      // "Inside" here is the authored floor polygon, the same one the
+      // reconstruction extrudes and the placement audit tests against, so the
+      // viewer cannot disagree with the rest of the project about the room.
+      function canStandAt(x, z) {
+        if (!manifest) return false;
+        return (
+          pointInsidePolygon(x, z, manifest.polygon) &&
+          distanceToPolygonEdge(x, z, manifest.polygon) >= WALL_MARGIN
+        );
+      }
+
+      function startingPosition(polygon) {
+        const xs = polygon.map((p) => p[0]);
+        const zs = polygon.map((p) => p[1]);
+        const centroid = [
+          xs.reduce((a, b) => a + b, 0) / xs.length,
+          zs.reduce((a, b) => a + b, 0) / zs.length,
+        ];
+        if (canStandAt(centroid[0], centroid[1])) return centroid;
+        // A concave room can put its centroid inside a wall, so fall back to
+        // the most open sampled point rather than spawning outside the room.
+        const [minX, maxX] = [Math.min(...xs), Math.max(...xs)];
+        const [minZ, maxZ] = [Math.min(...zs), Math.max(...zs)];
+        let best = centroid;
+        let bestClearance = -Infinity;
+        for (let i = 1; i < 24; i++) {
+          for (let j = 1; j < 24; j++) {
+            const x = minX + ((maxX - minX) * i) / 24;
+            const z = minZ + ((maxZ - minZ) * j) / 24;
+            if (!pointInsidePolygon(x, z, manifest.polygon)) continue;
+            const clearance = distanceToPolygonEdge(x, z, manifest.polygon);
+            if (clearance > bestClearance) {
+              bestClearance = clearance;
+              best = [x, z];
+            }
+          }
+        }
+        return best;
+      }
+
+      const pressed = new Set();
+      addEventListener("keydown", (event) => {
+        if (event.code.startsWith("Arrow")) event.preventDefault();
+        pressed.add(event.code);
+      });
+      addEventListener("keyup", (event) => pressed.delete(event.code));
+      addEventListener("blur", () => pressed.clear());
+
+      // Drag to look, deliberately not pointer lock: the cursor stays visible
+      // and the page never captures the mouse, so nothing has to be released
+      // with Esc before using the rest of the screen.
+      let dragging = false;
+      let lastX = 0;
+      let lastY = 0;
+      const surface = renderer.domElement;
+      surface.addEventListener("pointerdown", (event) => {
+        dragging = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        surface.classList.add("dragging");
+        surface.setPointerCapture(event.pointerId);
+      });
+      const endDrag = (event) => {
+        dragging = false;
+        surface.classList.remove("dragging");
+        if (event.pointerId !== undefined && surface.hasPointerCapture(event.pointerId)) {
+          surface.releasePointerCapture(event.pointerId);
+        }
+      };
+      surface.addEventListener("pointerup", endDrag);
+      surface.addEventListener("pointercancel", endDrag);
+      surface.addEventListener("pointermove", (event) => {
+        if (!dragging) return;
+        yaw -= (event.clientX - lastX) * LOOK_SENSITIVITY;
+        pitch -= (event.clientY - lastY) * LOOK_SENSITIVITY;
+        pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitch));
+        lastX = event.clientX;
+        lastY = event.clientY;
+      });
+
+      function applyDisplaySettings(root, { flatColour, shadows }) {
+        root.traverse((node) => {
+          if (!node.isMesh) return;
+          const materials = Array.isArray(node.material) ? node.material : [node.material];
+          node.material = materials.map((material) => {
+            const copy = material.clone();
+            // Standing inside the room means looking at the back of every
+            // wall, floor and ceiling face, since the shell keeps its outward
+            // normals. Single sided rendering would leave the room wide open.
+            copy.side = THREE.DoubleSide;
+            if (flatColour) {
+              copy.map = null;
+              // Collider meshes carry vertex colours, which would otherwise
+              // modulate the flat colour and make one object look striped.
+              copy.vertexColors = false;
+              copy.color = new THREE.Color(...flatColour.map((v) => v / 255));
+              copy.metalness = 0;
+              copy.roughness = 1;
+            }
+            return copy;
+          });
+          if (node.material.length === 1) node.material = node.material[0];
+          node.castShadow = shadows;
+          node.receiveShadow = shadows;
         });
       }
 
-      function setMode(mode) {
-        document.getElementById("btn-render").classList.toggle("active", mode === "render");
-        document.getElementById("btn-acoustic").classList.toggle("active", mode === "acoustic");
-        load(mode);
+      async function buildMode(mode) {
+        const group = new THREE.Group();
+        const shell = await loadGltf(`shell_${mode}.glb`);
+        applyDisplaySettings(shell.scene, { flatColour: null, shadows: mode === "colour" });
+        group.add(shell.scene);
+
+        const useCollider = mode === "acoustic";
+        const cache = new Map();
+        for (const entry of manifest.instances) {
+          const url = useCollider ? entry.collider_url : entry.render_url;
+          if (!url) continue; // counted in the report, not silently ignored
+          if (!cache.has(url)) cache.set(url, loadGltf(url));
+          const gltf = await cache.get(url);
+          const piece = gltf.scene.clone(true);
+          const flatColour =
+            mode === "label" ? entry.label_colour : mode === "acoustic" ? entry.acoustic_colour : null;
+          applyDisplaySettings(piece, { flatColour, shadows: mode === "colour" });
+          // Our instance matrix, applied whole: if a piece lands wrongly, the
+          // reconstruction is wrong, because the viewer adds no correction.
+          piece.matrixAutoUpdate = false;
+          piece.matrix.fromArray(entry.matrix);
+          group.add(piece);
+        }
+        return group;
       }
 
-      document.getElementById("btn-render").onclick = () => setMode("render");
-      document.getElementById("btn-acoustic").onclick = () => setMode("acoustic");
-      document.getElementById("btn-walk").onclick = () => {
-        walking = !walking;
-        document.getElementById("btn-walk").classList.toggle("active", walking);
-        orbit.enabled = !walking;
-        document.getElementById("hint").textContent = walking
-          ? "Click to capture the mouse. WASD to walk, mouse to look, Esc to release."
-          : "Orbit: drag to rotate, scroll to zoom.";
-        if (walking) {
-          camera.position.y = floorY + EYE_HEIGHT;
-          walk.lock();
-        } else {
-          walk.unlock();
-        }
-      };
+      function fitSunTo(group) {
+        const box = new THREE.Box3().setFromObject(group);
+        const centre = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        sun.position.set(centre.x + size.x, box.max.y + size.y, centre.z + size.z);
+        sun.target.position.copy(centre);
+        const extent = Math.max(size.x, size.z);
+        Object.assign(sun.shadow.camera, {
+          left: -extent,
+          right: extent,
+          top: extent,
+          bottom: -extent,
+          far: extent * 4,
+        });
+        sun.shadow.camera.updateProjectionMatrix();
+      }
 
+      function renderLegend(mode) {
+        const entries = (manifest && manifest.legends[mode]) || [];
+        document.getElementById("legend").innerHTML = entries
+          .map(
+            (entry) =>
+              `<div class="entry"><span class="swatch" style="background: rgb(${entry.colour.join(
+                ","
+              )})"></span>${entry.label}</div>`
+          )
+          .join("");
+      }
+
+      async function setMode(mode) {
+        for (const name of MODES) {
+          document.getElementById(`btn-${name}`).classList.toggle("active", name === mode);
+        }
+        renderLegend(mode);
+        if (!groups[mode]) groups[mode] = await buildMode(mode);
+        if (activeMode && groups[activeMode]) scene.remove(groups[activeMode]);
+        scene.add(groups[mode]);
+        fitSunTo(groups[mode]);
+        activeMode = mode;
+      }
+
+      for (const mode of MODES) {
+        document.getElementById(`btn-${mode}`).onclick = () => setMode(mode);
+      }
+
+      const forward = new THREE.Vector3();
+      const right = new THREE.Vector3();
       const clock = new THREE.Clock();
+
       function animate() {
         requestAnimationFrame(animate);
-        const delta = clock.getDelta();
-        if (walking && walk.isLocked) {
-          const distance = WALK_SPEED * delta;
-          if (pressed.has("KeyW")) walk.moveForward(distance);
-          if (pressed.has("KeyS")) walk.moveForward(-distance);
-          if (pressed.has("KeyA")) walk.moveRight(-distance);
-          if (pressed.has("KeyD")) walk.moveRight(distance);
-          // Body translation only; looking up or down never changes eye height.
-          camera.position.y = floorY + EYE_HEIGHT;
+        const delta = Math.min(clock.getDelta(), 0.1);
+        camera.rotation.set(pitch, yaw, 0);
+        forward.set(-Math.sin(yaw), 0, -Math.cos(yaw));
+        right.set(Math.cos(yaw), 0, -Math.sin(yaw));
+
+        let stepX = 0;
+        let stepZ = 0;
+        const distance = WALK_SPEED * delta;
+        const push = (vector, sign) => {
+          stepX += vector.x * distance * sign;
+          stepZ += vector.z * distance * sign;
+        };
+        if (pressed.has("KeyW") || pressed.has("ArrowUp")) push(forward, 1);
+        if (pressed.has("KeyS") || pressed.has("ArrowDown")) push(forward, -1);
+        if (pressed.has("KeyD") || pressed.has("ArrowRight")) push(right, 1);
+        if (pressed.has("KeyA") || pressed.has("ArrowLeft")) push(right, -1);
+
+        if (stepX !== 0 || stepZ !== 0) {
+          const { x, z } = camera.position;
+          if (canStandAt(x + stepX, z + stepZ)) {
+            camera.position.x = x + stepX;
+            camera.position.z = z + stepZ;
+          } else if (canStandAt(x + stepX, z)) {
+            camera.position.x = x + stepX; // slide along the wall
+          } else if (canStandAt(x, z + stepZ)) {
+            camera.position.z = z + stepZ;
+          }
         }
+        headLamp.position.copy(camera.position);
         renderer.render(scene, camera);
       }
 
@@ -158,17 +354,27 @@
         renderer.setSize(innerWidth, innerHeight);
       });
 
-      fetch("scene.json")
+      // Test hook: lets an automated check assert that the walk camera never
+      // leaves the room, which is otherwise only verifiable by eye.
+      window.reverberate = {
+        position: () => camera.position.toArray(),
+        canStandAt,
+      };
+
+      fetch("manifest.json")
         .then((response) => response.json())
-        .then((info) => {
-          document.getElementById("title").textContent = info.title;
-          document.getElementById("hint").textContent = info.hint;
+        .then(async (data) => {
+          manifest = data;
+          document.getElementById("title").textContent = data.title;
+          document.getElementById("report").textContent = data.hint;
+          const [x, z] = startingPosition(data.polygon);
+          camera.position.set(x, data.floorHeight + EYE_HEIGHT, z);
+          await setMode("colour");
         })
-        .catch(() => {
-          document.getElementById("title").textContent = "reconstructed room";
+        .catch((error) => {
+          document.getElementById("title").textContent = `failed to load: ${error}`;
         });
 
-      setMode("render");
       animate();
     </script>
   </body>
