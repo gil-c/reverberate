@@ -19,9 +19,14 @@ import numpy as np
 import pyroomacoustics as pra
 import trimesh
 
-from reverberate.geometry.apartment import Storey, extrude_storey
+from reverberate.geometry.apartment import (
+    Storey,
+    build_apartment,
+    extrude_storey,
+    instances_on_storey,
+)
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
-from reverberate.geometry.hssd_room import FurnitureInstance
+from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.viz.room_surfaces import shell_surface_labels
@@ -164,6 +169,31 @@ def simulation_geometry(
         unresolved=unresolved,
     )
     return [*shell, *obstacles], summary
+
+
+def apartment_geometry(
+    hssd_root: Path, scene_id: str, storey_index: int = 0, seed: int = 0
+) -> tuple[list[MeshMaterialAssignment], GeometrySummary, Storey]:
+    """One call from a scene id to everything the simulator needs.
+
+    This is the entry point for the acoustic pipeline: it assembles the
+    apartment, keeps the furniture standing on the chosen storey, and returns
+    the mesh-plus-material list ``pra_room.build_room`` already expects.
+    Storeys come largest first, so the default is the main floor.
+
+    The returned assignments are the *same* meshes the viewer draws in its
+    acoustic mode, which is the property worth preserving: if the simulation
+    and the picture ever disagree, one of them stopped calling this function.
+    """
+    storeys = build_apartment(hssd_root, scene_id)
+    if not storeys:
+        raise ValueError(f"scene {scene_id} has no walkable storey")
+    storey = storeys[storey_index]
+    instances = instances_on_storey(
+        load_object_instances(hssd_root / "scenes" / f"{scene_id}.scene_instance.json"), storey
+    )
+    assignments, summary = simulation_geometry(hssd_root, storey, instances, seed=seed)
+    return assignments, summary, storey
 
 
 def build_pra_room(

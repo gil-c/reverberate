@@ -25,10 +25,10 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
-from reverberate.geometry.hssd_room import RoomRegion, load_regions
+from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion, load_regions
 
 #: Height above a floor at which the stage is sectioned to find its walls.
 #: Doors reach the floor, so a doorway is a gap at this height, while window
@@ -171,6 +171,21 @@ def build_storey(regions: list[RoomRegion], stage: trimesh.Trimesh) -> Storey:
         rooms=regions,
         doorways=len(doorways),
     )
+
+
+def instances_on_storey(
+    instances: list[FurnitureInstance], storey: Storey
+) -> list[FurnitureInstance]:
+    """Furniture belonging to this storey, by height and by standing inside it."""
+    kept = []
+    for instance in instances:
+        x, y, z = instance.translation
+        if not storey.floor_height - 0.5 <= y <= storey.ceiling_height + 0.5:
+            continue
+        if not storey.walkable.buffer(DOORWAY_SEARCH_DISTANCE).contains(Point(x, z)):
+            continue
+        kept.append(instance)
+    return kept
 
 
 def load_stage(hssd_root: Path, scene_id: str) -> trimesh.Trimesh:
