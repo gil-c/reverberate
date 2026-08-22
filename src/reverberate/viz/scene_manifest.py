@@ -25,16 +25,18 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from reverberate.geometry.absorption import compensate
 from reverberate.geometry.apartment import (
     Storey,
     build_apartment,
     extrude_storey,
     instances_on_storey,
 )
+from reverberate.geometry.decimation import DETAIL_LEVELS
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
-from reverberate.geometry.sim_geometry import OBSTACLE_FACE_BUDGET, simulation_collider
+from reverberate.geometry.sim_geometry import reduced_collider
 from reverberate.viz.label_palette import (
     SHELL_LABEL_COLOURS,
     SHELL_RENDER_COLOURS,
@@ -66,7 +68,27 @@ class InstanceEntry:
     matrix: list[float]
     label_colour: list[int]
     acoustic_colour: list[int]
+    #: The absorption actually handed to pyroomacoustics, after compensation.
+    #: This is what ``acoustic_colour`` shows, so the acoustic view is a
+    #: picture of the simulator's input rather than of the material table.
     absorption: float
+    #: The tabulated coefficient for this category, before compensation. Kept
+    #: alongside so the viewer can show what was changed rather than only the
+    #: result, which would make a heavily compensated object indistinguishable
+    #: from a genuinely absorptive one.
+    base_absorption: float
+    #: Surface area before and after decimation, in m². Their ratio is the
+    #: compensation factor, and quoting both lets a reader check it.
+    original_area: float
+    reduced_area: float
+    compensation_factor: float
+    #: True when a band hit the ceiling of 1.0, which is the one case where
+    #: absorbing power really is lost. Flagged so the viewer can mark it.
+    capped: bool
+    #: Colour for the dedicated compensation view: neutral at factor 1, hot
+    #: where the coefficient was scaled hard. Without it a compensated 0.2
+    #: looks exactly like a genuine 0.8.
+    compensation_colour: list[int]
 
 
 @dataclass
@@ -78,13 +100,16 @@ class ManifestReport:
     render_as_collider: list[str] = field(default_factory=list)
     layouts: dict[str, int] = field(default_factory=dict)
     storey: str = ""
+    compensated: int = 0
+    capped: int = 0
 
     def summary(self) -> str:
         layouts = ", ".join(f"{name}: {count}" for name, count in sorted(self.layouts.items()))
         return (
             f"{self.placed} pieces placed ({layouts}); "
             f"{len(self.unresolved)} unresolved, "
-            f"{len(self.render_as_collider)} simulated from their render mesh"
+            f"{len(self.render_as_collider)} simulated from their render mesh, "
+            f"{self.compensated} absorption-compensated, {self.capped} capped"
         )
 
 
@@ -113,12 +138,13 @@ def export_simulation_collider(hssd_root: Path, template: str, target_dir: Path)
 
     The acoustic view must not show the pretty collider while pyroomacoustics
     receives a decimated one, so the decimated mesh is exported here and the
-    browser is pointed at it. Both come from ``simulation_collider``, which is
-    the single place that decision is made.
+    browser is pointed at it. Both come from ``reduced_collider``, which is the
+    single place that decision is made.
     """
-    mesh = simulation_collider(hssd_root, template, OBSTACLE_FACE_BUDGET)
-    if mesh is None:
+    loaded = reduced_collider(hssd_root, template, DETAIL_LEVELS[0].detail_length)
+    if loaded is None:
         return None
+    mesh = loaded[0]
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / f"{template}.glb"
     if not path.exists():
@@ -146,9 +172,28 @@ def build_instances(
             continue
         category = category_for_template(hssd_root, instance.template_name) or "unknown"
         material = material_for_label(category, rng)
-        absorption = float(np.mean(material.energy_absorption["coeffs"]))
+        base_absorption = float(np.mean(material.energy_absorption["coeffs"]))
         if asset.collider_is_render:
             report.render_as_collider.append(instance.template_name)
+
+        loaded = reduced_collider(hssd_root, instance.template_name, DETAIL_LEVELS[0].detail_length)
+        if loaded is None:
+            report.unresolved.append(instance.template_name)
+            continue
+        reduced, original_area = loaded
+        placed = reduced.copy()
+        placed.apply_transform(instance.transform_matrix())
+        scale = float(placed.area) / float(reduced.area) if reduced.area else 1.0
+        compensated = compensate(
+            material,
+            original_area=original_area * scale,
+            reduced_area=float(placed.area),
+            base_key=category,
+        )
+        absorption = float(np.mean(compensated.material.energy_absorption["coeffs"]))
+        report.compensated += int(compensated.compensated)
+        report.capped += int(compensated.capped)
+
         entries.append(
             InstanceEntry(
                 template=instance.template_name,
@@ -163,11 +208,32 @@ def build_instances(
                 label_colour=list(category_colour(category)),
                 acoustic_colour=absorption_colour(absorption)[:3].tolist(),
                 absorption=absorption,
+                base_absorption=base_absorption,
+                original_area=float(compensated.original_area),
+                reduced_area=float(compensated.reduced_area),
+                compensation_factor=float(compensated.applied_factor),
+                capped=compensated.capped,
+                compensation_colour=compensation_colour(compensated.applied_factor)[:3].tolist(),
             )
         )
         report.placed += 1
         report.layouts[asset.layout] = report.layouts.get(asset.layout, 0) + 1
     return entries, report
+
+
+def compensation_colour(factor: float, max_factor: float = 8.0) -> np.ndarray:
+    """Grey (untouched) to orange (heavily rescaled), as an RGBA byte colour.
+
+    This view exists because ``absorption_colour`` cannot tell the two apart:
+    a material tabulated at 0.8 and one tabulated at 0.2 then scaled four times
+    produce the same red, yet only the second one is a modelling decision the
+    reader should be able to see and challenge.
+    """
+    fraction = float(np.clip((factor - 1.0) / (max_factor - 1.0), 0.0, 1.0))
+    return np.array(
+        [int(160 + 95 * fraction), int(160 - 60 * fraction), int(160 - 140 * fraction), 255],
+        dtype=np.uint8,
+    )
 
 
 def shell_meshes(

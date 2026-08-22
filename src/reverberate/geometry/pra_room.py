@@ -23,6 +23,10 @@ class MeshMaterialAssignment:
     mesh: trimesh.Trimesh
     material: pra.Material
     name: str = ""
+    #: Set when the mesh was decimated and its absorption rescaled to keep the
+    #: obstacle's absorbing power. Carried here so the viewer and the audit
+    #: panel quote the simulator's own figures rather than recomputing them.
+    compensation: object | None = None
 
 
 def walls_from_mesh(assignment: MeshMaterialAssignment) -> list[pra.wall.Wall]:
