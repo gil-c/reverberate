@@ -1,4 +1,8 @@
-data/
+# The downloaded datasets, ~23 GB, at the repository root only. Anchored with a
+# leading slash on purpose: an unanchored `data/` also matches
+# `src/reverberate/data/`, which holds the checked-in material coefficient
+# tables, and silently kept them out of the repository until CI caught it.
+/data/
 .venv/
 .idea/
 __pycache__/

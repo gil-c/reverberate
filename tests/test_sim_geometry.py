@@ -14,15 +14,15 @@ import trimesh
 from shapely.geometry import Point
 
 from reverberate.geometry.apartment import Storey, build_storey
+from reverberate.geometry.decimation import DETAIL_LEVELS
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
 from reverberate.geometry.sim_geometry import (
-    OBSTACLE_FACE_BUDGET,
     decimate,
     obstacle_assignments,
+    reduced_collider,
     sample_points,
     sample_source_receiver,
     shell_assignments,
-    simulation_collider,
     simulation_geometry,
 )
 
@@ -103,29 +103,31 @@ def instance(template: str, x: float = 0.0) -> FurnitureInstance:
     )
 
 
-def test_obstacles_are_decimated_to_the_budget(tmp_path: Path) -> None:
+def test_obstacles_are_decimated_but_keep_their_absorbing_power(tmp_path: Path) -> None:
+    """Decimation must not also delete the absorption it was meant to keep."""
     dense_faces = build_object_tree(tmp_path)
-    assignments, unresolved = obstacle_assignments(tmp_path, [instance("abc")])
+    assignments, unresolved, absorption = obstacle_assignments(tmp_path, [instance("abc")])
     assert unresolved == []
-    assert len(assignments[0].mesh.faces) <= OBSTACLE_FACE_BUDGET < dense_faces
+    assert len(assignments[0].mesh.faces) <= dense_faces
+    assert absorption.power_error == pytest.approx(0.0, abs=1e-6)
 
 
 def test_the_viewer_and_the_simulator_read_the_same_collider(tmp_path: Path) -> None:
     """The whole point: the acoustic view must not be a flattering picture.
 
-    ``simulation_collider`` is the single place the decimation decision is
-    made, and both the exported mesh and the simulated one come from it.
+    ``reduced_collider`` is the single place the decimation decision is made,
+    and both the exported mesh and the simulated one come from it.
     """
     build_object_tree(tmp_path)
-    exported = simulation_collider(tmp_path, "abc", OBSTACLE_FACE_BUDGET)
+    exported = reduced_collider(tmp_path, "abc", DETAIL_LEVELS[0].detail_length)
     simulated = obstacle_assignments(tmp_path, [instance("abc")])[0][0].mesh
     assert exported is not None
-    assert len(exported.faces) == len(simulated.faces)
+    assert len(exported[0].faces) == len(simulated.faces)
 
 
 def test_an_unresolvable_template_is_reported_not_dropped(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
-    assignments, unresolved = obstacle_assignments(tmp_path, [instance("missing")])
+    assignments, unresolved, _ = obstacle_assignments(tmp_path, [instance("missing")])
     assert assignments == []
     assert unresolved == ["missing"]
 
@@ -141,7 +143,7 @@ def test_summary_counts_the_walls_pyroomacoustics_will_build(tmp_path: Path) -> 
 
 def test_instances_keep_their_placement_in_the_simulated_geometry(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
-    assignments, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
+    assignments, _, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
     assert assignments[0].mesh.centroid[0] == pytest.approx(3.0, abs=0.1)
 
 

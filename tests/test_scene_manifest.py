@@ -165,3 +165,37 @@ def test_manifest_entries_serialise_to_json(tmp_path: Path) -> None:
     from dataclasses import asdict
 
     json.dumps([asdict(entry) for entry in entries])
+
+
+def test_compensation_colour_separates_untouched_from_rescaled() -> None:
+    """The acoustic colour alone cannot show compensation: a material tabulated
+    at 0.8 and one tabulated at 0.2 scaled four times give the same red. This
+    ramp is what makes the modelling decision visible instead of implied."""
+    from reverberate.viz.scene_manifest import compensation_colour
+
+    untouched = compensation_colour(1.0)
+    rescaled = compensation_colour(8.0)
+
+    assert list(untouched) != list(rescaled)
+    assert list(compensation_colour(0.5)) == list(untouched)
+    assert list(compensation_colour(100.0)) == list(rescaled)
+
+
+def test_manifest_entries_carry_the_provenance_of_the_compensation() -> None:
+    """The viewer must be able to say what was changed, not only the result:
+    tabulated coefficient, both areas, the factor, and whether it was capped."""
+    from dataclasses import fields
+
+    from reverberate.viz.scene_manifest import InstanceEntry
+
+    names = {field.name for field in fields(InstanceEntry)}
+
+    assert {
+        "absorption",
+        "base_absorption",
+        "original_area",
+        "reduced_area",
+        "compensation_factor",
+        "capped",
+        "compensation_colour",
+    } <= names
