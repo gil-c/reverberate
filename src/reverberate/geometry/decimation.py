@@ -14,9 +14,10 @@ Two things replace it.
 **A budget derived from the object's own size and from physics.** Section 5.3
 of the brief argues that detail much smaller than the shortest wavelength of
 interest does not reflect specularly, it scatters, and scattering is already
-modelled by the scattering coefficient. At 4 kHz the wavelength is about
-8.6 cm, and that is the floor: decimating past it stops being the argument the
-README makes and starts being damage. The budget is therefore the number of
+modelled by the scattering coefficient. At 8 kHz, the top of the band range in
+``reverberate.acoustics``, that wavelength is about 4.3 cm, and that is the
+floor: decimating past it stops being the argument the README makes and starts
+being damage. The budget is therefore the number of
 triangles of roughly that edge length needed to cover the object's surface.
 
 **Levels of detail, so distance can pay for itself.** What is far away, or
@@ -39,9 +40,7 @@ from dataclasses import dataclass
 import numpy as np
 import trimesh
 
-#: Shortest wavelength of interest, in metres: 4 kHz in air at about 343 m/s.
-#: Section 5.3's argument for why decimation is physics rather than a shortcut.
-MIN_WAVELENGTH = 0.086
+from reverberate.acoustics import MIN_WAVELENGTH
 
 #: No obstacle is reduced below this, whatever its size. A handful of triangles
 #: cannot enclose a volume, and an obstacle that has lost its volume has lost

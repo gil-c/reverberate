@@ -26,7 +26,8 @@ from dataclasses import dataclass
 import numpy as np
 import trimesh
 
-from reverberate.geometry.decimation import MIN_WAVELENGTH, decimate_within, deviation
+from reverberate.acoustics import MIN_WAVELENGTH
+from reverberate.geometry.decimation import decimate_within, deviation
 
 #: How far an envelope may sit from the real surface, in metres. Half the
 #: shortest wavelength of interest: detail finer than this scatters rather than

@@ -18,8 +18,9 @@ import pyroomacoustics as pra
 import pytest
 import trimesh
 
+from reverberate.acoustics import MIN_WAVELENGTH
 from reverberate.geometry.absorption import absorbing_power, compensate
-from reverberate.geometry.decimation import MIN_WAVELENGTH, decimate_within, deviation
+from reverberate.geometry.decimation import decimate_within, deviation
 from reverberate.geometry.envelope import (
     MAX_ENVELOPE_DEVIATION,
     acoustic_envelope,

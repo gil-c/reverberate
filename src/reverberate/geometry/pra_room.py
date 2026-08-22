@@ -15,6 +15,8 @@ import numpy as np
 import pyroomacoustics as pra
 import trimesh
 
+from reverberate.metrics import BandMetrics, measure
+
 
 @dataclass
 class MeshMaterialAssignment:
@@ -74,6 +76,15 @@ class SimulationResult:
     mean_absorption: float
     sabine_rt60: float
     eyring_rt60: float
+    #: Every per-octave-band measure of the response, from 125 Hz to 8 kHz.
+    #: The broadband figure above is kept only for continuity with the
+    #: Sabine/Eyring guard, which is itself a broadband estimate; it is not the
+    #: quantity this project predicts, and it can average away a large error in
+    #: one band against an opposite one in another.
+    bands: BandMetrics | None = None
+    #: The impulse response itself, so a caller can compare two simulations
+    #: without re-running either.
+    rir: np.ndarray | None = None
 
 
 def sabine_rt60(volume: float, surface_area: float, mean_absorption: float) -> float:
@@ -120,6 +131,8 @@ def simulate_and_validate(
     room.compute_rir()
 
     rt60 = float(room.measure_rt60()[0, 0])
+    response = np.asarray(room.rir[0][0], dtype=float)
+    band_metrics = measure(response, fs)
 
     total_area = 0.0
     weighted_absorption = 0.0
@@ -145,4 +158,6 @@ def simulate_and_validate(
         mean_absorption=mean_absorption,
         sabine_rt60=sabine_rt60(volume, total_area, mean_absorption),
         eyring_rt60=eyring_rt60(volume, total_area, mean_absorption),
+        bands=band_metrics,
+        rir=response,
     )

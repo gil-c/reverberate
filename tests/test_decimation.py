@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 import trimesh
 
+from reverberate.acoustics import MIN_WAVELENGTH
 from reverberate.geometry.decimation import (
     DETAIL_LEVELS,
     MAX_OBSTACLE_FACES,
     MIN_OBSTACLE_FACES,
-    MIN_WAVELENGTH,
     NEAR_DISTANCE,
     DecimationReport,
     decimate_adaptive,
