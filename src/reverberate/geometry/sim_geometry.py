@@ -111,12 +111,14 @@ def simulation_collider(hssd_root: Path, template: str, face_budget: int) -> tri
 @lru_cache(maxsize=1024)
 def reduced_collider(
     hssd_root: Path, template: str, detail_length: float
-) -> tuple[trimesh.Trimesh, float] | None:
-    """The decimated obstacle mesh and the surface area it had before.
+) -> tuple[trimesh.Trimesh, float, float] | None:
+    """The decimated obstacle mesh, the area it had before, and how far it strays.
 
-    Both halves are needed together and both are expensive, so they are cached
-    as a pair: the reduced mesh is what the simulator and the acoustic view
-    draw, and the original area is what the absorption compensation divides by.
+    All three are needed together and the first two are expensive, so they are
+    cached as one: the reduced mesh is what the simulator and the acoustic view
+    draw, the original area is what the absorption compensation divides by, and
+    the deviation is the characteristic size of the surface detail that was
+    removed, which is what decides *which bands* that compensation applies to.
     Returning the area rather than the original mesh keeps the cache small.
     """
     asset = resolve_asset(hssd_root / "objects", template)
@@ -137,7 +139,7 @@ def reduced_collider(
     # compensation, -87% with it, on an envelope 77 cm off). Compensation is a
     # small correction for a good approximation, never a licence for a bad one.
     envelope = acoustic_envelope(mesh, max_deviation=detail_length / 2.0)
-    return envelope.mesh, reference_area(hssd_root, template)
+    return envelope.mesh, reference_area(hssd_root, template), envelope.deviation
 
 
 @lru_cache(maxsize=1024)
@@ -226,20 +228,23 @@ def obstacle_assignments(
         if loaded is None:
             unresolved.append(instance.template_name)
             continue
-        base, original_area = loaded
+        base, original_area, deviation = loaded
         mesh = base.copy()
         mesh.apply_transform(instance.transform_matrix())
 
         material = material_for_label(category, rng)
         # Areas are compared after the instance matrix so that a non-uniform
         # scale is reflected in both, rather than compensating for a scaling
-        # that never happened.
+        # that never happened. The deviation is scaled the same way: it is a
+        # length in the template's own frame, and a plant scaled to twice its
+        # size lost detail twice as large.
         scale = _area_scale(base, mesh)
         entry = compensate(
             material,
             original_area=original_area * scale,
             reduced_area=float(mesh.area),
             base_key=category,
+            feature_size=deviation * float(np.sqrt(scale)),
         )
         entries.append(entry)
         base_materials.append(material)
