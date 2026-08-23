@@ -13,11 +13,13 @@ import numpy as np
 import pyroomacoustics as pra
 import pytest
 
+from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.geometry.absorption import (
     MAX_ABSORPTION,
     MAX_COMPENSATION_FACTOR,
     absorbing_power,
     audit,
+    band_weights,
     compensate,
 )
 
@@ -146,3 +148,102 @@ def test_audit_refuses_mismatched_inputs() -> None:
     """Pairing entries with the wrong materials would silently misreport."""
     with pytest.raises(ValueError):
         audit([compensate(pra.Material(0.2), 4.0, 2.0)], [])
+
+
+def octave_material(coefficient: float = 0.1) -> pra.Material:
+    """A seven-band material, which is what the material table produces."""
+    return pra.Material(
+        energy_absorption={
+            "coeffs": [coefficient] * len(OCTAVE_BANDS),
+            "center_freqs": list(OCTAVE_BANDS),
+        },
+        scattering={"coeffs": [0.1] * len(OCTAVE_BANDS), "center_freqs": list(OCTAVE_BANDS)},
+    )
+
+
+def test_band_weights_are_one_where_the_feature_is_at_least_a_wavelength() -> None:
+    # 2.744 m is the wavelength at 125 Hz, so every band sees a feature that big.
+    weights = band_weights(2.744, len(OCTAVE_BANDS))
+
+    assert np.allclose(weights, 1.0)
+
+
+def test_band_weights_taper_towards_the_low_bands() -> None:
+    # A 10 cm feature: invisible at 125 Hz (274 cm), fully seen at 4 kHz (8.6 cm).
+    weights = band_weights(0.10, len(OCTAVE_BANDS))
+
+    assert weights[0] == pytest.approx(0.10 / 2.744, rel=1e-3)
+    assert weights[-1] == 1.0
+    assert np.all(np.diff(weights) >= 0.0)
+
+
+def test_band_weights_leave_a_scalar_material_alone() -> None:
+    """A material with one coefficient has no frequency to weigh against.
+
+    Weighting it would mean inventing one, and the honest default is the
+    previous behaviour rather than a silent promotion to multi-band.
+    """
+    assert np.allclose(band_weights(0.01, 1), 1.0)
+
+
+def test_compensation_is_weighted_down_at_low_frequency() -> None:
+    """The point of the whole change: a small feature is not restored at 125 Hz.
+
+    A plant's lost leaf area contributed absorption where the wavelength was
+    comparable to a leaf. Crediting it with the same absorption at 125 Hz, where
+    the wavelength is 274 cm, is inventing absorption the object never had.
+    """
+    material = octave_material(0.1)
+
+    entry = compensate(material, original_area=8.0, reduced_area=2.0, feature_size=0.05)
+
+    coefficients = np.asarray(entry.material.energy_absorption["coeffs"])
+    # 5 cm against 274 cm is a weight of 0.018, so a factor of 4 arrives as 1.05.
+    assert coefficients[0] == pytest.approx(0.1 * (1.0 + 3.0 * 0.05 / 2.744))
+    assert coefficients[-1] == pytest.approx(0.4)
+    assert np.all(np.diff(coefficients) >= 0.0)
+
+
+def test_an_unweighted_compensation_is_unchanged() -> None:
+    """Omitting the feature size must reproduce the previous behaviour exactly."""
+    material = octave_material(0.1)
+
+    weighted = compensate(material, original_area=8.0, reduced_area=2.0, feature_size=0.0)
+
+    assert np.allclose(weighted.material.energy_absorption["coeffs"], 0.4)
+    assert weighted.applied_factor == pytest.approx(4.0)
+
+
+def test_weighting_removes_capping_the_flat_factor_caused() -> None:
+    """Most capping was the low bands, and the low bands are what weighting spares.
+
+    A coefficient that saturates is absorbing power genuinely lost, so a scheme
+    that avoids saturating in the first place is strictly better than one that
+    counts how often it does.
+    """
+    material = octave_material(0.3)
+
+    flat = compensate(material, original_area=10.0, reduced_area=2.0)
+    weighted = compensate(material, original_area=10.0, reduced_area=2.0, feature_size=0.05)
+
+    assert flat.capped_bands > 0
+    assert weighted.capped_bands < flat.capped_bands
+
+
+def test_audit_separates_intentional_low_band_shortfall_from_capping() -> None:
+    """The audit has to tell a correction apart from a defect.
+
+    Both look like "less absorbing power than the table says". Only the top
+    band distinguishes them: nothing is ever weighted away at 8 kHz, so a
+    shortfall there is capping and a shortfall at 125 Hz alone is the weighting
+    doing its job.
+    """
+    material = octave_material(0.1)
+    entry = compensate(material, original_area=8.0, reduced_area=2.0, feature_size=0.05)
+
+    report = audit([entry], [material])
+    error = report.band_power_error
+
+    assert error is not None
+    assert error[0] < -0.5
+    assert report.top_band_error == pytest.approx(0.0, abs=1e-9)

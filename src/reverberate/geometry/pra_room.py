@@ -47,13 +47,59 @@ def walls_from_mesh(assignment: MeshMaterialAssignment) -> list[pra.wall.Wall]:
     ]
 
 
+HIT_TARGET = 600
+"""Mean ray hits per histogram bin, which is what actually sets the noise floor.
+
+pyroomacoustics sizes its own ray count from Vorlaender (2008, eq. 11.12),
+``n = target * V / (pi r^2 c dt)``, and defaults ``target`` to 20. Twenty is
+enough to draw a decay curve; it is not enough to *compare* two of them. On the
+living room of scene 102344049, stripped to its 24-face shell so that seeds were
+cheap, four seeds per setting gave, as spread of T30 across bands (the
+acceptance threshold is 5%):
+
+    target   20  ->    661 rays ->  6-14%   -- pyroomacoustics' default
+    target   60  ->  2 000 rays ->    12%
+    target  180  ->  6 000 rays ->   7.5%
+    target  600  -> 20 000 rays ->   3.4%   -- this value
+    target 1800  -> 60 000 rays ->   5.8%
+
+The last line is not a regression, it is the floor of a four-seed estimate of a
+standard deviation. 600 is the first setting that clears the threshold.
+"""
+
+RECEIVER_RADIUS = 1.0
+"""Radius of the sphere that counts a ray as heard, in metres.
+
+This is a sampling knob and not a physical one, which had to be measured rather
+than assumed: the required ray count falls as ``1/r^2``, so a small receiver is
+expensive, but a large one averages over space and could plausibly bias the
+answer. It does not. Driven to 200 000 rays, radii of 0.15, 0.5 and 1.0 m agree
+on T30 to within 3-6%, well inside the 5% threshold, so the radius is free to be
+chosen for cost alone. Widening it from the 0.15 m used previously buys a factor
+of 44 in rays for the same noise.
+
+Below convergence the error is not symmetric. Starving the histogram truncates
+the tail, so the decay looks steeper and T30 comes out *short*: the old setting
+of 200 rays at 0.15 m reported 0.66 s where the converged answer is 1.3 s, an
+underestimate of a factor of two that no amount of averaging would have revealed.
+"""
+
+
 def build_room(
     assignments: list[MeshMaterialAssignment],
     fs: int = 16000,
     max_order: int = 3,
-    n_rays: int = 10000,
-    receiver_radius: float = 0.15,
+    n_rays: int | None = None,
+    receiver_radius: float = RECEIVER_RADIUS,
+    hit_target: int = HIT_TARGET,
 ) -> pra.Room:
+    """A room whose ray count is derived from its volume, not fixed by hand.
+
+    ``n_rays`` is left ``None`` in normal use. A fixed count cannot be correct
+    for every room, because the number needed scales with volume, and passing
+    one silently makes the answer depend on room size. It is kept overridable
+    only so experiments can sweep it.
+    """
     walls: list[pra.wall.Wall] = []
     for assignment in assignments:
         walls.extend(walls_from_mesh(assignment))
@@ -65,7 +111,94 @@ def build_room(
         air_absorption=True,
     )
     room.set_ray_tracing(n_rays=n_rays, receiver_radius=receiver_radius)
+    if n_rays is None:
+        # set_ray_tracing has just sized itself for 20 hits per bin, off this
+        # room's own volume. Rescaling that is safer than recomputing the
+        # formula here, which would mean duplicating pyroomacoustics' volume
+        # estimate and its assumptions about what counts as enclosed.
+        sized = int(room.rt_args["n_rays"] * hit_target / 20)
+        room.set_ray_tracing(n_rays=sized, receiver_radius=receiver_radius)
     return room
+
+
+@dataclass(frozen=True)
+class PairResponse:
+    """One source/receiver pair's impulse response and its per-band metrics."""
+
+    source: np.ndarray
+    receiver: np.ndarray
+    rir: np.ndarray
+    bands: BandMetrics
+
+
+def simulate_pairs(
+    assignments: list[MeshMaterialAssignment],
+    pairs: list[tuple[np.ndarray, np.ndarray]],
+    fs: int = 16000,
+    max_order: int = 2,
+    n_rays: int | None = None,
+    room: pra.Room | None = None,
+    seed: int | None = None,
+) -> list[PairResponse]:
+    """Several source/receiver pairs against one room, built once.
+
+    Construction is the dominant cost and it is paid per triangle: one
+    ``pra.wall_factory`` call per face from a Python loop, measured at ~65 s of
+    a ~114 s run on an apartment. That cost is independent of where the source
+    and the receiver stand, so paying it once per *geometry* rather than once
+    per *pair* is close to a free order of magnitude, and it is what makes a
+    positional sweep affordable at all.
+
+    Pairs are kept paired: pyroomacoustics computes a response for every
+    source/microphone combination, so ``rir[i][j]`` is microphone ``i`` hearing
+    source ``j`` and only the diagonal is asked for. The off-diagonal responses
+    are computed and discarded, which is still far cheaper than rebuilding the
+    walls, but it does mean the ray tracing cost grows with the number of
+    pairs even though the construction cost does not.
+
+    **The ray tracer is stochastic and its randomness is global.** Diffuse
+    reflection draws from one process-wide generator inside ``libroom``, so two
+    runs of the identical scene return different responses, and adding a second
+    source shifts the draws the first one gets. ``seed`` pins it. That matters
+    beyond reproducibility: because adding a pair perturbs the other pairs'
+    draws, one sweep is comparable to another only at the same seed and with
+    the same pairs in the same order.
+
+    Seeding bounds the scatter but does not remove it, so a comparison between
+    two geometries is meaningful only once the residual spread is below the
+    threshold being tested. That is what ``build_room``'s ray sizing is for,
+    and it is why ``n_rays`` defaults to ``None`` here rather than to a
+    constant.
+
+    Pass ``room`` to reuse a room that has already been built *and has no
+    source or microphone attached yet*; otherwise one is built from
+    ``assignments``.
+    """
+    if not pairs:
+        return []
+    if seed is not None:
+        pra.random.seed(seed)
+    if room is None:
+        room = build_room(assignments, fs=fs, max_order=max_order, n_rays=n_rays)
+    for source, _ in pairs:
+        room.add_source(np.asarray(source, dtype=float))
+    room.add_microphone_array(np.array([np.asarray(mic, dtype=float) for _, mic in pairs]).T)
+    room.image_source_model()
+    room.ray_tracing()
+    room.compute_rir()
+
+    responses = []
+    for index, (source, receiver) in enumerate(pairs):
+        response = np.asarray(room.rir[index][index], dtype=float)
+        responses.append(
+            PairResponse(
+                source=np.asarray(source, dtype=float),
+                receiver=np.asarray(receiver, dtype=float),
+                rir=response,
+                bands=measure(response, fs),
+            )
+        )
+    return responses
 
 
 @dataclass

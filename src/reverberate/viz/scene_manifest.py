@@ -180,7 +180,7 @@ def build_instances(
         if loaded is None:
             report.unresolved.append(instance.template_name)
             continue
-        reduced, original_area = loaded
+        reduced, original_area, deviation = loaded
         placed = reduced.copy()
         placed.apply_transform(instance.transform_matrix())
         scale = float(placed.area) / float(reduced.area) if reduced.area else 1.0
@@ -189,6 +189,7 @@ def build_instances(
             original_area=original_area * scale,
             reduced_area=float(placed.area),
             base_key=category,
+            feature_size=deviation * float(np.sqrt(scale)),
         )
         absorption = float(np.mean(compensated.material.energy_absorption["coeffs"]))
         report.compensated += int(compensated.compensated)
