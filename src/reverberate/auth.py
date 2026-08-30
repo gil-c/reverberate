@@ -9,9 +9,12 @@ from keepassify import KeePassXCError, SecretStore, write_association
 
 __all__ = ["KeePassXCError", "inject", "require"]
 
-#: KeePassXC entry-URL namespace: the "site" these secrets are stored under
+#: KeePassXC entry-URL namespaces: the "sites" these secrets are stored under
 #: in the vault (get-logins looks entries up by URL, same as a browser would).
-URL = "https://reverberate.local"
+#: ``dev-common.local`` holds credentials shared across the owner's projects,
+#: such as the Vast.ai key; ``reverberate.local`` holds this project's own. The
+#: project namespace is searched last, so it wins on a name collision.
+URLS = ("https://dev-common.local", "https://reverberate.local")
 
 _cache: dict[str, str] | None = None
 
@@ -23,7 +26,7 @@ def _running_in_ci() -> bool:
 def _fetch() -> dict[str, str]:
     global _cache
     if _cache is None:
-        _cache = {} if _running_in_ci() else SecretStore(urls=[URL], skip_in_ci=False).fetch()
+        _cache = {} if _running_in_ci() else SecretStore(urls=list(URLS), skip_in_ci=False).fetch()
     return _cache
 
 
@@ -55,7 +58,7 @@ def require(name: str) -> str:
 
 def _main(argv: list[str] | None = None) -> int:
     command = (argv or sys.argv[1:] or ["list"])[0]
-    store = SecretStore(urls=[URL])
+    store = SecretStore(urls=list(URLS))
     if command == "associate":
         association = store.associate()
         path = write_association(association, store.association_path)
