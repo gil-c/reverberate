@@ -1,6 +1,6 @@
 """Semantic label to acoustic material (roadmap section 5.5).
 
-This module is now a thin adapter over :mod:`reverberate.materials_db`, which
+This module is now a thin adapter over :mod:`reverberate.materials`, which
 holds the real data in checked-in CSV files. It used to carry a 23-entry table
 plus a random fallback pool, which meant about 95 % of HSSD's 409 condensed
 categories got a coefficient drawn at random from four materials. That is how
@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 import pyroomacoustics as pra
 
-from reverberate.materials_db import (
+from reverberate.materials import (
     UnknownCategoryError,
     class_for_category,
     material_for_category,

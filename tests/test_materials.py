@@ -12,15 +12,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from reverberate.acoustics import OCTAVE_BANDS
+from reverberate.acoustics import OCTAVE_BANDS, SOLVER_BANDS
 from reverberate.geometry.materials import material_for_label
-from reverberate.materials_db import (
+from reverberate.materials import (
     UnknownCategoryError,
     absorption_for_category,
     acoustic_classes,
     category_assignments,
     class_for_category,
     coverage,
+)
+from reverberate.materials.db import CLASSES_FILE
+from reverberate.materials.extrapolation import (
+    MAX_ABSORPTION,
+    MEASURED_BANDS,
+    MIN_OCTAVE_RATIO,
+    extend_high_bands,
+    layer_model_fit,
 )
 
 
@@ -124,11 +132,103 @@ def test_provenance_distinguishes_measurement_from_judgement() -> None:
     assert all(material.notes for material in classes.values())
 
 
-def test_the_8_khz_column_is_carried_over_rather_than_invented() -> None:
-    """Published tables stop at 4 kHz. Repeating the last measured value is the
-    assumption that adds least, and it is recorded rather than hidden."""
+def test_the_file_stores_only_what_is_measured() -> None:
+    """The 8 kHz column used to be the 4 kHz value repeated, in the file, as
+    though it were data. Everything above 4 kHz is now derived instead."""
+    header = (CLASSES_FILE.read_text().splitlines()[0]).split(",")
+
+    assert [column for column in header if column.startswith("a")] == [
+        f"a{band}" for band in MEASURED_BANDS
+    ]
+    assert "a8000" not in header
+    assert "a16000" not in header
+
+
+def test_the_bands_above_4_khz_follow_the_measured_trend() -> None:
+    """The rule W4 settled on: the material's own 2-to-4 kHz ratio, applied
+    once per octave, clipped to at most 1 and at least the ratio floor."""
     for material in acoustic_classes().values():
-        assert material.absorption[-1] == pytest.approx(material.absorption[-2])
+        extension = material.high_bands
+        measured = material.measured_absorption
+
+        assert MIN_OCTAVE_RATIO <= extension.applied_ratio <= 1.0
+        assert extension.values[0] == pytest.approx(
+            min(measured[-1] * extension.applied_ratio, MAX_ABSORPTION)
+        )
+        assert extension.values[1] == pytest.approx(
+            min(measured[-1] * extension.applied_ratio**2, MAX_ABSORPTION)
+        )
+
+
+def test_nothing_gains_absorption_above_the_last_measurement() -> None:
+    """A class still rising at 4 kHz is approaching a plateau, not
+    accelerating. Continuing the rise two octaves invents the number."""
+    for material in acoustic_classes().values():
+        top = material.solver_absorption[-3:]
+
+        assert top[1] <= top[0] + 1e-12
+        assert top[2] <= top[1] + 1e-12
+
+
+def test_a_rising_class_holds_and_a_falling_class_falls() -> None:
+    """The two branches of the rule, on two classes that exercise them."""
+    rising = extend_high_bands(np.array([0.05, 0.06, 0.13, 0.18, 0.24, 0.35]))
+    falling = extend_high_bands(np.array([0.19, 0.37, 0.56, 0.67, 0.61, 0.59]))
+
+    assert rising.held and rising.clipped
+    assert rising.values == pytest.approx((0.35, 0.35))
+    assert not falling.held
+    assert falling.values[1] < falling.values[0] < 0.59
+
+
+def test_a_single_measured_ratio_is_not_projected_without_bound() -> None:
+    """A ratio taken from two values rounded to two decimals is not precise
+    enough to be raised to the second power unbounded."""
+    collapsing = extend_high_bands(np.array([0.5, 0.5, 0.5, 0.5, 0.50, 0.10]))
+
+    assert collapsing.applied_ratio == pytest.approx(MIN_OCTAVE_RATIO)
+    assert collapsing.values == pytest.approx((0.08, 0.064))
+
+
+def test_the_low_bands_repeat_the_lowest_measurement() -> None:
+    """No source measures below 125 Hz. Held, and said so, not modelled."""
+    for material in acoustic_classes().values():
+        assert material.solver_absorption[:4] == pytest.approx(
+            (material.measured_absorption[0],) * 4
+        )
+
+
+def test_the_solver_curve_is_the_eleven_bands_pffdtd_asserts_on() -> None:
+    """``fit_to_Sabs_oct_11`` asserts ``Sabs.size == 11`` and hard-codes the
+    centres, so a curve of any other length never reaches the solver."""
+    assert len(SOLVER_BANDS) == 11
+    assert SOLVER_BANDS[0] == pytest.approx(15.625)
+    assert SOLVER_BANDS[-1] == pytest.approx(16000.0)
+
+    for material in acoustic_classes().values():
+        assert len(material.solver_absorption) == 11
+        assert all(0.0 <= value <= MAX_ABSORPTION for value in material.solver_absorption)
+
+
+def test_the_two_faces_of_a_material_agree_where_they_overlap() -> None:
+    """Face A feeds the metrics and face B feeds the solver. If the 8 kHz value
+    differed between them, nothing downstream would say so."""
+    for material in acoustic_classes().values():
+        assert material.absorption == pytest.approx(
+            material.measured_absorption + (material.solver_absorption[-2],)
+        )
+
+
+def test_the_layer_model_does_not_describe_the_soft_classes() -> None:
+    """The reason W4 does not extrapolate with Delany-Bazley. If this ever
+    stops holding, the physical model becomes the better rule and this
+    module's decision should be revisited."""
+    upholstery = acoustic_classes()["upholstery"]
+
+    fit = layer_model_fit(np.asarray(upholstery.measured_absorption))
+
+    assert fit.rms_residual > 0.05
+    assert fit.high_bands[0] > upholstery.measured_absorption[-1] + 0.2
 
 
 def test_material_round_trips_into_pyroomacoustics() -> None:

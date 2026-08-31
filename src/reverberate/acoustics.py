@@ -21,6 +21,10 @@ import numpy as np
 #: Speed of sound in air at room temperature, m/s.
 SPEED_OF_SOUND = 343.0
 
+#: Density of air at room temperature, kg/m^3. Used by the porous layer model
+#: in :mod:`reverberate.materials.extrapolation`.
+AIR_DENSITY = 1.204
+
 #: The octave band centres, in Hz. Identical to ``pyroomacoustics``' own bands,
 #: which is what lets a material from its table be used without resampling.
 OCTAVE_BANDS: tuple[int, ...] = (125, 250, 500, 1000, 2000, 4000, 8000)
@@ -36,6 +40,21 @@ MAX_FREQUENCY = OCTAVE_BANDS[-1]
 #: coefficient rather than by the mesh. Simplifying past it stops being that
 #: argument and starts being damage.
 MIN_WAVELENGTH = SPEED_OF_SOUND / MAX_FREQUENCY
+
+#: The eleven octave bands the wave solver's impedance fit is expressed on, in
+#: Hz. These are not a choice: PFFDTD's ``fit_to_Sabs_oct_11`` hard-codes
+#: ``1000 * 2 ** arange(-6, 5)`` and asserts it is given exactly eleven
+#: coefficients, so a material reaches the solver on these centres or not at
+#: all.
+#:
+#: They are deliberately kept separate from :data:`OCTAVE_BANDS`, which is what
+#: `pyroomacoustics` and the metrics work on. The two ranges answer different
+#: questions -- what the solver is told about a boundary, and what a measured
+#: impulse response is summarised on -- and collapsing them would mean either
+#: resampling every published table or claiming a 16 Hz metric nothing in this
+#: project can measure. :func:`reverberate.materials.db.AcousticClass.solver_absorption`
+#: is the bridge.
+SOLVER_BANDS: tuple[float, ...] = tuple(1000.0 * 2.0 ** np.arange(-6, 5))
 
 
 def wavelengths() -> np.ndarray:
