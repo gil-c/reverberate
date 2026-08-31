@@ -13,3 +13,4 @@ rtree>=1.4
 scikit-image>=0.26
 fast_simplification>=0.1
 h5py>=3.11
+scipy>=1.13

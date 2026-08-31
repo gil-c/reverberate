@@ -11,7 +11,7 @@ Python, because it is authored knowledge that should be reviewable and
 diffable on its own terms:
 
 - ``acoustic_classes.csv``: the materials, with a coefficient per octave band
-  from 125 Hz to 8 kHz, a scattering coefficient, and the provenance of each
+  from 125 Hz to 4 kHz, a scattering coefficient, and the provenance of each
   row. ``provenance`` records whether the values were taken from a published
   measurement, which sources agreed, or whether the row was interpolated from
   a neighbouring material by reasoning about what the object is made of.
@@ -24,12 +24,15 @@ diffable on its own terms:
 raises, because it is a gap in a checked-in file that someone can fix, not
 noise to paper over at runtime.
 
-**A note on 8 kHz.** Published absorption tables almost universally stop at
-4 kHz. The 8 kHz column is therefore carried over from 4 kHz rather than
-invented: absorption curves are flat or gently falling by then for the porous
-materials that dominate, and repeating the last measured value is the
-assumption that adds least. It is recorded here rather than hidden because it
-is the weakest row of data in the file.
+**A note on the bands above 4 kHz.** Published absorption tables almost
+universally stop there, and the architecture now runs two octaves past it. The
+file therefore stores only what is measured, 125 Hz to 4 kHz, and the 8 kHz and
+16 kHz values are derived per class by
+:mod:`reverberate.materials.extrapolation` under the rule named in the
+``high_band_rule`` column. Nothing above 4 kHz is stored as though it were
+data. This replaces the previous 8 kHz column, which was the 4 kHz value
+repeated: an assumption that was reasonable across one octave and would not
+have been across two.
 """
 
 from __future__ import annotations
@@ -42,7 +45,12 @@ from pathlib import Path
 import numpy as np
 import pyroomacoustics as pra
 
-from reverberate.acoustics import OCTAVE_BANDS
+from reverberate.acoustics import OCTAVE_BANDS, SOLVER_BANDS
+from reverberate.materials.extrapolation import (
+    MEASURED_BANDS,
+    HighBandExtension,
+    extend_to_solver_bands,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 CLASSES_FILE = DATA_DIR / "acoustic_classes.csv"
@@ -54,10 +62,32 @@ class AcousticClass:
     """One material, with its coefficients and where they came from."""
 
     name: str
-    absorption: tuple[float, ...]
+    measured_absorption: tuple[float, ...]
+    solver_absorption: tuple[float, ...]
+    high_bands: HighBandExtension
     scattering: float
     provenance: str
     notes: str
+
+    @property
+    def absorption(self) -> tuple[float, ...]:
+        """Coefficients on :data:`OCTAVE_BANDS`, 125 Hz to 8 kHz.
+
+        The metrics and `pyroomacoustics` work on these seven bands. The 8 kHz
+        value is the derived one, taken from the same curve the solver is
+        fitted to, so face A and face B cannot drift apart.
+        """
+        return self.measured_absorption + (self.solver_absorption[-2],)
+
+    @property
+    def extrapolated(self) -> bool:
+        """Whether anything above 4 kHz moved away from the 4 kHz value.
+
+        Reported per class, because "the catalogue reaches 16 kHz" means two
+        different things for a carpet and for a tile, and the report has to say
+        which one it means for each.
+        """
+        return not self.high_bands.held
 
     @property
     def measured(self) -> bool:
@@ -104,14 +134,22 @@ class CategoryAssignment:
 
 @lru_cache(maxsize=1)
 def acoustic_classes() -> dict[str, AcousticClass]:
-    """Every material class, keyed by name."""
+    """Every material class, keyed by name.
+
+    The two bands above 4 kHz are derived here, once, so that every consumer
+    sees the same curve and no caller has to remember to extend one.
+    """
     classes: dict[str, AcousticClass] = {}
     with CLASSES_FILE.open() as handle:
         for row in csv.DictReader(handle):
             name = row["material_class"]
+            measured = tuple(float(row[f"a{band}"]) for band in MEASURED_BANDS)
+            extended, extension = extend_to_solver_bands(np.asarray(measured))
             classes[name] = AcousticClass(
                 name=name,
-                absorption=tuple(float(row[f"a{band}"]) for band in OCTAVE_BANDS),
+                measured_absorption=measured,
+                solver_absorption=tuple(float(value) for value in extended),
+                high_bands=extension,
                 scattering=float(row["scattering"]),
                 provenance=row["provenance"],
                 notes=row["notes"],
@@ -177,6 +215,11 @@ def absorption_for_category(label: str | None) -> np.ndarray:
     return np.asarray(class_for_category(label).absorption, dtype=float)
 
 
+def solver_absorption_for_category(label: str | None) -> np.ndarray:
+    """The eleven-band curve the wave solver's impedance fit is run on."""
+    return np.asarray(class_for_category(label).solver_absorption, dtype=float)
+
+
 def coverage() -> dict[str, int]:
     """How the mapping was arrived at, for the dataset report.
 
@@ -191,4 +234,6 @@ def coverage() -> dict[str, int]:
         "derived": sum(1 for a in assignments if not a.curated),
         "objects": sum(a.objects for a in assignments),
         "classes": len(acoustic_classes()),
+        "extrapolated_classes": sum(1 for c in acoustic_classes().values() if c.extrapolated),
+        "solver_bands": len(SOLVER_BANDS),
     }

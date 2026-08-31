@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.materials`, the catalogue as one package with both faces of
+  section 6.1: absorption per band, the two octaves above the last published
+  measurement, and the impedance filter the wave solver reads. Fitting is
+  PFFDTD's own `fit_to_Sabs_oct_11` at the pinned commit, cached content
+  addressed on the eleven-band curve, and every fitted filter is checked for
+  passivity on 4000 frequencies rather than argued to be passive. All 27
+  classes pass. Report at `data/interim/materials/report.md`.
 - `reverberate.geometry.orientation`, which decides once per surface which side
   the air is on and records it in the scene, instead of leaving each exporter to
   invent a value. A watertight, consistently wound mesh has its normals pointed
@@ -59,6 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The catalogue no longer stores anything above 4 kHz as though it were
+  data.** The 8 kHz column was the 4 kHz value repeated, which was defensible
+  across one octave and is not across two now that the architecture runs to
+  16 kHz. The column is gone from `acoustic_classes.csv`; 8 and 16 kHz are
+  derived per class by continuing the material's own measured 2-to-4 kHz
+  ratio, clipped to at most 1 and at least 0.8. A Delany-Bazley layer model
+  was tried first and rejected on its own residual, which reaches 0.11 in
+  absorption units on the *measured* bands and disagrees in shape with every
+  class that is already falling by 4 kHz; it is kept as the diagnostic the
+  report quotes. 19 of 27 classes end up holding 4 kHz anyway, now because
+  their own measurements say to.
+- `reverberate.materials_db` moved to `reverberate.materials.db`, and the
+  coefficient tables moved with it. `reverberate.geometry.materials` is
+  unchanged as an entry point.
 - `reverberate.auth` now searches the shared `dev-common` credential namespace as
   well as the project's own, so credentials shared across projects resolve. The
   project namespace is searched last, so it still wins on a name collision.

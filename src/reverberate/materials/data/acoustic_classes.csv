@@ -1,0 +1,28 @@
+material_class,a125,a250,a500,a1000,a2000,a4000,scattering,provenance,notes
+plasterboard,0.15,0.10,0.06,0.04,0.04,0.05,0.05,measured;pra:plasterboard;crosscheck:commercial-acoustics,"Gypsum board partition wall. Cross-checked: published 0.29/0.10/0.05/0.04/0.07/0.09 agrees on shape, low band varies with cavity depth."
+painted_concrete,0.02,0.03,0.03,0.03,0.04,0.07,0.10,measured;pra:rough_concrete,Hard mineral wall. Near-total reflector at all bands.
+ceramic_tile,0.01,0.01,0.01,0.02,0.02,0.02,0.05,measured;crosscheck:commercial-acoustics,Glazed tile or marble. The hardest common surface; bathroom and kitchen walls.
+glass_window,0.10,0.05,0.04,0.03,0.03,0.03,0.05,measured;pra:glass_window;crosscheck:commercial-acoustics,Single glazing. Published low band ranges 0.10-0.35 depending on pane size and mounting.
+mirror_glass,0.06,0.04,0.03,0.03,0.02,0.02,0.05,interpolated;from:glass_window,"Glass bonded to a wall, so the panel resonance that lifts a free window low band is suppressed."
+wood_panel,0.18,0.12,0.10,0.09,0.08,0.07,0.10,measured;pra:wood_1.6cm;crosscheck:commercial-acoustics,"Solid wood 1.6 cm. Doors, table tops, cabinet carcasses."
+wood_thin_panel,0.28,0.22,0.17,0.09,0.10,0.11,0.10,measured;pra:wood_1.6cm;interpolated,Thin panel over an air gap; the low band rises because the panel resonates.
+hardwood_floor,0.15,0.11,0.10,0.07,0.06,0.07,0.05,measured;crosscheck:commercial-acoustics,Wood flooring on joists.
+carpet_thick,0.08,0.24,0.57,0.69,0.71,0.73,0.30,measured;crosscheck:commercial-acoustics;pra:carpet_cotton,Pile carpet with underlay. The dominant floor absorber in a furnished home.
+carpet_thin,0.02,0.06,0.14,0.37,0.60,0.65,0.30,measured;crosscheck:commercial-acoustics,"Thin rug laid directly on a hard floor, no underlay."
+curtain_heavy,0.14,0.35,0.55,0.72,0.70,0.65,0.40,measured;crosscheck:commercial-acoustics;pra:curtains_cotton_0.5,"Draped, folded fabric hung clear of the wall."
+curtain_light,0.05,0.06,0.13,0.18,0.24,0.35,0.40,measured;crosscheck:commercial-acoustics,Thin unlined fabric; a much weaker absorber than it looks.
+upholstery,0.19,0.37,0.56,0.67,0.61,0.59,0.30,measured;crosscheck:commercial-acoustics,"Unoccupied upholstered seating. Sofas and armchairs, the main mid-band absorber in a living room."
+mattress,0.22,0.40,0.60,0.70,0.65,0.62,0.30,interpolated;from:upholstery,"Thicker and denser than seat upholstery, so slightly better at low frequency."
+soft_furnishing,0.15,0.30,0.50,0.62,0.60,0.58,0.35,interpolated;from:upholstery,"Pillows, blankets, towels, clothing. Porous and light, so weak below 250 Hz."
+plush,0.12,0.26,0.45,0.58,0.58,0.56,0.40,interpolated;from:soft_furnishing,"Stuffed toys and similar. Small, so their total area matters more than their coefficient."
+wood_furniture,0.14,0.11,0.09,0.08,0.08,0.08,0.15,measured;pra:wood_1.6cm,"Tables, chairs, shelving and cabinets seen as a whole object."
+metal,0.02,0.02,0.02,0.03,0.03,0.04,0.10,measured;crosscheck:commercial-acoustics,"Appliance casings, racks, railings. Reflective across the band."
+appliance,0.05,0.06,0.07,0.08,0.09,0.10,0.15,interpolated;from:metal,"Metal cabinet with some internal damping and vents; fridges, ovens, washers."
+ceramic_hard,0.01,0.01,0.02,0.02,0.02,0.03,0.10,measured;crosscheck:commercial-acoustics,"Sanitary ware, crockery, vases. Effectively a perfect reflector."
+water_surface,0.01,0.01,0.01,0.01,0.02,0.02,0.05,measured;crosscheck:commercial-acoustics,Filled bath or sink. Listed for completeness; the area involved is small.
+paper,0.05,0.10,0.18,0.28,0.35,0.40,0.25,interpolated;from:soft_furnishing,"Books on open shelves, stacked paper. Absorbs mainly at high frequency."
+foliage,0.03,0.06,0.11,0.17,0.27,0.31,0.60,measured;crosscheck:shapingwaves,"Potted plants and foliage. High scattering, low absorption, and acoustically near transparent at low frequency because the leaves are far smaller than the wavelength."
+acoustic_ceiling,0.48,0.97,1.00,0.97,1.00,1.00,0.20,measured;pra:ceiling_fibre_absorber,"Mineral fibre ceiling tile. Used for the ceiling surface, not for objects."
+human,0.39,0.57,0.80,0.94,0.92,0.87,0.30,measured;crosscheck:commercial-acoustics,"A person, as the difference between an occupied and an empty upholstered seat."
+generic_hard,0.02,0.02,0.03,0.03,0.04,0.05,0.10,measured;pra:hard_surface,Fallback for small dense objects with no better match. Deliberately reflective: assuming absorption we cannot justify would flatter the room.
+generic_soft,0.14,0.28,0.46,0.58,0.57,0.55,0.30,interpolated;from:upholstery,Fallback for objects that are clearly textile or porous but have no specific entry.
