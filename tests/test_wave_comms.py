@@ -279,6 +279,67 @@ class TestCacheKey:
         (Path(spec.mat_folder) / "wall.h5").write_bytes(b"other impedance")
         assert first != spec.key
 
+    def _model(
+        self,
+        *,
+        tris: list[list[int]] | None = None,
+        sides: list[int] | None = None,
+        src: float = 1.0,
+        stamp: str = "first export",
+    ) -> str:
+        """A model file shaped like the one the exporter actually writes."""
+        return json.dumps(
+            {
+                "mats_hash": {
+                    "wall": {
+                        "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+                        "tris": tris if tris is not None else [[0, 1, 2]],
+                        "sides": sides if sides is not None else [2],
+                        "color": [128, 128, 128],
+                    }
+                },
+                "sources": [{"xyz": [src, 1.0, 1.0], "name": "S1"}],
+                "receivers": [{"xyz": [2.0, 1.0, 1.0], "name": "R1"}],
+                "export_datetime": stamp,
+            }
+        )
+
+    def test_the_key_follows_the_exported_mesh(self, tmp_path: Path) -> None:
+        """Not the scene description: a moved triangle must miss the cache.
+
+        The cache holds ``vox_out.h5``, which is a statement about where the
+        boundary nodes are. If geometry could change under a fixed key, a run
+        would be handed the previous scene's boundary and nothing would say so.
+        """
+        first = self._spec(tmp_path, body=self._model()).key
+        moved = self._spec(tmp_path, body=self._model(tris=[[0, 2, 1]])).key
+        assert first != moved
+
+    def test_a_changed_sidedness_is_a_different_entry(self, tmp_path: Path) -> None:
+        """Sidedness decides which nodes carry the material, so it is geometry."""
+        first = self._spec(tmp_path, body=self._model()).key
+        assert first != self._spec(tmp_path, body=self._model(sides=[3])).key
+
+    def test_moving_the_source_reuses_the_voxelisation(self, tmp_path: Path) -> None:
+        """The whole economics of W8: one grid, many source and receiver pairs.
+
+        Sources and receivers live in the same file as the mesh but reach the
+        solver through ``comms_out.h5``, which the cache deliberately does not
+        hold. Keying on them would voxelise the same room again for every pair.
+        """
+        first = self._spec(tmp_path, body=self._model(src=1.0)).key
+        assert first == self._spec(tmp_path, body=self._model(src=3.5)).key
+
+    def test_re_exporting_the_same_geometry_keeps_the_entry(self, tmp_path: Path) -> None:
+        """``export_datetime`` changes on every export and means nothing here."""
+        first = self._spec(tmp_path, body=self._model(stamp="first export")).key
+        assert first == self._spec(tmp_path, body=self._model(stamp="second export")).key
+
+    def test_an_unparsable_model_is_hashed_whole(self, tmp_path: Path) -> None:
+        """An unrecognised layout over-keys rather than guessing at its shape."""
+        first = self._spec(tmp_path, body="not json at all").key
+        assert first != self._spec(tmp_path, body="also not json").key
+
     def test_an_uncomputed_entry_is_incomplete(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

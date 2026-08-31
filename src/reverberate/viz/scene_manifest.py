@@ -176,7 +176,9 @@ def build_instances(
         if asset.collider_is_render:
             report.render_as_collider.append(instance.template_name)
 
-        loaded = reduced_collider(hssd_root, instance.template_name, DETAIL_LEVELS[0].detail_length)
+        loaded = reduced_collider(
+            hssd_root, instance.template_name, DETAIL_LEVELS[0].detail_length, seed
+        )
         if loaded is None:
             report.unresolved.append(instance.template_name)
             continue

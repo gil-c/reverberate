@@ -130,6 +130,7 @@ def acoustic_envelope(
     mesh: trimesh.Trimesh,
     max_deviation: float = MAX_ENVELOPE_DEVIATION,
     max_parts: int = MAX_ENVELOPE_PARTS,
+    seed: int = 0,
 ) -> Envelope:
     """The surface to simulate for this obstacle, and how far it strays.
 
@@ -138,6 +139,10 @@ def acoustic_envelope(
     and keeps the original mesh rather than shipping a shape that misrepresents
     the object. Whatever comes back is reduced to the fewest triangles that
     stay within the same limit.
+
+    ``seed`` pins the surface sampling that both measurements rest on, so the
+    same object gives the same envelope in another process. See
+    :func:`reverberate.geometry.decimation.deviation`.
     """
     original_area = float(mesh.area)
     original_faces = len(mesh.faces)
@@ -163,9 +168,9 @@ def acoustic_envelope(
         # the envelope close to some real surface, or is it bulging into space
         # the object does not occupy? A hull can only ever contain the mesh, so
         # nothing is missed by not testing the other direction.
-        error = deviation(candidate, mesh)
+        error = deviation(candidate, mesh, seed=seed)
         if error <= max_deviation:
-            reduced, _ = decimate_within(candidate, max_deviation)
+            reduced, _ = decimate_within(candidate, max_deviation, seed=seed)
             return Envelope(
                 mesh=reduced,
                 parts=count,
@@ -178,7 +183,7 @@ def acoustic_envelope(
     # Nothing convex represented this object closely enough. Keeping the real
     # mesh is expensive, and that is the honest cost of an object whose shape
     # genuinely cannot be approximated this way.
-    reduced, error = decimate_within(mesh, max_deviation)
+    reduced, error = decimate_within(mesh, max_deviation, seed=seed)
     return Envelope(
         mesh=reduced,
         parts=0,

@@ -29,6 +29,11 @@ class MeshMaterialAssignment:
     #: obstacle's absorbing power. Carried here so the viewer and the audit
     #: panel quote the simulator's own figures rather than recomputing them.
     compensation: object | None = None
+    #: PFFDTD's per-face sidedness, derived once by
+    #: :func:`reverberate.geometry.orientation.orient_for_air` and carried with
+    #: the mesh so that an exporter never has to invent it. ``None`` only for
+    #: assignments built by hand in a test or by an older caller.
+    sides: np.ndarray | None = None
 
 
 def walls_from_mesh(assignment: MeshMaterialAssignment) -> list[pra.wall.Wall]:

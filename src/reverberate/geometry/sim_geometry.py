@@ -41,6 +41,7 @@ from reverberate.geometry.envelope import acoustic_envelope
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
+from reverberate.geometry.orientation import BOTH, orient_for_air
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.viz.room_surfaces import shell_surface_labels
 
@@ -56,6 +57,11 @@ class GeometrySummary:
     obstacle_faces: int
     unresolved: list[str]
     absorption: AbsorptionAudit | None = None
+    #: Faces whose orientation could not be derived and which are therefore
+    #: exported as active on both sides. Reported rather than hidden: it is the
+    #: share of the scene whose absorption depends on a claim about geometry
+    #: that nothing was able to check.
+    unoriented_faces: int = 0
 
     @property
     def total_walls(self) -> int:
@@ -64,10 +70,12 @@ class GeometrySummary:
 
     def summary(self) -> str:
         absorption = f", {self.absorption.summary()}" if self.absorption is not None else ""
+        oriented = self.total_walls - self.unoriented_faces
         return (
             f"shell {self.shell_faces} faces ({self.shell_volume:.0f} m3, "
             f"watertight={self.shell_watertight}), {self.obstacle_count} obstacles "
-            f"totalling {self.obstacle_faces} faces, {self.total_walls} pra walls"
+            f"totalling {self.obstacle_faces} faces, {self.total_walls} pra walls, "
+            f"{oriented} faces oriented"
             f"{absorption}"
         )
 
@@ -110,7 +118,7 @@ def simulation_collider(hssd_root: Path, template: str, face_budget: int) -> tri
 
 @lru_cache(maxsize=1024)
 def reduced_collider(
-    hssd_root: Path, template: str, detail_length: float
+    hssd_root: Path, template: str, detail_length: float, seed: int = 0
 ) -> tuple[trimesh.Trimesh, float, float] | None:
     """The decimated obstacle mesh, the area it had before, and how far it strays.
 
@@ -138,12 +146,12 @@ def reduced_collider(
     # does not recover the acoustics and can make them worse (RT60 -59% without
     # compensation, -87% with it, on an envelope 77 cm off). Compensation is a
     # small correction for a good approximation, never a licence for a bad one.
-    envelope = acoustic_envelope(mesh, max_deviation=detail_length / 2.0)
-    return envelope.mesh, reference_area(hssd_root, template), envelope.deviation
+    envelope = acoustic_envelope(mesh, max_deviation=detail_length / 2.0, seed=seed)
+    return envelope.mesh, reference_area(hssd_root, template, seed), envelope.deviation
 
 
 @lru_cache(maxsize=1024)
-def reference_area(hssd_root: Path, template: str) -> float:
+def reference_area(hssd_root: Path, template: str, seed: int = 0) -> float:
     """The obstacle's true outer surface, measured once at the finest rung.
 
     This is what absorption is compensated *against*, and it deliberately does
@@ -159,7 +167,7 @@ def reference_area(hssd_root: Path, template: str) -> float:
     mesh = trimesh.load(asset.collider, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):
         return 0.0
-    return float(acoustic_envelope(mesh).area)
+    return float(acoustic_envelope(mesh, seed=seed).area)
 
 
 def shell_assignments(storey: Storey, seed: int = 0) -> list[MeshMaterialAssignment]:
@@ -173,18 +181,26 @@ def shell_assignments(storey: Storey, seed: int = 0) -> list[MeshMaterialAssignm
     rng = np.random.default_rng(seed)
     shell = extrude_storey(storey)
     labels = shell_surface_labels(shell)
+    # Orientation is derived on the whole enclosure, before it is cut into
+    # floor, wall and ceiling: a submesh of a box is an open sheet with no
+    # inside, and asking each part on its own would throw away the one thing
+    # that makes the answer knowable. The shell's air is on the inside.
+    oriented = orient_for_air(shell, "inside")
+    shell = oriented.mesh
     assignments = []
     for surface in ("floor", "wall", "ceiling"):
         selected = labels == surface
         if not selected.any():
             continue
-        part = shell.submesh([np.flatnonzero(selected)], append=True)
+        faces = np.flatnonzero(selected)
+        part = shell.submesh([faces], append=True)
         assert isinstance(part, trimesh.Trimesh)
         assignments.append(
             MeshMaterialAssignment(
                 mesh=part,
                 material=material_for_label(surface, rng),
                 name=f"shell_{surface}",
+                sides=oriented.sides[faces],
             )
         )
     return assignments
@@ -224,13 +240,18 @@ def obstacle_assignments(
     for index, instance in enumerate(instances):
         category = category_for_template(hssd_root, instance.template_name) or "unknown"
         chosen = level if level is not None else _level_for_instance(instance, listener, storey)
-        loaded = reduced_collider(hssd_root, instance.template_name, chosen.detail_length)
+        loaded = reduced_collider(hssd_root, instance.template_name, chosen.detail_length, seed)
         if loaded is None:
             unresolved.append(instance.template_name)
             continue
         base, original_area, deviation = loaded
         mesh = base.copy()
         mesh.apply_transform(instance.transform_matrix())
+        # After the instance matrix, not before: a mirroring transform flips
+        # the winding, so an orientation derived in the template's own frame
+        # would be exactly backwards for half the placements.
+        oriented = orient_for_air(mesh, "outside")
+        mesh = oriented.mesh
 
         material = material_for_label(category, rng)
         # Areas are compared after the instance matrix so that a non-uniform
@@ -254,6 +275,7 @@ def obstacle_assignments(
                 material=entry.material,
                 name=f"{category}_{index}",
                 compensation=entry,
+                sides=oriented.sides,
             )
         )
     return assignments, unresolved, audit(entries, base_materials)
@@ -320,6 +342,7 @@ def simulation_geometry(
         hssd_root, instances, seed=seed, listener=listener, level=level, storey=storey
     )
     whole_shell = extrude_storey(storey)
+    everything = [*shell, *obstacles]
     summary = GeometrySummary(
         shell_faces=sum(len(assignment.mesh.faces) for assignment in shell),
         shell_volume=float(whole_shell.volume),
@@ -328,8 +351,13 @@ def simulation_geometry(
         obstacle_faces=sum(len(assignment.mesh.faces) for assignment in obstacles),
         unresolved=unresolved,
         absorption=absorption,
+        unoriented_faces=sum(
+            int(np.count_nonzero(assignment.sides == BOTH))
+            for assignment in everything
+            if assignment.sides is not None
+        ),
     )
-    return [*shell, *obstacles], summary
+    return everything, summary
 
 
 def apartment_geometry(
