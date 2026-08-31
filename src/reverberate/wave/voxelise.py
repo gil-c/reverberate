@@ -6,11 +6,15 @@ bill bought CPU time on an idle GPU.** Voxelisation needs no GPU at all, so it
 happens here, on whatever CPU is cheapest, and its result is cached.
 
 The cache is content addressed. The key is a hash of everything the voxelisation
-actually depends on: the scene's JSON bytes, the impedance files, the grid
-parameters and the bounds. The roadmap says "keyed on scene and grid step only";
-in practice ``sim_mats.h5`` is written by the same pass and does depend on the
-materials, so they are in the key too. A key that ignored them would serve a
-scene its neighbour's walls.
+actually depends on: the exported mesh itself, the impedance files, the grid
+parameters and the bounds. The mesh means ``mats_hash``, the points, triangles
+and sidedness the file carries, and not the whole file: ``sources``,
+``receivers`` and ``export_datetime`` sit beside it and change nothing about the
+grid, so keying on them would force a fresh voxelisation for every new source
+position, which is the entire cost W8 exists to amortise. The roadmap says
+"keyed on scene and grid step only"; in practice ``sim_mats.h5`` is written by
+the same pass and does depend on the materials, so they are in the key too. A
+key that ignored them would serve a scene its neighbour's walls.
 
 What an entry holds is the three scene-dependent files the engine reads,
 ``sim_consts.h5``, ``vox_out.h5`` and ``sim_mats.h5``, plus ``cart_grid.h5``,
@@ -103,9 +107,9 @@ class SceneSpec:
 
     @property
     def key(self) -> str:
-        """A hash over the scene's bytes, its materials' bytes and the grid."""
+        """A hash over the exported mesh, its materials' bytes and the grid."""
         digest = hashlib.sha256()
-        digest.update(Path(self.model_json).read_bytes())
+        digest.update(_geometry_bytes(Path(self.model_json)))
         for label in sorted(self.mat_files):
             digest.update(label.encode())
             digest.update((Path(self.mat_folder) / self.mat_files[label]).read_bytes())
@@ -223,6 +227,7 @@ def voxelise(spec: SceneSpec, *, nprocs: int | None = None, force: bool = False)
             "key": spec.key,
             "model_json": str(spec.model_json),
             "model_sha256": hashlib.sha256(Path(spec.model_json).read_bytes()).hexdigest(),
+            "geometry_sha256": hashlib.sha256(_geometry_bytes(Path(spec.model_json))).hexdigest(),
             "fmax": spec.fmax,
             "ppw": spec.ppw,
             "Tc": spec.tc,
@@ -266,6 +271,32 @@ def engine_inputs(entry: CacheEntry, comms_out: Path) -> list[Path]:
     if missing:
         raise FileNotFoundError(f"missing engine inputs: {missing}")
     return paths
+
+
+def _geometry_bytes(model_json: Path) -> bytes:
+    """The part of the scene file the voxelisation actually depends on.
+
+    The model file holds the exported mesh itself, ``mats_hash``, with every
+    point, triangle and sidedness in it, so hashing it does key the cache on
+    real geometry: change a wall and the key changes with it. But it also holds
+    ``sources``, ``receivers`` and ``export_datetime``, and hashing those was a
+    quiet defect in the other direction. Moving one receiver by a centimetre
+    changed the key and forced a fresh voxelisation, which is exactly the cost
+    W8 exists to amortise across source and receiver pairs, and a re-export at a
+    new timestamp invalidated every entry for nothing.
+
+    So the key is taken over ``mats_hash`` alone, canonicalised so that key
+    order in the file cannot matter. A file this function cannot parse is
+    hashed whole: an unrecognised layout is not something to be clever about,
+    and over-keying only costs time, whereas under-keying serves wrong data.
+    """
+    raw = model_json.read_bytes()
+    try:
+        model = json.loads(raw)
+        geometry = model["mats_hash"]
+    except (ValueError, KeyError, TypeError):
+        return raw
+    return json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _parse_report(stdout: str) -> dict[str, object]:

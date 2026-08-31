@@ -172,7 +172,14 @@ def validate(original: trimesh.Trimesh, reduced: trimesh.Trimesh) -> DecimationR
 
 
 def decimate_to(mesh: trimesh.Trimesh, budget: int) -> trimesh.Trimesh:
-    """Reduce to a face count, or return the mesh unchanged if it cannot be."""
+    """Reduce to a face count, or return the mesh unchanged if it cannot be.
+
+    ``simplify_quadric_decimation`` exposes no seed. It is believed
+    deterministic, being a greedy quadric collapse, but that is an assumption
+    rather than a measurement, so the cross-process determinism test in
+    ``tests/test_decimation.py`` exercises this path end to end instead of
+    trusting it.
+    """
     if len(mesh.faces) <= budget:
         return mesh
     try:
@@ -238,17 +245,26 @@ def mean_edge_length(mesh: trimesh.Trimesh) -> float:
     return float(np.mean(mesh.edges_unique_length))
 
 
-def deviation(original: trimesh.Trimesh, reduced: trimesh.Trimesh, samples: int = 2000) -> float:
+def deviation(
+    original: trimesh.Trimesh, reduced: trimesh.Trimesh, samples: int = 2000, seed: int = 0
+) -> float:
     """How far the reduced mesh strays from the original, in metres.
 
     The 95th percentile of the distance from points sampled on the original
     surface to the reduced one. A percentile rather than a maximum because a
     single sliver triangle should not veto a reduction that is otherwise well
     inside the physical limit.
+
+    ``seed`` is not decoration. Without it ``sample_surface`` draws from OS
+    entropy, and since this number is the accept-or-reject test in
+    :func:`decimate_within`, two processes handed the same scene accepted
+    different face budgets: 608 098 triangles against 614 330 on one apartment.
+    The sample is the only randomness in the geometry pipeline, so pinning it
+    makes the export reproducible across processes and not merely within one.
     """
     if len(reduced.faces) == 0 or len(original.faces) == 0:
         return float("inf")
-    points, _ = trimesh.sample.sample_surface(original, samples)
+    points, _ = trimesh.sample.sample_surface(original, samples, seed=seed)
     _, distances, _ = trimesh.proximity.closest_point(reduced, points)  # type: ignore[no-untyped-call]
     return float(np.percentile(np.abs(distances), 95))
 
@@ -257,6 +273,7 @@ def decimate_within(
     mesh: trimesh.Trimesh,
     max_deviation: float = MIN_WAVELENGTH / 2.0,
     candidates: tuple[int, ...] = (16, 32, 64, 128, 256, 512, 1024, 2048),
+    seed: int = 0,
 ) -> tuple[trimesh.Trimesh, float]:
     """Reduce to the fewest triangles that still stay within ``max_deviation``.
 
@@ -279,7 +296,7 @@ def decimate_within(
         reduced = decimate_to(mesh, target)
         if len(reduced.faces) >= len(mesh.faces):
             continue
-        error = deviation(mesh, reduced)
+        error = deviation(mesh, reduced, seed=seed)
         if error <= max_deviation:
             return reduced, error
     return mesh, 0.0
