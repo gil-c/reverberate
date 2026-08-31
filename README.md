@@ -79,3 +79,37 @@ Two pieces of tooling exist so that nobody has to be careful:
 
 Measured cost per room, and the grid resolution the numbers justify, are in
 `data/runs/b1_pffdtd_cost/`.
+
+## Renting for the solver, not for the pipeline
+
+PFFDTD does two unrelated jobs in one call. It voxelises the scene, which is CPU
+work, and it runs the wave solver, which is why the card was rented. In the B0
+session the first took 52 minutes and the second 22, so most of the bill bought
+CPU time on an idle GPU.
+
+`reverberate.wave` splits them:
+
+```
+python -m reverberate.wave voxelise --model scene.json --mat-folder mats \
+    --fmax 16000                       # local, on any CPU, cached, no GPU
+python -m reverberate.wave comms --key KEY --source X Y Z --receiver X Y Z \
+    --duration 0.1 --out comms_out.h5  # a new pair, three seconds
+python -m reverberate.wave solve --key KEY --comms comms_out.h5 \
+    --host H --port P --out sim_outs.h5
+```
+
+The cache is content addressed on the scene, the materials and the grid, so a
+room is voxelised once however many sources and listeners it later carries. The
+second command is the piece PFFDTD does not offer: it places a new source and
+its receivers on an already voxelised grid, which is what makes one voxelisation
+worth amortising. Its output is bit for bit identical to what a full `sim_setup`
+would write, and the slow test that proves it runs a real `sim_setup` and diffs
+every dataset.
+
+The rented machine only ever sees the four files the engine reads, and gives
+back the one it writes. It needs no Python, no mesh and no material table.
+Renting is still not a one-liner: `solve` takes a machine that already exists,
+because the rate and the total are agreed before an instance does.
+
+What the split costs and saves, measured rather than extrapolated, is in
+`data/runs/w8_split_pipeline/`.
