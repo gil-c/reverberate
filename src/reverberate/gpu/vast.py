@@ -68,7 +68,8 @@ SPEND_CEILING_USD = 1000.0
 #: Name of the spend ledger inside the runs directory.
 LEDGER_NAME = "gpu_spend.jsonl"
 
-_API = "https://console.vast.ai/api/v0"
+_API = "https://console.vast.ai/api"
+_API_VERSION = "v0"
 
 
 class VastError(RuntimeError):
@@ -173,23 +174,32 @@ def search_query(
     min_reliability: float = 0.99,
     min_cuda: float = 12.0,
     min_inet_down_mbps: int = 300,
+    min_gpu_ram_gb: float = 0.0,
+    min_cpu_cores: int = 0,
 ) -> str:
     """Build a Vast.ai offer query string.
 
     Kept separate from the request so the filter that picked a machine can be
     recorded in provenance verbatim, and asserted on in tests.
+
+    ``gpu_name`` is dropped from the filter when empty, which is how to ask for
+    "any card with at least this much VRAM" rather than naming one.
     """
-    return " ".join(
-        [
-            f"gpu_name={gpu_name}",
-            f"num_gpus={num_gpus}",
-            "rentable=true",
-            f"disk_space>{min_disk_gb}",
-            f"reliability>{min_reliability}",
-            f"cuda_vers>={min_cuda}",
-            f"inet_down>{min_inet_down_mbps}",
-        ]
-    )
+    tokens = [
+        f"num_gpus={num_gpus}",
+        "rentable=true",
+        f"disk_space>{min_disk_gb}",
+        f"reliability>{min_reliability}",
+        f"cuda_vers>={min_cuda}",
+        f"inet_down>{min_inet_down_mbps}",
+    ]
+    if gpu_name:
+        tokens.insert(0, f"gpu_name={gpu_name}")
+    if min_gpu_ram_gb > 0:
+        tokens.append(f"gpu_ram>={int(min_gpu_ram_gb * 1024)}")
+    if min_cpu_cores > 0:
+        tokens.append(f"cpu_cores_effective>={min_cpu_cores}")
+    return " ".join(tokens)
 
 
 def estimate_cost_usd(dph: float, hours: float) -> float:
@@ -287,8 +297,14 @@ class VastClient:
         self._key = key
         self._timeout = timeout
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        url = f"{_API}{path}"
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        api_version: str = _API_VERSION,
+    ) -> Any:
+        url = f"{_API}/{api_version}{path}"
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(url, data=data, method=method)  # noqa: S310
         request.add_header("Authorization", f"Bearer {self._key}")
@@ -305,23 +321,46 @@ class VastClient:
             raise VastError(f"{method} {path} failed: {error.reason}") from None
 
     def search(self, query: str, limit: int = 20) -> list[Offer]:
-        """Offers matching ``query``, cheapest first."""
-        params = urllib.parse.urlencode({"q": json.dumps(parse_query(query)), "limit": limit})
+        """Offers matching ``query``, cheapest first.
+
+        ``limit`` and ``order`` travel inside the ``q`` document. The bundles
+        endpoint rejects them as URL parameters with HTTP 400, which is what it
+        did to every search this module made before 2026-08.
+        """
+        filters = {**parse_query(query), "order": [["dph_total", "asc"]], "limit": limit}
+        params = urllib.parse.urlencode({"q": json.dumps(filters)})
         payload = self._request("GET", f"/bundles/?{params}")
         offers = [Offer.from_api(raw) for raw in payload.get("offers", [])]
         return sorted(offers, key=lambda offer: offer.dph_total)
 
     def instances(self) -> list[Instance]:
-        """Every instance on the account, rented or still loading."""
-        payload = self._request("GET", "/instances/")
+        """Every instance on the account, rented or still loading.
+
+        The listing lives under ``/api/v1``: since 2026-08 the ``v0`` form
+        answers HTTP 410 and names its replacement.
+        """
+        payload = self._request("GET", "/instances/", api_version="v1")
         return [Instance.from_api(raw) for raw in payload.get("instances", [])]
 
     def instance(self, instance_id: int) -> Instance | None:
-        """One instance, or ``None`` once it no longer exists."""
-        for found in self.instances():
-            if found.id == instance_id:
-                return found
-        return None
+        """One instance, or ``None`` once it no longer exists.
+
+        Asks for the single instance rather than filtering the listing, so a
+        watchdog polling one rental stays cheap and keeps working even while
+        the listing endpoint is being moved around.
+        """
+        try:
+            payload = self._request("GET", f"/instances/{instance_id}/")
+        except VastError:
+            return None
+        raw = payload.get("instances")
+        if not raw:
+            return None
+        if isinstance(raw, list):
+            raw = next((item for item in raw if item.get("id") == instance_id), None)
+            if raw is None:
+                return None
+        return Instance.from_api(raw)
 
     def create(
         self,
