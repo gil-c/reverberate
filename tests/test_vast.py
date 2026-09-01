@@ -99,6 +99,15 @@ class TestOfferSelection:
         assert "disk_space>60" in query
         assert "rentable=true" in query
 
+    def test_the_default_card_name_carries_a_space_not_an_underscore(self) -> None:
+        """The API matches ``RTX 4090``, so the underscore form finds nothing.
+
+        This returned zero offers with no error for as long as the default said
+        ``RTX_4090``, which is how Vast.ai's own documentation writes it.
+        """
+        assert "gpu_name=RTX 4090" in search_query()
+        assert "RTX_4090" not in search_query()
+
     def test_query_parses_into_the_operators_the_api_expects(self) -> None:
         parsed = parse_query("gpu_name=RTX_4090 disk_space>60 cuda_vers>=12.0")
         assert parsed["gpu_name"] == {"eq": "RTX_4090"}

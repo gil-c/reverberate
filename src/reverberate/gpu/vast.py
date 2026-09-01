@@ -168,7 +168,7 @@ class Rental:
 
 
 def search_query(
-    gpu_name: str = "RTX_4090",
+    gpu_name: str = "RTX 4090",
     num_gpus: int = 1,
     min_disk_gb: int = 60,
     min_reliability: float = 0.99,
@@ -184,6 +184,13 @@ def search_query(
 
     ``gpu_name`` is dropped from the filter when empty, which is how to ask for
     "any card with at least this much VRAM" rather than naming one.
+
+    The card name carries a **space**, not an underscore. Vast.ai's own
+    documentation writes ``RTX_4090`` and the web console shows it that way, but
+    the field the API matches against stores ``RTX 4090``, so an underscore
+    matches nothing and the search returns zero offers with no error at all. The
+    default was written with an underscore and silently found nothing until it
+    was checked against the raw offer records.
     """
     tokens = [
         f"num_gpus={num_gpus}",
