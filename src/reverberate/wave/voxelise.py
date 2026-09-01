@@ -37,9 +37,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from reverberate.settings import data_root
 from reverberate.wave.comms import ENGINE_FILES
+
+if TYPE_CHECKING:
+    from reverberate.store import ObjectStore
 
 __all__ = [
     "CACHE_FILES",
@@ -169,16 +173,34 @@ def entry_for(spec: SceneSpec) -> CacheEntry:
     return CacheEntry(path=path, key=key, manifest=manifest)
 
 
-def voxelise(spec: SceneSpec, *, nprocs: int | None = None, force: bool = False) -> CacheEntry:
+def voxelise(
+    spec: SceneSpec,
+    *,
+    nprocs: int | None = None,
+    force: bool = False,
+    store: ObjectStore | None = None,
+) -> CacheEntry:
     """Voxelise ``spec`` locally and publish it to the cache, or reuse it.
 
     Publication is atomic: the child writes into a sibling directory and the
     entry is renamed into place only once every file is there, so an interrupted
     run leaves no half voxelisation for a later run to trust.
+
+    ``store`` makes the lookup order local, then remote, then compute, with a
+    computed entry pushed. Passing ``None`` keeps the cache per worktree, which
+    is what the tests and an offline laptop want. See
+    :mod:`reverberate.wave.vox_store`.
     """
     entry = entry_for(spec)
     if entry.complete and not force:
         return entry
+
+    if store is not None and not force:
+        from reverberate.wave.vox_store import fetch_entry
+
+        fetched = fetch_entry(store, spec.key)
+        if fetched is not None:
+            return fetched
 
     root = cache_root()
     staging = root / f".{spec.key}.partial.{os.getpid()}"
@@ -254,7 +276,12 @@ def voxelise(spec: SceneSpec, *, nprocs: int | None = None, force: bool = False)
     if destination.exists():
         _remove_tree(destination)
     staging.rename(destination)
-    return entry_for(spec)
+    published = entry_for(spec)
+    if store is not None:
+        from reverberate.wave.vox_store import publish_entry
+
+        publish_entry(store, published)
+    return published
 
 
 def engine_inputs(entry: CacheEntry, comms_out: Path) -> list[Path]:
