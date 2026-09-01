@@ -3,7 +3,7 @@
 This tool exists to answer one question before any decimation, material
 assignment or simulation code is written: do the per object semantic labels
 that the MIDI-3D repackaging claims to preserve actually survive, and is the
-room shell usable at all. See ROADMAP.md, Phase 1, step 2.
+room shell usable at all.
 
 A "room" directory in the MIDI-3D layout (for example
 ``<scene-uuid>/SecondBedroom-1656/``) holds one GLB file per furniture
