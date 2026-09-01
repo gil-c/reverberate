@@ -33,6 +33,41 @@
       }
       #busy { margin-top: 6px; color: #d0a860; font-size: 11px; }
       #report { margin-top: 5px; color: #7a8290; font-size: 10px; }
+      button:disabled { opacity: .38; cursor: not-allowed; }
+      /* The solver panel is an overlay like #ui, not a layout column, so the
+         renderer keeps the whole window and its size never depends on how much
+         text the panel holds. */
+      #run-panel {
+        position: fixed; top: 0; right: 0; bottom: 0; width: 25rem; max-width: 42vw;
+        overflow-y: auto; padding: 1rem 1.1rem 3rem;
+        background: rgba(25, 28, 33, 0.94); border-left: 1px solid #2b3038;
+        font: 13px/1.5 system-ui, sans-serif; color: #e6e8eb;
+      }
+      #run-panel[hidden] { display: none; }
+      #run-panel h1 { font-size: 1rem; margin: 0 0 .2rem; }
+      #run-panel h2 {
+        font-size: .78rem; text-transform: uppercase; letter-spacing: .08em;
+        color: #8d97a5; margin: 1.4rem 0 .5rem;
+      }
+      #run-panel .sub { color: #8d97a5; margin: 0 0 .6rem; font-size: .8rem; word-break: break-all; }
+      #run-panel table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+      #run-panel th, #run-panel td {
+        text-align: right; padding: .18rem .3rem; border-bottom: 1px solid #262b33;
+      }
+      #run-panel th:first-child, #run-panel td:first-child { text-align: left; }
+      #run-panel th { color: #8d97a5; font-weight: 500; }
+      #run-panel td.out { color: #6b7280; }
+      #run-panel canvas.plot {
+        width: 100%; height: 88px; display: block; background: #101317;
+        border: 1px solid #2b3038; border-radius: 5px;
+      }
+      #run-panel audio { width: 100%; margin-top: .3rem; }
+      #run-panel .legend { display: flex; flex-wrap: wrap; gap: .25rem .6rem; }
+      #run-panel .legend span { display: flex; align-items: center; gap: .3rem; font-size: .78rem; }
+      #run-panel .swatch { width: .7rem; height: .7rem; border-radius: 2px; border: 1px solid #00000060; }
+      #run-panel .note { color: #b9a06a; font-size: .78rem; }
+      #run-panel .caption { color: #8d97a5; font-size: .74rem; margin: .2rem 0 .7rem; }
+      #run-panel select { width: 100%; }
     </style>
   </head>
   <body>
@@ -42,13 +77,14 @@
       <div style="margin-top: 8px">
         <button id="btn-colour" class="active">Colour</button>
         <button id="btn-label">Label</button>
-        <button id="btn-acoustic">Acoustic</button>
+        <button id="btn-acoustic" title="what the wave solver read and returned">Acoustic</button>
       </div>
       <div id="legend"></div>
       <div id="hint">Drag to look around. W A S D to walk.</div>
       <div id="report"></div>
       <div id="busy"></div>
     </div>
+    <div id="run-panel" hidden></div>
 
     <script type="importmap">
       {
@@ -63,6 +99,7 @@
       import * as THREE from "three";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+      import { buildRunGroup, loadRun, renderRunPanel } from "./solver_mode.js";
 
       // Eye height of a standing adult, in metres, held constant: a person's
       // head does not rise when they look up. Body translation and head
@@ -74,7 +111,10 @@
       const WALL_MARGIN = 0.22;
       const MAX_PITCH = Math.PI / 2 - 0.05;
       const LOOK_SENSITIVITY = 0.0032;
-      const MODES = ["colour", "label", "acoustic"];
+      const SCENE_MODES = ["colour", "label"];
+      // The solver mode is listed with the others so the buttons stay one set,
+      // but it is built from a run payload rather than from the HSSD assembly.
+      const MODES = [...SCENE_MODES, "acoustic"];
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x0d0f12);
@@ -117,6 +157,10 @@
       let pitch = 0;
       const groups = {};
       let activeMode = null;
+      let runData = null;
+      let runView = null;
+      let runShow = null;
+      let apartmentRuns = [];
 
       function ringContains(x, z, ring) {
         let inside = false;
@@ -161,7 +205,18 @@
       // about 0.9 m wide, so the clearance kept here has to be small enough to
       // pass through one.
       function canStandAt(x, z) {
-        if (!manifest) return false;
+        // The solver mesh is the apartment's own bedroom, cropped and not
+        // recentred, so one outline governs every mode and walking across a
+        // mode switch stays continuous. Until the apartment arrives there is no
+        // outline, and the run's bounding box stands in for it.
+        if (!manifest) {
+          if (!runView) return false;
+          const { min, max } = runView.bounds;
+          return (
+            x > min.x + WALL_MARGIN && x < max.x - WALL_MARGIN &&
+            z > min.z + WALL_MARGIN && z < max.z - WALL_MARGIN
+          );
+        }
         if (!outlineContains(x, z)) return false;
         for (const part of manifest.outline) {
           if (!partContains(x, z, part)) continue;
@@ -268,22 +323,39 @@
         });
       }
 
+      async function buildAcousticMode() {
+        runData = await loadRun(apartmentRuns[0].url);
+        runView = buildRunGroup(THREE, runData);
+        runShow = renderRunPanel(document.getElementById("run-panel"), runData, {
+          onSelect: (sample) => runView.highlight(sample.source_index, sample.receiver_index),
+          onStand: (sample) => standAt(sample.receiver_index),
+        });
+        return runView.group;
+      }
+
+      function standAt(receiverIndex) {
+        const marker = runView && runView.receivers[receiverIndex];
+        if (!marker) return;
+        // Put the head where the receiver was, so what is heard and what is
+        // seen come from the same point in the room.
+        camera.position.copy(marker.position);
+      }
+
       async function buildMode(mode) {
+        if (mode === "acoustic") return buildAcousticMode();
         const group = new THREE.Group();
         const shell = await loadGltf(`${base}shell_${mode}.glb`);
         applyDisplaySettings(shell.scene, { flatColour: null, shadows: mode === "colour" });
         group.add(shell.scene);
 
-        const useCollider = mode === "acoustic";
         const cache = new Map();
         for (const entry of manifest.instances) {
-          const url = useCollider ? entry.collider_url : entry.render_url;
+          const url = entry.render_url;
           if (!url) continue; // counted in the report, not silently ignored
           if (!cache.has(url)) cache.set(url, loadGltf(base + url));
           const gltf = await cache.get(url);
           const piece = gltf.scene.clone(true);
-          const flatColour =
-            mode === "label" ? entry.label_colour : mode === "acoustic" ? entry.acoustic_colour : null;
+          const flatColour = mode === "label" ? entry.label_colour : null;
           applyDisplaySettings(piece, { flatColour, shadows: mode === "colour" });
           // Our instance matrix, applied whole: if a piece lands wrongly, the
           // reconstruction is wrong, because the viewer adds no correction.
@@ -324,17 +396,49 @@
       }
 
       async function setMode(mode) {
+        if (mode === "acoustic" && !apartmentRuns.length) return;
+        // Record the deliberate choice before the first await, not after it.
+        // Assigning it at the end let a cached assembly finish inside those
+        // awaits, read `chosen` as still unset, and take the view back to
+        // colour, so opening on the simulated room only worked on a cold cache.
+        chosen = mode;
         for (const name of MODES) {
           document.getElementById(`btn-${name}`).classList.toggle("active", name === mode);
         }
-        renderLegend(mode);
+        renderLegend(mode === "acoustic" ? null : mode);
+        setBusy(mode === "acoustic" && !groups.acoustic ? "loading solver run…" : assemblyMessage);
         if (!groups[mode]) groups[mode] = await buildMode(mode);
         if (activeMode && groups[activeMode]) scene.remove(groups[activeMode]);
-        if (!manifest) return;
+        // The solver mode reads only the run payload, so it can be shown while
+        // the apartment is still being assembled. The other three are the
+        // assembly, and have nothing to draw until it arrives.
+        if (!manifest && mode !== "acoustic") return;
         scene.add(groups[mode]);
         fitSunTo(groups[mode]);
+
+        const panel = document.getElementById("run-panel");
+        panel.hidden = mode !== "acoustic";
         activeMode = mode;
+        // The camera is deliberately left alone. All three modes draw the same
+        // room in the same frame, so switching between them is a change of
+        // representation and not a change of place; moving the viewer here
+        // would lose whatever they had walked over to look at.
+        if (mode === "acoustic") {
+          // Redraw once the panel has its real width, otherwise every plot is
+          // sized from a hidden element and comes out a pixel wide.
+          requestAnimationFrame(() => runShow && runShow(0));
+        }
+        setBusy(assemblyMessage);
       }
+
+      // Which mode the viewer is showing on purpose, as opposed to which one
+      // has finished loading. Cleared when an apartment starts loading.
+      let chosen = null;
+      // What the apartment load wants the status line to say. Held here because
+      // opening the solver run mid assembly used to blank the status line on
+      // its way out, leaving the only sign of a minutes long build with nothing
+      // on screen to say it was still running.
+      let assemblyMessage = "";
 
       for (const mode of MODES) {
         document.getElementById(`btn-${mode}`).onclick = () => setMode(mode);
@@ -397,45 +501,118 @@
         document.getElementById("busy").textContent = text;
       }
 
+      // Point the run at an apartment, dropping whatever the last one had.
+      //
+      // Called with the *incoming* scene before the manifest is fetched. Doing
+      // it afterwards left the Solver button offering the outgoing apartment's
+      // run for the whole of a multi second assembly, ready to open it over a
+      // room it was never simulated in. Doing it beforehand also makes the run
+      // available immediately, which is correct: a run payload is published by
+      // the solver and owes nothing to the HSSD assembly.
+      function releaseRun(sceneId) {
+        runData = runView = runShow = null;
+        document.getElementById("run-panel").hidden = true;
+        apartmentRuns = sceneId ? runsByScene.get(sceneId) || [] : [];
+        const button = document.getElementById("btn-acoustic");
+        button.disabled = !apartmentRuns.length;
+        button.title = apartmentRuns.length
+          ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
+          : "no solver run has been rendered for this apartment";
+        // A disabled button must not still look like the mode you are in. The
+        // next setMode is minutes away, behind the apartment assembly, so
+        // leaving the highlight up says the acoustic view is on screen for the
+        // whole of a wait during which nothing is.
+        if (button.disabled) button.classList.remove("active");
+      }
+
       async function loadApartment(sceneId) {
-        setBusy("building apartment… (first load of a scene takes a while)");
+        assemblyMessage = "building apartment… (first load of a scene takes a while)";
+        setBusy(assemblyMessage);
+        // Nothing of the outgoing apartment may survive the wait, including the
+        // mode buttons, which is why this runs before the fetch and not after.
+        releaseRun(sceneId);
+        chosen = null;
+        if (activeMode === "acoustic") activeMode = null;
         // The server assembles a scene on demand: 168 apartments could not be
         // exported up front, and each one is cached after its first build.
         const response = await fetch(`scenes/${sceneId}/manifest.json`);
         if (!response.ok) {
+          assemblyMessage = "";
           setBusy(`failed to build ${sceneId}: ${response.status}`);
           return;
         }
         manifest = await response.json();
         base = `scenes/${sceneId}/`;
-        for (const mode of MODES) groups[mode] = null;
-        if (activeMode && scene.children.includes(groups[activeMode])) {
+        // The assembly invalidates the three modes built from it. It says
+        // nothing about the solver mode, which is built from the run payload,
+        // so a run opened during the wait survives its arrival intact.
+        for (const mode of SCENE_MODES) groups[mode] = null;
+        if (activeMode && activeMode !== "acoustic" && scene.children.includes(groups[activeMode])) {
           scene.remove(groups[activeMode]);
         }
-        activeMode = null;
+        if (activeMode !== "acoustic") activeMode = null;
+        assemblyMessage = "";
         document.getElementById("title").textContent = manifest.title;
         document.getElementById("report").textContent = manifest.hint;
-        const [x, z] = startingPosition();
-        camera.position.set(x, manifest.floorHeight + EYE_HEIGHT, z);
-        yaw = 0;
-        pitch = 0;
-        await setMode("colour");
+        // Only claim the view if the wait did not already give it away: someone
+        // who opened the solver run while the apartment assembled should not be
+        // yanked out of it, nor have the camera moved under them.
+        if (chosen === null) {
+          const [x, z] = startingPosition();
+          camera.position.set(x, manifest.floorHeight + EYE_HEIGHT, z);
+          yaw = 0;
+          pitch = 0;
+          await setMode("colour");
+        }
         setBusy("");
       }
 
-      fetch("apartments.json")
-        .then((response) => response.json())
-        .then(async (apartments) => {
-          const select = document.getElementById("scene-select");
-          select.innerHTML = apartments
-            .map((a) => `<option value="${a.id}">${a.label}</option>`)
-            .join("");
-          select.onchange = () => loadApartment(select.value);
-          await loadApartment(apartments[0].id);
-        })
-        .catch((error) => {
-          document.getElementById("title").textContent = `failed to load: ${error}`;
-        });
+      const runsByScene = new Map();
+      const runsByName = new Map();
+
+      async function boot() {
+        // Runs first: the selector marks which apartments have one, so a run is
+        // discoverable from the list rather than only by already knowing.
+        const runs = await fetch("runs.json")
+          .then((response) => (response.ok ? response.json() : []))
+          .catch(() => []);
+        for (const run of runs) {
+          if (!runsByScene.has(run.scene_id)) runsByScene.set(run.scene_id, []);
+          runsByScene.get(run.scene_id).push(run);
+          runsByName.set(run.name, run);
+        }
+
+        const apartments = await fetch("apartments.json").then((r) => r.json());
+        const select = document.getElementById("scene-select");
+        // Each simulated room gets its own entry above the apartments. It is a
+        // way into the same apartment, not a second scene, so the three modes
+        // and the walk behave there exactly as they do everywhere else. It
+        // leads because a room with a run is the only place all three modes
+        // have something to show.
+        select.innerHTML = [
+          ...runs.map((r) => `<option value="run:${r.name}">${r.scene_id} · ${r.room} · simulated</option>`),
+          ...apartments.map((a) => `<option value="${a.id}">${a.label}</option>`),
+        ].join("");
+        select.onchange = () => openSelection(select.value);
+        await openSelection(select.value);
+      }
+
+      async function openSelection(value) {
+        const run = value.startsWith("run:") ? runsByName.get(value.slice(4)) : null;
+        // Not awaited yet: assembling an apartment takes minutes on a first
+        // visit, and the run is ready now. Opening it first is what makes the
+        // simulated room the one entry that shows something immediately.
+        const assembling = loadApartment(run ? run.scene_id : value);
+        if (run) {
+          await setMode("acoustic");
+          standAt(runData.samples[0]?.receiver_index ?? 0);
+        }
+        await assembling;
+      }
+
+      boot().catch((error) => {
+        document.getElementById("title").textContent = `failed to load: ${error}`;
+      });
 
       animate();
     </script>

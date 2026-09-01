@@ -43,7 +43,7 @@ from reverberate.viz.label_palette import (
     category_colour,
     rgba,
 )
-from reverberate.viz.room_surfaces import absorption_colour, shell_surface_labels
+from reverberate.viz.room_surfaces import shell_surface_labels
 
 #: Subdirectory of the served site where asset symlinks are created.
 ASSET_DIR = "assets"
@@ -67,10 +67,7 @@ class InstanceEntry:
     #: Column-major 4x4, the layout ``THREE.Matrix4.fromArray`` expects.
     matrix: list[float]
     label_colour: list[int]
-    acoustic_colour: list[int]
     #: The absorption actually handed to pyroomacoustics, after compensation.
-    #: This is what ``acoustic_colour`` shows, so the acoustic view is a
-    #: picture of the simulator's input rather than of the material table.
     absorption: float
     #: The tabulated coefficient for this category, before compensation. Kept
     #: alongside so the viewer can show what was changed rather than only the
@@ -136,10 +133,10 @@ def link_asset(source: Path, target_dir: Path) -> str:
 def export_simulation_collider(hssd_root: Path, template: str, target_dir: Path) -> str | None:
     """Write the exact mesh the simulator will use for this template.
 
-    The acoustic view must not show the pretty collider while pyroomacoustics
-    receives a decimated one, so the decimated mesh is exported here and the
-    browser is pointed at it. Both come from ``reduced_collider``, which is the
-    single place that decision is made.
+    The viewer must not show the pretty collider while the simulator receives a
+    decimated one, so the decimated mesh is exported here and the browser is
+    pointed at it. Both come from ``reduced_collider``, which is the single
+    place that decision is made.
     """
     loaded = reduced_collider(hssd_root, template, DETAIL_LEVELS[0].detail_length)
     if loaded is None:
@@ -209,7 +206,6 @@ def build_instances(
                 collider_is_render=asset.collider_is_render,
                 matrix=column_major(instance.transform_matrix()),
                 label_colour=list(category_colour(category)),
-                acoustic_colour=absorption_colour(absorption)[:3].tolist(),
                 absorption=absorption,
                 base_absorption=base_absorption,
                 original_area=float(compensated.original_area),
@@ -244,9 +240,9 @@ def shell_meshes(
 ) -> tuple[dict[str, trimesh.Trimesh], dict[str, float]]:
     """The apartment shell in each view, plus the absorption assigned per surface.
 
-    All three are the *same* mesh with different colours, and that mesh is the
-    one ``simulation_geometry`` hands to pyroomacoustics, so the acoustic view
-    is a picture of the simulator's input rather than a lookalike.
+    Both are the *same* mesh with different colours, and that mesh is the one
+    ``simulation_geometry`` hands to the simulator, so what is drawn is the
+    simulator's input rather than a lookalike.
     """
     rng = np.random.default_rng(seed)
     absorptions = {
@@ -264,17 +260,10 @@ def shell_meshes(
         mesh.visual = trimesh.visual.ColorVisuals(mesh, face_colors=face_colours)
         return mesh
 
-    acoustic = base.copy()
-    acoustic_colours = np.zeros((len(acoustic.faces), 4), dtype=np.uint8)
-    for surface, absorption in absorptions.items():
-        acoustic_colours[labels == surface] = absorption_colour(absorption)
-    acoustic.visual = trimesh.visual.ColorVisuals(acoustic, face_colors=acoustic_colours)
-
     return (
         {
             "colour": coloured(SHELL_RENDER_COLOURS),
             "label": coloured(SHELL_LABEL_COLOURS),
-            "acoustic": acoustic,
         },
         absorptions,
     )
@@ -329,13 +318,6 @@ def write_manifest(hssd_root: Path, scene_id: str, target: Path) -> ManifestRepo
             + [
                 {"label": surface, "colour": list(colour)}
                 for surface, colour in SHELL_LABEL_COLOURS.items()
-            ],
-            "acoustic": [
-                {
-                    "label": f"{surface} ({absorption:.2f})",
-                    "colour": absorption_colour(absorption)[:3].tolist(),
-                }
-                for surface, absorption in absorptions.items()
             ],
         },
     }

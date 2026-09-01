@@ -25,6 +25,8 @@ from reverberate.geometry.placement import (
     VOICE,
     choose_archetype,
     footprint_of,
+    largest_free_room,
+    sample_group,
     sample_pair,
     sampling_area,
 )
@@ -186,3 +188,115 @@ def test_sampling_area_refuses_a_storey_with_no_room_left() -> None:
 
     with pytest.raises(ValueError, match="no free floor area"):
         sampling_area(storey, footprints=[sofa_at(1.0, 1.0, size=4.0)], min_wall_distance=0.5)
+
+
+def two_room_storey() -> Storey:
+    """A large room and a small one, so "largest free" has something to choose."""
+    big = RoomRegion(
+        name="living",
+        label="living room",
+        poly_loop=np.array([[0, 0, 0], [8, 0, 0], [8, 0, 6], [0, 0, 6]], dtype=float),
+        floor_height=0.0,
+        extrusion_height=2.8,
+    )
+    small = RoomRegion(
+        name="closet",
+        label="bedroom",
+        poly_loop=np.array([[8, 0, 0], [11, 0, 0], [11, 0, 2], [8, 0, 2]], dtype=float),
+        floor_height=0.0,
+        extrusion_height=2.8,
+    )
+    return build_storey([big, small], trimesh.creation.box(extents=(0.01, 0.01, 0.01)))
+
+
+def test_a_group_puts_every_placement_in_one_room() -> None:
+    """Twelve responses of one run share a room, so they share a decay to compare."""
+    storey = two_room_storey()
+    area = sampling_area(storey)
+    group = sample_group(storey, np.random.default_rng(0), area, sources=2, receivers=6, seed=0)
+
+    assert group.response_count == 12
+    assert group.room == "living"
+    for placement in group.sources + group.receivers:
+        assert placement.room == "living"
+
+
+def test_the_largest_free_room_is_chosen_by_free_floor_not_gross_area() -> None:
+    """A big room filled with furniture is a worse candidate than a small empty one."""
+    storey = two_room_storey()
+    filled = sampling_area(storey, [sofa_at(4.0, 3.0, size=7.5)])
+    assert largest_free_room(storey, filled) == "closet"
+    assert largest_free_room(storey, sampling_area(storey)) == "living"
+
+
+def test_no_placement_lands_inside_furniture() -> None:
+    storey = two_room_storey()
+    sofa = sofa_at(4.0, 3.0, size=3.0)
+    area = sampling_area(storey, [sofa])
+    group = sample_group(storey, np.random.default_rng(3), area, room="living", seed=3)
+
+    for placement in group.sources + group.receivers:
+        assert not sofa.contains(Point(placement.position[0], placement.position[2]))
+
+
+def test_placements_are_kept_apart() -> None:
+    """Two receivers inside one cell would return the same response twice."""
+    storey = two_room_storey()
+    group = sample_group(
+        storey, np.random.default_rng(11), sampling_area(storey), min_separation=0.5, seed=11
+    )
+    points = np.array([p.position[[0, 2]] for p in group.sources + group.receivers], dtype=float)
+    distances = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    assert distances.min() >= 0.5
+
+
+def test_a_separation_the_room_cannot_satisfy_is_refused() -> None:
+    """Reported, not silently relaxed into overlapping placements."""
+    storey = two_room_storey()
+    with pytest.raises(ValueError, match="at least 20.0 m apart"):
+        sample_group(
+            storey, np.random.default_rng(0), sampling_area(storey), min_separation=20.0, seed=0
+        )
+
+
+def test_receivers_are_at_ear_height_and_sources_are_not_all_the_same() -> None:
+    storey = two_room_storey()
+    group = sample_group(
+        storey, np.random.default_rng(5), sampling_area(storey), receivers=6, seed=5
+    )
+    heights = {round(float(r.position[1]), 3) for r in group.receivers}
+    assert heights <= {STANDING_EAR_HEIGHT, SEATED_EAR_HEIGHT}
+    assert len(heights) == 2, "every receiver was given the same posture"
+
+
+def test_the_same_seed_gives_the_same_group() -> None:
+    """The run record carries a seed, so the seed has to be sufficient."""
+    storey = two_room_storey()
+    area = sampling_area(storey)
+    first = sample_group(storey, np.random.default_rng(42), area, seed=42)
+    again = sample_group(storey, np.random.default_rng(42), area, seed=42)
+    other = sample_group(storey, np.random.default_rng(43), area, seed=43)
+
+    assert first.record() == again.record()
+    assert first.record() != other.record()
+
+
+def test_the_record_carries_the_positions_and_the_seed() -> None:
+    storey = two_room_storey()
+    record = sample_group(storey, np.random.default_rng(1), sampling_area(storey), seed=1).record()
+
+    assert record["seed"] == 1
+    assert record["room"] == "living"
+    sources = record["sources"]
+    receivers = record["receivers"]
+    assert isinstance(sources, list) and isinstance(receivers, list)
+    assert len(sources) == 2 and len(receivers) == 6
+    assert len(sources[0]["position"]) == 3
+    assert sources[0]["archetype"] is not None
+
+
+def test_a_room_that_does_not_exist_is_named_in_the_error() -> None:
+    storey = two_room_storey()
+    with pytest.raises(ValueError, match="no room named 'kitchen'"):
+        sample_group(storey, np.random.default_rng(0), sampling_area(storey), room="kitchen")

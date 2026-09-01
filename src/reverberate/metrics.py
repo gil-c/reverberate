@@ -42,12 +42,29 @@ from reverberate.acoustics import OCTAVE_BANDS, SPEED_OF_SOUND
 EARLY_WINDOW = 0.050
 
 
+def band_centres(fs: int) -> tuple[int, ...]:
+    """The centre frequencies the filter bank actually produces, at this rate.
+
+    Not the same thing as :data:`~reverberate.acoustics.OCTAVE_BANDS`, and the
+    difference matters. ``OCTAVE_BANDS`` is the seven bands the material data is
+    defined on, 125 Hz to 8 kHz. ``pyroomacoustics`` keeps doubling until it
+    reaches Nyquist, so at 48 kHz it returns **eight** bands, the last centred on
+    16 kHz. Every per-band array in this module is therefore one longer than
+    ``OCTAVE_BANDS``, and labelling those arrays with ``OCTAVE_BANDS`` silently
+    dropped the top band and misaligned nothing visibly, which is the worst way
+    for it to be wrong. Ask the bank what it produced instead of assuming.
+    """
+    bank = pra.acoustics.OctaveBandsFactory(fs=fs, base_frequency=OCTAVE_BANDS[0], n_fft=512)
+    return tuple(int(round(float(value))) for value in bank.centers)
+
+
 def octave_filter(rir: np.ndarray, fs: int) -> np.ndarray:
     """Split a response into its octave bands.
 
     Uses ``pyroomacoustics``' own filter bank so that the bands a response is
     analysed on are exactly the bands its materials were defined on. Returns an
-    array shaped ``(bands, samples)``.
+    array shaped ``(bands, samples)``. See :func:`band_centres` for why that
+    first axis can be longer than :data:`~reverberate.acoustics.OCTAVE_BANDS`.
     """
     bands = pra.acoustics.OctaveBandsFactory(fs=fs, base_frequency=OCTAVE_BANDS[0], n_fft=512)
     filtered = bands.analysis(np.asarray(rir, dtype=float))
@@ -223,7 +240,7 @@ def measure(rir: np.ndarray, fs: int) -> BandMetrics:
     """Every per-band metric for one impulse response, in one pass."""
     level, arrival = direct_sound(rir, fs)
     return BandMetrics(
-        bands=OCTAVE_BANDS,
+        bands=band_centres(fs),
         rt60=rt60_per_band(rir, fs),
         edt=edt_per_band(rir, fs),
         c50=clarity_per_band(rir, fs),

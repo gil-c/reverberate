@@ -14,3 +14,12 @@ scikit-image>=0.26
 fast_simplification>=0.1
 h5py>=3.11
 scipy>=1.13
+
+# The remote store and the impulse response format. Pinned exactly, unlike the
+# lines above: roadmap constraint 8 asks for pinned dependencies and the rest of
+# this file does not honour it yet. Raised in the pull request rather than
+# changed here, because repinning fourteen packages is not this change.
+boto3==1.43.85
+sofar==1.3.0
+soundfile==0.14.0
+resampy==0.4.3

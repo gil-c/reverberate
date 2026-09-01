@@ -19,6 +19,7 @@ from reverberate.acoustics import MIN_WAVELENGTH, OCTAVE_BANDS
 from reverberate.metrics import (
     EARLY_WINDOW,
     JND_RT60_RELATIVE,
+    band_centres,
     clarity_per_band,
     compare,
     critical_distance,
@@ -36,11 +37,11 @@ from reverberate.metrics import (
 FS = 16000
 
 
-def decaying_noise(rt60: float, seconds: float = 3.0, seed: int = 0) -> np.ndarray:
+def decaying_noise(rt60: float, seconds: float = 3.0, seed: int = 0, fs: int = FS) -> np.ndarray:
     """Noise with a known reverberation time, plus a direct-sound spike."""
     rng = np.random.default_rng(seed)
-    samples = int(seconds * FS)
-    time = np.arange(samples) / FS
+    samples = int(seconds * fs)
+    time = np.arange(samples) / fs
     # -60 dB over rt60 seconds is a decay constant of ln(10^6) = 13.8155/2.
     response = rng.normal(size=samples) * np.exp(-6.9078 * time / rt60)
     response[0] += 5.0
@@ -195,3 +196,25 @@ def test_a_silent_response_does_not_pretend_to_have_measurements() -> None:
     assert level == float("-inf")
     assert arrival == 0
     assert np.all(np.isnan(rt60_per_band(silent, FS)))
+
+
+def test_band_labels_follow_the_filter_bank_and_not_the_material_bands() -> None:
+    """At delivery rates the bank adds a band the material data does not have.
+
+    ``OCTAVE_BANDS`` stops at 8 kHz because that is where the absorption data
+    stops. ``pyroomacoustics`` keeps doubling until Nyquist, so from 32 kHz
+    upward it returns an eighth band centred on 16 kHz. Labelling the arrays
+    with ``OCTAVE_BANDS`` therefore dropped the top band, and it was invisible
+    because the rest of this suite runs at 16 kHz where the two agree.
+    """
+    assert band_centres(16000) == OCTAVE_BANDS
+    assert band_centres(48000) == (*OCTAVE_BANDS, 16000)
+
+    metrics = measure(decaying_noise(0.7, fs=48000), 48000)
+
+    assert metrics.bands == band_centres(48000)
+    assert len(metrics.rt60) == len(metrics.bands)
+    assert metrics.decay_curves.shape[0] == len(metrics.bands)
+    # summary() zips bands against rt60 with strict=True, so a mislabelled
+    # band count raises here rather than printing a wrong table.
+    assert "16000 Hz" in metrics.summary()
