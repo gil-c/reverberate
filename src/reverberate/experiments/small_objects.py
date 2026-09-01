@@ -218,7 +218,7 @@ def effect_of(
         category=category,
         size=size,
         half_distance=half_distance,
-        bands=OCTAVE_BANDS,
+        bands=present.bands.bands,
         rt60_relative=np.nan_to_num(rt60, nan=0.0, posinf=0.0),
         c50_db=present.bands.c50 - absent.bands.c50,
         drr_db=present.bands.drr - absent.bands.drr,
