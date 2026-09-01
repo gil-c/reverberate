@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.experiments.scene_export`, `.run`, `.compare` and `.engine`, the
+  measurement harness that had survived four sessions as four throwaway scripts
+  under `data/runs/`. Named for what they do rather than for the roadmap item
+  that first needed them: export a scene and copies of it cut back to a path
+  length budget, run one domain here or on a rented machine, and say where one
+  response departs from another. W1's `common` and `padded` bounds are kept as a
+  required argument with no default anywhere, and the chosen mode is carried in
+  the `Bounds` value, in the run directory's name and in the run's JSON, so a
+  pair of bounds can never be recorded without saying how it was arrived at.
+  Voxelisation now goes through `reverberate.wave` instead of importing PFFDTD's
+  `sim_setup` in process, so the harness is no longer pinned to numpy below 2
+  and one voxelisation is cached across runs.
 - `reverberate.materials`, the catalogue as one package with both faces of
   section 6.1: absorption per band, the two octaves above the last published
   measurement, and the impedance filter the wave solver reads. Fitting is
