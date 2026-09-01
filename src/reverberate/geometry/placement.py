@@ -153,16 +153,54 @@ def footprint_of(mesh: trimesh.Trimesh) -> Polygon:
     return Polygon()
 
 
+#: What a person can stand on rather than walk around, in metres above the
+#: floor. A rug, a floor mat or a threshold strip is under this; a bed frame is
+#: not. Measured need: in HSSD bedroom.001 a single rug's convex hull covered
+#: 11.63 m2 of a 13.61 m2 room, so treating every placed object as an obstacle
+#: left **no** free floor at all and the sampler could not place anything. The
+#: rug is still simulated as a surface; it is simply not a thing you walk
+#: around.
+STEP_OVER_HEIGHT = 0.15
+
+#: Full stature, taller than :data:`STANDING_EAR_HEIGHT` because a person's head
+#: is above their ears. An object entirely above this, such as a ceiling lamp or
+#: a high shelf, does not stop anyone standing under it.
+STANDING_HEIGHT = 1.8
+
+
+def occupies_standing_space(
+    mesh: trimesh.Trimesh,
+    floor_height: float,
+    step_over: float = STEP_OVER_HEIGHT,
+    stature: float = STANDING_HEIGHT,
+) -> bool:
+    """Whether a placed object actually stops a person standing there.
+
+    The previous rule was "any placed object blocks", which is wrong in both
+    directions and was measured to be wrong: it excluded rugs, which you stand
+    on, and it would equally exclude the floor under a pendant lamp. An object
+    blocks when it rises above what can be stepped onto *and* begins below the
+    top of a standing person.
+    """
+    low, high = float(mesh.bounds[0][1]), float(mesh.bounds[1][1])
+    return high > floor_height + step_over and low < floor_height + stature
+
+
 def furniture_footprints(
     hssd_root: Path,
     instances: list[FurnitureInstance],
     face_budget: int = OBSTACLE_FACE_BUDGET,
+    floor_height: float | None = None,
 ) -> list[Polygon]:
     """The XZ footprint of every obstacle, under its instance matrix.
 
     Uses ``simulation_collider``, the same mesh the simulator and the acoustic
     view read, so the space treated as occupied is the space that is actually
     simulated as occupied.
+
+    Pass ``floor_height`` to keep only the objects that occupy standing space;
+    leaving it ``None`` keeps every object, which is the older and blunter
+    behaviour and is retained only for callers that want the raw footprints.
     """
     footprints = []
     for instance in instances:
@@ -171,6 +209,8 @@ def furniture_footprints(
             continue
         mesh = base.copy()
         mesh.apply_transform(instance.transform_matrix())
+        if floor_height is not None and not occupies_standing_space(mesh, floor_height):
+            continue
         polygon = footprint_of(mesh)
         if not polygon.is_empty:
             footprints.append(polygon)
@@ -284,3 +324,157 @@ def sample_pair(
         if same_room is None or pair.same_room == same_room:
             return pair
     raise ValueError(f"could not sample a pair with same_room={same_room} in this storey")
+
+
+@dataclass(frozen=True)
+class PlacedGroup:
+    """Several sources and several receivers sharing one room, and one run.
+
+    The asymmetry is a cost fact, not a modelling preference. The solver's cost
+    is set by the grid and the number of time steps, so a receiver added to an
+    existing run is nearly free while a second source is a second run. W20's
+    2 x 6 is that arithmetic: twelve responses for the price of two.
+    """
+
+    room: str
+    sources: tuple[Placement, ...]
+    receivers: tuple[Placement, ...]
+    seed: int
+
+    @property
+    def response_count(self) -> int:
+        return len(self.sources) * len(self.receivers)
+
+    def record(self) -> dict[str, object]:
+        """The placement as it goes into the run record, positions and all."""
+        return {
+            "room": self.room,
+            "seed": self.seed,
+            "sources": [
+                {
+                    "position": [round(float(value), 4) for value in source.position],
+                    "azimuth_deg": round(source.azimuth, 2),
+                    "archetype": source.archetype.name if source.archetype else None,
+                }
+                for source in self.sources
+            ],
+            "receivers": [
+                {
+                    "position": [round(float(value), 4) for value in receiver.position],
+                    "azimuth_deg": round(receiver.azimuth, 2),
+                }
+                for receiver in self.receivers
+            ],
+        }
+
+
+def room_sampling_area(
+    storey: Storey,
+    room: str,
+    area: Polygon | MultiPolygon,
+) -> Polygon | MultiPolygon:
+    """The part of ``area`` that lies inside one annotated room.
+
+    Intersected with the free area rather than taken raw, so the wall setback
+    and the furniture subtraction still hold inside the room.
+    """
+    for region in storey.rooms:
+        if region.name == room:
+            free = area.intersection(region.polygon_xz.buffer(0))
+            if free.is_empty:
+                raise ValueError(f"room {room!r} has no free floor left once furniture is removed")
+            return free
+    raise ValueError(f"no room named {room!r} on this storey")
+
+
+def largest_free_room(storey: Storey, area: Polygon | MultiPolygon) -> str:
+    """The room with the most free floor, which is where a group will fit.
+
+    Free floor rather than gross area: a large bedroom whose floor is entirely
+    taken by a bed is a worse candidate than a small empty one, and it is free
+    floor that the sampler actually draws from.
+    """
+    best, best_area = "", 0.0
+    for region in storey.rooms:
+        free = area.intersection(region.polygon_xz.buffer(0)).area
+        if free > best_area:
+            best, best_area = region.name, float(free)
+    if not best:
+        raise ValueError("no room on this storey has any free floor")
+    return best
+
+
+def sample_group(
+    storey: Storey,
+    rng: np.random.Generator,
+    area: Polygon | MultiPolygon,
+    *,
+    room: str | None = None,
+    sources: int = 2,
+    receivers: int = 6,
+    min_separation: float = 0.5,
+    seed: int = 0,
+    max_attempts: int = 200,
+) -> PlacedGroup:
+    """Sources and receivers at head height, all in one room, all apart.
+
+    ``min_separation`` keeps every pair of placements apart in the horizontal
+    plane. Two reasons, and neither is aesthetic. Receivers are not grid
+    constrained, so each is interpolated from the 8 nodes around it; two
+    receivers closer than a cell would read very nearly the same nodes and
+    return the same response twice while costing storage as if they were two
+    measurements. And a receiver sitting on a source is not a measurement of a
+    room at all. Half a metre is far larger than the 8.2 mm cell of a 4 kHz
+    working point, so this is a statement about what is worth measuring, not
+    about what the grid can resolve.
+
+    Nothing here re-checks walls or furniture: ``area`` is already the free
+    floor, so exclusion is structural, as ``sampling_area`` intends.
+    """
+    chosen = room if room is not None else largest_free_room(storey, area)
+    free = room_sampling_area(storey, chosen, area)
+    total = sources + receivers
+
+    for _ in range(max_attempts):
+        points = _sample_positions(free, total, rng)
+        if _all_apart(points, min_separation):
+            break
+    else:
+        raise ValueError(
+            f"could not place {total} points at least {min_separation} m apart in {chosen!r}; "
+            f"its free floor is {free.area:.2f} m2"
+        )
+
+    placed_sources = tuple(
+        Placement(
+            position=np.array([x, storey.floor_height + kind.sample_height(rng), z]),
+            azimuth=float(rng.uniform(0.0, 360.0)),
+            room=room_of(storey, x, z),
+            archetype=kind,
+        )
+        for (x, z), kind in ((point, choose_archetype(rng)) for point in points[:sources])
+    )
+    placed_receivers = tuple(
+        Placement(
+            position=np.array(
+                [
+                    x,
+                    storey.floor_height
+                    + (STANDING_EAR_HEIGHT if bool(rng.integers(2)) else SEATED_EAR_HEIGHT),
+                    z,
+                ]
+            ),
+            azimuth=float(rng.uniform(0.0, 360.0)),
+            room=room_of(storey, x, z),
+        )
+        for x, z in points[sources:]
+    )
+    return PlacedGroup(room=chosen, sources=placed_sources, receivers=placed_receivers, seed=seed)
+
+
+def _all_apart(points: list[tuple[float, float]], minimum: float) -> bool:
+    coordinates = np.asarray(points)
+    deltas = coordinates[:, None, :] - coordinates[None, :, :]
+    distances = np.linalg.norm(deltas, axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    return bool(distances.min() >= minimum)
