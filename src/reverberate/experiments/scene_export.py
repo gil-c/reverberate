@@ -341,9 +341,7 @@ def export(
     print(f"{scene_id}/{room_name} (room only): {room_summary.summary()}")
 
     # The whole storey, which is the reference the truncations are judged against.
-    full_assignments, full_summary = simulation_geometry(
-        hssd_root, storey, instances, seed=seed, listener=src
-    )
+    full_assignments, full_summary = simulation_geometry(hssd_root, storey, instances, seed=seed)
     print(f"{scene_id} (whole storey): {full_summary.summary()}")
     full_assignments = refine(full_assignments, max_edge_m)
     print(

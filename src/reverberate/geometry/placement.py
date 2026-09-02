@@ -41,9 +41,8 @@ from reverberate.geometry.apartment import Storey
 from reverberate.geometry.hssd_room import FurnitureInstance
 from reverberate.geometry.sim_geometry import (
     MIN_WALL_DISTANCE,
-    OBSTACLE_FACE_BUDGET,
+    obstacle_collider,
     room_of,
-    simulation_collider,
 )
 
 #: Ear height of a standing and of a seated listener, in metres.
@@ -189,13 +188,12 @@ def occupies_standing_space(
 def furniture_footprints(
     hssd_root: Path,
     instances: list[FurnitureInstance],
-    face_budget: int = OBSTACLE_FACE_BUDGET,
     floor_height: float | None = None,
 ) -> list[Polygon]:
     """The XZ footprint of every obstacle, under its instance matrix.
 
-    Uses ``simulation_collider``, the same mesh the simulator and the acoustic
-    view read, so the space treated as occupied is the space that is actually
+    Uses ``obstacle_collider``, the same mesh the solver and the acoustic view
+    read, so the space treated as occupied is the space that is actually
     simulated as occupied.
 
     Pass ``floor_height`` to keep only the objects that occupy standing space;
@@ -204,7 +202,7 @@ def furniture_footprints(
     """
     footprints = []
     for instance in instances:
-        base = simulation_collider(hssd_root, instance.template_name, face_budget)
+        base = obstacle_collider(hssd_root, instance.template_name)
         if base is None:
             continue
         mesh = base.copy()

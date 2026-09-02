@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from reverberate.acoustics import MIN_WAVELENGTH, OCTAVE_BANDS
+from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.metrics import (
     EARLY_WINDOW,
     JND_RT60_RELATIVE,
@@ -48,12 +48,10 @@ def decaying_noise(rt60: float, seconds: float = 3.0, seed: int = 0, fs: int = F
     return response
 
 
-def test_band_range_reaches_8_khz_and_sets_the_physical_floor() -> None:
-    """The range and the decimation limit are the same decision, so they are
-    checked together: moving the ceiling up an octave halves the floor."""
+def test_band_range_reaches_8_khz() -> None:
+    """Everything downstream resamples onto these, so the tuple is pinned."""
     assert OCTAVE_BANDS == (125, 250, 500, 1000, 2000, 4000, 8000)
-    assert pytest.approx(0.0429, abs=1e-3) == MIN_WAVELENGTH
-    assert wavelength_of(8000) == pytest.approx(MIN_WAVELENGTH)
+    assert wavelength_of(8000) == pytest.approx(0.0429, abs=1e-3)
 
 
 def test_rt60_recovers_a_known_decay_in_every_band() -> None:

@@ -7,11 +7,14 @@ is silent. `pyroomacoustics` already works on these seven octave bands and
 every material in its table is expressed on them, so adopting them costs
 nothing and avoids resampling anyone's data.
 
-The range runs to 8 kHz rather than stopping at 4 kHz. That matters beyond
-metrics: the shortest wavelength of interest sets the floor for how far
-geometry may be simplified (section 5.3), and moving the ceiling up an octave
-halves it, from 8.6 cm to 4.3 cm. Every deviation budget derived from
-``MIN_WAVELENGTH`` therefore tightens by a factor of two.
+The range runs to 8 kHz rather than stopping at 4 kHz, so that a metric can be
+quoted on the band a listener still hears detail in.
+
+It used to carry a second job: ``MIN_WAVELENGTH`` was the floor for how far
+geometry could be simplified. Roadmap section 6.3 retires that argument, since
+the wave solver's cost is set by the bounding box rather than by triangle
+count, and nothing simplifies geometry any more. These bands are now what they
+say they are and nothing else.
 """
 
 from __future__ import annotations
@@ -31,15 +34,6 @@ OCTAVE_BANDS: tuple[int, ...] = (125, 250, 500, 1000, 2000, 4000, 8000)
 
 #: Highest band centre, in Hz. The shortest wavelength of interest follows.
 MAX_FREQUENCY = OCTAVE_BANDS[-1]
-
-#: Shortest wavelength of interest, in metres: about 4.3 cm at 8 kHz.
-#:
-#: This is the physical floor for geometric detail. Section 5.3's argument is
-#: that structure much smaller than this does not produce specular reflection,
-#: it produces scattering, and scattering is already modelled by the scattering
-#: coefficient rather than by the mesh. Simplifying past it stops being that
-#: argument and starts being damage.
-MIN_WAVELENGTH = SPEED_OF_SOUND / MAX_FREQUENCY
 
 #: The eleven octave bands the wave solver's impedance fit is expressed on, in
 #: Hz. These are not a choice: PFFDTD's ``fit_to_Sabs_oct_11`` hard-codes
