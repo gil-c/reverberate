@@ -49,6 +49,7 @@ __all__ = [
     "CACHE_FILES",
     "CacheEntry",
     "PFFDTD_DIR_ENV",
+    "ensure_patched",
     "PFFDTD_PYTHON_ENV",
     "SceneSpec",
     "cache_root",
@@ -111,8 +112,21 @@ class SceneSpec:
 
     @property
     def key(self) -> str:
-        """A hash over the exported mesh, its materials' bytes and the grid."""
+        """A hash over the mesh, the materials, the grid and the voxeliser.
+
+        The voxeliser is in there because this project replaces one of its
+        files. Without it, an entry computed before a replacement and one
+        computed after collide on the same key, and the cache serves geometry
+        the current code would never produce -- silently, which is the failure
+        this whole module is shaped to avoid.
+        """
+        from reverberate.wave import vendored
+
         digest = hashlib.sha256()
+        digest.update(vendored.UPSTREAM_COMMIT.encode())
+        for relative in sorted(vendored.PATCHED_FILES):
+            digest.update(relative.encode())
+            digest.update(vendored.patched_path(relative).read_bytes())
         digest.update(_geometry_bytes(Path(self.model_json)))
         for label in sorted(self.mat_files):
             digest.update(label.encode())
@@ -164,6 +178,54 @@ def cache_root() -> Path:
     return path
 
 
+def ensure_patched(root: Path | None = None) -> list[str]:
+    """Install this project's replacement files into the PFFDTD checkout.
+
+    Returns the paths it wrote, so a caller can say whether anything changed.
+    Idempotent: a file already identical to ours is left alone.
+
+    Raises when the checkout is not the pinned commit, or when a file to be
+    replaced is neither the upstream we derived from nor our own copy. Both
+    mean the replacement would be a merge nobody performed, and the geometry it
+    would produce is not the geometry these patches were reasoned about. A
+    voxelisation is cached under a key that does not know any of this, so
+    failing here is the only place it can be caught.
+    """
+    from reverberate.wave import vendored
+
+    checkout = Path(root) if root is not None else pffdtd_dir()
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if head and head != vendored.UPSTREAM_COMMIT:
+        raise RuntimeError(
+            f"{checkout} is at {head[:12]}, but the replacement files were "
+            f"derived from {vendored.UPSTREAM_COMMIT[:12]}. Re-derive them "
+            f"against the new commit rather than installing them blind."
+        )
+
+    written = []
+    for relative, expected in vendored.UPSTREAM_SHA256.items():
+        target = checkout / relative
+        ours = vendored.patched_path(relative).read_bytes()
+        ours_digest = hashlib.sha256(ours).hexdigest()
+        if target.is_file():
+            found = hashlib.sha256(target.read_bytes()).hexdigest()
+            if found == ours_digest:
+                continue
+            if found != expected:
+                raise RuntimeError(
+                    f"{target} is neither the upstream we patched ({expected[:12]}) "
+                    f"nor our copy ({ours_digest[:12]}); it hashes {found[:12]}"
+                )
+        target.write_bytes(ours)
+        written.append(relative)
+    return written
+
+
 def entry_for(spec: SceneSpec) -> CacheEntry:
     """The cache entry for ``spec``, whether or not it has been computed."""
     key = spec.key
@@ -201,6 +263,8 @@ def voxelise(
         fetched = fetch_entry(store, spec.key)
         if fetched is not None:
             return fetched
+
+    ensure_patched()
 
     root = cache_root()
     staging = root / f".{spec.key}.partial.{os.getpid()}"
