@@ -18,6 +18,7 @@ from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
 from reverberate.geometry.sim_geometry import (
     obstacle_assignments,
     obstacle_collider,
+    outer_surface,
     sample_points,
     sample_source_receiver,
     shell_assignments,
@@ -185,3 +186,62 @@ def test_instances_from_another_storey_are_not_simulated(tmp_path: Path) -> None
     )
     _, summary = simulation_geometry(tmp_path, storey, [instance("abc", x=1.0), upstairs])
     assert summary.obstacle_count == 1
+
+
+class TestOuterSurface:
+    """Buried faces are what make the voxeliser build ringing cavities."""
+
+    @staticmethod
+    def _two_overlapping_boxes() -> trimesh.Trimesh:
+        """A two-body convex decomposition, as HSSD ships them."""
+        left = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        right = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        right.apply_translation([0.6, 0.0, 0.0])
+        combined = trimesh.util.concatenate([left, right])
+        assert isinstance(combined, trimesh.Trimesh)
+        return combined
+
+    def test_the_union_gives_the_real_occupied_volume(self) -> None:
+        """Two 1 m boxes overlapping by 0.4 m occupy 1.6 m3, not 2.0.
+
+        ``Trimesh.volume`` integrates over every face, so on a decomposition it
+        adds the bodies up and counts the overlap twice. That is the number the
+        union corrects, and on real HSSD colliders the two agree to the digit
+        because those bodies abut rather than interpenetrate.
+        """
+        mesh = self._two_overlapping_boxes()
+        united, ok = outer_surface(mesh)
+
+        assert ok
+        assert mesh.volume == pytest.approx(2.0, rel=1e-6)
+        assert united.volume == pytest.approx(1.6, rel=1e-5)
+        assert united.is_watertight
+
+    def test_the_union_drops_the_buried_area(self) -> None:
+        """The faces that vanish are the ones sealed inside the solid."""
+        mesh = self._two_overlapping_boxes()
+        united, _ = outer_surface(mesh)
+        # Two axis-aligned unit cubes overlapping along x merge into one
+        # 1.6 x 1 x 1 box: 2 * (1.6 + 1.6 + 1) = 8.4 m2 against the 12 m2 the
+        # decomposition presents. The 3.6 m2 difference is sealed inside.
+        assert mesh.area == pytest.approx(12.0, rel=1e-6)
+        assert united.area == pytest.approx(8.4, rel=1e-5)
+
+    def test_a_single_body_is_returned_untouched(self) -> None:
+        """Nothing is buried in one convex body, so nothing is worth doing."""
+        box = trimesh.creation.box()
+        united, ok = outer_surface(box)
+        assert ok
+        assert united is box
+
+    def test_a_mesh_the_engine_refuses_is_kept_whole(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An obstacle with buried faces beats a missing obstacle."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("no boolean engine")
+
+        monkeypatch.setattr(trimesh.boolean, "union", boom)
+        mesh = self._two_overlapping_boxes()
+        united, ok = outer_surface(mesh)
+        assert not ok
+        assert united is mesh

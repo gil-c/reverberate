@@ -75,17 +75,54 @@ class GeometrySummary:
         )
 
 
+def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
+    """The union of a collider's convex bodies, and whether the union succeeded.
+
+    HSSD ships colliders as convex decompositions whose bodies interpenetrate.
+    Every contact between two bodies leaves a pair of faces *inside* the solid,
+    where sound never reaches, and the voxeliser's adjacency graph around them
+    is a tangle of shards rather than one sealed surface.
+
+    That is not cosmetic. PFFDTD deliberately does not fill solids -- it builds
+    an adjacency graph so it can accept non-watertight scenes -- so the air
+    inside every object is simulated, bounded by nodes marked rigid, which is a
+    cavity with no absorption at all and a correspondingly enormous Q. Measured
+    on one bedroom: 403 such pockets holding 3.77 m3, 11 per cent of the room's
+    own air, and 211 of them resonating between 1 and 4 kHz at a mean size of
+    8.6 cm. The responses show the consequence as narrow lines near 2 kHz that
+    only emerge below -25 dB and drag the late decay to three times the early
+    one.
+
+    The union removes the buried faces exactly rather than approximately. It
+    conserves volume to the digit, so nothing about the shape is given up; only
+    the interior area goes, which is the area that was never reachable.
+
+    Returns the original mesh unchanged, and False, when the boolean engine
+    cannot do it: an obstacle with its buried faces is still better than no
+    obstacle, and the caller reports the count rather than hiding it.
+    """
+    if mesh.body_count <= 1:
+        return mesh, True
+    try:
+        united = trimesh.boolean.union(list(mesh.split(only_watertight=False)))
+    except Exception:
+        return mesh, False
+    if not isinstance(united, trimesh.Trimesh) or len(united.faces) == 0:
+        return mesh, False
+    return united, True
+
+
 @lru_cache(maxsize=512)
 def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
     """The mesh that both the solver and the acoustic view use for a template.
 
-    The collider exactly as HSSD ships it. ``resolve_asset`` falls back to the
-    render mesh when an object has no ``.collider.glb``, which is HSSD's own
-    rule and is what keeps doors and windows in the simulation instead of
-    silently dropping them.
+    HSSD's collider, reduced to its outer surface by :func:`outer_surface`.
+    ``resolve_asset`` falls back to the render mesh when an object has no
+    ``.collider.glb``, which is HSSD's own rule and is what keeps doors and
+    windows in the simulation instead of silently dropping them.
 
     Cached because a room usually places the same template several times and
-    the parse is the expensive part.
+    the union is the expensive part.
     """
     asset = resolve_asset(hssd_root / "objects", template)
     if asset is None:
@@ -93,7 +130,7 @@ def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
     mesh = trimesh.load(asset.collider, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):
         return None
-    return mesh
+    return outer_surface(mesh)[0]
 
 
 def shell_assignments(storey: Storey, seed: int = 0) -> list[MeshMaterialAssignment]:
