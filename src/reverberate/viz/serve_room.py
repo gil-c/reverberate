@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reverberate.viz.run_view import RunRef, build_site, discover_runs
-from reverberate.viz.scene_manifest import ManifestReport, write_manifest
+from reverberate.viz.scene_cache import SceneEntry, ensure_scene
 
 STATIC_DIR = Path(__file__).parent / "web"
 
@@ -86,11 +86,13 @@ class SiteBuilder:
         target: Path,
         first: str | None = None,
         runs_root: Path | None = None,
+        rebuild: bool = False,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
+        self.rebuild = rebuild
         self._lock = threading.Lock()
-        self._built: dict[str, ManifestReport] = {}
+        self._built: dict[str, SceneEntry] = {}
         shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
 
         self.runs = discover_runs(runs_root) if runs_root is not None else []
@@ -117,15 +119,27 @@ class SiteBuilder:
         apartments = attach_runs(list_apartments(hssd_root, first), self.runs)
         (target / "apartments.json").write_text(json.dumps(apartments))
 
-    def ensure(self, scene_id: str) -> ManifestReport:
+    def ensure(self, scene_id: str) -> SceneEntry:
         # Serialised deliberately: two browser requests for the same scene must
         # not both run the assembly, which is the slow part.
         with self._lock:
             if scene_id not in self._built:
-                report = write_manifest(self.hssd_root, scene_id, self.target / "scenes" / scene_id)
-                print(f"{scene_id}: {report.summary()}")
-                print(f"{scene_id}: {report.storey}")
-                self._built[scene_id] = report
+                cached = ensure_scene(self.hssd_root, scene_id, force=self.rebuild)
+                # The site is a temporary directory and the entry is not: the
+                # scene is linked into place rather than copied, because its
+                # asset symlinks are absolute and a copy would duplicate the
+                # exported meshes for the lifetime of the process.
+                link = self.target / "scenes" / scene_id
+                link.parent.mkdir(parents=True, exist_ok=True)
+                if link.is_symlink():
+                    link.unlink()
+                elif link.exists():
+                    shutil.rmtree(link)
+                link.symlink_to(cached.path, target_is_directory=True)
+                print(f"{scene_id}: {cached.summary()}")
+                print(f"{scene_id}: {cached.storey()}")
+                print(f"{scene_id}: cache entry {cached.key}")
+                self._built[scene_id] = cached
             return self._built[scene_id]
 
 
@@ -199,11 +213,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="reassemble the scene even if the cache already holds it",
+    )
     arguments = parser.parse_args(argv)
 
     if arguments.build_only is not None:
         builder = SiteBuilder(
-            arguments.hssd_root, arguments.build_only, arguments.scene, arguments.runs
+            arguments.hssd_root,
+            arguments.build_only,
+            arguments.scene,
+            arguments.runs,
+            arguments.rebuild,
         )
         if arguments.scene:
             builder.ensure(arguments.scene)
@@ -211,7 +234,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     with tempfile.TemporaryDirectory(prefix="reverberate-viewer-") as temporary:
-        builder = SiteBuilder(arguments.hssd_root, Path(temporary), arguments.scene, arguments.runs)
+        builder = SiteBuilder(
+            arguments.hssd_root,
+            Path(temporary),
+            arguments.scene,
+            arguments.runs,
+            arguments.rebuild,
+        )
         if arguments.scene:
             builder.ensure(arguments.scene)
         serve(builder, arguments.port, not arguments.no_browser)
