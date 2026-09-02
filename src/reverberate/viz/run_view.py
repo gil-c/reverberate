@@ -395,6 +395,10 @@ def build_site(run_dir: Path, target: Path) -> RunView:
         "theory_shell_only": report.get("theory_shell_only"),
         "theory_note": report.get("theory_note"),
         "measured_anomaly": report.get("measured_anomaly"),
+        # What the solver sealed off. Drawn, not merely recorded: sealing stops
+        # the simulation carrying sound through a region, and the whole reason
+        # the census exists is that this must be visible rather than inferred.
+        "sealed": report.get("sealed"),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
         "binaural_note": report["binaural_note"],

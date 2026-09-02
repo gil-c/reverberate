@@ -135,6 +135,19 @@ def responses_of_run(
     return audio.resample_to(signals, reduced.sample_rate_hz, delivery_rate_hz), delivery_rate_hz
 
 
+def _sealed_from_models(model_json: Path) -> dict[str, object] | None:
+    """The sealed-volume census written beside the exported model, if any.
+
+    Read rather than recomputed: the number the viewer shows has to be the one
+    the solver was given, and recomputing it here would let the two drift.
+    """
+    manifest = Path(model_json).parent / "manifest.json"
+    if not manifest.is_file():
+        return None
+    record = json.loads(manifest.read_text()).get("sealed")
+    return record if isinstance(record, dict) else None
+
+
 def measure_all(
     ir: np.ndarray, sample_rate_hz: float, *, fmax_hz: float | None = None
 ) -> list[dict[str, Any]]:
@@ -550,6 +563,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 - one linear re
         "placement": plan["placement"],
         "cost": plan["cost"],
         "room": geometry.record(),
+        # Carried through from the scene description so the run page can draw
+        # what the solver sealed. Absent on runs exported before the census.
+        "sealed": _sealed_from_models(model_json),
         "low_cut_hz": round(geometry.first_axial_mode_hz, 3),
         "low_cut_reason": (
             "the integrator's residue below the room's first axial mode is not "

@@ -21,7 +21,7 @@ roughly six minutes for a bedroom at 16 kHz, against a solve measured in hours.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -41,6 +41,7 @@ from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instan
 from reverberate.geometry.materials import material_for_label
 from reverberate.geometry.orientation import BOTH, orient_for_air
 from reverberate.geometry.pra_room import MeshMaterialAssignment
+from reverberate.geometry.sealed import SealedReport, sealed_regions
 from reverberate.viz.room_surfaces import shell_surface_labels
 
 
@@ -59,6 +60,11 @@ class GeometrySummary:
     #: share of the scene whose absorption depends on a claim about geometry
     #: that nothing was able to check.
     unoriented_faces: int = 0
+    #: The air the solver will seal inside closed bodies, and any body whose
+    #: inside could not be told from its outside. Carried here so the picture
+    #: can show what the simulation stopped carrying sound through: sealing is
+    #: correct, and it must not therefore be silent.
+    sealed: SealedReport = field(default_factory=SealedReport)
 
     @property
     def total_walls(self) -> int:
@@ -71,7 +77,7 @@ class GeometrySummary:
             f"shell {self.shell_faces} faces ({self.shell_volume:.0f} m3, "
             f"watertight={self.shell_watertight}), {self.obstacle_count} obstacles "
             f"totalling {self.obstacle_faces} faces, {self.total_walls} pra walls, "
-            f"{oriented} faces oriented"
+            f"{oriented} faces oriented, {self.sealed.summary()}"
         )
 
 
@@ -247,6 +253,7 @@ def simulation_geometry(
             for assignment in everything
             if assignment.sides is not None
         ),
+        sealed=sealed_regions(list(everything)),
     )
     return everything, summary
 

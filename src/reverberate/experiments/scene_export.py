@@ -371,6 +371,11 @@ def export(
         "source": [float(v) for v in src],
         "receiver": [float(v) for v in rec],
         "direct_path_m": direct,
+        # What the solver will seal, decided from the meshes rather than
+        # recovered from a voxel grid, so the viewer can draw it and a grid
+        # census can be checked against it. See reverberate.geometry.sealed.
+        "sealed": room_summary.sealed.record(),
+        "sealed_full": full_summary.sealed.record(),
         "scenes": [s.as_dict() for s in scenes],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

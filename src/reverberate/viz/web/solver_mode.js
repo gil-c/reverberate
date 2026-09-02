@@ -169,6 +169,42 @@ function drawSpectrogram(canvas, spec) {
  * markers, and `onStand` is offered as a button so the listener can put the
  * camera exactly where the receiver they are hearing was.
  */
+/** The air the solver sealed off, as a table a reader can challenge.
+ *
+ * Sealing stops the simulation carrying sound through a region, so it is shown
+ * rather than assumed. The frequency is what makes the row actionable: a cavity
+ * of side L would have rung at c/2L had it been left rigid, and that is how a
+ * 125 Hz boom announces itself before anyone pays for a solve.
+ */
+function sealedSection(sealed) {
+  if (!sealed) return "";
+  const rows = (sealed.interiors || [])
+    .slice(0, 8)
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.owner)}</td><td>${r.volume_m3.toFixed(3)} m³</td>` +
+        `<td>${r.first_mode_hz.toFixed(0)} Hz</td></tr>`
+    )
+    .join("");
+  const unclosed = sealed.unclosed_bodies || [];
+  return `
+    <h2>Sealed air</h2>
+    <p class="caption">There is no air inside a solid object, so the solver is
+    made to carry none there. Left coupled it is a cavity with rigid walls and no
+    absorption at all, and it rings: that is what put 3.6 s of decay into the
+    125 Hz band of an earlier run. Total ${sealed.sealed_volume_m3.toFixed(3)} m³
+    in ${(sealed.interiors || []).length} closed bodies.</p>
+    <table><tr><th>body</th><th>volume</th><th>would have rung at</th></tr>${rows}</table>
+    ${
+      unclosed.length
+        ? `<p class="note">${unclosed.length} bodies are not closed, so their
+           inside cannot be told from their outside and nothing was sealed for
+           them: ${escapeHtml(unclosed.slice(0, 6).join(", "))}</p>`
+        : `<p class="caption">Every body is closed, so no interior was left
+           undecided.</p>`
+    }`;
+}
+
 export function renderRunPanel(element, data, { onSelect, onStand }) {
   const room = data.room;
   const theory = data.theory;
@@ -211,6 +247,8 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <p class="caption">Coloured by absorption at 1 kHz, red reflective through to
     blue absorbent. Grey means the material carried no measured coefficient.</p>
     <div class="legend">${legend}</div>
+
+    ${sealedSection(data.sealed)}
 
     <h2>Sample</h2>
     <select id="run-pick">${data.samples
