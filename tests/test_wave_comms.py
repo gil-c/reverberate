@@ -273,9 +273,18 @@ class TestCacheKey:
         assert first != self._spec(tmp_path, body='{"moved": true}').key
 
     def test_changed_materials_are_a_different_entry(self, tmp_path: Path) -> None:
-        """The roadmap says 'scene and grid step'; sim_mats.h5 says otherwise."""
-        spec = self._spec(tmp_path)
-        first = spec.key
+        """The roadmap says 'scene and grid step'; sim_mats.h5 says otherwise.
+
+        Two specs, not two reads of one: ``key`` is cached per instance, so a
+        file changed after the first read of an already-read spec would not
+        be reflected -- the mutation has to happen before ``key`` is read at
+        all, which a fresh second spec guarantees.
+        """
+        first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = self._spec(first_dir).key
+        spec = self._spec(second_dir)
         (Path(spec.mat_folder) / "wall.h5").write_bytes(b"other impedance")
         assert first != spec.key
 

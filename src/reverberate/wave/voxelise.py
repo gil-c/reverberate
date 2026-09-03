@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -110,7 +111,7 @@ class SceneSpec:
     bmax: tuple[float, float, float] | None = None
     rot_az_el: tuple[float, float] = (0.0, 0.0)
 
-    @property
+    @cached_property
     def key(self) -> str:
         """A hash over the mesh, the materials, the grid and the voxeliser.
 
@@ -119,6 +120,13 @@ class SceneSpec:
         computed after collide on the same key, and the cache serves geometry
         the current code would never produce -- silently, which is the failure
         this whole module is shaped to avoid.
+
+        Cached rather than a plain property: computing it re-reads the mesh,
+        every material file and every patched voxeliser file from disk, and a
+        single :func:`voxelise` call reads ``spec.key`` several times over.
+        Safe on a frozen dataclass because ``cached_property`` stores the
+        result straight into the instance's own ``__dict__`` rather than
+        going through ``__setattr__``, which is what frozen blocks.
         """
         from reverberate.wave import vendored
 
@@ -178,11 +186,23 @@ def cache_root() -> Path:
     return path
 
 
+#: Checkouts already verified this process. Nothing but this function writes
+#: to a checkout's pinned files, and nothing else moves its HEAD, so a
+#: checkout that has passed the commit check and the per-file digest compare
+#: once stays valid for the rest of the process -- and voxelise() calls this
+#: before every scene it voxelises, potentially many per process.
+_patched_checkouts: set[Path] = set()
+
+
 def ensure_patched(root: Path | None = None) -> list[str]:
     """Install this project's replacement files into the PFFDTD checkout.
 
     Returns the paths it wrote, so a caller can say whether anything changed.
-    Idempotent: a file already identical to ours is left alone.
+    Idempotent: a file already identical to ours is left alone. Memoized per
+    process per checkout, so a caller voxelising many scenes against the same
+    checkout pays for the git subprocess and the file digests once rather than
+    once per scene; a later call for a checkout already verified this process
+    returns ``[]`` without touching disk.
 
     Raises when the checkout is not the pinned commit, or when a file to be
     replaced is neither the upstream we derived from nor our own copy. Both
@@ -193,7 +213,10 @@ def ensure_patched(root: Path | None = None) -> list[str]:
     """
     from reverberate.wave import vendored
 
-    checkout = Path(root) if root is not None else pffdtd_dir()
+    checkout = Path(root).resolve() if root is not None else pffdtd_dir()
+    if checkout in _patched_checkouts:
+        return []
+
     head = subprocess.run(
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         capture_output=True,
@@ -223,6 +246,7 @@ def ensure_patched(root: Path | None = None) -> list[str]:
                 )
         target.write_bytes(ours)
         written.append(relative)
+    _patched_checkouts.add(checkout)
     return written
 
 
