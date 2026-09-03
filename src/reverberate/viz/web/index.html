@@ -78,6 +78,9 @@
         <button id="btn-colour" class="active">Colour</button>
         <button id="btn-label">Label</button>
         <button id="btn-acoustic" title="what the wave solver read and returned">Acoustic</button>
+        <!-- Shown only when an apartment has more than one run. With one there
+             is nothing to choose, and a select of one is furniture. -->
+        <select id="run-choice" hidden title="which solver run to open"></select>
       </div>
       <div id="legend"></div>
       <div id="hint">Drag to look around. W A S D to walk.</div>
@@ -99,7 +102,7 @@
       import * as THREE from "three";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
-      import { buildRunGroup, loadRun, renderRunPanel } from "./solver_mode.js";
+      import { buildRunGroup, buildVoxelCloud, loadRun, renderRunPanel } from "./solver_mode.js";
 
       // Eye height of a standing adult, in metres, held constant: a person's
       // head does not rise when they look up. Body translation and head
@@ -161,6 +164,17 @@
       let runView = null;
       let runShow = null;
       let apartmentRuns = [];
+      // Index into apartmentRuns. discover_runs sorts by directory name and
+      // the convention is wNN, so the newest sorts last and that is the
+      // default: opening an apartment on its oldest run means opening it on
+      // the one whose defects have since been fixed. Sorting by name rather
+      // than by date is the assumption; it holds while the convention does.
+      let runChoice = 0;
+      // Bumped by every buildAcousticMode() call, so a voxel-cloud fetch that
+      // is still in flight when the run changes underneath it can tell, on
+      // waking up, that it is no longer the current run and back off instead
+      // of mutating whichever run is now on screen.
+      let acousticGeneration = 0;
 
       function ringContains(x, z, ring) {
         let inside = false;
@@ -324,13 +338,60 @@
       }
 
       async function buildAcousticMode() {
-        runData = await loadRun(apartmentRuns[0].url);
-        runView = buildRunGroup(THREE, runData);
-        runShow = renderRunPanel(document.getElementById("run-panel"), runData, {
-          onSelect: (sample) => runView.highlight(sample.source_index, sample.receiver_index),
+        // Claimed before the first await, and closed over by name (not read
+        // off the shared `runData`/`runView` again after an await): switching
+        // runs while this call's voxel-cloud fetch is still in flight used to
+        // let the stale fetch's completion mutate whichever run had since
+        // become current, silently drawing one run's grid into another's
+        // scene. Local bindings can't be reassigned out from under a pending
+        // await; only the module-level ones could.
+        const generation = ++acousticGeneration;
+        const data = await loadRun(apartmentRuns[runChoice].url);
+        const view = buildRunGroup(THREE, data);
+        // Narrower residual: if run.json fetches themselves resolved out of
+        // order (two run switches close enough together), this assignment
+        // could still lose to an older generation. Left alone rather than
+        // guarded, because doing that right means deciding what an early
+        // return here hands back to setMode's `await buildMode(mode)`, which
+        // is a change to the mode-switching flow this fix does not make.
+        runData = data;
+        runView = view;
+        runShow = renderRunPanel(document.getElementById("run-panel"), data, {
+          onSelect: (sample) => view.highlight(sample.source_index, sample.receiver_index),
           onStand: (sample) => standAt(sample.receiver_index),
         });
-        return runView.group;
+        // Voxels are what the acoustic mode is for, so they are the default and
+        // the triangles are the alternative. The two are exclusive: they
+        // describe the same boundary, so drawing both puts opaque faces exactly
+        // where the points are and the points lose, which is how this shipped
+        // looking like a mesh view with a checkbox that did nothing visible.
+        const toggle = document.getElementById("run-voxels");
+        if (toggle) {
+          let cloud = null;
+          const apply = async () => {
+            if (toggle.checked && !cloud) {
+              toggle.disabled = true;
+              setBusy("loading the grid…");
+              cloud = await buildVoxelCloud(THREE, data);
+              // Another buildAcousticMode() call has since started: this
+              // fetch's result belongs to a run that is no longer on screen,
+              // so it is dropped rather than attached anywhere.
+              if (generation !== acousticGeneration) return;
+              toggle.disabled = false;
+              setBusy("");
+              if (cloud) view.group.add(cloud);
+            }
+            if (generation !== acousticGeneration) return;
+            // A run whose grid has been collected has no cloud to show; the
+            // triangles stay rather than leaving an empty room.
+            const voxels = toggle.checked && cloud !== null;
+            if (cloud) cloud.visible = voxels;
+            for (const surface of view.surfaces) surface.visible = !voxels;
+          };
+          toggle.onchange = apply;
+          await apply();
+        }
+        return view.group;
       }
 
       function standAt(receiverIndex) {
@@ -440,6 +501,17 @@
       // on screen to say it was still running.
       let assemblyMessage = "";
 
+      document.getElementById("run-choice").onchange = async (event) => {
+        // Drop the built group as well as the payload: it holds the previous
+        // run's surfaces, and adding the new one beside it would draw two
+        // rooms at once.
+        runChoice = Number(event.target.value);
+        if (groups.acoustic) scene.remove(groups.acoustic);
+        groups.acoustic = null;
+        runData = runView = runShow = null;
+        await setMode("acoustic");
+      };
+
       for (const mode of MODES) {
         document.getElementById(`btn-${mode}`).onclick = () => setMode(mode);
       }
@@ -518,6 +590,13 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
+        runChoice = Math.max(0, apartmentRuns.length - 1);
+        const picker = document.getElementById("run-choice");
+        picker.hidden = apartmentRuns.length < 2;
+        picker.innerHTML = apartmentRuns
+          .map((r, i) => `<option value="${i}">${r.name}</option>`)
+          .join("");
+        picker.value = String(runChoice);
         // A disabled button must not still look like the mode you are in. The
         // next setMode is minutes away, behind the apartment assembly, so
         // leaving the highlight up says the acoustic view is on screen for the

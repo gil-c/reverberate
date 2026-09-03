@@ -102,20 +102,15 @@ def test_changing_the_geometry_code_changes_the_key(
 ) -> None:
     """An entry must not outlive the code that produced it.
 
-    Editing how an envelope is chosen changes what an assembly would return,
-    and a cache that ignored that would serve a stale room for as long as the
-    scene files stayed put -- silently, which is the worst way to be wrong.
+    Editing how a collider is chosen or oriented changes what an assembly would
+    return, and a cache that ignored that would serve a stale room for as long
+    as the scene files stayed put -- silently, which is the worst way to be
+    wrong.
     """
     hssd = build_scene_files(tmp_path / "hssd")
-    before = scene_cache.scene_key(hssd, SCENE, 0.1)
+    before = scene_cache.scene_key(hssd, SCENE)
     monkeypatch.setattr(scene_cache, "code_digest", lambda: "a different build")
-    assert scene_cache.scene_key(hssd, SCENE, 0.1) != before
-
-
-def test_the_detail_length_is_part_of_the_key(tmp_path: Path) -> None:
-    """The viewer asks for the finest rung; a coarser one is a different scene."""
-    hssd = build_scene_files(tmp_path / "hssd")
-    assert scene_cache.scene_key(hssd, SCENE, 0.1) != scene_cache.scene_key(hssd, SCENE, 0.2)
+    assert scene_cache.scene_key(hssd, SCENE) != before
 
 
 def test_an_interrupted_assembly_publishes_nothing(
@@ -134,7 +129,7 @@ def test_an_interrupted_assembly_publishes_nothing(
     with pytest.raises(RuntimeError):
         scene_cache.ensure_scene(hssd, SCENE)
 
-    entry = scene_cache.entry_for(hssd, SCENE, 0.1)
+    entry = scene_cache.entry_for(hssd, SCENE)
     assert not entry.complete
     # Nothing at all is left behind, staging directories included.
     assert list(scene_cache.cache_root().iterdir()) == []

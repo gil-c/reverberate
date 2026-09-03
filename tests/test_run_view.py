@@ -28,6 +28,7 @@ from reverberate.viz.run_view import (
     build_site,
     decay_curve_points,
     envelope,
+    model_json_of,
     spectrogram,
     surface_groups,
 )
@@ -212,6 +213,19 @@ def _write_run(root: Path) -> Path:
         "responses": 2,
         "binaural": False,
         "binaural_note": "two bare points in a room are not a pair of ears",
+        "sealed": {
+            "sealed_volume_m3": 3.306,
+            "unclosed_bodies": ["curtain_2"],
+            "interiors": [
+                {
+                    "owner": "bed_5",
+                    "volume_m3": 0.755,
+                    "extent_m": 1.635,
+                    "first_mode_hz": 104.9,
+                    "centroid": [0.0, 0.0, 0.0],
+                }
+            ],
+        },
         "placement_seed": 1,
         "placement": {
             "seed": 1,
@@ -301,6 +315,37 @@ def test_the_page_keeps_the_caveats_the_report_carried(tmp_path: Path) -> None:
     assert payload["omissions"] == ["no air absorption"]
     assert payload["theory_shell_only"]["sabine_rt60_s"] == 0.6
     assert payload["dry_voice"]["licence"] == "CC BY-NC 4.0"
+
+
+def test_the_page_can_show_what_the_solver_sealed(tmp_path: Path) -> None:
+    """Sealing stops the simulation carrying sound somewhere, so it is drawn.
+
+    Both halves matter: what was sealed, and which bodies were left undecided
+    because they are not closed. A page that showed only the first would make
+    the defect case the invisible one.
+    """
+    run = _write_run(tmp_path)
+
+    build_site(run, tmp_path / "site")
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+
+    assert payload["sealed"]["sealed_volume_m3"] == 3.306
+    assert payload["sealed"]["unclosed_bodies"] == ["curtain_2"]
+    assert payload["sealed"]["interiors"][0]["first_mode_hz"] == 104.9
+
+
+def test_a_run_exported_before_the_census_still_builds(tmp_path: Path) -> None:
+    """Older runs carry no census, and must not become unopenable for it."""
+    run = _write_run(tmp_path)
+    report_path = run / "report.json"
+    report = json.loads(report_path.read_text())
+    del report["sealed"]
+    report_path.write_text(json.dumps(report))
+
+    build_site(run, tmp_path / "site")
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+
+    assert payload["sealed"] is None
 
 
 def _spectrogram_image(spec: dict[str, Any]) -> np.ndarray:
@@ -557,3 +602,33 @@ def test_the_run_module_owns_the_panel_and_the_geometry() -> None:
 
     assert "renderRunPanel" in module
     assert "buildRunGroup" in module
+
+
+class TestModelJsonResolution:
+    """A report's model path has to open from wherever the viewer is started."""
+
+    def test_an_absolute_path_is_used_as_it_stands(self, tmp_path: Path) -> None:
+        model = tmp_path / "models" / "bedroom.json"
+        model.parent.mkdir(parents=True)
+        model.write_text("{}")
+
+        assert model_json_of(tmp_path, {"model_json": str(model)}) == model
+
+    def test_a_relative_path_is_found_from_the_run_directory(self, tmp_path: Path) -> None:
+        """Reports written before the path was resolved carry a relative one."""
+        run = tmp_path / "runs" / "w27"
+        model = run / "models" / "bedroom.json"
+        model.parent.mkdir(parents=True)
+        model.write_text("{}")
+
+        found = model_json_of(run, {"model_json": "models/bedroom.json"})
+
+        assert found.resolve() == model.resolve()
+
+    def test_a_path_that_is_nowhere_says_where_it_looked(self, tmp_path: Path) -> None:
+        """Naming only the last candidate would send a reader to the wrong place."""
+        run = tmp_path / "runs" / "w27"
+        run.mkdir(parents=True)
+
+        with pytest.raises(FileNotFoundError, match="is not at any of"):
+            model_json_of(run, {"model_json": "models/missing.json"})

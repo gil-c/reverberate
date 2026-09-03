@@ -1,11 +1,11 @@
 """Keep an assembled apartment on disk, so the viewer pays for it once.
 
-Assembling one storey costs about 140 seconds, and profiling says where: over
-99 per cent of it is :func:`~reverberate.geometry.envelope.acoustic_envelope`
-searching for the envelope and the face budget of each of the 231 pieces of
-furniture, at roughly six ``deviation`` measurements per piece. None of that
-work is wasted, but all of it was repeated on every start, because the served
-site was built into a ``TemporaryDirectory`` that went away with the process.
+Assembling one storey used to cost about 140 seconds, over 99 per cent of it
+spent fitting an acoustic envelope to each of the 231 pieces of furniture. That
+search is gone, so assembly is now dominated by parsing and exporting the
+colliders instead. It is still repeated on every start unless it is kept,
+because the served site is built into a ``TemporaryDirectory`` that goes away
+with the process.
 
 So an assembled scene is cached the way a voxelisation already is, and
 deliberately in the same shape: ``<data root>/cache/<name>/<key>/`` holding the
@@ -15,14 +15,14 @@ nothing a later run would trust. See :mod:`reverberate.wave.voxelise`, whose
 mechanism this mirrors.
 
 **What the key covers.** The scene's own two source files, byte for byte, the
-detail length the colliders are reduced to, the seed that pins the sampling,
-and the source of every module that shapes the result. That last part is what
-makes the cache safe to keep across edits: change how an envelope is chosen and
-the key changes with it, so the old entry is neither served nor deleted. The
-HSSD assets themselves are not hashed -- reading a hundred megabytes of glTF to
-decide whether to skip two minutes of geometry would give a good part of the
-saving back -- so a dataset edited in place is the one thing this cache would
-not notice.
+seed that pins the sampling, and the source of every module that shapes the
+result. That last part is what makes the cache safe to keep across edits:
+change how a material is chosen, or a collider placed, and the key changes
+with it, so the old entry is neither served nor deleted. The HSSD assets
+themselves are not hashed -- reading a hundred megabytes of glTF to decide
+whether to skip two minutes of geometry would give a good part of the saving
+back -- so a dataset edited in place is the one thing this cache would not
+notice.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from reverberate.geometry.decimation import DETAIL_LEVELS
 from reverberate.settings import data_root
 from reverberate.viz.scene_manifest import write_manifest
 
@@ -57,10 +56,7 @@ CACHE_NAME = "scenes"
 #: quietly skip: it would mean the key no longer covers the code it claims to.
 SOURCES = (
     "acoustics.py",
-    "geometry/absorption.py",
     "geometry/apartment.py",
-    "geometry/decimation.py",
-    "geometry/envelope.py",
     "geometry/hssd_assets.py",
     "geometry/hssd_room.py",
     "geometry/materials.py",
@@ -88,7 +84,7 @@ def code_digest() -> str:
     return digest.hexdigest()
 
 
-def scene_key(hssd_root: Path, scene_id: str, detail_length: float, seed: int = 0) -> str:
+def scene_key(hssd_root: Path, scene_id: str, seed: int = 0) -> str:
     """Everything an assembled scene depends on, and nothing else."""
     digest = hashlib.sha256()
     for path in (
@@ -100,7 +96,6 @@ def scene_key(hssd_root: Path, scene_id: str, detail_length: float, seed: int = 
         json.dumps(
             {
                 "scene_id": scene_id,
-                "detail_length": detail_length,
                 "seed": seed,
                 "code": code_digest(),
             },
@@ -132,9 +127,9 @@ class SceneEntry:
         return str(self.manifest.get("storey", ""))
 
 
-def entry_for(hssd_root: Path, scene_id: str, detail_length: float, seed: int = 0) -> SceneEntry:
+def entry_for(hssd_root: Path, scene_id: str, seed: int = 0) -> SceneEntry:
     """The cache entry for this scene, whether or not it has been assembled."""
-    key = scene_key(hssd_root, scene_id, detail_length, seed)
+    key = scene_key(hssd_root, scene_id, seed)
     path = cache_root() / key
     record = path / "entry.json"
     manifest = json.loads(record.read_text()) if record.is_file() else {}
@@ -144,7 +139,6 @@ def entry_for(hssd_root: Path, scene_id: str, detail_length: float, seed: int = 
 def ensure_scene(
     hssd_root: Path,
     scene_id: str,
-    detail_length: float | None = None,
     seed: int = 0,
     force: bool = False,
 ) -> SceneEntry:
@@ -155,9 +149,7 @@ def ensure_scene(
     mid-assembly cannot leave a half scene that :attr:`SceneEntry.complete`
     would accept.
     """
-    if detail_length is None:
-        detail_length = DETAIL_LEVELS[0].detail_length
-    entry = entry_for(hssd_root, scene_id, detail_length, seed)
+    entry = entry_for(hssd_root, scene_id, seed)
     if entry.complete and not force:
         return entry
 
@@ -170,7 +162,6 @@ def ensure_scene(
         record = {
             "scene_id": scene_id,
             "key": entry.key,
-            "detail_length": detail_length,
             "seed": seed,
             "summary": report.summary(),
             "storey": report.storey,
@@ -187,4 +178,4 @@ def ensure_scene(
     finally:
         if staging.exists():
             shutil.rmtree(staging)
-    return entry_for(hssd_root, scene_id, detail_length, seed)
+    return entry_for(hssd_root, scene_id, seed)

@@ -134,6 +134,11 @@ class Instance:
     gpu_name: str
     #: Unix timestamp the contract started, or ``None`` before it does.
     start_date: float | None
+    #: Vast.ai's own account of what the instance is doing, and the only way to
+    #: tell "still pulling a 5 GB image" from "this host is broken". Both show
+    #: as ``loading``, and one is worth waiting twenty minutes for while the
+    #: other is worth nothing at all. Empty when the API offers no message.
+    status_msg: str = ""
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Instance:
@@ -146,6 +151,7 @@ class Instance:
             ssh_port=int(raw.get("ssh_port") or 0),
             gpu_name=str(raw.get("gpu_name", "")),
             start_date=float(start) if start else None,
+            status_msg=" ".join(str(raw.get("status_msg") or "").split()),
         )
 
     def uptime_hours(self, now: float | None = None) -> float:
@@ -407,11 +413,19 @@ class VastClient:
         return False
 
 
-def arm_hard_stop(instance_id: int, hours: float) -> int:
-    """Spawn a detached watchdog that destroys ``instance_id`` after ``hours``.
+def arm_hard_stop(instance_id: int, deadline: float) -> int:
+    """Spawn a detached watchdog that destroys ``instance_id`` at ``deadline``.
 
     Detached on purpose: the whole point is that it survives the session, the
     terminal and the agent that started it. Returns the watchdog's pid.
+
+    ``deadline`` is an absolute unix timestamp, not a duration, and that is the
+    W22 defect. The watchdog used to be handed a number of hours and spend them
+    in a single ``time.sleep``. A ``sleep`` does not advance while the machine
+    is suspended, so every minute the laptop spent asleep was a minute the
+    rented instance kept billing unwatched -- which is how W2 ran 1.97 h against
+    a 1.5 h cap. Against a wall-clock timestamp, suspending the machine can
+    delay the kill by one poll interval and no more.
     """
     command = [
         sys.executable,
@@ -419,7 +433,7 @@ def arm_hard_stop(instance_id: int, hours: float) -> int:
         "reverberate.gpu.vast",
         "hard-stop",
         str(instance_id),
-        str(hours),
+        str(deadline),
     ]
     log = runs_dir() / f"hard_stop_{instance_id}.log"
     with log.open("a") as handle:
@@ -460,7 +474,7 @@ def rent(
     instance_id = client.create(offer.id, image=image, disk_gb=disk_gb)
     deadline = time.time() + hours * 3600.0
     try:
-        pid = arm_hard_stop(instance_id, hours)
+        pid = arm_hard_stop(instance_id, deadline)
     except OSError:
         client.destroy_and_verify(instance_id)
         raise VastError("could not arm the hard stop, so the instance was destroyed") from None
@@ -498,9 +512,24 @@ def teardown(client: VastClient, instance_id: int) -> bool:
     return gone
 
 
-def _hard_stop(instance_id: int, hours: float) -> int:
-    """Watchdog body: sleep, then destroy and verify. Run detached."""
-    time.sleep(max(0.0, hours * 3600.0))
+#: How often the watchdog wakes to compare the clock against its deadline.
+#: Short enough that a suspend-and-resume cannot overshoot by much, long enough
+#: that a watchdog living for hours costs nothing.
+HARD_STOP_POLL_S = 30.0
+
+
+def _hard_stop(instance_id: int, deadline: float, poll_s: float = HARD_STOP_POLL_S) -> int:
+    """Watchdog body: wait for the wall clock to pass ``deadline``, then kill.
+
+    The wait is a poll against :func:`time.time` rather than one long sleep,
+    so that suspending the machine cannot postpone the deadline. See
+    :func:`arm_hard_stop`.
+    """
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_s, remaining))
     from reverberate import auth
 
     auth.inject([API_KEY_ENV])

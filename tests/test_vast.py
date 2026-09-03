@@ -11,6 +11,7 @@ Nothing here touches the network.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -195,7 +196,7 @@ class TestRentRefuses:
     ) -> None:
         # An instance with no hard stop is exactly the failure mode this module
         # exists to prevent, so it must not survive.
-        def boom(instance_id: int, hours: float) -> int:
+        def boom(instance_id: int, deadline: float) -> int:
             raise OSError("no fork")
 
         monkeypatch.setattr(vast, "arm_hard_stop", boom)
@@ -211,15 +212,19 @@ class TestRentSucceeds:
     ) -> None:
         armed: list[tuple[int, float]] = []
 
-        def record(instance_id: int, hours: float) -> int:
-            armed.append((instance_id, hours))
+        def record(instance_id: int, deadline: float) -> int:
+            armed.append((instance_id, deadline))
             return 4242
 
         monkeypatch.setattr(vast, "arm_hard_stop", record)
         client = FakeClient()
+        before = time.time()
         rental = vast.rent(client, make_offer(dph=0.327), hours=3.0, image="cuda")  # type: ignore[arg-type]
 
-        assert armed == [(rental.instance_id, 3.0)]
+        # An absolute timestamp, not a duration: see arm_hard_stop on W22.
+        assert len(armed) == 1
+        assert armed[0][0] == rental.instance_id
+        assert before + 3 * 3600 <= armed[0][1] <= time.time() + 3 * 3600
         assert rental.watchdog_pid == 4242
         entry = vast.read_ledger()[0]
         assert entry["event"] == "rent"
@@ -229,7 +234,7 @@ class TestRentSucceeds:
     def test_the_credential_never_reaches_the_ledger(
         self, data_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(vast, "arm_hard_stop", lambda instance_id, hours: 1)
+        monkeypatch.setattr(vast, "arm_hard_stop", lambda instance_id, deadline: 1)
         monkeypatch.setenv(vast.API_KEY_ENV, "secret-key-value")
         vast.rent(FakeClient(), make_offer(), hours=1.0, image="img")  # type: ignore[arg-type]
         assert "secret-key-value" not in vast.ledger_path().read_text()
@@ -310,3 +315,85 @@ def test_ledger_file_is_one_json_object_per_line(tmp_path: Path) -> None:
     lines = path.read_text().splitlines()
     assert len(lines) == 2
     assert all(json.loads(line)["instance_id"] == 1 for line in lines)
+
+
+class TestHardStopSurvivesSuspension:
+    """W22: the watchdog must not lose time while the machine is asleep."""
+
+    @staticmethod
+    def _client_holding(instance_id: int) -> FakeClient:
+        client = FakeClient()
+        client.live[instance_id] = Instance(
+            id=instance_id,
+            status="running",
+            dph_total=0.30,
+            ssh_host="ssh.example",
+            ssh_port=22,
+            gpu_name="RTX 4090",
+            start_date=None,
+        )
+        return client
+
+    def test_a_deadline_already_past_kills_at_once(
+        self, data_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Waking up late is the suspend case, and it must still fire.
+
+        A watchdog spending its whole wait in one ``time.sleep`` cannot tell
+        that the machine suspended underneath it. One polling the wall clock
+        finds the deadline gone and acts immediately, which is the fix.
+        """
+        client = self._client_holding(77)
+        monkeypatch.setattr(vast, "VastClient", lambda *a, **k: client)
+        monkeypatch.setattr("reverberate.auth.inject", lambda names: None)
+
+        assert vast._hard_stop(77, deadline=time.time() - 3600.0) == 0
+        assert client.destroyed == [77]
+
+    def test_no_single_sleep_outlasts_the_deadline(
+        self, data_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each nap is capped, so a suspend can cost one poll interval, not the run."""
+        slept: list[float] = []
+        clock = [1000.0]
+
+        def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock[0] += seconds
+
+        client = self._client_holding(77)
+        monkeypatch.setattr("reverberate.gpu.vast.time.sleep", fake_sleep)
+        monkeypatch.setattr("reverberate.gpu.vast.time.time", lambda: clock[0])
+        monkeypatch.setattr(vast, "VastClient", lambda *a, **k: client)
+        monkeypatch.setattr("reverberate.auth.inject", lambda names: None)
+
+        vast._hard_stop(77, deadline=1070.0, poll_s=30.0)
+
+        assert slept == [30.0, 30.0, 10.0]
+        assert client.destroyed == [77]
+
+
+class TestInstanceDiagnostics:
+    """status_msg is what separates a slow pull from a dead host."""
+
+    def test_the_status_message_is_carried_and_collapsed(self) -> None:
+        instance = Instance.from_api(
+            {
+                "id": 7,
+                "actual_status": "loading",
+                "dph_total": 1.0,
+                "ssh_host": "ssh9.vast.ai",
+                "ssh_port": 2,
+                "gpu_name": "A100 SXM4",
+                "status_msg": "  pulling\n  image   layer 3/9 \n",
+            }
+        )
+        assert instance.status == "loading"
+        assert instance.status_msg == "pulling image layer 3/9"
+
+    def test_a_missing_status_message_is_empty_not_none(self) -> None:
+        """Callers format it into logs, so it must never be the string "None"."""
+        instance = Instance.from_api(
+            {"id": 7, "actual_status": "running", "dph_total": 1.0, "gpu_name": "x"}
+        )
+        assert instance.status_msg == ""

@@ -28,11 +28,13 @@ classes, not over a hand-picked subset, so no partition of the catalogue into
 The ratio between the last two measured bands, 2 and 4 kHz, is applied once per
 octave above 4 kHz, clipped:
 
-- **never above 1.** A porous absorber still rising at 4 kHz is approaching a
-  plateau, not accelerating; continuing a rise two octaves would take
-  ``curtain_light`` from a measured 0.35 to an invented 0.75. Clipping at the
-  plateau degenerates to the old carry-over rule exactly where the old rule was
-  defensible.
+- **never above 1 at 8 kHz, and never above 0.9 at 16 kHz.** A porous absorber
+  still rising at 4 kHz is approaching a plateau, not accelerating; continuing
+  a rise two octaves would take ``curtain_light`` from a measured 0.35 to an
+  invented 0.75. But holding the plateau across both octaves is its own
+  invention in the generous direction: carpet's random-incidence absorption is
+  measured to peak near 6.5 kHz and fall after it, so 8 kHz may hold the 4 kHz
+  value and 16 kHz may not. See :data:`PLATEAU_TOP_RATIO`.
 - **never below** :data:`MIN_OCTAVE_RATIO`. This bounds how far a single
   measured ratio, itself the quotient of two values rounded to two decimals,
   is allowed to be projected.
@@ -80,6 +82,25 @@ LOW_BANDS: tuple[float, ...] = tuple(band for band in SOLVER_BANDS if band < MEA
 #: twice more on the strength of it.
 MIN_OCTAVE_RATIO = 0.8
 
+#: What a class that would otherwise plateau does in the top octave instead.
+#: It applies only to a class whose own ratio is 1 or above; one already falling
+#: keeps its own ratio in both octaves, because its measurement is better
+#: evidence than this bound.
+#:
+#: The reason is the only high-frequency measurement this project has been able
+#: to find. Random-incidence absorption of carpet peaks near 0.75 around 6.3 to
+#: 6.5 kHz and falls after it; ISO 354 and ASTM C423 both stop at 5 kHz, which
+#: is why no catalogue carries the bands beyond. So 8 kHz sits at the peak and
+#: holding the 4 kHz value there is defensible, while holding it two octaves up
+#: asserts a plateau the measurement contradicts.
+#:
+#: **The 0.9 is a judgement, not a measurement.** What is measured is that the
+#: curve turns over; how fast it falls afterwards is not, for any class here.
+#: It is set in the conservative direction on purpose: too little absorption
+#: lengthens the top octave, which is visible in a decay curve, where too much
+#: quietly flatters the room.
+PLATEAU_TOP_RATIO = 0.9
+
 #: The locally reactive model cannot represent more than this, and PFFDTD's
 #: ``convert_Sabs_to_Yn`` clips to it with a warning. Clip here instead, so the
 #: clip is visible in our own report rather than in the solver's stdout.
@@ -110,9 +131,16 @@ def extend_high_bands(measured: np.ndarray) -> HighBandExtension:
     measured = np.asarray(measured, dtype=float)
     last, previous = float(measured[-1]), float(measured[-2])
     ratio = 1.0 if previous <= 0.0 else last / previous
+    # Applied octave by octave, because the ceiling is not the same in both:
+    # see MAX_OCTAVE_RATIO. A class already falling at 4 kHz keeps its own
+    # ratio in both bands and is untouched by this.
     applied = float(np.clip(ratio, MIN_OCTAVE_RATIO, 1.0))
-    values = tuple(float(np.clip(last * applied**n, 0.0, MAX_ABSORPTION)) for n in (1, 2))
-    return HighBandExtension(measured_ratio=ratio, applied_ratio=applied, values=values)
+    # The top octave is where a plateau stops being defensible. A class that is
+    # already falling is left alone: its own measurement outranks this bound.
+    top = PLATEAU_TOP_RATIO if applied >= 1.0 else applied
+    first = float(np.clip(last * applied, 0.0, MAX_ABSORPTION))
+    second = float(np.clip(first * top, 0.0, MAX_ABSORPTION))
+    return HighBandExtension(measured_ratio=ratio, applied_ratio=applied, values=(first, second))
 
 
 def extend_to_solver_bands(measured: np.ndarray) -> tuple[np.ndarray, HighBandExtension]:

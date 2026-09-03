@@ -39,9 +39,12 @@ this one's dataset.
 
 A room is represented by its 3D mesh and by the acoustic properties of each of
 its surfaces, walls, floor and furniture. Rooms are extruded from their authored
-floor polygons so they are watertight by construction, furniture is reduced to
-fitted envelopes rather than convex decompositions, and each surface carries an
-absorption curve per octave band together with a transmission coefficient.
+floor polygons so they are watertight by construction, furniture reaches the
+solver as the exact boolean union of the convex bodies its collider ships as,
+and each surface carries an absorption curve per octave band together with a
+transmission coefficient. The union removes the faces buried between adjacent
+bodies, which sound never reaches, and conserves the volume to the digit: the
+shape is not approximated, only the unreachable area goes.
 
 That single scene description is handed to both solvers. Each covers the
 frequency range where its approximation holds, and the two are recombined across
@@ -98,8 +101,11 @@ python -m reverberate.wave solve --key KEY --comms comms_out.h5 \
     --host H --port P --out sim_outs.h5
 ```
 
-The cache is content addressed on the scene, the materials and the grid, so a
-room is voxelised once however many sources and listeners it later carries. The
+The cache is content addressed on the scene, the materials, the grid and the
+voxeliser, so a room is voxelised once however many sources and listeners it
+later carries. The voxeliser is in the key because this project replaces one of
+its files: without it, an entry computed before a replacement would answer for
+one computed after. The
 second command is the piece PFFDTD does not offer: it places a new source and
 its receivers on an already voxelised grid, which is what makes one voxelisation
 worth amortising. Its output is bit for bit identical to what a full `sim_setup`

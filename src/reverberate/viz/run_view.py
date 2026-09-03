@@ -46,6 +46,7 @@ __all__ = [
     "decay_curve_points",
     "discover_runs",
     "envelope",
+    "model_json_of",
     "model_materials",
     "run_scene",
     "spectrogram",
@@ -362,6 +363,61 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
     return found
 
 
+def _write_voxels(report: dict[str, Any], target: Path) -> dict[str, Any] | None:
+    """Thin the run's voxelisation into the page, when its cache is still here.
+
+    Optional on purpose. The cache is content addressed and sized in
+    terabytes, so it is the first thing pruned; a run page that stopped
+    building because a grid was collected would be a worse trade than a run
+    page without the voxel view.
+    """
+    root = report.get("cache_root")
+    key = report.get("cache_key")
+    if not root or not key:
+        return None
+    cache_dir = Path(str(root)) / str(key)
+    if not (cache_dir / "vox_out.h5").is_file():
+        return None
+    from reverberate.viz.vox_view import read_surface, write_voxel_payload
+
+    # The labels come from the voxelisation's own manifest, and nowhere else.
+    # A node carries a material *index*, and the index is a position in the
+    # list the voxeliser was handed: the room's thirteen, not the apartment's
+    # fifty-two. Reading them from the model would name every node wrongly, and
+    # reading them from the report -- which has no such key -- produced an
+    # empty list that merely looked like a material list.
+    manifest = json.loads((cache_dir / "manifest.json").read_text())
+    labels = sorted(manifest.get("materials") or {})
+    return write_voxel_payload(read_surface(cache_dir), labels, target)
+
+
+def model_json_of(run_dir: Path, report: dict[str, Any]) -> Path:
+    """Where the run's exported model actually is.
+
+    Reports written before the path was resolved carry a relative one, which
+    only opens from the directory it was written in. The viewer is started
+    from wherever the reader happens to be -- a run configuration, a shell, a
+    different checkout -- so it is resolved here against the places it could
+    sensibly be, and the failure names every one of them rather than the last.
+    """
+    stored = Path(str(report["model_json"]))
+    if stored.is_absolute() and stored.is_file():
+        return stored
+    tried = [stored]
+    # The runs root, then its parent: a relative path in a report is relative
+    # to the tree the run lives in, and "data/runs/x/models/y.json" is written
+    # from the checkout root, two levels above the run directory.
+    for root in (Path.cwd(), run_dir, run_dir.parent, run_dir.parent.parent.parent):
+        candidate = root / stored
+        tried.append(candidate)
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"{run_dir.name}: the exported model named in report.json is not at any "
+        "of " + ", ".join(str(path) for path in tried)
+    )
+
+
 def build_site(run_dir: Path, target: Path) -> RunView:
     """Write one run's payload and audio into ``target``.
 
@@ -372,7 +428,8 @@ def build_site(run_dir: Path, target: Path) -> RunView:
     """
     run_dir, target = Path(run_dir), Path(target)
     report = json.loads((run_dir / "report.json").read_text())
-    model = json.loads(Path(str(report["model_json"])).read_text())
+    model_json = model_json_of(run_dir, report)
+    model = json.loads(model_json.read_text())
 
     target.mkdir(parents=True, exist_ok=True)
     audio_names: set[str] = set()
@@ -381,7 +438,7 @@ def build_site(run_dir: Path, target: Path) -> RunView:
         shutil.copytree(source_audio, target / "audio", dirs_exist_ok=True)
         audio_names = {path.name for path in source_audio.glob("*.wav")}
 
-    groups = surface_groups(model, model_materials(Path(str(report["model_json"]))))
+    groups = surface_groups(model, model_materials(model_json))
     placement = report["placement"]
     scene = run_scene(run_dir)
     payload = {
@@ -395,6 +452,11 @@ def build_site(run_dir: Path, target: Path) -> RunView:
         "theory_shell_only": report.get("theory_shell_only"),
         "theory_note": report.get("theory_note"),
         "measured_anomaly": report.get("measured_anomaly"),
+        # What the solver sealed off. Drawn, not merely recorded: sealing stops
+        # the simulation carrying sound through a region, and the whole reason
+        # the census exists is that this must be visible rather than inferred.
+        "sealed": report.get("sealed"),
+        "voxels": _write_voxels(report, target),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
         "binaural_note": report["binaural_note"],

@@ -1,4 +1,4 @@
-"""Tests for the geometry pyroomacoustics receives.
+"""Tests for the geometry the solver receives.
 
 The property under test throughout is that the simulator and the acoustic view
 read from the same place, so that a picture of one is a picture of the other.
@@ -14,12 +14,11 @@ import trimesh
 from shapely.geometry import Point
 
 from reverberate.geometry.apartment import Storey, build_storey
-from reverberate.geometry.decimation import DETAIL_LEVELS
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
 from reverberate.geometry.sim_geometry import (
-    decimate,
     obstacle_assignments,
-    reduced_collider,
+    obstacle_collider,
+    outer_surface,
     sample_points,
     sample_source_receiver,
     shell_assignments,
@@ -65,18 +64,6 @@ def test_floor_and_ceiling_get_different_absorption() -> None:
     assert floor != ceiling
 
 
-def test_decimation_cuts_faces_but_keeps_the_shape() -> None:
-    sphere = trimesh.creation.icosphere(subdivisions=4)
-    reduced = decimate(sphere, 200)
-    assert len(reduced.faces) < len(sphere.faces)
-    assert reduced.bounds == pytest.approx(sphere.bounds, abs=0.05)
-
-
-def test_a_mesh_under_budget_is_left_alone() -> None:
-    box = trimesh.creation.box()
-    assert decimate(box, 1000) is box
-
-
 def build_object_tree(root: Path) -> int:
     """A minimal objects tree holding one dense collider."""
     directory = root / "objects" / "a"
@@ -94,6 +81,31 @@ def build_object_tree(root: Path) -> int:
     return len(dense.faces)
 
 
+def build_two_body_object_tree(root: Path) -> None:
+    """A minimal objects tree whose collider is two overlapping convex bodies.
+
+    ``build_object_tree``'s icosphere is a single body, so ``outer_surface``
+    short-circuits on ``body_count <= 1`` and never reaches the union path --
+    it cannot exercise a union failure. Two overlapping boxes can.
+    """
+    directory = root / "objects" / "a"
+    directory.mkdir(parents=True)
+    left = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    right = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    right.apply_translation([0.6, 0.0, 0.0])
+    combined = trimesh.util.concatenate([left, right])
+    assert isinstance(combined, trimesh.Trimesh)
+    exported = combined.export(file_type="glb")
+    assert isinstance(exported, bytes)
+    (directory / "abc.glb").write_bytes(exported)
+    (directory / "abc.collider.glb").write_bytes(exported)
+    metadata = root / "metadata"
+    metadata.mkdir()
+    (metadata / "hssd_obj_semantics_condensed.csv").write_text(
+        "hash,art,pick,condensed,primary,,\nabc,No,No,sofa,sofa,,\n"
+    )
+
+
 def instance(template: str, x: float = 0.0) -> FurnitureInstance:
     return FurnitureInstance(
         template_name=template,
@@ -103,36 +115,41 @@ def instance(template: str, x: float = 0.0) -> FurnitureInstance:
     )
 
 
-def test_obstacles_are_decimated_but_keep_their_absorbing_power(tmp_path: Path) -> None:
-    """Decimation must not also delete the absorption it was meant to keep."""
+def test_the_collider_reaches_the_solver_with_every_triangle(tmp_path: Path) -> None:
+    """Nothing is decimated any more, so the count must match exactly.
+
+    ``<=`` would pass while a reduction quietly came back; this is the
+    assertion that makes its return a failing test.
+    """
     dense_faces = build_object_tree(tmp_path)
-    assignments, unresolved, absorption = obstacle_assignments(tmp_path, [instance("abc")])
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("abc")])
     assert unresolved == []
-    assert len(assignments[0].mesh.faces) <= dense_faces
-    assert absorption.power_error == pytest.approx(0.0, abs=1e-6)
+    assert unmerged == []
+    assert len(assignments[0].mesh.faces) == dense_faces
 
 
 def test_the_viewer_and_the_simulator_read_the_same_collider(tmp_path: Path) -> None:
     """The whole point: the acoustic view must not be a flattering picture.
 
-    ``reduced_collider`` is the single place the decimation decision is made,
-    and both the exported mesh and the simulated one come from it.
+    ``obstacle_collider`` is the single place that mesh is chosen, and both the
+    exported mesh and the simulated one come from it.
     """
     build_object_tree(tmp_path)
-    exported = reduced_collider(tmp_path, "abc", DETAIL_LEVELS[0].detail_length)
+    exported = obstacle_collider(tmp_path, "abc")
     simulated = obstacle_assignments(tmp_path, [instance("abc")])[0][0].mesh
     assert exported is not None
-    assert len(exported[0].faces) == len(simulated.faces)
+    assert len(exported.faces) == len(simulated.faces)
 
 
 def test_an_unresolvable_template_is_reported_not_dropped(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
-    assignments, unresolved, _ = obstacle_assignments(tmp_path, [instance("missing")])
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("missing")])
     assert assignments == []
     assert unresolved == ["missing"]
+    assert unmerged == []
 
 
-def test_summary_counts_the_walls_pyroomacoustics_will_build(tmp_path: Path) -> None:
+def test_summary_counts_the_walls_the_exporter_will_build(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
     storey = square_storey()
     assignments, summary = simulation_geometry(tmp_path, storey, [instance("abc")])
@@ -145,6 +162,41 @@ def test_instances_keep_their_placement_in_the_simulated_geometry(tmp_path: Path
     build_object_tree(tmp_path)
     assignments, _, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
     assert assignments[0].mesh.centroid[0] == pytest.approx(3.0, abs=0.1)
+
+
+def test_a_failed_union_is_reported_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the fix: a failed union used to vanish silently.
+
+    ``obstacle_collider`` discarded ``outer_surface``'s success flag, so
+    nothing downstream ever learned a union had failed and the obstacle still
+    carried its original, buried-face mesh. It has to show up in three
+    places: the per-assignment list, the summary a human reads, and the
+    sealed-air census, which must not count a still-overlapping decomposition
+    as if its per-body volumes were real, separate interiors.
+    """
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("no boolean engine")
+
+    monkeypatch.setattr(trimesh.boolean, "union", boom)
+    build_two_body_object_tree(tmp_path)
+    storey = square_storey()
+
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("abc")])
+    assert unresolved == []
+    assert unmerged == ["sofa_0"]
+    # The obstacle is still placed, on its original two-body mesh -- a
+    # defective obstacle beats a missing one.
+    assert len(assignments) == 1
+
+    placed, summary = simulation_geometry(tmp_path, storey, [instance("abc")])
+    assert summary.unmerged == ["sofa_0"]
+    # Not counted as a legitimate sealed interior: its bodies still overlap,
+    # so a per-body volume would double-count the overlap.
+    assert "sofa_0" not in {region.owner for region in summary.sealed.interiors}
+    assert "sofa_0" in summary.sealed.unclosed
 
 
 def test_sampled_points_stay_clear_of_the_walls() -> None:
@@ -196,3 +248,62 @@ def test_instances_from_another_storey_are_not_simulated(tmp_path: Path) -> None
     )
     _, summary = simulation_geometry(tmp_path, storey, [instance("abc", x=1.0), upstairs])
     assert summary.obstacle_count == 1
+
+
+class TestOuterSurface:
+    """Buried faces are what make the voxeliser build ringing cavities."""
+
+    @staticmethod
+    def _two_overlapping_boxes() -> trimesh.Trimesh:
+        """A two-body convex decomposition, as HSSD ships them."""
+        left = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        right = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        right.apply_translation([0.6, 0.0, 0.0])
+        combined = trimesh.util.concatenate([left, right])
+        assert isinstance(combined, trimesh.Trimesh)
+        return combined
+
+    def test_the_union_gives_the_real_occupied_volume(self) -> None:
+        """Two 1 m boxes overlapping by 0.4 m occupy 1.6 m3, not 2.0.
+
+        ``Trimesh.volume`` integrates over every face, so on a decomposition it
+        adds the bodies up and counts the overlap twice. That is the number the
+        union corrects, and on real HSSD colliders the two agree to the digit
+        because those bodies abut rather than interpenetrate.
+        """
+        mesh = self._two_overlapping_boxes()
+        united, ok = outer_surface(mesh)
+
+        assert ok
+        assert mesh.volume == pytest.approx(2.0, rel=1e-6)
+        assert united.volume == pytest.approx(1.6, rel=1e-5)
+        assert united.is_watertight
+
+    def test_the_union_drops_the_buried_area(self) -> None:
+        """The faces that vanish are the ones sealed inside the solid."""
+        mesh = self._two_overlapping_boxes()
+        united, _ = outer_surface(mesh)
+        # Two axis-aligned unit cubes overlapping along x merge into one
+        # 1.6 x 1 x 1 box: 2 * (1.6 + 1.6 + 1) = 8.4 m2 against the 12 m2 the
+        # decomposition presents. The 3.6 m2 difference is sealed inside.
+        assert mesh.area == pytest.approx(12.0, rel=1e-6)
+        assert united.area == pytest.approx(8.4, rel=1e-5)
+
+    def test_a_single_body_is_returned_untouched(self) -> None:
+        """Nothing is buried in one convex body, so nothing is worth doing."""
+        box = trimesh.creation.box()
+        united, ok = outer_surface(box)
+        assert ok
+        assert united is box
+
+    def test_a_mesh_the_engine_refuses_is_kept_whole(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An obstacle with buried faces beats a missing obstacle."""
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("no boolean engine")
+
+        monkeypatch.setattr(trimesh.boolean, "union", boom)
+        mesh = self._two_overlapping_boxes()
+        united, ok = outer_surface(mesh)
+        assert not ok
+        assert united is mesh

@@ -27,6 +27,7 @@ from reverberate.materials.extrapolation import (
     MAX_ABSORPTION,
     MEASURED_BANDS,
     MIN_OCTAVE_RATIO,
+    PLATEAU_TOP_RATIO,
     extend_high_bands,
     layer_model_fit,
 )
@@ -152,12 +153,12 @@ def test_the_bands_above_4_khz_follow_the_measured_trend() -> None:
         measured = material.measured_absorption
 
         assert MIN_OCTAVE_RATIO <= extension.applied_ratio <= 1.0
-        assert extension.values[0] == pytest.approx(
-            min(measured[-1] * extension.applied_ratio, MAX_ABSORPTION)
+        first = min(measured[-1] * extension.applied_ratio, MAX_ABSORPTION)
+        second_ratio = (
+            PLATEAU_TOP_RATIO if extension.applied_ratio >= 1.0 else extension.applied_ratio
         )
-        assert extension.values[1] == pytest.approx(
-            min(measured[-1] * extension.applied_ratio**2, MAX_ABSORPTION)
-        )
+        assert extension.values[0] == pytest.approx(first)
+        assert extension.values[1] == pytest.approx(min(first * second_ratio, MAX_ABSORPTION))
 
 
 def test_nothing_gains_absorption_above_the_last_measurement() -> None:
@@ -170,15 +171,24 @@ def test_nothing_gains_absorption_above_the_last_measurement() -> None:
         assert top[2] <= top[1] + 1e-12
 
 
-def test_a_rising_class_holds_and_a_falling_class_falls() -> None:
-    """The two branches of the rule, on two classes that exercise them."""
+def test_a_rising_class_holds_at_8_khz_then_gives_way_at_16() -> None:
+    """Carpet is measured to peak near 6.5 kHz and fall after it, so a plateau
+    is defensible for one octave above the last measurement and not for two."""
     rising = extend_high_bands(np.array([0.05, 0.06, 0.13, 0.18, 0.24, 0.35]))
-    falling = extend_high_bands(np.array([0.19, 0.37, 0.56, 0.67, 0.61, 0.59]))
 
     assert rising.held and rising.clipped
-    assert rising.values == pytest.approx((0.35, 0.35))
+    assert rising.values[0] == pytest.approx(0.35)
+    assert rising.values[1] == pytest.approx(0.35 * PLATEAU_TOP_RATIO)
+
+
+def test_a_falling_class_keeps_its_own_ratio_in_both_octaves() -> None:
+    """The ceiling only overrules a class that was not already falling."""
+    falling = extend_high_bands(np.array([0.19, 0.37, 0.56, 0.67, 0.61, 0.59]))
+
     assert not falling.held
     assert falling.values[1] < falling.values[0] < 0.59
+    ratio = 0.59 / 0.61
+    assert falling.values == pytest.approx((0.59 * ratio, 0.59 * ratio**2))
 
 
 def test_a_single_measured_ratio_is_not_projected_without_bound() -> None:
