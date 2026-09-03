@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from reverberate.viz.vox_view import (
+    _blocks_path,
     _dense_blocks,
     read_voxels,
     surface_of,
@@ -78,6 +79,28 @@ def test_it_says_what_a_cube_stands_for(tmp_path: Path) -> None:
     assert "for 192 boundary nodes" in cloud.summary()
 
 
+def test_a_corrupt_cache_is_rebuilt_not_raised(tmp_path: Path) -> None:
+    """``np.load`` raises ``zipfile.BadZipFile`` on a truncated ``.npz``, which
+    is neither ``OSError`` nor ``ValueError`` nor ``KeyError`` -- a half
+    written cache entry (crash mid ``np.savez``, disk full) must still fall
+    back to rebuilding rather than taking the viewer down.
+    """
+    root = write_cache(tmp_path / "vox", nodes=192)
+    target_cubes = 100_000
+    read_voxels(root, target_cubes=target_cubes)  # writes the cache entry
+    path = _blocks_path(root, target_cubes)
+    # A real npz (a zip archive), cut off mid file -- what a crash or a full
+    # disk mid ``np.savez`` leaves behind. Arbitrary bytes are not this: those
+    # never reach the zip reader and surface as a plain ``ValueError``, which
+    # was already caught.
+    written = path.read_bytes()
+    path.write_bytes(written[: len(written) // 2])
+
+    cloud = read_voxels(root, target_cubes=target_cubes)
+
+    assert cloud.total_nodes == 192
+
+
 def test_a_grid_that_fits_is_drawn_cell_by_cell(tmp_path: Path) -> None:
     """No aggregation is applied when none is needed to fit the budget."""
     cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
@@ -105,6 +128,81 @@ def test_sealed_nodes_are_marked_so_they_can_be_drawn_apart(tmp_path: Path) -> N
     cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
 
     assert 0 < int(cloud.inert.sum()) < cloud.drawn
+
+
+def test_a_rigid_but_coupled_block_is_not_shown_as_a_material(tmp_path: Path) -> None:
+    """A block with no material nodes at all is rigid whether or not it is
+    also sealed. Gating the rigid label on ``block_inert`` (which additionally
+    demands every node have lost adjacency) used to leave a rigid-but-still-
+    coupled block -- the very defect patch 5 exists to fix -- looking like it
+    commonly held material 0, ``argmax``'s answer on an all-zero row.
+
+    Two blocks, so the scene also holds a real material and ``kinds`` is not
+    degenerate: the first half of the grid is rigid and still fully coupled
+    (no node has lost adjacency), the second half genuinely is material 0.
+    """
+    root = tmp_path / "vox"
+    root.mkdir(parents=True)
+    h = 0.1
+    nx, ny, nz = 4, 2, 2  # span 2 along x makes exactly two blocks
+    with h5py.File(root / "cart_grid.h5", "w") as handle:
+        handle["h"] = h
+        handle["xv"], handle["yv"], handle["zv"] = (
+            np.arange(nx) * h,
+            np.arange(ny) * h,
+            np.arange(nz) * h,
+        )
+
+    total = nx * ny * nz
+    material = np.zeros(total, dtype=np.int8)
+    material[: total // 2] = -1  # the block at ix in {0, 1}: rigid
+    material[total // 2 :] = 0  # the block at ix in {2, 3}: material 0
+    with h5py.File(root / "vox_out.h5", "w") as handle:
+        handle["Nx"], handle["Ny"], handle["Nz"] = nx, ny, nz
+        handle["h"] = h
+        handle["bn_ixyz"] = np.arange(total, dtype=np.int64)
+        handle["mat_bn"] = material
+        handle["adj_bn"] = np.ones((total, 6), dtype=bool)  # nobody has lost adjacency
+
+    cloud = read_voxels(root, target_cubes=2)
+
+    assert cloud.drawn == 2
+    assert int(cloud.material[0]) == -1  # rigid, not material 0
+    assert not bool(cloud.inert[0])  # coupled, so not sealed
+    assert int(cloud.material[1]) == 0
+    assert not bool(cloud.inert[1])
+
+
+def test_a_boundary_block_does_not_draw_past_the_grid(tmp_path: Path) -> None:
+    """A block is sized as if it held a full ``cell_m`` of native cells, which
+    one straddling the far edge of an axis the grid's shape does not divide
+    evenly by does not -- its corners must be clipped to the grid's own extent
+    rather than drawn a whole block past it.
+    """
+    root = tmp_path / "vox"
+    root.mkdir(parents=True)
+    h = 0.1
+    nx, ny, nz = 5, 4, 3  # none a multiple of the span this target forces
+    xv, yv, zv = np.arange(nx) * h, np.arange(ny) * h, np.arange(nz) * h
+    with h5py.File(root / "cart_grid.h5", "w") as handle:
+        handle["h"] = h
+        handle["xv"], handle["yv"], handle["zv"] = xv, yv, zv
+
+    total = nx * ny * nz
+    with h5py.File(root / "vox_out.h5", "w") as handle:
+        handle["Nx"], handle["Ny"], handle["Nz"] = nx, ny, nz
+        handle["h"] = h
+        handle["bn_ixyz"] = np.arange(total, dtype=np.int64)
+        handle["mat_bn"] = np.full(total, 3, dtype=np.int8)
+        handle["adj_bn"] = np.ones((total, 6), dtype=bool)
+
+    # One block for the whole grid, so its span overshoots every axis.
+    cloud = read_voxels(root, target_cubes=1)
+    surface = surface_of(cloud)
+    corners = surface.corners.reshape(-1, 3).astype(np.float64)
+
+    assert (corners >= cloud.bounds_lo - 1e-6).all()
+    assert (corners <= cloud.bounds_hi + 1e-6).all()
 
 
 def test_the_payload_is_binary_and_self_describing(tmp_path: Path) -> None:
@@ -187,3 +285,29 @@ class TestSurface:
         from reverberate.viz.vox_view import NO_FACE, _greedy_quads
 
         assert _greedy_quads(np.full((4, 4), NO_FACE, dtype=np.int16)).shape[0] == 0
+
+    def test_reused_scratch_buffers_do_not_leak_between_slices(self) -> None:
+        """``surface_of`` passes the same ``changed``/``ends`` buffers to every
+        slice of an axis rather than allocating fresh ones. Both are fully
+        overwritten before they are read, so a second call reusing a first
+        call's buffers must answer only for its own, smaller ``kind`` -- not
+        for whatever the first call's larger region left behind in them.
+        """
+        from reverberate.viz.vox_view import NO_FACE, _greedy_quads
+
+        changed = np.empty((6, 5), dtype=bool)
+        ends = np.empty((7, 5), dtype=np.int64)
+
+        full = np.full((6, 5), 3, dtype=np.int16)
+        first = _greedy_quads(full, changed, ends)
+        assert list(first[0]) == [0, 0, 6, 5, 3]
+
+        partial = np.full((6, 5), NO_FACE, dtype=np.int16)
+        partial[2:4, 1:3] = 7
+        second = _greedy_quads(partial, changed, ends)
+        assert second.shape[0] == 1
+        assert list(second[0]) == [2, 1, 4, 3, 7]
+
+        # And unbuffered, for the same inputs, agrees -- proving the buffers
+        # are what changed, not the algorithm.
+        assert np.array_equal(second, _greedy_quads(partial))

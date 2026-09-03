@@ -9,12 +9,14 @@ voxeliser left coupled to the room, look identical in a picture of triangles.
 **Aggregated, because the grid is not drawable.** A bedroom at 16 kHz has 63
 million boundary nodes at 2 mm. Taking one in two hundred and drawing it at
 true size gives 2 mm specks thirty millimetres apart -- dust, not a wall, and
-unreadable however it is shaded. So the grid is binned into coarser cells and
-one cube is drawn per occupied cell, coloured by the material most of the nodes
-in it carry.
+unreadable however it is shaded. So the grid is binned into coarser blocks,
+each coloured by the material most of the nodes in it carry, and adjacent
+blocks' hidden faces and coplanar quads of the same material are merged into
+the fewest rectangles that draw the same solid (see :func:`surface_of`) --
+never into fewer or coarser blocks than the binning chose.
 
-That changes what a cube means, and the change is the honest part: a cube is
-"this block of the grid holds boundary nodes", not "here is a node". The cell
+That changes what a block means, and the change is the honest part: a block is
+"this much of the grid holds boundary nodes", not "here is a node". The block
 size and the node count behind it travel with the payload so the picture cannot
 be read as finer than it is.
 
@@ -26,6 +28,7 @@ region. Their share of the picture is the visible form of that decision.
 from __future__ import annotations
 
 import json
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,6 +96,14 @@ class VoxelCloud:
     cell_m: float
     #: Grid step in metres. ``cell_m / h_m`` is how many cells a cube spans.
     h_m: float
+    #: The native grid's own renderable extent per axis, in the scene's own
+    #: frame: its first and last boundary node, each expanded by half a native
+    #: cell. A block is aggregated as if it held a full ``cell_m`` worth of
+    #: cells even along an axis the grid's shape does not divide evenly by, so
+    #: without this a boundary block would draw past where the grid actually
+    #: ends -- see :func:`_corners_of`, which clips to it.
+    bounds_lo: np.ndarray
+    bounds_hi: np.ndarray
 
     @property
     def drawn(self) -> int:
@@ -160,7 +171,7 @@ def read_surface(cache_dir: Path, target_cubes: int = TARGET_CUBES) -> VoxelSurf
                         blocks=blocks,
                         quads=int(data["quads"]),
                     )
-        except (OSError, KeyError, ValueError):
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
             pass  # rebuild rather than refuse to draw
     surface = surface_of(read_voxels(cache_dir, target_cubes))
     staging = path.with_suffix(".partial.npz")
@@ -197,8 +208,10 @@ def _cached_blocks(cache_dir: Path, target_cubes: int) -> VoxelCloud | None:
                 total_nodes=int(data["total_nodes"]),
                 cell_m=float(data["cell_m"]),
                 h_m=float(data["h_m"]),
+                bounds_lo=data["bounds_lo"],
+                bounds_hi=data["bounds_hi"],
             )
-    except (OSError, KeyError, ValueError):
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
         # A half written or stale file is worth rebuilding rather than
         # refusing to draw over.
         return None
@@ -216,6 +229,8 @@ def _write_cached_blocks(cache_dir: Path, target_cubes: int, cloud: VoxelCloud) 
             total_nodes=cloud.total_nodes,
             cell_m=cloud.cell_m,
             h_m=cloud.h_m,
+            bounds_lo=cloud.bounds_lo,
+            bounds_hi=cloud.bounds_hi,
         )
         staging.replace(path)
     except OSError:
@@ -301,11 +316,19 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # patch exists for, and the view must be able to show it rather than
     # quietly relabel it as sealed.
     inert_count = np.bincount(inverse, weights=inert, minlength=found)
-    block_inert = (tally[:, 1:].sum(axis=1) == 0) & (inert_count >= occupancy)
+    all_rigid = tally[:, 1:].sum(axis=1) == 0
+    block_inert = all_rigid & (inert_count >= occupancy)
     # Otherwise it takes the commonest material it actually has, ignoring the
     # rigid nodes, which are the far side of a boundary the room cannot hear.
+    #
+    # A block with no material nodes at all is rigid regardless of whether it
+    # is also sealed: ``block_inert`` additionally demands every node have
+    # lost adjacency, which a rigid-but-still-coupled block -- the very defect
+    # patch 5 exists to fix -- does not satisfy. Gating on ``block_inert``
+    # here would leave such a block's ``argmax`` of an all-zero row, material
+    # index 0, standing as if it were commonly that material.
     block_material = tally[:, 1:].argmax(axis=1).astype(np.int8)
-    block_material[block_inert] = -1
+    block_material[all_rigid] = -1
 
     # Back from the packed key to a centre in the scene's own frame.
     coarse = -(-shape // span)
@@ -325,6 +348,12 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
         axis=1,
     ).astype(np.float32)
 
+    # The grid's own extent, half a native cell past its outermost nodes on
+    # each side -- not derived from the aggregated block positions, which are
+    # exactly the values a boundary block's own size would otherwise overshoot.
+    bounds_lo = np.array([axis[0] - 0.5 * h_m for axis in axes], dtype=np.float64)
+    bounds_hi = np.array([axis[-1] + 0.5 * h_m for axis in axes], dtype=np.float64)
+
     return VoxelCloud(
         positions=positions,
         material=block_material,
@@ -332,6 +361,8 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
         total_nodes=total,
         cell_m=span * h_m,
         h_m=h_m,
+        bounds_lo=bounds_lo,
+        bounds_hi=bounds_hi,
     )
 
 
@@ -388,8 +419,17 @@ def surface_of(cloud: VoxelCloud) -> VoxelSurface:
     and smoothing it here would draw a room the wave equation was not solved
     in.
     """
-    occupied = _dense_blocks(cloud)
-    label = _dense_labels(cloud)
+    # Computed once and threaded through rather than re-derived by each of
+    # _dense_labels and _corners_of: cloud.lattice is a min/max reduction over
+    # every block position, and _corners_of alone is called once per emitted
+    # quad batch, so re-deriving it there repeats that reduction thousands of
+    # times over a grid with thousands of slices per axis.
+    origin, shape = cloud.lattice
+    label = _dense_labels(cloud, origin, shape)
+    # label's NO_FACE sentinel already says which cells are occupied, so a
+    # second dense array built by _dense_blocks purely to answer that would be
+    # a redundant lattice-sized allocation and scatter alongside this one.
+    occupied = label != NO_FACE
     corners: list[np.ndarray] = []
     labels: list[np.ndarray] = []
     quads = 0
@@ -397,6 +437,15 @@ def surface_of(cloud: VoxelCloud) -> VoxelSurface:
     for axis in range(3):
         near = np.moveaxis(occupied, axis, 0)
         near_label = np.moveaxis(label, axis, 0)
+        # One slice's shape is the same for every side and every i along this
+        # axis, so these are allocated once per axis and overwritten in place
+        # for each slice below, rather than each slice reallocating its own --
+        # _greedy_quads runs roughly two sides times a thousand slices per
+        # axis on the shipped grid, and its largest scratch array alone is
+        # multiple megabytes.
+        kind_buf = np.empty(near.shape[1:], dtype=np.int16)
+        changed_buf = np.empty(near.shape[1:], dtype=bool)
+        ends_buf = np.empty((near.shape[1] + 1, near.shape[2]), dtype=np.int64)
         for side in (0, 1):
             for i in range(near.shape[0]):
                 behind = None
@@ -407,10 +456,12 @@ def surface_of(cloud: VoxelCloud) -> VoxelSurface:
                 visible = near[i] if behind is None else near[i] & ~behind
                 if not visible.any():
                     continue
-                merged = _greedy_quads(np.where(visible, near_label[i], NO_FACE))
+                kind_buf[:] = NO_FACE
+                kind_buf[visible] = near_label[i][visible]
+                merged = _greedy_quads(kind_buf, changed_buf, ends_buf)
                 if merged.size == 0:
                     continue
-                corners.append(_corners_of(cloud, axis, side, i, merged))
+                corners.append(_corners_of(cloud, axis, side, i, merged, origin))
                 labels.append(np.repeat(merged[:, 4].astype(np.int16), 4))
                 quads += int(merged.shape[0])
 
@@ -423,7 +474,11 @@ def surface_of(cloud: VoxelCloud) -> VoxelSurface:
     return VoxelSurface(points, index, np.concatenate(labels), cloud, quads)
 
 
-def _greedy_quads(kind: np.ndarray) -> np.ndarray:
+def _greedy_quads(
+    kind: np.ndarray,
+    changed: np.ndarray | None = None,
+    ends: np.ndarray | None = None,
+) -> np.ndarray:
     """Merge one slice of face labels into the fewest rectangles.
 
     Returns ``(n, 5)`` of ``u0, v0, u1, v1, label``, ends exclusive.
@@ -437,9 +492,17 @@ def _greedy_quads(kind: np.ndarray) -> np.ndarray:
     Vectorised over the whole slice: the obvious loop over rows and runs is
     twenty times slower, and the grid's own resolution has a thousand slices
     per axis.
+
+    ``changed`` (``kind.shape``, bool) and ``ends`` (``(kind.shape[0] + 1,
+    kind.shape[1])``, int64) are optional scratch buffers, both fully
+    overwritten before they are read. Passed in and reused rather than
+    allocated fresh, a caller invoking this once per slice of a much larger
+    volume -- :func:`surface_of` does, thousands of times per axis -- turns
+    thousands of transient multi-megabyte allocations into one pair per axis.
     """
     width = kind.shape[0]
-    changed = np.empty_like(kind, dtype=bool)
+    if changed is None:
+        changed = np.empty_like(kind, dtype=bool)
     changed[0] = True
     changed[1:] = kind[1:] != kind[:-1]
     run_u, run_v = np.nonzero(changed)
@@ -450,10 +513,15 @@ def _greedy_quads(kind: np.ndarray) -> np.ndarray:
         return np.zeros((0, 5), dtype=np.int64)
 
     # A run ends at the next change in its own column, or at the edge.
-    ends = np.full((width + 1, kind.shape[1]), width, dtype=np.int64)
+    if ends is None:
+        ends = np.empty((width + 1, kind.shape[1]), dtype=np.int64)
+    ends[:] = width
     rows = np.nonzero(changed)[0]
     ends[:-1][changed] = rows
-    ends = np.minimum.accumulate(ends[::-1], axis=0)[::-1]
+    # In place: accumulate reads and writes the same (reversed) positions in
+    # the same sequential order, so this is safe, and it is what keeps this
+    # from being a second fresh (width + 1, height) array every call.
+    np.minimum.accumulate(ends[::-1], axis=0, out=ends[::-1])
     run_end = ends[run_u + 1, run_v]
 
     # Runs merge down v when start, end and label match and v is consecutive,
@@ -479,9 +547,14 @@ def _dense_blocks(cloud: VoxelCloud) -> np.ndarray:
     return grid
 
 
-def _dense_labels(cloud: VoxelCloud) -> np.ndarray:
-    """Material per lattice cell, with sealed folded in as its own label."""
-    origin, shape = cloud.lattice
+def _dense_labels(cloud: VoxelCloud, origin: np.ndarray, shape: np.ndarray) -> np.ndarray:
+    """Material per lattice cell, with sealed folded in as its own label.
+
+    ``origin``/``shape`` come from :attr:`VoxelCloud.lattice`, taken as
+    arguments rather than read again here, so a caller looping over many
+    slices of the result -- :func:`surface_of` does -- pays for that
+    reduction once.
+    """
     cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int64)
     grid = np.full(tuple(shape), NO_FACE, dtype=np.int16)
     grid[cells[:, 0], cells[:, 1], cells[:, 2]] = np.where(
@@ -490,9 +563,22 @@ def _dense_labels(cloud: VoxelCloud) -> np.ndarray:
     return grid
 
 
-def _corners_of(cloud: VoxelCloud, axis: int, side: int, i: int, merged: np.ndarray) -> np.ndarray:
-    """The four corners of every merged face of one slice, all at once."""
-    origin, _ = cloud.lattice
+def _corners_of(
+    cloud: VoxelCloud, axis: int, side: int, i: int, merged: np.ndarray, origin: np.ndarray
+) -> np.ndarray:
+    """The four corners of every merged face of one slice, all at once.
+
+    Clipped to the grid's own extent, ``cloud.bounds_lo``/``bounds_hi``. Every
+    block is sized as if it held a full ``cell_m`` worth of native cells, which
+    a block at the far edge of an axis the grid's shape does not divide evenly
+    by does not: its rendered quad would otherwise reach past where the grid
+    actually ends. The clip is a no-op away from the boundary, where a block's
+    true extent already matches ``cell_m``.
+
+    ``origin`` is :attr:`VoxelCloud.lattice`'s, passed in rather than read
+    again here: this runs once per emitted quad batch, and re-deriving it
+    would repeat that reduction over every block position for every batch.
+    """
     cell = cloud.cell_m
     other = [a for a in range(3) if a != axis]
     plane = origin[axis] + (i + side) * cell - 0.5 * cell
@@ -501,9 +587,17 @@ def _corners_of(cloud: VoxelCloud, axis: int, side: int, i: int, merged: np.ndar
     hi_u = origin[other[0]] + merged[:, 2] * cell - 0.5 * cell
     hi_v = origin[other[1]] + merged[:, 3] * cell - 0.5 * cell
     out = np.empty((merged.shape[0], 4, 3), dtype=np.float64)
-    out[:, :, axis] = plane
-    out[:, :, other[0]] = np.stack([lo_u, hi_u, hi_u, lo_u], axis=1)
-    out[:, :, other[1]] = np.stack([lo_v, lo_v, hi_v, hi_v], axis=1)
+    out[:, :, axis] = np.clip(plane, cloud.bounds_lo[axis], cloud.bounds_hi[axis])
+    out[:, :, other[0]] = np.clip(
+        np.stack([lo_u, hi_u, hi_u, lo_u], axis=1),
+        cloud.bounds_lo[other[0]],
+        cloud.bounds_hi[other[0]],
+    )
+    out[:, :, other[1]] = np.clip(
+        np.stack([lo_v, lo_v, hi_v, hi_v], axis=1),
+        cloud.bounds_lo[other[1]],
+        cloud.bounds_hi[other[1]],
+    )
     return out.reshape(-1, 3)
 
 
