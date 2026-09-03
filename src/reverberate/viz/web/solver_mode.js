@@ -287,9 +287,26 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
       .join("")}</ul>
     ${
       data.measured_anomaly
-        ? `<h2>Open question</h2>
+        // The heading follows the record rather than asserting either state:
+        // it said "Open question" for as long as the anomaly was closed, which
+        // is the way a page quietly goes stale.
+        ? `<h2>${
+            String(data.measured_anomaly.status || "").startsWith("closed")
+              ? "A defect that was found and fixed"
+              : "Open question"
+          }</h2>
       <p class="note">${escapeHtml(data.measured_anomaly.what)}</p>
-      <p class="caption">${escapeHtml(data.measured_anomaly.status)}</p>`
+      <p class="caption">${escapeHtml(data.measured_anomaly.status)}</p>
+      ${
+        data.measured_anomaly.cause
+          ? `<p class="caption"><b>Cause.</b> ${escapeHtml(data.measured_anomaly.cause)}</p>`
+          : ""
+      }
+      ${
+        data.measured_anomaly.fix
+          ? `<p class="caption"><b>Fix.</b> ${escapeHtml(data.measured_anomaly.fix)}</p>`
+          : ""
+      }`
         : ""
     }
   `;

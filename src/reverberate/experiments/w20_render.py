@@ -580,40 +580,53 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 - one linear re
         ),
         "measured_anomaly": {
             "what": (
-                "RT60 rises with frequency, from about 0.7 s at 250 Hz to "
-                "2.0 to 2.9 s at 2 and 4 kHz, on every receiver of both sources"
+                "RT60 rose with frequency, from about 0.7 s at 250 Hz to 2.0 to 2.9 s at "
+                "2 and 4 kHz, on every receiver of both sources"
             ),
             "why_it_is_wrong": (
-                "the fitted boundary absorption rises with frequency too, most "
-                "strongly on the two largest absorbers: the bed goes 0.22 to "
-                "0.81 and the carpet 0.14 to 0.75 between 125 Hz and 2 kHz. A "
-                "more absorbing boundary cannot produce a longer decay, so at "
-                "least one of the two numbers is not measuring the room"
+                "the fitted boundary absorption rises with frequency too, most strongly on "
+                "the two largest absorbers. A more absorbing boundary cannot produce a "
+                "longer decay, so at least one of the two numbers was not measuring the room"
             ),
-            "ruled_out": [
-                "the post-processing chain: a bare impulse pushed through the "
-                "same low pass and resampler measures an RT60 of 1 to 8 ms in "
-                "every band, three orders of magnitude below what is seen here",
-                "the low frequency residue: that was a separate defect, already "
-                "fixed by cutting below the first axial mode, and it moved the "
-                "low bands rather than the high ones",
-                "band mislabelling: the arrays are now labelled from the filter "
-                "bank itself, and the 16 kHz band is marked out of band",
+            "cause": (
+                "PFFDTD does not fill solids -- by design, so it can accept non-watertight "
+                "scenes -- and for a one-sided surface it takes the material away from the "
+                "back side while leaving that node adjacent to its neighbours. The inside of "
+                "every closed object was therefore simulated as air behind a perfectly rigid "
+                "boundary: absorption zero, Q enormous. KernelAirCart reads all six "
+                "neighbours unconditionally, so a missed edge intersection drives the cavity "
+                "from the room"
+            ),
+            "how_it_was_found": [
+                "the decay has two slopes and the early one is sane: T20 of 0.85, 0.71, "
+                "0.62, 0.67, 0.83, 0.85 s from 125 Hz to 4 kHz",
+                "the late tail's spectral flatness is 0.021 against 0.27 early, so discrete "
+                "lines and not numerical noise",
+                "Schroeder is 286 Hz with 42.8 modes per Hz at 2 kHz, so isolated peaks "
+                "there cannot be room modes",
+                "the lines sit near 2091 Hz, implying 8.2 cm cavities, and a flood fill of "
+                "the grid found 211 pockets in the 1 to 4 kHz band averaging 8.6 cm",
             ],
-            "not_yet_tested": [
-                "air absorption is absent, which is the largest omission and "
-                "acts hardest exactly here; on its own it would shorten the "
-                "2 kHz decay, so it explains a bias but not the rising trend",
-                "locally reacting fitted impedance boundaries are known to "
-                "under-absorb at grazing incidence, and grazing paths across "
-                "the floor and ceiling dominate the late tail",
-                "10.5 points per wavelength is measured at fmax, so numerical "
-                "dispersion is worst in the top octave",
+            "fix": (
+                "two, and neither sufficient alone: obstacles reach the solver as the exact "
+                "boolean union of their convex bodies, which removes the buried faces, and "
+                "the non-air side of every surface is sealed rather than merely silenced. "
+                "T30/T20 went from 1.68, 1.80, 1.70 at 1, 2 and 4 kHz to 1.06, 1.11, 1.11, "
+                "and 125 Hz from 4.03 to 1.03 with T30 falling from 3.64 s to 0.45 s"
+            ),
+            "still_untested": [
+                "air absorption is absent, which is the largest omission and acts hardest in "
+                "the top octave; it was not the cause here",
+                "locally reacting fitted impedance boundaries under-absorb at grazing "
+                "incidence; not the cause here either",
+                "10.5 points per wavelength is measured at fmax, so numerical dispersion is "
+                "worst in the top octave",
             ],
             "status": (
-                "open. The decay below 1 kHz is consistent with the shell only "
-                "bound and is the part of these responses to trust; the top two "
-                "octaves are not yet explained and should not be quoted"
+                "closed by W25. Every band now decays straight, T30/T20 between 1.00 and "
+                "1.11, and every band sits inside the theory bracket below rather than above "
+                "it. Runs made before W25 still carry the defect and their top octaves "
+                "should not be quoted"
             ),
         },
         "theory": prediction.record(),
