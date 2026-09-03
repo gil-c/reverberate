@@ -28,6 +28,7 @@ from reverberate.viz.run_view import (
     build_site,
     decay_curve_points,
     envelope,
+    model_json_of,
     spectrogram,
     surface_groups,
 )
@@ -601,3 +602,33 @@ def test_the_run_module_owns_the_panel_and_the_geometry() -> None:
 
     assert "renderRunPanel" in module
     assert "buildRunGroup" in module
+
+
+class TestModelJsonResolution:
+    """A report's model path has to open from wherever the viewer is started."""
+
+    def test_an_absolute_path_is_used_as_it_stands(self, tmp_path: Path) -> None:
+        model = tmp_path / "models" / "bedroom.json"
+        model.parent.mkdir(parents=True)
+        model.write_text("{}")
+
+        assert model_json_of(tmp_path, {"model_json": str(model)}) == model
+
+    def test_a_relative_path_is_found_from_the_run_directory(self, tmp_path: Path) -> None:
+        """Reports written before the path was resolved carry a relative one."""
+        run = tmp_path / "runs" / "w27"
+        model = run / "models" / "bedroom.json"
+        model.parent.mkdir(parents=True)
+        model.write_text("{}")
+
+        found = model_json_of(run, {"model_json": "models/bedroom.json"})
+
+        assert found.resolve() == model.resolve()
+
+    def test_a_path_that_is_nowhere_says_where_it_looked(self, tmp_path: Path) -> None:
+        """Naming only the last candidate would send a reader to the wrong place."""
+        run = tmp_path / "runs" / "w27"
+        run.mkdir(parents=True)
+
+        with pytest.raises(FileNotFoundError, match="is not at any of"):
+            model_json_of(run, {"model_json": "models/missing.json"})

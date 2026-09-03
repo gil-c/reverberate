@@ -311,7 +311,11 @@ def voxelise(
     report.update(
         {
             "key": spec.key,
-            "model_json": str(spec.model_json),
+            # Resolved, like the path handed to the child on line 278 above.
+            # A relative one only works from the directory it was written in,
+            # and this manifest outlives that: it is read back by the renderer
+            # and by the viewer, neither of which knows where you stood.
+            "model_json": str(Path(spec.model_json).resolve()),
             "model_sha256": hashlib.sha256(Path(spec.model_json).read_bytes()).hexdigest(),
             "geometry_sha256": hashlib.sha256(_geometry_bytes(Path(spec.model_json))).hexdigest(),
             "fmax": spec.fmax,
