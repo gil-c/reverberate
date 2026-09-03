@@ -54,9 +54,11 @@ class SealedReport:
 
     #: Interiors of closed obstacle bodies. Expected, and the reason for the fix.
     interiors: list[SealedRegion] = field(default_factory=list)
-    #: Bodies whose interior could not be established, because the mesh is not
-    #: closed. Their inside and outside are not distinguishable, so nothing is
-    #: claimed about them -- named so the viewer can mark them.
+    #: Bodies whose interior could not be established: either the mesh is not
+    #: closed, so inside and outside are not distinguishable, or its convex
+    #: decomposition could not be unioned into one solid, so its bodies still
+    #: overlap and a per-body volume would double-count the overlap. Nothing
+    #: is claimed about them either way -- named so the viewer can mark them.
     unclosed: list[str] = field(default_factory=list)
 
     @property
@@ -88,7 +90,9 @@ class SealedReport:
         }
 
 
-def sealed_regions(assignments: list[object]) -> SealedReport:
+def sealed_regions(
+    assignments: list[object], unmerged: frozenset[str] = frozenset()
+) -> SealedReport:
     """The volumes the solver will seal, from the meshes it is about to receive.
 
     Read off the geometry rather than off a voxel grid, so it is available
@@ -96,6 +100,15 @@ def sealed_regions(assignments: list[object]) -> SealedReport:
     A grid census answers a different question -- what the voxeliser actually
     did -- and the two are worth comparing precisely because they are derived
     independently.
+
+    ``unmerged`` names the assignments whose convex bodies could not be
+    unioned into one outer surface (see
+    :func:`~reverberate.geometry.sim_geometry.obstacle_assignments`), so they
+    still carry their original, overlapping convex decomposition. Per-body
+    volumes on a mesh like that are not a claim this function can make: the
+    bodies interpenetrate by construction, so summing them double-counts the
+    overlap. Such an assignment is reported as unclosed rather than as a set
+    of interiors that would silently misstate the sealed volume.
     """
     report = SealedReport()
     for assignment in assignments:
@@ -106,6 +119,9 @@ def sealed_regions(assignments: list[object]) -> SealedReport:
             continue
         mesh = getattr(assignment, "mesh", None)
         if not isinstance(mesh, trimesh.Trimesh):
+            continue
+        if name in unmerged:
+            report.unclosed.append(name)
             continue
         for body in mesh.split(only_watertight=False):
             if not body.is_watertight or len(body.faces) < 4:

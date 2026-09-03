@@ -60,6 +60,13 @@ class GeometrySummary:
     #: share of the scene whose absorption depends on a claim about geometry
     #: that nothing was able to check.
     unoriented_faces: int = 0
+    #: Obstacles whose convex bodies could not be unioned into one outer
+    #: surface, so they still carry their original buried interior faces. Named
+    #: rather than counted only, because ``outer_surface``'s own docstring
+    #: promises the count is reported and not hidden -- and a mesh that kept
+    #: its buried faces is exactly the kind ``sealed_regions`` cannot be
+    #: trusted to classify correctly.
+    unmerged: list[str] = field(default_factory=list)
     #: The air the solver will seal inside closed bodies, and any body whose
     #: inside could not be told from its outside. Carried here so the picture
     #: can show what the simulation stopped carrying sound through: sealing is
@@ -77,7 +84,8 @@ class GeometrySummary:
             f"shell {self.shell_faces} faces ({self.shell_volume:.0f} m3, "
             f"watertight={self.shell_watertight}), {self.obstacle_count} obstacles "
             f"totalling {self.obstacle_faces} faces, {self.total_walls} pra walls, "
-            f"{oriented} faces oriented, {self.sealed.summary()}"
+            f"{oriented} faces oriented, {len(self.unmerged)} unmerged, "
+            f"{self.sealed.summary()}"
         )
 
 
@@ -104,8 +112,12 @@ def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
     the interior area goes, which is the area that was never reachable.
 
     Returns the original mesh unchanged, and False, when the boolean engine
-    cannot do it: an obstacle with its buried faces is still better than no
-    obstacle, and the caller reports the count rather than hiding it.
+    cannot do it, or when it returns something that is not actually one sealed
+    solid: an obstacle with its buried faces is still better than no obstacle,
+    and the caller reports the count rather than hiding it. Watertightness is
+    checked here rather than assumed, because "conserves volume to the digit"
+    is a claim about a *closed* solid, and a union that comes back open has not
+    earned it.
     """
     if mesh.body_count <= 1:
         return mesh, True
@@ -115,10 +127,30 @@ def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
         return mesh, False
     if not isinstance(united, trimesh.Trimesh) or len(united.faces) == 0:
         return mesh, False
+    if not united.is_watertight:
+        return mesh, False
     return united, True
 
 
 @lru_cache(maxsize=512)
+def _load_and_union(hssd_root: Path, template: str) -> tuple[trimesh.Trimesh, bool] | None:
+    """The unioned collider for a template, and whether the union held.
+
+    ``None`` only when the asset itself cannot be resolved or loaded. Cached
+    because a room usually places the same template several times and the
+    union is the expensive part; the ``bool`` is cached alongside the mesh so
+    a caller that needs to know about a failed union is not forced to redo the
+    union just to learn that.
+    """
+    asset = resolve_asset(hssd_root / "objects", template)
+    if asset is None:
+        return None
+    mesh = trimesh.load(asset.collider, force="mesh")
+    if not isinstance(mesh, trimesh.Trimesh):
+        return None
+    return outer_surface(mesh)
+
+
 def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
     """The mesh that both the solver and the acoustic view use for a template.
 
@@ -127,16 +159,13 @@ def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
     ``.collider.glb``, which is HSSD's own rule and is what keeps doors and
     windows in the simulation instead of silently dropping them.
 
-    Cached because a room usually places the same template several times and
-    the union is the expensive part.
+    A thin wrapper over :func:`_load_and_union`'s cache for callers that only
+    want the mesh. :func:`obstacle_assignments` calls ``_load_and_union``
+    directly instead, because it is the one place a failed union has to be
+    reported rather than silently accepted.
     """
-    asset = resolve_asset(hssd_root / "objects", template)
-    if asset is None:
-        return None
-    mesh = trimesh.load(asset.collider, force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh):
-        return None
-    return outer_surface(mesh)[0]
+    result = _load_and_union(hssd_root, template)
+    return result[0] if result is not None else None
 
 
 def shell_assignments(storey: Storey, seed: int = 0) -> list[MeshMaterialAssignment]:
@@ -179,23 +208,34 @@ def obstacle_assignments(
     hssd_root: Path,
     instances: list[FurnitureInstance],
     seed: int = 0,
-) -> tuple[list[MeshMaterialAssignment], list[str]]:
+) -> tuple[list[MeshMaterialAssignment], list[str], list[str]]:
     """Every piece of furniture, as its collider under its instance matrix.
 
     The collider goes to the solver whole. Nothing is decimated, no envelope is
     fitted, and no absorption is rescaled to make up for either, because
     nothing is taken away to make up for.
+
+    Returns the assignments, the templates that could not be resolved at all,
+    and the *assignment* names (``owner``-shaped, like ``"seat_3"``, not the
+    template id) whose convex bodies could not be unioned into one outer
+    surface -- placed anyway, on their original, buried-face mesh, because an
+    obstacle with a defect is better than a missing obstacle, but named so the
+    defect is visible rather than indistinguishable from a clean union, and so
+    :func:`~reverberate.geometry.sealed.sealed_regions` can tell which placed
+    piece it is looking at rather than which template it came from.
     """
     rng = np.random.default_rng(seed)
     assignments: list[MeshMaterialAssignment] = []
     unresolved: list[str] = []
+    unmerged: list[str] = []
 
     for index, instance in enumerate(instances):
         category = category_for_template(hssd_root, instance.template_name) or "unknown"
-        base = obstacle_collider(hssd_root, instance.template_name)
-        if base is None:
+        loaded = _load_and_union(hssd_root, instance.template_name)
+        if loaded is None:
             unresolved.append(instance.template_name)
             continue
+        base, merged = loaded
         mesh = base.copy()
         mesh.apply_transform(instance.transform_matrix())
         # After the instance matrix, not before: a mirroring transform flips
@@ -204,15 +244,18 @@ def obstacle_assignments(
         oriented = orient_for_air(mesh, "outside")
         mesh = oriented.mesh
 
+        name = f"{category}_{index}"
+        if not merged:
+            unmerged.append(name)
         assignments.append(
             MeshMaterialAssignment(
                 mesh=mesh,
                 material=material_for_label(category, rng),
-                name=f"{category}_{index}",
+                name=name,
                 sides=oriented.sides,
             )
         )
-    return assignments, unresolved
+    return assignments, unresolved, unmerged
 
 
 def simulation_geometry(
@@ -238,7 +281,7 @@ def simulation_geometry(
     """
     instances = instances_on_storey(instances, storey, storeys)
     shell = shell_assignments(storey, seed=seed)
-    obstacles, unresolved = obstacle_assignments(hssd_root, instances, seed=seed)
+    obstacles, unresolved, unmerged = obstacle_assignments(hssd_root, instances, seed=seed)
     whole_shell = extrude_storey(storey)
     everything = [*shell, *obstacles]
     summary = GeometrySummary(
@@ -248,12 +291,13 @@ def simulation_geometry(
         obstacle_count=len(obstacles),
         obstacle_faces=sum(len(assignment.mesh.faces) for assignment in obstacles),
         unresolved=unresolved,
+        unmerged=unmerged,
         unoriented_faces=sum(
             int(np.count_nonzero(assignment.sides == BOTH))
             for assignment in everything
             if assignment.sides is not None
         ),
-        sealed=sealed_regions(list(everything)),
+        sealed=sealed_regions(list(everything), unmerged=frozenset(unmerged)),
     )
     return everything, summary
 

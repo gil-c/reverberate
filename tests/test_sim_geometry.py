@@ -81,6 +81,31 @@ def build_object_tree(root: Path) -> int:
     return len(dense.faces)
 
 
+def build_two_body_object_tree(root: Path) -> None:
+    """A minimal objects tree whose collider is two overlapping convex bodies.
+
+    ``build_object_tree``'s icosphere is a single body, so ``outer_surface``
+    short-circuits on ``body_count <= 1`` and never reaches the union path --
+    it cannot exercise a union failure. Two overlapping boxes can.
+    """
+    directory = root / "objects" / "a"
+    directory.mkdir(parents=True)
+    left = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    right = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    right.apply_translation([0.6, 0.0, 0.0])
+    combined = trimesh.util.concatenate([left, right])
+    assert isinstance(combined, trimesh.Trimesh)
+    exported = combined.export(file_type="glb")
+    assert isinstance(exported, bytes)
+    (directory / "abc.glb").write_bytes(exported)
+    (directory / "abc.collider.glb").write_bytes(exported)
+    metadata = root / "metadata"
+    metadata.mkdir()
+    (metadata / "hssd_obj_semantics_condensed.csv").write_text(
+        "hash,art,pick,condensed,primary,,\nabc,No,No,sofa,sofa,,\n"
+    )
+
+
 def instance(template: str, x: float = 0.0) -> FurnitureInstance:
     return FurnitureInstance(
         template_name=template,
@@ -97,8 +122,9 @@ def test_the_collider_reaches_the_solver_with_every_triangle(tmp_path: Path) -> 
     assertion that makes its return a failing test.
     """
     dense_faces = build_object_tree(tmp_path)
-    assignments, unresolved = obstacle_assignments(tmp_path, [instance("abc")])
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("abc")])
     assert unresolved == []
+    assert unmerged == []
     assert len(assignments[0].mesh.faces) == dense_faces
 
 
@@ -117,9 +143,10 @@ def test_the_viewer_and_the_simulator_read_the_same_collider(tmp_path: Path) -> 
 
 def test_an_unresolvable_template_is_reported_not_dropped(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
-    assignments, unresolved = obstacle_assignments(tmp_path, [instance("missing")])
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("missing")])
     assert assignments == []
     assert unresolved == ["missing"]
+    assert unmerged == []
 
 
 def test_summary_counts_the_walls_the_exporter_will_build(tmp_path: Path) -> None:
@@ -133,8 +160,43 @@ def test_summary_counts_the_walls_the_exporter_will_build(tmp_path: Path) -> Non
 
 def test_instances_keep_their_placement_in_the_simulated_geometry(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
-    assignments, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
+    assignments, _, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
     assert assignments[0].mesh.centroid[0] == pytest.approx(3.0, abs=0.1)
+
+
+def test_a_failed_union_is_reported_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the fix: a failed union used to vanish silently.
+
+    ``obstacle_collider`` discarded ``outer_surface``'s success flag, so
+    nothing downstream ever learned a union had failed and the obstacle still
+    carried its original, buried-face mesh. It has to show up in three
+    places: the per-assignment list, the summary a human reads, and the
+    sealed-air census, which must not count a still-overlapping decomposition
+    as if its per-body volumes were real, separate interiors.
+    """
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("no boolean engine")
+
+    monkeypatch.setattr(trimesh.boolean, "union", boom)
+    build_two_body_object_tree(tmp_path)
+    storey = square_storey()
+
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("abc")])
+    assert unresolved == []
+    assert unmerged == ["sofa_0"]
+    # The obstacle is still placed, on its original two-body mesh -- a
+    # defective obstacle beats a missing one.
+    assert len(assignments) == 1
+
+    placed, summary = simulation_geometry(tmp_path, storey, [instance("abc")])
+    assert summary.unmerged == ["sofa_0"]
+    # Not counted as a legitimate sealed interior: its bodies still overlap,
+    # so a per-body volume would double-count the overlap.
+    assert "sofa_0" not in {region.owner for region in summary.sealed.interiors}
+    assert "sofa_0" in summary.sealed.unclosed
 
 
 def test_sampled_points_stay_clear_of_the_walls() -> None:
