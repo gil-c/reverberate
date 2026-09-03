@@ -15,14 +15,14 @@ nothing a later run would trust. See :mod:`reverberate.wave.voxelise`, whose
 mechanism this mirrors.
 
 **What the key covers.** The scene's own two source files, byte for byte, the
-detail length the colliders are reduced to, the seed that pins the sampling,
-and the source of every module that shapes the result. That last part is what
-makes the cache safe to keep across edits: change how an envelope is chosen and
-the key changes with it, so the old entry is neither served nor deleted. The
-HSSD assets themselves are not hashed -- reading a hundred megabytes of glTF to
-decide whether to skip two minutes of geometry would give a good part of the
-saving back -- so a dataset edited in place is the one thing this cache would
-not notice.
+seed that pins the sampling, and the source of every module that shapes the
+result. That last part is what makes the cache safe to keep across edits:
+change how a material is chosen, or a collider placed, and the key changes
+with it, so the old entry is neither served nor deleted. The HSSD assets
+themselves are not hashed -- reading a hundred megabytes of glTF to decide
+whether to skip two minutes of geometry would give a good part of the saving
+back -- so a dataset edited in place is the one thing this cache would not
+notice.
 """
 
 from __future__ import annotations
