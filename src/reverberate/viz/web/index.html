@@ -102,7 +102,7 @@
       import * as THREE from "three";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
-      import { buildRunGroup, loadRun, renderRunPanel } from "./solver_mode.js";
+      import { buildRunGroup, buildVoxelCloud, loadRun, renderRunPanel } from "./solver_mode.js";
 
       // Eye height of a standing adult, in metres, held constant: a person's
       // head does not rise when they look up. Body translation and head
@@ -339,6 +339,32 @@
           onSelect: (sample) => runView.highlight(sample.source_index, sample.receiver_index),
           onStand: (sample) => standAt(sample.receiver_index),
         });
+        // Voxels are what the acoustic mode is for, so they are the default and
+        // the triangles are the alternative. The two are exclusive: they
+        // describe the same boundary, so drawing both puts opaque faces exactly
+        // where the points are and the points lose, which is how this shipped
+        // looking like a mesh view with a checkbox that did nothing visible.
+        const toggle = document.getElementById("run-voxels");
+        if (toggle) {
+          let cloud = null;
+          const apply = async () => {
+            if (toggle.checked && !cloud) {
+              toggle.disabled = true;
+              setBusy("loading the grid…");
+              cloud = await buildVoxelCloud(THREE, runData);
+              toggle.disabled = false;
+              setBusy("");
+              if (cloud) runView.group.add(cloud);
+            }
+            // A run whose grid has been collected has no cloud to show; the
+            // triangles stay rather than leaving an empty room.
+            const voxels = toggle.checked && cloud !== null;
+            if (cloud) cloud.visible = voxels;
+            for (const surface of runView.surfaces) surface.visible = !voxels;
+          };
+          toggle.onchange = apply;
+          await apply();
+        }
         return runView.group;
       }
 

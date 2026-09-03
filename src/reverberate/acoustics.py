@@ -1,11 +1,11 @@
 """The frequency bands everything in this project is expressed on.
 
 One definition, imported everywhere, because the band range is not a local
-choice: material coefficients, the simulation, the metrics and the physical
-limit on decimation all have to agree, and a mismatch between any two of them
-is silent. `pyroomacoustics` already works on these seven octave bands and
-every material in its table is expressed on them, so adopting them costs
-nothing and avoids resampling anyone's data.
+choice: material coefficients, the simulation and the metrics all have to
+agree, and a mismatch between any two of them is silent. `pyroomacoustics`
+already works on these seven octave bands and every material in its table is
+expressed on them, so adopting them costs nothing and avoids resampling
+anyone's data.
 
 The range runs to 8 kHz rather than stopping at 4 kHz, so that a metric can be
 quoted on the band a listener still hears detail in.
@@ -32,9 +32,6 @@ AIR_DENSITY = 1.204
 #: which is what lets a material from its table be used without resampling.
 OCTAVE_BANDS: tuple[int, ...] = (125, 250, 500, 1000, 2000, 4000, 8000)
 
-#: Highest band centre, in Hz. The shortest wavelength of interest follows.
-MAX_FREQUENCY = OCTAVE_BANDS[-1]
-
 #: The eleven octave bands the wave solver's impedance fit is expressed on, in
 #: Hz. These are not a choice: PFFDTD's ``fit_to_Sabs_oct_11`` hard-codes
 #: ``1000 * 2 ** arange(-6, 5)`` and asserts it is given exactly eleven
@@ -49,15 +46,6 @@ MAX_FREQUENCY = OCTAVE_BANDS[-1]
 #: project can measure. :func:`reverberate.materials.db.AcousticClass.solver_absorption`
 #: is the bridge.
 SOLVER_BANDS: tuple[float, ...] = tuple(1000.0 * 2.0 ** np.arange(-6, 5))
-
-
-def wavelengths() -> np.ndarray:
-    """Wavelength of each octave band, in metres, in band order.
-
-    Used to decide, per band, whether a feature of a given size is something
-    sound reflects off or something it simply flows around.
-    """
-    return SPEED_OF_SOUND / np.asarray(OCTAVE_BANDS, dtype=float)
 
 
 def band_index(frequency: float) -> int:

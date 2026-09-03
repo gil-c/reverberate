@@ -556,6 +556,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0915 - one linear re
         "scene_sha256": scene_sha256,
         "model_json": str(model_json),
         "cache_key": args.cache_key,
+        # Where the grid lives, so the run page can draw the voxelisation the
+        # solver actually read rather than a second opinion about it.
+        "cache_root": str(cache_root()),
         "responses": int(len(sources) * receivers.shape[0]),
         "binaural": False,
         "binaural_note": NOT_BINAURAL,

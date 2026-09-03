@@ -25,6 +25,11 @@ export async function loadRun(url) {
 /** Build the solver's surfaces, plus a marker per source and receiver. */
 export function buildRunGroup(THREE, data) {
   const group = new THREE.Group();
+  // Kept apart from the markers: the surfaces and the voxel cloud describe the
+  // same boundary, so showing both puts opaque triangles exactly where the
+  // points are and the points lose. They are exclusive, and this is the handle
+  // that lets the caller switch.
+  const surfaces = [];
 
   for (const entry of data.groups) {
     if (!entry.indices.length) continue;
@@ -47,6 +52,7 @@ export function buildRunGroup(THREE, data) {
     });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = entry.label;
+    surfaces.push(mesh);
     group.add(mesh);
   }
 
@@ -75,7 +81,7 @@ export function buildRunGroup(THREE, data) {
     receivers.forEach((m, i) => m.material.color.setHex(i === receiverIndex ? PICKED : RECEIVER));
   };
 
-  return { group, highlight, bounds, receivers, sources };
+  return { group, highlight, bounds, receivers, sources, surfaces };
 }
 
 // ------------------------------------------------------------------- plots
@@ -169,6 +175,75 @@ function drawSpectrogram(canvas, spec) {
  * markers, and `onStand` is offered as a button so the listener can put the
  * camera exactly where the receiver they are hearing was.
  */
+/** The voxelisation, as a merged mesh, or null when there is no grid on disk.
+ *
+ * This is the last picture in the chain and the only one taken after the
+ * solver's own reading of the scene: triangles say what was sent, this says
+ * what was received. Blocks holding no material at all get a colour of their
+ * own, because those are the sealed insides of solid objects and sealing stops
+ * the simulation carrying sound through a region.
+ *
+ * Faces between touching blocks are not drawn and coplanar faces of the same
+ * material are merged into rectangles, on the Python side. A bedroom at 4 mm
+ * is 14 million blocks -- 167 M triangles as solid cubes -- and reaches here
+ * as 951 480, without one face moving.
+ */
+export async function buildVoxelCloud(THREE, data) {
+  const meta = data.voxels;
+  if (!meta) return null;
+  const base = data.baseUrl;
+  const [corners, index, label] = await Promise.all([
+    fetch(`${base}/${meta.corners_url}`).then((r) => r.arrayBuffer()),
+    fetch(`${base}/${meta.index_url}`).then((r) => r.arrayBuffer()),
+    fetch(`${base}/${meta.label_url}`).then((r) => r.arrayBuffer()),
+  ]);
+  const position = new Float32Array(corners);
+  const labels = new Int16Array(label);
+
+  // Unlit, with the shading in the vertex colours.
+  //
+  // The scene's lights are tuned for the textured HSSD modes -- hemisphere
+  // 1.4, sun 1.8, a head lamp at 14 -- where light makes the realism. Here the
+  // colour *is* the datum: it says which material a face carries, and any
+  // albedo above about 0.4 washed out under that rig, which is the one failure
+  // a data view cannot have. So the face's own normal decides its brightness,
+  // and nothing can exceed the albedo.
+  const colour = new Float32Array(position.length);
+  const rgb = new THREE.Color();
+  for (let v = 0; v < labels.length; v++) {
+    const kind = labels[v];
+    if (kind === -2) rgb.setRGB(0.85, 0.25, 0.55); // sealed inside
+    else if (kind < 0) rgb.setRGB(0.45, 0.45, 0.48); // rigid, still coupled
+    // Distinct hues per material, stable across runs because the label list is
+    // sorted before it is written and the index is a position in it.
+    else rgb.setHSL((kind * 0.61803398875) % 1, 0.62, 0.55);
+    colour[v * 3] = rgb.r;
+    colour[v * 3 + 1] = rgb.g;
+    colour[v * 3 + 2] = rgb.b;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
+  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index), 1));
+  geometry.computeVertexNormals();
+
+  // Shade from the normal rather than from a light, so a face keeps its own
+  // colour and only its orientation changes how bright it is.
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <color_vertex>",
+      `#include <color_vertex>
+       vec3 n = normalize(normalMatrix * normal);
+       vColor.rgb *= 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);`
+    );
+  };
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = "voxels";
+  return mesh;
+}
+
 /** The air the solver sealed off, as a table a reader can challenge.
  *
  * Sealing stops the simulation carrying sound through a region, so it is shown
@@ -249,6 +324,17 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <div class="legend">${legend}</div>
 
     ${sealedSection(data.sealed)}
+    ${
+      data.voxels
+        ? `<h2>Voxelisation</h2>
+           <label><input type="checkbox" id="run-voxels" checked> the grid the solver read (untick for the triangles it was sent)</label>
+           <p class="caption">${escapeHtml(data.voxels.note)}
+           ${data.voxels.quads.toLocaleString()} quads stand for
+           ${data.voxels.blocks.toLocaleString()} blocks and
+           ${data.voxels.total_nodes.toLocaleString()} boundary nodes;
+           ${data.voxels.sealed_quads.toLocaleString()} of them are sealed.</p>`
+        : ""
+    }
 
     <h2>Sample</h2>
     <select id="run-pick">${data.samples

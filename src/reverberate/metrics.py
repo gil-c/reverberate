@@ -5,12 +5,12 @@ quantity this project predicts: section 5.7 defines the target as octave-band
 decay envelopes, so the broadband figure could not show whether a prediction
 or an approximation was any good. Worse, it hides its own errors: a 10 dB
 error at 4 kHz and an opposite one at 125 Hz average out to a broadband number
-that looks excellent. Every decimation validation recorded before this module
-existed is optimistic for that reason and has to be redone with it.
+that looks excellent. Every validation recorded before this module existed is
+optimistic for that reason and has to be redone with it.
 
 Everything here works on one impulse response and returns per-band arrays on
-``reverberate.acoustics.OCTAVE_BANDS``, so the metrics, the materials and the
-physical limit on decimation all speak the same language.
+``reverberate.acoustics.OCTAVE_BANDS``, so the metrics and the materials speak
+the same language.
 
 The measures are the standard ones, and each is here because it answers a
 different question about an approximation:
@@ -22,7 +22,7 @@ different question about an approximation:
 - **C50 and DRR** are sensitive to where the source and listener stand, and to
   directivity, which a whole-room average is not.
 - **Direct sound level and arrival time** are purely geometric, which makes
-  them the most sensitive thing to decimation near the source.
+  them the most sensitive thing to a geometry approximation near the source.
 - **Early reflection energy** covers the first 50 ms, where the image source
   model and the real shape of the room matter most.
 """
@@ -126,7 +126,7 @@ def edt_per_band(rir: np.ndarray, fs: int) -> np.ndarray:
     EDT is dominated by the earliest reflections, so it tracks the perceived
     reverberance more closely than RT60 and is far more sensitive to the local
     geometry around the source and the listener. That makes it the better alarm
-    when decimation has flattened something nearby.
+    when an approximation has flattened something nearby.
     """
     return np.array(
         [
@@ -198,8 +198,8 @@ def early_energy_per_band(rir: np.ndarray, fs: int) -> np.ndarray:
     """Energy in the first 50 ms per band, in dB relative to the whole response.
 
     The window where the image source model does the work and where the shape
-    of the room is heard rather than averaged, so it is where an over-decimated
-    obstacle shows up first.
+    of the room is heard rather than averaged, so it is where a badly
+    approximated obstacle shows up first.
     """
     _, arrival = direct_sound(rir, fs)
     values = []
