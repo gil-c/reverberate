@@ -34,6 +34,7 @@ import webbrowser
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from reverberate.store import shared_store
 from reverberate.viz.run_view import RunRef, build_site, discover_runs
 from reverberate.viz.scene_cache import SceneEntry, ensure_scene
 
@@ -96,11 +97,14 @@ class SiteBuilder:
         shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
 
         self.runs = discover_runs(runs_root) if runs_root is not None else []
+        # Resolved once, before the loop: it reads the vault, and a run whose
+        # grid is missing would otherwise ask for it again per run.
+        store = shared_store() if self.runs else None
         # Runs are built up front, unlike apartments: there are a handful of
         # them and the payload is a second of work, so paying for it here keeps
         # the mode switch instant and the failure visible at startup.
         for run in self.runs:
-            view = build_site(run.path, target / "runs" / run.name)
+            view = build_site(run.path, target / "runs" / run.name, store)
             print(f"{run.name}: {view.summary()} (scene {run.scene_id}, {run.room})")
         (target / "runs.json").write_text(
             json.dumps(

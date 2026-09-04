@@ -59,6 +59,7 @@ from typing import Any, Literal
 import numpy as np
 
 from reverberate.experiments.engine import Engine, run_binary, sim_consts, write_record
+from reverberate.store import shared_store
 from reverberate.wave import (
     ENGINE_FILES,
     CacheEntry,
@@ -366,7 +367,15 @@ def run_scene(
         bmin=bmin,
         bmax=bmax,
     )
-    entry = voxelise(spec, nprocs=nprocs)
+    # The store, not the local cache, is what makes a voxelisation outlive the
+    # tree that computed it. W29's 16 kHz grid was computed in a worktree,
+    # never published, and vanished with the worktree: five hours of GPU whose
+    # geometry could no longer be looked at. So the lookup order here is
+    # local, then remote, then compute, and a computed entry is pushed.
+    store = shared_store()
+    if store is None:
+        print("no store credentials: this voxelisation stays on this machine only")
+    entry = voxelise(spec, nprocs=nprocs, store=store)
 
     run_dir = out / f"{scene_name}_f{int(fmax)}_p{ppw:g}_{bounds.mode}"
     if run_dir.exists():

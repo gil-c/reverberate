@@ -55,6 +55,7 @@ __all__ = [
     "StoreError",
     "digest_of_bytes",
     "digest_of_file",
+    "shared_store",
 ]
 
 #: Environment variables carrying the credentials. Read here, never elsewhere.
@@ -336,3 +337,54 @@ def _make_client() -> Any:
         aws_access_key_id=_require(KEY_ID_ENV),
         aws_secret_access_key=_require(SECRET_ENV),
     )
+
+
+#: Resolved once per process by :func:`shared_store`. ``None`` is a real
+#: answer -- "this machine has no credentials" -- so absence is spelled with a
+#: sentinel rather than with ``None``.
+_SHARED_UNSET = object()
+_shared: Any = _SHARED_UNSET
+
+
+def shared_store() -> ObjectStore | None:
+    """The project's bucket, or ``None`` when this machine cannot reach it.
+
+    Every caller that *shares* an artefact wants the same thing: the store if
+    the credentials are there, and no store rather than an exception if they
+    are not. A laptop with a locked vault, a checkout without KeePassXC and CI
+    all have to keep working, and each of them would otherwise grow its own
+    try/except around :class:`B2Store`.
+
+    Returning ``None`` rather than raising is what makes the store optional at
+    every call site without making it invisible: a caller that gets ``None``
+    is expected to say so, because a silently local-only run is the failure
+    mode this project has already paid for once -- the voxelisation cache of
+    W29 lived in a worktree, was never published, and went with the worktree.
+
+    Resolved once: the vault is read at most one time per process, and the
+    answer -- store or no store -- is kept for every later call.
+    """
+    global _shared
+    if _shared is _SHARED_UNSET:
+        _shared = _open_shared_store()
+    return _shared  # type: ignore[no-any-return]
+
+
+def _open_shared_store() -> ObjectStore | None:
+    import contextlib
+
+    from reverberate import auth
+
+    # A vault that will not open, or is not installed, is a machine without
+    # credentials -- which is exactly what this function reports by returning
+    # None. It is not an error to raise through a caller that asked whether a
+    # store exists.
+    with contextlib.suppress(Exception):
+        auth.inject([KEY_ID_ENV, SECRET_ENV, BUCKET_ENV, ENDPOINT_ENV])
+    names = (KEY_ID_ENV, SECRET_ENV, BUCKET_ENV, ENDPOINT_ENV)
+    if not all(os.environ.get(name) for name in names):
+        return None
+    try:
+        return B2Store()
+    except (StoreError, ImportError):
+        return None

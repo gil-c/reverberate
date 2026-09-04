@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 
 from reverberate import metrics
+from reverberate.store import ObjectStore
 
 __all__ = [
     "SPECTROGRAM_BINS",
@@ -363,20 +364,70 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
     return found
 
 
-def _write_voxels(report: dict[str, Any], target: Path) -> dict[str, Any] | None:
-    """Thin the run's voxelisation into the page, when its cache is still here.
+def _voxel_cache_dir(
+    key: str, recorded_root: object, run: str, store: ObjectStore | None
+) -> Path | None:
+    """Where this run's grid is, looking in the three places it can be.
 
-    Optional on purpose. The cache is content addressed and sized in
-    terabytes, so it is the first thing pruned; a run page that stopped
-    building because a grid was collected would be a worse trade than a run
-    page without the voxel view.
+    In order: this machine's own cache, the root the report happens to name,
+    then ``store``. The order is not arbitrary -- the recorded root is the
+    least trustworthy of the three, because it is an absolute path in whatever
+    tree wrote the report, and W29's pointed into a worktree that no longer
+    exists. The key is content addressed, so any copy found under it is the
+    same grid.
+
+    ``store`` is passed in rather than opened here, the way
+    :func:`reverberate.wave.voxelise.voxelise` takes one: building a page must
+    not reach the network because a caller forgot it could.
     """
-    root = report.get("cache_root")
-    key = report.get("cache_key")
-    if not root or not key:
+    from reverberate.wave.voxelise import cache_root
+
+    candidates = [cache_root() / key]
+    if recorded_root:
+        candidates.append(Path(str(recorded_root)) / key)
+    for candidate in candidates:
+        if (candidate / "vox_out.h5").is_file():
+            return candidate
+
+    from reverberate.wave.vox_store import fetch_entry
+
+    if store is None:
+        print(f"{run}: no grid at {candidates[0]} and no store to look further in")
         return None
-    cache_dir = Path(str(root)) / str(key)
-    if not (cache_dir / "vox_out.h5").is_file():
+    print(f"{run}: no grid on this machine, pulling {key} from the store")
+    try:
+        fetched = fetch_entry(store, key)
+    except Exception as error:  # noqa: BLE001 - a store that will not answer is not a build failure
+        print(f"{run}: the store could not deliver {key} ({error}); the page keeps the triangles")
+        return None
+    if fetched is None:
+        print(f"{run}: the store holds no grid {key} either; the page keeps the triangles")
+        return None
+    return fetched.path
+
+
+def _write_voxels(
+    report: dict[str, Any], target: Path, store: ObjectStore | None = None
+) -> dict[str, Any] | None:
+    """Thin the run's voxelisation into the page, from wherever the grid is.
+
+    Optional on purpose, and never silent about it. The cache is content
+    addressed and sized in terabytes, so it is the first thing pruned; a run
+    page that stopped building because a grid was collected would be a worse
+    trade than a run page without the grid view.
+
+    What is *not* an acceptable trade is falling back without saying so. The
+    page then draws the exported triangles under a mode that promises the
+    solver's own grid, and the two look enough alike that the substitution
+    reads as a rendering choice rather than as a missing file.
+    """
+    key = report.get("cache_key")
+    run = str(report.get("run") or "run")
+    if not key:
+        print(f"{run}: the report names no cache key, so the page keeps the triangles")
+        return None
+    cache_dir = _voxel_cache_dir(str(key), report.get("cache_root"), run, store)
+    if cache_dir is None:
         return None
     from reverberate.viz.vox_view import read_surface, write_voxel_payload
 
@@ -418,7 +469,7 @@ def model_json_of(run_dir: Path, report: dict[str, Any]) -> Path:
     )
 
 
-def build_site(run_dir: Path, target: Path) -> RunView:
+def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) -> RunView:
     """Write one run's payload and audio into ``target``.
 
     Reads only what the run already published: ``report.json`` for the room and
@@ -456,7 +507,7 @@ def build_site(run_dir: Path, target: Path) -> RunView:
         # the simulation carrying sound through a region, and the whole reason
         # the census exists is that this must be visible rather than inferred.
         "sealed": report.get("sealed"),
-        "voxels": _write_voxels(report, target),
+        "voxels": _write_voxels(report, target, store),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
         "binaural_note": report["binaural_note"],

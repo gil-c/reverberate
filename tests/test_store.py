@@ -200,3 +200,40 @@ def test_the_live_bucket_answers() -> None:
         pytest.skip("no B2 credentials in this environment")
     live = B2Store()
     assert any(True for _ in live.list("", shared=True))
+
+
+def test_no_credentials_means_no_store_rather_than_an_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A laptop with a locked vault has to keep working, and has to say so.
+
+    Every caller that shares an artefact wants the same answer shape: a store,
+    or no store. Raising here would push a try/except into each of them, and
+    the one that forgot it would take a run down over a missing password.
+    """
+    monkeypatch.setattr(store_module, "_shared", store_module._SHARED_UNSET)
+    monkeypatch.setattr("reverberate.auth.inject", lambda names=None: 0)
+    for name in (
+        store_module.KEY_ID_ENV,
+        store_module.SECRET_ENV,
+        store_module.BUCKET_ENV,
+        store_module.ENDPOINT_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert store_module.shared_store() is None
+
+
+def test_the_store_is_opened_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The vault is read at most once a process, however many callers ask."""
+    monkeypatch.setattr(store_module, "_shared", store_module._SHARED_UNSET)
+    opened: list[int] = []
+
+    def once() -> object:
+        opened.append(1)
+        return MemoryStore()
+
+    monkeypatch.setattr(store_module, "_open_shared_store", once)
+    first = store_module.shared_store()
+    assert store_module.shared_store() is first
+    assert opened == [1]

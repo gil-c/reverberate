@@ -632,3 +632,57 @@ class TestModelJsonResolution:
 
         with pytest.raises(FileNotFoundError, match="is not at any of"):
             model_json_of(run, {"model_json": "models/missing.json"})
+
+
+def test_a_missing_grid_says_so_instead_of_passing_the_mesh_off_as_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback is allowed. Making it look like a rendering choice is not.
+
+    W29's grid was computed in a worktree, never published, and went with the
+    worktree. The page then drew the exported triangles under a mode that
+    promises the solver's own grid, and nothing anywhere said the file was
+    gone -- which is how a missing terabyte reads as a styling decision.
+    """
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    run = _write_run(tmp_path)
+
+    build_site(run, tmp_path / "site")
+
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+    assert payload["voxels"] is None
+    said = capsys.readouterr().out
+    assert "run" in said
+    assert "b" * 32 in said or "triangles" in said
+
+
+def test_the_grid_is_pulled_from_the_store_when_this_machine_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local, then remote, then nothing. The key is what identifies a grid.
+
+    The path recorded in the report is an absolute path in whatever tree wrote
+    it, so it is the one thing that cannot be relied on; the content addressed
+    key can.
+    """
+    from reverberate.store import MemoryStore
+    from reverberate.wave.vox_store import remote_prefix
+    from test_vox_view import write_cache
+
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    key = "b" * 32
+    source = write_cache(tmp_path / "published", nodes=150)
+    (source / "sim_consts.h5").write_bytes(b"consts")
+    (source / "sim_mats.h5").write_bytes(b"mats")
+    (source / "manifest.json").write_text(json.dumps({"materials": {"carpet": {}, "shell": {}}}))
+    store = MemoryStore()
+    for name in ("sim_consts.h5", "vox_out.h5", "sim_mats.h5", "cart_grid.h5", "manifest.json"):
+        store.put_file(f"{remote_prefix(key)}{name}", source / name)
+
+    run = _write_run(tmp_path)
+    build_site(run, tmp_path / "site", store)
+
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+    assert payload["voxels"] is not None
+    assert payload["voxels"]["labels"] == ["carpet", "shell"]
+    assert (tmp_path / "data" / "cache" / "vox" / key / "vox_out.h5").is_file()
