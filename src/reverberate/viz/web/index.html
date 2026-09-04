@@ -395,11 +395,22 @@
       }
 
       function standAt(receiverIndex) {
-        const marker = runView && runView.receivers[receiverIndex];
-        if (!marker) return;
-        // Put the head where the receiver was, so what is heard and what is
-        // seen come from the same point in the room.
-        camera.position.copy(marker.position);
+        if (!runView) return;
+        const marker = runView.receivers[receiverIndex];
+        if (marker) {
+          // Put the head where the receiver was, so what is heard and what is
+          // seen come from the same point in the room.
+          camera.position.copy(marker.position);
+          return;
+        }
+        // A grid published without a solve has no receiver to stand at, and the
+        // camera would otherwise stay wherever it was left -- which on a first
+        // load is the origin, and the origin of this scene is in the floor. The
+        // room then renders as one flat wall of colour and reads as a broken
+        // page rather than as a camera inside the carpet. So stand in the
+        // middle of it at eye height instead.
+        const { min, max } = runView.bounds;
+        camera.position.set((min.x + max.x) / 2, min.y + EYE_HEIGHT, (min.z + max.z) / 2);
       }
 
       async function buildMode(mode) {

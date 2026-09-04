@@ -174,6 +174,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The acoustic view renders a run that has no responses behind it. Every panel
+  below the voxelisation reads a sample, and `data.dry_voice.member_name` threw
+  on a grid published on its own, which took the whole page down rather than
+  its lower half. They are now replaced by one line saying nothing was solved
+  on this grid, because an empty decay curve looks like a decay that was
+  measured and came out flat. The camera stands in the middle of the room at
+  eye height when there is no receiver to stand at, instead of staying at the
+  origin -- which in this scene is inside the floor, and renders as one flat
+  wall of colour that reads as a broken page.
 - The acoustic view says which of the two it is drawing. Blocks are sized to a
   cube budget, so a fine grid is drawn coarser than it is -- the 16 kHz bedroom
   is 13 917 266 blocks of 4.09 mm standing for 63 430 624 nodes of 2.04 mm --
