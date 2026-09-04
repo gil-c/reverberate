@@ -316,12 +316,21 @@ def voxelise(
 
     child = Path(__file__).with_name("_child_voxelise.py")
     started = time.time()
+    # In the staging directory, not wherever the caller happened to stand.
+    # PFFDTD's voxeliser spills per-voxel results through a *relative*
+    # ``mmap_dat/`` (``vox_scene.py:61``) and memory-maps ``adj_check.dat``
+    # beside it, both cleared at the start of every run. Two voxelisations
+    # sharing a working directory therefore delete each other's scratch and die
+    # on an assertion about triangle counts that reads like a defect in the
+    # scene. Staging is per key and per pid, so it cannot collide, and the
+    # scratch is thrown away with it. Every path in ``job`` is absolute.
     completed = subprocess.run(
         [pffdtd_python(), str(child)],
         input=json.dumps(job),
         capture_output=True,
         text=True,
         check=False,
+        cwd=staging,
     )
     wall_s = time.time() - started
     (staging / "voxelise.log").write_text(completed.stdout + completed.stderr)

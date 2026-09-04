@@ -233,3 +233,50 @@ class TestPatchedVoxeliser:
         first = spec.key
         Path(spec.model_json).unlink()
         assert spec.key == first
+
+
+class TestScratchDirectory:
+    """Two voxelisations must not share a scratch directory."""
+
+    def test_the_child_runs_in_its_own_staging_directory(self, tmp_path: Path) -> None:
+        """PFFDTD spills per-voxel results through a *relative* ``mmap_dat/``.
+
+        ``vox_scene.py:61`` sets ``DAT_FOLDER = 'mmap_dat'`` and clears it at the
+        start of every run, and ``adj_check.dat`` is memory-mapped beside it. A
+        child inheriting the caller's working directory therefore shares that
+        scratch with every other voxelisation started from the same place, and
+        the loser dies on an assertion about triangle counts that reads like a
+        defect in the scene rather than a collision.
+
+        Asserted on the ``cwd`` the subprocess is given, because that is the
+        whole of the fix and the alternative -- running two real voxelisations
+        and checking neither corrupts the other -- costs minutes and a
+        gigabyte.
+        """
+        import importlib
+        from unittest import mock
+
+        # By path, not ``from reverberate.wave import voxelise``: the package
+        # re-exports the *function* of that name, which would shadow the module.
+        module = importlib.import_module("reverberate.wave.voxelise")
+
+        spec = make_spec(tmp_path)
+        recorded: dict[str, object] = {}
+
+        def fake_run(argv: list[str], **kwargs: object) -> object:
+            recorded.update(kwargs)
+            raise RuntimeError("stop here: the call is what is under test")
+
+        with (
+            mock.patch.object(module, "ensure_patched", lambda: []),
+            mock.patch.object(module, "pffdtd_dir", lambda: tmp_path),
+            mock.patch.object(module, "pffdtd_python", lambda: "python"),
+            mock.patch.object(module.subprocess, "run", fake_run),
+            mock.patch.object(module, "cache_root", lambda: tmp_path / "cache"),
+            pytest.raises(RuntimeError, match="stop here"),
+        ):
+            module.voxelise(spec)
+
+        cwd = recorded.get("cwd")
+        assert cwd is not None
+        assert Path(str(cwd)).name.startswith(f".{spec.key}.partial.")

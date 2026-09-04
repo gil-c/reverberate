@@ -87,6 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two voxelisations sharing a working directory destroyed each other.**
+  PFFDTD spills per-voxel results through a *relative* `mmap_dat/` and
+  memory-maps `adj_check.dat` beside it, both cleared at the start of every
+  run, and the child inherited whatever directory the caller happened to stand
+  in. The loser died on an assertion about triangle counts that reads like a
+  defect in the scene rather than a collision. The child now runs in the
+  entry's own staging directory, which is keyed per cache entry and per pid, so
+  the scratch cannot collide and is thrown away with it.
 - **The voxelisation cache was never published, so a grid died with the worktree
   that computed it.** `reverberate.wave.vox_store` has been able to push and pull
   a cache entry since it was written, and nothing ever called it: both callers of
