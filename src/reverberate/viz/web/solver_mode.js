@@ -333,7 +333,12 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
            ${data.voxels.blocks.toLocaleString()} blocks and
            ${data.voxels.total_nodes.toLocaleString()} boundary nodes;
            ${data.voxels.sealed_quads.toLocaleString()} of them are sealed.</p>`
-        : ""
+        : `<h2>Voxelisation</h2>
+           <p class="caption">Not drawn. This run's grid is not on the machine
+           serving this page and the shared store does not hold it either, so
+           what you see above is the triangle mesh the solver was sent, not the
+           grid it read. The two are not the same picture: the gap between them
+           is where a mislaid material or an unsealed interior hides.</p>`
     }
 
     <h2>Sample</h2>

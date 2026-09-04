@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
+from reverberate.store import shared_store
 from reverberate.wave.comms import write_comms
 from reverberate.wave.remote import DEFAULT_PFFDTD_DIR, DEFAULT_REMOTE_DIR, Machine, solve
 from reverberate.wave.voxelise import (
@@ -53,7 +54,13 @@ def _voxelise(args: argparse.Namespace) -> int:
         ppw=args.ppw,
         fcc=args.fcc,
     )
-    entry = voxelise(spec, nprocs=args.nprocs, force=args.force)
+    # Local, then remote, then compute -- and publish what was computed. A
+    # voxelisation is hours of CPU and about a gigabyte, and the one thing it
+    # must survive is the tree it was computed in.
+    store = None if args.local_only else shared_store()
+    if store is None and not args.local_only:
+        print("no store credentials: this entry stays on this machine only", file=sys.stderr)
+    entry = voxelise(spec, nprocs=args.nprocs, force=args.force, store=store)
     print(json.dumps({"key": entry.key, "path": str(entry.path), **entry.manifest}, indent=2))
     return 0
 
@@ -119,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     vox.add_argument("--fcc", action="store_true")
     vox.add_argument("--nprocs", type=int, default=None)
     vox.add_argument("--force", action="store_true", help="re-voxelise even if cached")
+    vox.add_argument(
+        "--local-only",
+        action="store_true",
+        help="do not read from or publish to the shared store",
+    )
     vox.set_defaults(func=_voxelise)
 
     comms = sub.add_parser("comms", help="place one source and its receivers on a cached grid")

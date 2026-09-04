@@ -56,6 +56,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The voxelisation cache was never published, so a grid died with the worktree
+  that computed it.** `reverberate.wave.vox_store` has been able to push and pull
+  a cache entry since it was written, and nothing ever called it: both callers of
+  `voxelise` passed `store=None`. W29's 16 kHz bedroom -- 63 430 624 boundary
+  nodes, five hours of A100 -- was computed in a worktree that has since been
+  removed, and the geometry behind a finished measurement could no longer be
+  looked at. `reverberate.store.shared_store` now answers "the bucket, or nothing"
+  once per process, `voxelise` receives it from the experiment harness and from
+  the CLI, and a computed entry is published.
+- **A run page with no grid drew the exported triangles under the mode that
+  promises the solver's own.** `_write_voxels` returned `None` and said nothing,
+  so a missing terabyte read as a rendering choice. It now looks in this
+  machine's cache, then in the root the report names, then in the shared store --
+  the key is content addressed, so any copy found under it is the same grid --
+  and when none of the three has it, the build log and the page itself say so.
 - **The same scene exported from two processes gave different geometry**,
   608 098 triangles against 614 330. `trimesh.sample.sample_surface` was called
   without its `seed`, so it drew from OS entropy, and the 95th percentile it
