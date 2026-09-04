@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of itself, trading an object that is too fat for one the grid may not resolve;
   and a single decimation target refused 17 of 41 templates, so the budget is a
   back-off ladder with an absolute cap under it.
+- `reverberate.experiments.grid_page`, which publishes a voxelisation as a run
+  page with no solve behind it. The acoustic view answers the question the mesh
+  view cannot -- the mesh says what left the exporter, the grid says what the
+  solver received -- and until now the only way to see it was to render a run,
+  which means a placement, comms files, a solve, responses and audio. Looking at
+  the geometry cost a GPU. The sections that need responses come out empty
+  rather than invented, and `omissions` says so on the page: no source, no
+  receiver, no dry voice, and a plausible-looking pair nobody placed would be
+  exactly the claim this page must not make.
 - `scripts/check_vox_index.sh`, patch 6's acceptance test: one bedroom
   voxelised with and without the index, `vox_out.h5` compared byte for byte.
 
