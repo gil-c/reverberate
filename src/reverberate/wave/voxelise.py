@@ -340,6 +340,14 @@ def voxelise(
             + completed.stderr.strip()[-2000:]
         )
 
+    # The scratch, now that the child is done with it. Giving it the staging
+    # directory to work in is what stops two voxelisations colliding, but the
+    # staging directory is also what gets published, so without this every
+    # cache entry keeps an empty ``mmap_dat/`` and whatever memmap the adjacency
+    # check left beside it. Cheap to remove, and confusing to find later.
+    _remove_tree(staging / "mmap_dat")
+    (staging / "adj_check.dat").unlink(missing_ok=True)
+
     report = _parse_report(completed.stdout)
     report.update(
         {
