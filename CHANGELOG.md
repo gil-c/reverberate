@@ -96,6 +96,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Eleven of the twenty-eight pieces standing in the bedroom never reached the
+  solver.** The room's furniture was chosen by asking `room_of` which polygon
+  the instance's *origin point* falls in, while the shell was extruded from
+  `isolated_storey`: two footprints for one scene, and the one deciding the
+  furniture was never the one drawing the room. An asset's origin sits in the
+  wall band, so every picture hanging on the bedroom's own walls answered
+  `"doorway"` and was dropped, leaving a bare wall where it hung. Scoping by
+  footprint against the same polygon the shell comes from admits the four
+  pictures and nothing else -- 17 obstacles become 21, and 7.97 m2 of picture
+  appears in `bedroom_only.json` where there was none -- and the four wardrobes
+  in the adjoining closets still stay out, which is right, because the
+  bedroom's shell does not enclose them. The split is 0.83 against 0.00, so
+  there is no threshold here to tune. `room_of` keeps the job it is right for,
+  which is labelling which room a source or a receiver stands in.
+- **Voxelising a whole flat took a night because of one line.** PFFDTD's
+  `vox_grid_base.fill` compares every triangle against every voxel with no
+  spatial index, so the cost is `O(Nvox x Ntris)` and, through VoxGrid's own
+  `Nvox_est` heuristic, grows as `Ntris^1.5`. Measured at 4 kHz: 1.8e9
+  elementary comparisons for a bedroom and 2.0e12 for the flat, which is
+  61 626 s of one core. Patch 6 bins each triangle into the index range its
+  bounding box spans, once, so the per-voxel search is a slice: the flat's fill
+  is 67 s and the bedroom's 8.37 s becomes 1.33 s. Acceptance is identity, not
+  speed -- candidate lists are built ascending by triangle index, the order
+  `np.nonzero` produced, and `vox_out.h5` is byte for byte what it was, same
+  88 826 940 bytes and same sha256. A lattice the binning does not recognise
+  falls back to upstream's scan rather than to a guess.
+- **A fresh PFFDTD checkout at the pinned commit could not voxelise at all.**
+  `np.float` was removed in numpy 1.20 and upstream still reads it in
+  `common/myfuncs.py`. The repair was in this machine's checkout, applied by
+  hand and recorded in no file, so it was outside `PATCHED_FILES`:
+  `ensure_patched` neither knew about it nor would restore it, and nothing in
+  the repository said why the checkout worked. It is patch 7 now, a whole file
+  under the same pin as the rest.
 - **Two voxelisations sharing a working directory destroyed each other.**
   PFFDTD spills per-voxel results through a *relative* `mmap_dat/` and
   memory-maps `adj_check.dat` beside it, both cleared at the start of every
@@ -140,6 +173,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at. Entries cached under the old key are orphaned and can be deleted.
 
 ### Changed
+
+- The acoustic view says which of the two it is drawing. Blocks are sized to a
+  cube budget, so a fine grid is drawn coarser than it is -- the 16 kHz bedroom
+  is 13 917 266 blocks of 4.09 mm standing for 63 430 624 nodes of 2.04 mm --
+  and a thin object aggregated away reads exactly like a thin object the
+  voxeliser missed. `VoxelCloud.aggregated` and the payload note now name the
+  block size against the grid step whenever they differ.
 
 - **The catalogue no longer stores anything above 4 kHz as though it were
   data.** The 8 kHz column was the 4 kHz value repeated, which was defensible
