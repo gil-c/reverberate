@@ -117,7 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   elementary comparisons for a bedroom and 2.0e12 for the flat, which is
   61 626 s of one core. Patch 6 bins each triangle into the index range its
   bounding box spans, once, so the per-voxel search is a slice: the flat's fill
-  is 67 s and the bedroom's 8.37 s becomes 1.33 s. Acceptance is identity, not
+  is 67 s and the bedroom's 8.37 s becomes 1.33 s. **The whole storey at 4 kHz,
+  carved, voxelises end to end in 27.6 minutes** -- 3 244 563 triangles,
+  66 159 665 boundary nodes, 235 s of fill against 1 420 s of `calc_adj`, which
+  is where the next lever is. Acceptance is identity, not
   speed -- candidate lists are built ascending by triangle index, the order
   `np.nonzero` produced, and `vox_out.h5` is byte for byte what it was, same
   88 826 940 bytes and same sha256. A lattice the binning does not recognise
@@ -136,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in. The loser died on an assertion about triangle counts that reads like a
   defect in the scene rather than a collision. The child now runs in the
   entry's own staging directory, which is keyed per cache entry and per pid, so
-  the scratch cannot collide and is thrown away with it.
+  the scratch cannot collide -- and it is deleted before the entry is
+  published, since the staging directory is also what gets published.
 - **The voxelisation cache was never published, so a grid died with the worktree
   that computed it.** `reverberate.wave.vox_store` has been able to push and pull
   a cache entry since it was written, and nothing ever called it: both callers of
