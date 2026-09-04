@@ -54,7 +54,9 @@ def _sound_speed(entry_path: Path) -> float:
         return float(handle["c"][()])
 
 
-def build(models: Path, scene_name: str, cache_key: str, out: Path) -> dict[str, Any]:
+def build(
+    models: Path, scene_name: str, cache_key: str, out: Path, viewer_cubes: int | None = None
+) -> dict[str, Any]:
     """Write ``plan.json`` and ``report.json`` for one voxelisation.
 
     Everything is read back from the artefacts themselves -- the cache entry's
@@ -104,6 +106,10 @@ def build(models: Path, scene_name: str, cache_key: str, out: Path) -> dict[str,
         "binaural_note": "no receivers: nothing was solved on this grid",
         "dry_voice": None,
         "omissions": [NO_SOLVE],
+        # Optional, and only meaningful for a page whose purpose is to be
+        # looked at: how many blocks the viewer may spend on it. See
+        # ``reverberate.viz.vox_view.TARGET_CUBES``.
+        **({"viewer_cubes": viewer_cubes} if viewer_cubes else {}),
         "grid": {
             key: entry.manifest.get(key)
             for key in ("fmax", "h_m", "grid_shape", "grid_points", "boundary_nodes", "triangles")
@@ -120,9 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scene", required=True, help="a scene name from the models manifest")
     parser.add_argument("--cache-key", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--viewer-cubes",
+        type=int,
+        default=None,
+        help="blocks the viewer may spend, overriding TARGET_CUBES; a finer picture "
+        "and a longer first build",
+    )
     args = parser.parse_args(argv)
 
-    report = build(args.models, args.scene, args.cache_key, args.out)
+    report = build(args.models, args.scene, args.cache_key, args.out, args.viewer_cubes)
     grid = report["grid"]
     print(
         f"{args.out.name}: {grid['boundary_nodes']:,} boundary nodes at "

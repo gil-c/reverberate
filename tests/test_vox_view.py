@@ -311,3 +311,63 @@ class TestSurface:
         # And unbuffered, for the same inputs, agrees -- proving the buffers
         # are what changed, not the algorithm.
         assert np.array_equal(second, _greedy_quads(partial))
+
+
+class TestCommonestMaterial:
+    """The block's material, by sorting rather than by a dense tally.
+
+    The tally it replaces was a ``(blocks, materials)`` count: 4.9 GB for the
+    flat at 16 mm blocks and **28 GB** at the grid's own step, which is what
+    stopped a whole flat being drawn at full resolution. Sorting is bounded by
+    the node count whatever the material list.
+    """
+
+    @staticmethod
+    def _dense(
+        inverse: np.ndarray, material: np.ndarray, found: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The implementation this replaced, kept as the oracle."""
+        kinds = int(material.max()) + 2
+        tally = np.bincount(
+            inverse * kinds + (material.astype(np.int64) + 1), minlength=found * kinds
+        ).reshape(found, kinds)
+        if tally.shape[1] < 2:
+            return np.zeros(found, np.int8), np.ones(found, bool)
+        return tally[:, 1:].argmax(axis=1).astype(np.int8), tally[:, 1:].sum(axis=1) == 0
+
+    def test_it_agrees_with_the_dense_tally(self) -> None:
+        """Randomised, because the disagreement that mattered was a tie, and a
+        hand-written case would not have contained one."""
+        from reverberate.viz.vox_view import _commonest_material
+
+        rng = np.random.default_rng(0)
+        for _ in range(200):
+            found = int(rng.integers(1, 40))
+            count = int(rng.integers(1, 200))
+            inverse = rng.integers(0, found, count)
+            material = rng.integers(-1, int(rng.integers(1, 7)), count).astype(np.int8)
+            mine, mine_rigid = _commonest_material(inverse, material, found)
+            theirs, theirs_rigid = self._dense(inverse, material, found)
+            assert np.array_equal(mine_rigid, theirs_rigid)
+            # A block with no material has no answer to compare; both mark it.
+            assert np.array_equal(mine[~mine_rigid], theirs[~theirs_rigid])
+
+    def test_a_tie_falls_to_the_lower_material(self) -> None:
+        """``argmax`` over the dense tally broke ties that way, and the first
+        sort-based version broke them the other, which disagreed on every block
+        where two materials were level."""
+        from reverberate.viz.vox_view import _commonest_material
+
+        material = np.array([0, 3], dtype=np.int8)
+        carried, rigid = _commonest_material(np.array([0, 0]), material, 1)
+        assert carried[0] == 0
+        assert not rigid[0]
+
+    def test_a_block_of_nothing_but_rigid_nodes_is_marked(self) -> None:
+        from reverberate.viz.vox_view import _commonest_material
+
+        carried, rigid = _commonest_material(
+            np.array([0, 0, 1]), np.array([-1, -1, 2], dtype=np.int8), 2
+        )
+        assert list(rigid) == [True, False]
+        assert carried[1] == 2

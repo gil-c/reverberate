@@ -147,6 +147,57 @@ class VoxelCloud:
         )
 
 
+def _commonest_material(
+    inverse: np.ndarray, material: np.ndarray, found: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per block: the material most of its nodes carry, and whether it has none.
+
+    By sorting rather than by tallying. The tally this replaces was a dense
+    ``(blocks, materials)`` count, which is fine for a bedroom's thirteen
+    materials at a coarse block and is **28 GB** for the flat's fifty-one at the
+    grid's own step -- so it, and not the browser, was what stopped a whole flat
+    being drawn at full resolution.
+
+    Sorting on ``block * kinds + material`` puts every (block, material) pair
+    together, so the run lengths *are* the counts and the longest run in each
+    block is its answer. Peak memory is a handful of arrays the length of the
+    node list, whatever the material count.
+
+    Rigid nodes, ``material == -1``, are excluded from the vote: they are the
+    far side of a boundary the room cannot hear. A block with nothing but rigid
+    nodes has no material at all, which the second return value marks.
+    """
+    kinds = int(material.max()) + 1
+    voting = material >= 0
+    carried = np.zeros(found, dtype=np.int8)
+    if not voting.any():
+        return carried, np.ones(found, dtype=bool)
+
+    pairs = inverse[voting] * kinds + material[voting].astype(np.int64)
+    pairs.sort()
+    # Run boundaries, hence run lengths, hence the count of each material in
+    # each block -- without ever materialising the blocks-by-materials grid.
+    edges = np.flatnonzero(np.diff(pairs))
+    starts = np.concatenate(([0], edges + 1))
+    counts = np.diff(np.concatenate((starts, [pairs.size])))
+    run_block, run_material = np.divmod(pairs[starts], kinds)
+
+    # The winner per block: order by block, then by count, then by *descending*
+    # material, and take the last run of each block. The last key is what makes
+    # a tie fall to the lower material index, which is what ``argmax`` over the
+    # dense tally did -- without it the two disagree on every block where two
+    # materials are level, which random blocks hit immediately.
+    picked = np.lexsort((-run_material, counts, run_block))
+    block_sorted = run_block[picked]
+    last = np.flatnonzero(np.diff(block_sorted))
+    last = np.concatenate((last, [block_sorted.size - 1]))
+    carried[block_sorted[last]] = run_material[picked][last].astype(np.int8)
+
+    all_rigid = np.ones(found, dtype=bool)
+    all_rigid[run_block] = False
+    return carried, all_rigid
+
+
 def read_voxels(cache_dir: Path, target_cubes: int = TARGET_CUBES) -> VoxelCloud:
     """Read a cached voxelisation and bin it into drawable blocks.
 
@@ -306,7 +357,6 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # which at the grid's own 2 mm is a 34 GB occupancy array and a 481 GB
     # material tally: it does not fail, it swaps, which is worse than failing.
     shape = np.array([axis.size for axis in axes], dtype=np.int64)
-    kinds = int(material.max()) + 2  # -1 rigid, then 0..max
     span = 1
     while span < 4096:
         if np.unique(_block_keys(scene_subs, span, shape)).size <= target_cubes:
@@ -319,9 +369,6 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
         _block_keys(scene_subs, span, shape), return_inverse=True, return_counts=True
     )
     found = unique_keys.size
-    tally = np.bincount(
-        inverse * kinds + (material.astype(np.int64) + 1), minlength=found * kinds
-    ).reshape(found, kinds)
 
     # A block is sealed only when *nothing* in it carries a material and every
     # node in it has lost its adjacency. A block at a surface holds both sides
@@ -334,7 +381,7 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # patch exists for, and the view must be able to show it rather than
     # quietly relabel it as sealed.
     inert_count = np.bincount(inverse, weights=inert, minlength=found)
-    all_rigid = tally[:, 1:].sum(axis=1) == 0
+    carried, all_rigid = _commonest_material(inverse, material, found)
     block_inert = all_rigid & (inert_count >= occupancy)
     # Otherwise it takes the commonest material it actually has, ignoring the
     # rigid nodes, which are the far side of a boundary the room cannot hear.
@@ -345,7 +392,7 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # patch 5 exists to fix -- does not satisfy. Gating on ``block_inert``
     # here would leave such a block's ``argmax`` of an all-zero row, material
     # index 0, standing as if it were commonly that material.
-    block_material = tally[:, 1:].argmax(axis=1).astype(np.int8)
+    block_material = carried
     block_material[all_rigid] = -1
 
     # Back from the packed key to a centre in the scene's own frame.
