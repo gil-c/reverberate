@@ -111,6 +111,35 @@ class SceneSpec:
     bmax: tuple[float, float, float] | None = None
     rot_az_el: tuple[float, float] = (0.0, 0.0)
 
+    # --- how it is computed, not what comes out. Deliberately outside `key`. ---
+    #
+    # A boundary node's row is decided by the triangles crossing its own six
+    # legs, and every voxel is given every triangle overlapping it plus a
+    # one-cell halo, so which voxel a node lands in cannot change its answer.
+    # These three therefore trade memory against wall clock and nothing else,
+    # and keying on them would fragment a cache sized in terabytes over choices
+    # that produce identical bytes. `tests/test_slabbed.py` is what makes that a
+    # checked claim rather than an argument. They are recorded in the manifest,
+    # because how an entry was computed is still worth being able to read back.
+    #: Voxels to process at a time, each consolidated and appended before the
+    #: next is built. Peak memory is one slab. 1 is upstream's single pass, and
+    #: the only one that runs ``check_adj_full``.
+    slabs: int = 1
+    #: Voxel side in grid steps, overriding PFFDTD's ``fac = 0.025`` heuristic.
+    #: That heuristic was tuned when the fill scanned every triangle per voxel;
+    #: patch 6 removed that cost, so smaller lattices are now free and a whole
+    #: flat at 16 kHz would otherwise ask for 17.5 million voxel objects.
+    nh: int | None = None
+    #: The same lever from the other end: a target voxel count, from which
+    #: PFFDTD derives ``Nh``. At most one of the two may be set.
+    nvox_est: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.nh is not None and self.nvox_est is not None:
+            raise ValueError("set nh or nvox_est, not both: PFFDTD asserts on it")
+        if self.slabs < 1:
+            raise ValueError(f"slabs must be at least 1, not {self.slabs}")
+
     @cached_property
     def key(self) -> str:
         """A hash over the mesh, the materials, the grid and the voxeliser.
@@ -312,6 +341,9 @@ def voxelise(
         "rot_az_el": list(spec.rot_az_el),
         "nprocs": nprocs,
         "compress": None,
+        "slabs": spec.slabs,
+        "nh": spec.nh,
+        "nvox_est": spec.nvox_est,
     }
 
     child = Path(__file__).with_name("_child_voxelise.py")
@@ -361,6 +393,11 @@ def voxelise(
             "geometry_sha256": hashlib.sha256(_geometry_bytes(Path(spec.model_json))).hexdigest(),
             "fmax": spec.fmax,
             "ppw": spec.ppw,
+            # How it was computed, not what came out: outside the key, but
+            # recorded, because an entry made in slabs did not run
+            # ``check_adj_full`` and a reader should be able to see that.
+            "nh": spec.nh,
+            "nvox_est": spec.nvox_est,
             "Tc": spec.tc,
             "rh": spec.rh,
             "fcc": spec.fcc,

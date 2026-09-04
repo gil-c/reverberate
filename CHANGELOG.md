@@ -46,6 +46,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than invented, and `omissions` says so on the page: no source, no
   receiver, no dry voice, and a plausible-looking pair nobody placed would be
   exactly the claim this page must not make.
+- **Slabbed voxelisation**, so peak memory is a slab of the grid and not the
+  grid. `SceneSpec.slabs` consolidates that many groups of voxels in turn, each
+  appended to `vox_out.h5` before the next is built; `nh` and `nvox_est` expose
+  the voxel side that PFFDTD's `fac = 0.025` heuristic otherwise picks alone.
+  All three are outside the cache key on purpose: a boundary node's row is
+  decided by the triangles crossing its own six legs, every voxel is handed
+  every triangle overlapping it plus a one-cell halo, and so how the work is
+  divided cannot reach the answer.
+
+  That is checked rather than argued. `scripts/check_slabs.sh` voxelises one
+  bedroom whole, in 2 slabs, in 5, at another voxel side, and at both together,
+  and compares the four datasets the engine reads: **all identical**. The rotate
+  and sort passes are done per slab rather than by `rotate_sim_data` afterwards,
+  because those read the whole of `adj_bn` and `bn_ixyz` into memory -- 15 GB at
+  16 kHz on this flat -- which is the ceiling slabbing exists to remove. It is
+  only correct because a slab is cut along the axis those passes put outermost,
+  making it a contiguous range of engine indices, so sorting inside each slab
+  and concatenating in order is already the global sort.
+
+  `check_adj_full` does not run on a slabbed entry: it memory-maps one byte per
+  grid point, 151 GB for that scene, and it verifies the whole grid rather than
+  a piece of it. The manifest records `slabs`, `nh` and `nvox_est` so a reader
+  can see which entries had it.
 - `scripts/check_vox_index.sh`, patch 6's acceptance test: one bedroom
   voxelised with and without the index, `vox_out.h5` compared byte for byte.
 

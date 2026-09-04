@@ -31,6 +31,127 @@ from pathlib import Path
 from typing import Any
 
 
+def _slabbed_adj(
+    out_dir: Path,
+    room_geo: Any,
+    cart_grid: Any,
+    vox_grid: Any,
+    fcc: bool,
+    nprocs: int | None,
+    slabs: int,
+) -> int:
+    """``calc_adj`` a slab of voxels at a time, appending to ``vox_out.h5``.
+
+    Why this is exact rather than approximate, in three facts about the code it
+    drives, each checked in ``tests/test_slabbed.py``:
+
+    1. **A voxel emits only its core.** ``vox_scene.py`` sets
+       ``in_mask[1:-1,1:-1,1:-1]`` and then clears ``vox_bp`` outside it, so the
+       one-cell halo is *read* -- which is what makes the adjacency at the core's
+       edge correct -- and never *emitted*. The cores tile the grid with no
+       overlap and no gap, which is why upstream can assert
+       ``np.unique(bn_ixyz).size == bn_ixyz.size``. A slab is a whole number of
+       voxels, so it inherits that property: no node is produced twice and none
+       is missed.
+    2. **Nothing written to the file is a global reduction.** ``adj_bn`` comes
+       from ray hits on the node's own six legs; ``saf_bn`` from those hits and
+       the triangle normal; ``mat_bn`` from the nearest triangle's material.
+       ``calc_adj`` does compute ``mat_approx_sa`` by summing over every node,
+       but that figure is only printed -- it never feeds back into what is
+       saved. So a node's row does not depend on which slab it was computed in.
+    3. **The engine's flat index is outermost-axis-major.** A slab cut along the
+       axis ``rotate_sim_data`` puts first is therefore a contiguous range of
+       flat indices, so sorting inside each slab and concatenating in order
+       gives exactly the globally sorted array -- no merge, no seam.
+
+    The rotate and sort passes are done here, per slab, rather than by
+    ``rotate_sim_data``/``sort_sim_data`` afterwards: those read the whole of
+    ``adj_bn`` and ``bn_ixyz`` into memory, which is 15 GB at 16 kHz on this
+    flat and would put back exactly the ceiling the slabbing exists to remove.
+
+    ``check_adj_full`` is skipped. It memory-maps one byte per grid point --
+    151 GB for that same scene -- and it is a verification of the whole grid,
+    which a slab cannot do a piece of. The report says ``slabs`` so a reader
+    knows this entry did not have it.
+
+    Returns the total number of boundary nodes written.
+    """
+    import h5py
+    import numpy as np
+    from common.myfuncs import ind2sub3d
+    from voxelizer.vox_scene import VoxScene
+
+    grid = np.asarray(cart_grid.Nxyz, dtype=np.int64)
+    # The same rule rotate_sim_data uses, so the file this writes is in the
+    # space the engine expects: axes in descending extent, biggest first.
+    order = np.argsort(grid)[::-1]
+    rotated = grid[order]
+    axes = [cart_grid.xv, cart_grid.yv, cart_grid.zv]
+
+    # Column permutation for adj_bn, lifted from rotate_sim_data: the six
+    # neighbour directions have to follow the axes they point along.
+    steps = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]])
+    columns = np.argsort(
+        [int(np.flatnonzero(np.all(step[order] == steps, axis=-1))[0]) for step in steps]
+    )
+
+    # Cut along the axis that ends up outermost, which is what makes a slab a
+    # contiguous range of engine indices.
+    axis = int(order[0])
+    nonempty = list(vox_grid.nonempty_idx)
+    starts = np.array([vox_grid.voxels[i].ixyz_start[axis] for i in nonempty], dtype=np.int64)
+    edges = np.linspace(0, int(grid[axis]), slabs + 1)[1:-1]
+    groups: list[list[int]] = [[] for _ in range(slabs)]
+    for voxel, start in zip(nonempty, starts, strict=True):
+        groups[int(np.searchsorted(edges, start, side="right"))].append(voxel)
+
+    handle = h5py.File(out_dir / "vox_out.h5", "w")
+    datasets = {
+        "bn_ixyz": handle.create_dataset("bn_ixyz", (0,), maxshape=(None,), dtype=np.int64),
+        "adj_bn": handle.create_dataset(
+            "adj_bn", (0, 6), maxshape=(None, 6), dtype=bool, chunks=(1 << 16, 6)
+        ),
+        "mat_bn": handle.create_dataset("mat_bn", (0,), maxshape=(None,), dtype=np.int8),
+        "saf_bn": handle.create_dataset("saf_bn", (0,), maxshape=(None,), dtype=np.float64),
+    }
+    total = 0
+    for number, group in enumerate(groups):
+        print(f"--SLAB {number + 1}/{slabs}: {len(group)} non-empty voxels", flush=True)
+        if not group:
+            continue
+        vox_grid.nonempty_idx = group
+        scene = VoxScene(room_geo, cart_grid, vox_grid, fcc=fcc)
+        scene.calc_adj(Nprocs=nprocs)
+
+        subs = ind2sub3d(scene.bn_ixyz, *grid)
+        moved = (subs[order[0]] * rotated[1] + subs[order[1]]) * rotated[2] + subs[order[2]]
+        keep = np.argsort(moved)
+        rows = {
+            "bn_ixyz": moved[keep],
+            "adj_bn": scene.adj_bn[:, columns][keep],
+            "mat_bn": scene.mat_bn[keep],
+            "saf_bn": scene.saf_bn[keep],
+        }
+        written = int(keep.size)
+        for name, data in rows.items():
+            dataset = datasets[name]
+            dataset.resize(total + written, axis=0)
+            dataset[total : total + written] = data
+        total += written
+        # Let the slab go before the next one is built, which is the whole
+        # point: peak memory is one slab and not the scene.
+        del scene, subs, moved, keep, rows
+
+    for name, values in zip("xyz", [axes[i] for i in order], strict=True):
+        handle.create_dataset(f"{name}v", data=values)
+    handle.create_dataset("h", data=np.float64(cart_grid.h))
+    for name, size in zip(("Nx", "Ny", "Nz"), rotated, strict=True):
+        handle.create_dataset(name, data=np.int64(size))
+    handle.create_dataset("Nb", data=np.int64(total))
+    handle.close()
+    return total
+
+
 def main() -> int:
     job = json.loads(sys.stdin.read())
 
@@ -104,23 +225,34 @@ def main() -> int:
     timed("vox_grid_fill_s", lambda: vox_grid.fill(Nprocs=nprocs))
     vox_grid.print_stats()
 
-    vox_scene = VoxScene(room_geo, cart_grid, vox_grid, fcc=fcc)
-    timed("vox_scene_adj_s", lambda: vox_scene.calc_adj(Nprocs=nprocs))
-    vox_scene.check_adj_full()
-    timed("vox_scene_save_s", lambda: vox_scene.save(str(out_dir), compress=compress))
+    slabs = int(job.get("slabs") or 1)
+    if slabs > 1:
+        boundary_nodes = timed(
+            "vox_scene_adj_s",
+            lambda: _slabbed_adj(out_dir, room_geo, cart_grid, vox_grid, fcc, nprocs, slabs),
+        )
+        timings["vox_scene_save_s"] = 0.0
+        timings["to_engine_space_s"] = 0.0
+        (out_dir / "comms_out.h5").unlink()
+    else:
+        vox_scene = VoxScene(room_geo, cart_grid, vox_grid, fcc=fcc)
+        timed("vox_scene_adj_s", lambda: vox_scene.calc_adj(Nprocs=nprocs))
+        vox_scene.check_adj_full()
+        timed("vox_scene_save_s", lambda: vox_scene.save(str(out_dir), compress=compress))
 
-    def _to_engine_space() -> None:
-        rotate_sim_data(str(out_dir))
-        if fcc:
-            fold_fcc_sim_data(str(out_dir))
-        sort_sim_data(str(out_dir))
+        def _to_engine_space() -> None:
+            rotate_sim_data(str(out_dir))
+            if fcc:
+                fold_fcc_sim_data(str(out_dir))
+            sort_sim_data(str(out_dir))
 
-    timed("to_engine_space_s", _to_engine_space)
-
-    (out_dir / "comms_out.h5").unlink()
+        timed("to_engine_space_s", _to_engine_space)
+        (out_dir / "comms_out.h5").unlink()
+        boundary_nodes = int(vox_scene.bn_ixyz.size)
 
     report = {
         "timings": timings,
+        "slabs": slabs,
         "voxelisation_s": round(
             sum(timings[k] for k in ("vox_grid_fill_s", "vox_scene_adj_s", "vox_scene_save_s")),
             3,
@@ -129,7 +261,7 @@ def main() -> int:
         "sample_rate_hz": float(sim_consts.SR),
         "grid_shape": [int(n) for n in cart_grid.Nxyz],
         "grid_points": int(np.prod(np.asarray(cart_grid.Nxyz, dtype=np.int64))),
-        "boundary_nodes": int(vox_scene.bn_ixyz.size),
+        "boundary_nodes": boundary_nodes,
         "triangles": int(room_geo.tris.shape[0]),
         "bmin": [float(v) for v in room_geo.bmin],
         "bmax": [float(v) for v in room_geo.bmax],
