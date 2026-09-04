@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.geometry.carve`, which carves HSSD's collision proxies back to
+  the shape the render mesh proves. The colliders are convex decompositions, so
+  everything hollow or concave reaches the grid as a solid lump: measured on
+  `bedroom.001` of `102344022`, unioned collider volume against render volume is
+  176x on the basket, 49x on a decoration, 39x and 24x on the lamps, 26x on the
+  wardrobes, 12x on the carpet, and **2.02x over the whole room**. That is what
+  makes the voxel view look inflated beside the mesh view, and it changes surface
+  area and the volume patch 5 seals along with it.
+
+  The render mesh cannot be substituted -- not one in the room is watertight,
+  they run to 28 668 disconnected shells apiece, and they carry 647 k triangles
+  against the colliders' 73 k -- but it can say where there is air. So the
+  collider solid and the render surface are rasterised onto a 6 mm grid, the
+  complement of the surface is flood filled from the border, and whatever that
+  fill reached is removed from the solid; marching cubes returns one closed body,
+  decimated to a triangle budget. Worst cases on this room come back at 2.4x
+  from 97.3x, 2.4x from 39.2x and 1.3x from 35.9x.
+
+  It is never a silent substitution. A carve that comes back empty or open, or
+  that no reduction can bring inside the budget while staying closed, is
+  discarded for the plain collider, and `CarveReport` names every template in
+  each case in the manifest. Three things it took to get right, each measured
+  rather than guessed: trimesh's `method="ray"` leaked on 42 of 47 templates and
+  is replaced by a conservative bounding-box rasteriser; eroding the finished
+  carve rather than only the collider's solid took one wardrobe to 0.1 per cent
+  of itself, trading an object that is too fat for one the grid may not resolve;
+  and a single decimation target refused 17 of 41 templates, so the budget is a
+  back-off ladder with an absolute cap under it.
+- `scripts/check_vox_index.sh`, patch 6's acceptance test: one bedroom
+  voxelised with and without the index, `vox_out.h5` compared byte for byte.
+
 - `reverberate.experiments.scene_export`, `.run`, `.compare` and `.engine`, the
   measurement harness that had survived four sessions as four throwaway scripts
   under `data/runs/`. Named for what they do rather than for the roadmap item

@@ -121,11 +121,29 @@ class VoxelCloud:
         shape = np.rint((high - low) / self.cell_m).astype(np.int64) + 1
         return low, shape
 
+    @property
+    def aggregated(self) -> bool:
+        """True when a drawn cube is bigger than the grid step it stands for.
+
+        The block size is chosen to fit a cube budget, so a fine grid is drawn
+        coarser than it is: the 16 kHz bedroom is 63 430 624 nodes of 2.04 mm
+        drawn as 13 917 266 blocks of 4.09 mm. That is a picture of the grid,
+        not the grid, and a viewer comparing it against the mesh needs to be
+        told which of the two they are looking at -- a thin object aggregated
+        away reads exactly like a thin object the voxeliser missed.
+        """
+        return self.cell_m > self.h_m * 1.0001
+
     def summary(self) -> str:
+        scale = (
+            f", aggregated {self.cell_m / self.h_m:.0f}x from {self.h_m * 1000:.2f} mm"
+            if self.aggregated
+            else " at the grid's own step"
+        )
         return (
-            f"{self.drawn:,} cubes of {self.cell_m * 1000:.0f} mm for "
-            f"{self.total_nodes:,} boundary nodes at {self.h_m * 1000:.2f} mm, "
-            f"{int(self.inert.sum()):,} inert"
+            f"{self.drawn:,} cubes of {self.cell_m * 1000:.2f} mm for "
+            f"{self.total_nodes:,} boundary nodes at {self.h_m * 1000:.2f} mm"
+            f"{scale}, {int(self.inert.sum()):,} inert"
         )
 
 
@@ -625,13 +643,21 @@ def write_voxel_payload(
         "cell_m": blocks.cell_m,
         "h_m": blocks.h_m,
         "sealed_quads": sealed_quads,
+        "aggregated": blocks.aggregated,
         "labels": labels,
         "corners_url": "voxels.f32",
         "index_url": "voxels_index.u32",
         "label_url": "voxels_label.i16",
         "note": (
-            f"The solver's own grid at {blocks.h_m * 1000:.2f} mm, in blocks of "
-            f"{blocks.cell_m * 1000:.1f} mm. Faces between touching blocks are "
+            (
+                f"Aggregated {blocks.cell_m / blocks.h_m:.0f}x: this is a "
+                f"picture of the grid, not the grid. A feature thinner than "
+                f"{blocks.cell_m * 1000:.1f} mm may be here and not drawn. "
+                if blocks.aggregated
+                else "Drawn at the grid's own step, one cube per node. "
+            )
+            + f"The solver's own grid at {blocks.h_m * 1000:.2f} mm, in blocks of "
+            f"{blocks.cell_m * 1000:.2f} mm. Faces between touching blocks are "
             "not drawn and coplanar faces of the same material are merged into "
             "rectangles, so this is the same solid as "
             f"{blocks.drawn * 12:,} cube triangles in {surface.triangles:,}. "
