@@ -105,8 +105,6 @@ class CarveResult:
     reason: str = ""
     collider_volume: float = 0.0
     carved_volume: float = 0.0
-    collider_faces: int = 0
-    carved_faces: int = 0
 
     @property
     def shrink(self) -> float:
@@ -293,7 +291,6 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
         mesh=collider,
         carved=False,
         collider_volume=abs(float(collider.volume)),
-        collider_faces=len(collider.faces),
     )
     asset = resolve_asset(hssd_root / "objects", template)
     if asset is None:
@@ -370,7 +367,6 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
     base.mesh = reduced
     base.carved = True
     base.carved_volume = abs(float(reduced.volume))
-    base.carved_faces = len(reduced.faces)
     return base
 
 
@@ -420,8 +416,6 @@ def carve_collider(hssd_root: Path, template: str, collider: trimesh.Trimesh) ->
         "reason": result.reason,
         "collider_volume": result.collider_volume,
         "carved_volume": result.carved_volume,
-        "collider_faces": result.collider_faces,
-        "carved_faces": result.carved_faces,
     }
     if result.carved:
         result.mesh.export(mesh_file)

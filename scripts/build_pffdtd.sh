@@ -7,7 +7,10 @@
 # are fixed here so nobody rediscovers them again.
 #
 #   1. The CUDA Makefile targets -arch=sm_35, which nvcc 12.x refuses outright.
-#   2. myfuncs.py calls np.finfo(np.float); the np.float alias is gone.
+#   2. myfuncs.py calls np.finfo(np.float); the np.float alias is gone. Repaired
+#      by patch 7 in reverberate.wave.vendored, not here: a sed in a build
+#      script is invisible in review and a silent no-op the day upstream
+#      reformats the line it matches.
 #   3. The code uses np.bool8, removed in numpy 2, so numpy is pinned to 1.26.
 #   4. The voxeliser closes SharedMemory blocks while numpy views are still
 #      alive, which raises BufferError on Python >= 3.9.
@@ -49,8 +52,6 @@ git -C "${INSTALL_DIR}" checkout --quiet "${PFFDTD_COMMIT}"
 log "Patch 1: CUDA arch sm_35 -> sm_${CUDA_ARCH}"
 sed -i "s/-arch=sm_[0-9]*/-arch=sm_${CUDA_ARCH}/g" "${INSTALL_DIR}/c_cuda/Makefile"
 
-log "Patch 2: np.finfo(np.float) -> np.finfo(float)"
-sed -i 's/np\.finfo(np\.float)/np.finfo(float)/g' "${INSTALL_DIR}/python/common/myfuncs.py"
 
 log "Python environment"
 python3 -m venv "${VENV_DIR}"

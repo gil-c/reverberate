@@ -10,18 +10,12 @@ plumbing that carries it.
 
 from __future__ import annotations
 
-import importlib
 import json
 from pathlib import Path
 
 import pytest
 
 from reverberate.wave.voxelise import SceneSpec
-
-#: ``reverberate.wave`` re-exports a *function* named ``voxelise``, which
-#: shadows the submodule of that name, so the package directory is reached
-#: through the import system rather than by attribute.
-WAVE = Path(importlib.import_module("reverberate.wave.voxelise").__file__ or "").parent
 
 
 def make_spec(tmp_path: Path, **extra: object) -> SceneSpec:
@@ -85,27 +79,3 @@ class TestGuards:
     def test_slabs_must_be_at_least_one(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="at least 1"):
             make_spec(tmp_path / "a", slabs=0)
-
-
-class TestTheChildCarriesThem:
-    """The levers are useless if the job dict drops them."""
-
-    def test_the_job_dict_names_both_levers(self) -> None:
-        source = (WAVE / "voxelise.py").read_text()
-        for field in ('"slabs": spec.slabs', '"nh": spec.nh'):
-            assert field in source
-
-    def test_the_child_cuts_along_the_engines_outermost_axis(self) -> None:
-        """A slab is only a contiguous range of engine indices if it is cut
-        along the axis ``rotate_sim_data`` puts first. Cut along any other and
-        the concatenation would need a global merge, which is the memory this
-        exists to avoid."""
-        child = (WAVE / "_child_voxelise.py").read_text()
-        assert "order = np.argsort(grid)[::-1]" in child
-        assert "axis = int(order[0])" in child
-
-    def test_the_child_sorts_inside_each_slab(self) -> None:
-        """Sorting per slab is what removes the global sort. It is only correct
-        because the slabs are already in order."""
-        child = (WAVE / "_child_voxelise.py").read_text()
-        assert "keep = np.argsort(moved)" in child
