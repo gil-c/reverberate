@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grid point, 151 GB for that scene, and it verifies the whole grid rather than
   a piece of it. The manifest records `slabs`, `nh` and `nvox_est` so a reader
   can see which entries had it.
-- `reverberate.wave.remote_voxelise` and `scripts/poc_remote_voxelise.py`, the
+- `reverberate.wave.remote_voxelise` and `scripts/remote_chain.py`, the
   half of roadmap section 11 that was never built. "Voxelisation happens here,
   on whatever CPU is cheapest" could only ever mean this laptop, because nothing
   put PFFDTD's Python side, its numpy below 2, or this project's three patched
@@ -81,6 +81,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   voxelise 1.6, fetch 0.1, and 3 932 047 boundary nodes came back matching the
   local count exactly. The whole-flat run at 16 kHz is **not** proven -- see the
   handover note in the pull request.
+
+  `MachineNeed` sizes the machine by arithmetic over the grid the job will
+  build -- the disk from `Nx*Ny*Nz`, the memory from the node count and the
+  block lattice -- and refuses offers that cannot meet it *before* an instance
+  exists. It reproduces what the runs actually used: 349 GB against the 330 the
+  flat at 16 kHz needed, and 18 GB against the 16.9 the lossless payload used.
+  Asked for a lossless payload of the flat at 16 kHz it answers 774 GB of
+  memory and rents nothing, which is the correct answer and took seven hours of
+  swap to learn the other way.
+
+  `--payload` builds the viewer's files on the machine that has just made the
+  grid and fetches only those: 185 MB comes home and 25 GB stays where it was
+  made. It needs numpy and h5py, which PFFDTD's own interpreter already has, so
+  there is no second provisioning and no second rental.
 
   Four rentals bought four lessons, each now a guard: the ssh identity is looked
   up from the account and matched against a local key *before* renting, because

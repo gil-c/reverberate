@@ -34,14 +34,20 @@ import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from reverberate.wave import vendored
 from reverberate.wave.remote import Machine, _run
 from reverberate.wave.voxelise import CACHE_FILES, SceneSpec
 
 __all__ = [
+    "MachineNeed",
     "REMOTE_PFFDTD",
     "RetrievalFailed",
+    "build_payload_remote",
+    "payload_need",
+    "payload_need_for",
+    "voxelise_need",
     "REMOTE_WORK",
     "RemoteVoxelisation",
     "install_patches",
@@ -101,6 +107,173 @@ def _rsync(
                 print(f"  transfer attempt {attempt} failed, resuming: {error}", flush=True)
                 time.sleep(10 * attempt)
     raise RuntimeError(f"transfer failed after {attempts} attempts: {last}")
+
+
+@dataclass(frozen=True)
+class MachineNeed:
+    """What a stage needs from a machine, computed from the job it was given.
+
+    Every rental this project has lost was lost to a number nobody worked out
+    beforehand: an ssh key that was never going to match, a disk guard wanting
+    302 GB on a 120 GB box, an estimate that ignored the cost of reserved disk.
+    So a stage states its requirement as arithmetic over the grid it is about to
+    build, and :meth:`unmet` refuses **before** an instance exists.
+
+    The three stages want different machines and must not share one:
+
+    ======== ============================ ==========================
+    stage    wants                        does not want
+    ======== ============================ ==========================
+    voxelise many cores, large disk       a GPU
+    payload  memory, one fast core        a GPU, many cores
+    solve    VRAM                         cores
+    ======== ============================ ==========================
+    """
+
+    cores: int
+    ram_gb: float
+    disk_gb: float
+    why: str
+    needs_gpu: bool = False
+    vram_gb: float = 0.0
+
+    def merge(self, other: MachineNeed) -> MachineNeed:
+        """The machine that satisfies both stages, for a rental that runs both."""
+        return MachineNeed(
+            cores=max(self.cores, other.cores),
+            ram_gb=max(self.ram_gb, other.ram_gb),
+            disk_gb=max(self.disk_gb, other.disk_gb),
+            why=f"{self.why}; then {other.why}",
+            needs_gpu=self.needs_gpu or other.needs_gpu,
+            vram_gb=max(self.vram_gb, other.vram_gb),
+        )
+
+    def unmet(self, offer: Any) -> list[str]:
+        """Every requirement ``offer`` fails, as sentences. Empty means rentable."""
+        problems = []
+        if offer.cpu_cores < self.cores:
+            problems.append(f"{offer.cpu_cores:.0f} vCPU, needs {self.cores}")
+        if offer.ram_gb < self.ram_gb:
+            problems.append(f"{offer.ram_gb:.0f} GB RAM, needs {self.ram_gb:.0f}")
+        if offer.disk_gb < self.disk_gb:
+            problems.append(f"{offer.disk_gb:.0f} GB disk, needs {self.disk_gb:.0f}")
+        if self.needs_gpu and offer.gpu_ram_gb < self.vram_gb:
+            problems.append(f"{offer.gpu_ram_gb:.0f} GB VRAM, needs {self.vram_gb:.0f}")
+        return problems
+
+
+def grid_shape_of(model_json: Path, fmax: float, ppw: float) -> tuple[int, int, int]:
+    """The grid a voxelisation will build, without building it.
+
+    ``CartGrid`` is ``ceil((bmax - bmin + 2 * offset * h) / h) + 1`` per axis
+    with ``offset`` 3.5, and the bounds come from the model's own points. Worked
+    out here so a machine can be sized before one is rented, which is the whole
+    difference between a requirement and a hope.
+    """
+    import numpy as np
+
+    from reverberate.experiments.run import grid_step
+
+    model = json.loads(Path(model_json).read_text())
+    points = np.concatenate(
+        [np.asarray(group["pts"], dtype=float) for group in model["mats_hash"].values()]
+    )
+    step = grid_step(fmax, ppw)
+    span = points.max(axis=0) - points.min(axis=0) + 2 * 3.5 * step
+    shape = np.ceil(span / step).astype(np.int64) + 1
+    return int(shape[0]), int(shape[1]), int(shape[2])
+
+
+#: Bytes a boundary node occupies in ``vox_out.h5``, measured at 23.0 across
+#: four entries spanning three orders of magnitude.
+BYTES_PER_NODE = 23.0
+
+
+def nodes_from_shape(shape: tuple[int, int, int]) -> float:
+    """How many boundary nodes a grid of this shape will hold, near enough to size a box.
+
+    Boundary nodes cover a *surface*, so they scale as the grid to the two
+    thirds. The constant is read off the flat at 4 kHz -- 66 159 665 nodes on a
+    2894 x 360 x 2265 grid -- and reproduces the same flat at 16 kHz to within a
+    few per cent, which is all a machine requirement needs.
+    """
+    points = float(shape[0]) * shape[1] * shape[2]
+    return float(66_159_665 * (points / 2.3598e9) ** (2 / 3))
+
+
+def voxelise_need(model_json: Path, fmax: float, ppw: float = 10.5, slabs: int = 1) -> MachineNeed:
+    """Sized from the grid the job will actually build.
+
+    Disk is the binding constraint and it is not the output file. PFFDTD's own
+    guard compares ``Nx*Ny*Nz`` against **half** the free space and, when it is
+    unhappy, asks a question on a stdin the child has already consumed -- which
+    presents as a hang, not as a full disk. So the requirement is twice the grid
+    in bytes, plus the entry, plus the per-voxel spill.
+
+    That guard is checking for space a slabbed run never uses, since it never
+    runs ``check_adj_full``. Until upstream is told so, the space has to be
+    rented anyway.
+    """
+    shape = grid_shape_of(model_json, fmax, ppw)
+    grid_bytes = float(shape[0]) * shape[1] * shape[2]
+    nodes = nodes_from_shape(shape)
+    entry_gb = nodes * BYTES_PER_NODE / 1e9
+    disk = 2 * grid_bytes / 1e9 + entry_gb + 30.0
+    ram = max(8.0, 60.0 * nodes / slabs / 1e9 + 4.0)
+    return MachineNeed(
+        cores=16,
+        ram_gb=ram,
+        disk_gb=disk,
+        why=(
+            f"grid {shape[0]}x{shape[1]}x{shape[2]}, {grid_bytes / 1e9:.0f} GB for PFFDTD's "
+            f"disk guard, ~{entry_gb:.1f} GB entry, {slabs} slab(s)"
+        ),
+    )
+
+
+def payload_need_for(nodes: float, shape: tuple[int, int, int], target_cubes: int) -> MachineNeed:
+    """The payload stage's requirement from a node count and a grid shape.
+
+    Taken separately from :func:`payload_need` so a rental that will voxelise
+    *and then* build the payload can be sized for both before either exists.
+    """
+    span = 1
+    while nodes / span**2 > target_cubes:
+        span *= 2
+    lattice = 1.0
+    for size in shape:
+        lattice *= -(-size // span)
+    # `_bin_voxels` holds the node arrays; `surface_of` holds the block lattice
+    # twice, as int16 labels and as a bool. Fitted to the one measurement there
+    # is -- 16.9 GB for the flat at 4 kHz, 66 159 665 nodes at one block each --
+    # and then rounded **up**, because a requirement that under-asks is a
+    # machine rented to swap for seven hours, which is how this number came to
+    # be measured at all.
+    ram = 30.0 * nodes / 1e9 + 5.0 * lattice / 1e9 + 4.0
+    return MachineNeed(
+        cores=4,
+        ram_gb=ram,
+        disk_gb=nodes * BYTES_PER_NODE / 1e9 + 20.0,
+        why=(
+            f"payload: {nodes:,.0f} nodes at one block per {span}, lattice "
+            f"{lattice / 1e6:.0f}M cells; memory-bound and single-threaded, "
+            "so cores are wasted on it"
+        ),
+    )
+
+
+def payload_need(cache_dir: Path, target_cubes: int) -> MachineNeed:
+    """Sized from the grid on disk, which by now is a fact rather than a forecast."""
+    import h5py
+
+    with h5py.File(Path(cache_dir) / "vox_out.h5", "r") as handle:
+        nodes = int(handle["bn_ixyz"].shape[0])
+        shape = (
+            int(handle["Nx"][()]),
+            int(handle["Ny"][()]),
+            int(handle["Nz"][()]),
+        )
+    return payload_need_for(nodes, shape, target_cubes)
 
 
 class RetrievalFailed(RuntimeError):
@@ -247,8 +420,13 @@ def voxelise_remote(
     nprocs: int | None = None,
     remote_dir: str = REMOTE_WORK,
     timeout: float | None = None,
+    fetch_entry: bool = True,
 ) -> RemoteVoxelisation:
     """Provision, upload, voxelise, retrieve. Does not rent and does not destroy.
+
+    ``fetch_entry=False`` leaves the grid on the machine, which is what the
+    caller wants when the next thing it does is build the viewer payload there:
+    25 GB stays put and 185 MB comes home instead.
 
     Deliberately, and for the same reason :func:`reverberate.wave.remote.solve`
     does neither: section 12.1 wants the rate and the total agreed before an
@@ -277,16 +455,17 @@ def voxelise_remote(
     voxelise_s = time.time() - started
 
     started = time.time()
-    try:
-        _rsync(
-            machine,
-            [f"{remote_dir}/{name}" for name in CACHE_FILES],
-            str(destination),
-            download=True,
-        )
-    except Exception as error:  # noqa: BLE001 - the type is what the caller needs
-        (destination / "voxelise.log").write_text(log)
-        raise RetrievalFailed(report, log, error) from error
+    if fetch_entry:
+        try:
+            _rsync(
+                machine,
+                [f"{remote_dir}/{name}" for name in CACHE_FILES],
+                str(destination),
+                download=True,
+            )
+        except Exception as error:  # noqa: BLE001 - the type is what the caller needs
+            (destination / "voxelise.log").write_text(log)
+            raise RetrievalFailed(report, log, error) from error
     fetch_s = time.time() - started
 
     (destination / "voxelise.log").write_text(log)
@@ -300,6 +479,62 @@ def voxelise_remote(
         uploaded_bytes=uploaded,
         log=log,
     )
+
+
+def build_payload_remote(
+    machine: Machine,
+    destination: Path,
+    *,
+    labels: list[str],
+    target_cubes: int,
+    remote_dir: str = REMOTE_WORK,
+    timeout: float | None = None,
+) -> tuple[dict[str, object], str]:
+    """Build the viewer's payload where the grid already is, and fetch only that.
+
+    The point of doing it here rather than at home: ``vox_out.h5`` is 25 GB for
+    the flat at 16 kHz and the payload the browser fetches is about 185 MB. One
+    of those transfers has already failed and cost a finished grid; the other
+    takes seconds. It also keeps the work off the laptop, which is the rule.
+
+    No second machine and no second provisioning: the build needs numpy and
+    h5py, PFFDTD's own interpreter has both, so this runs on the box that has
+    just voxelised. ``vox_view`` and ``comms`` are copied across as files.
+    """
+    modules = f"{remote_dir}/modules"
+    here = Path(__file__).parent
+    _run(machine.ssh_command(f"mkdir -p {shlex.quote(modules)}"), what="mkdir modules")
+    _rsync(
+        machine,
+        [
+            str(here.parent / "viz" / "vox_view.py"),
+            str(here / "comms.py"),
+            str(here / "_child_payload.py"),
+        ],
+        modules,
+        download=False,
+    )
+    job = {
+        "module_dir": modules,
+        "cache_dir": remote_dir,
+        "out_dir": f"{remote_dir}/payload",
+        "target_cubes": target_cubes,
+        "labels": labels,
+    }
+    remote = (
+        f"cd {shlex.quote(remote_dir)} && echo {shlex.quote(json.dumps(job))} | "
+        f"{REMOTE_VENV} {modules}/_child_payload.py 2>&1"
+    )
+    log = _run(machine.ssh_command(remote), what="payload", timeout=timeout)
+    marked = [line for line in log.splitlines() if "@@REVERBERATE@@" in line]
+    if not marked:
+        raise RuntimeError(f"the payload child printed no report:\n{log[-3000:]}")
+    report: dict[str, object] = json.loads(marked[0].split("@@REVERBERATE@@")[1])
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    _rsync(machine, [f"{remote_dir}/payload/"], str(destination), download=True)
+    return report, log
 
 
 def remote_disk_free_gb(machine: Machine) -> float:
