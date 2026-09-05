@@ -52,7 +52,6 @@ def run(model: str, mats: str, fmax: float, out: Path, tag: str, **extra: Any) -
         "compress": None,
         "slabs": 1,
         "nh": None,
-        "nvox_est": None,
     }
     job.update(extra)
     wave = Path(importlib.import_module("reverberate.wave.voxelise").__file__ or "").parent

@@ -49,8 +49,6 @@ def models(tmp_path: Path) -> Path:
                 "room": "bedroom.001",
                 "sealed": {"sealed_volume_m3": 3.3},
                 "sealed_full": {"sealed_volume_m3": 41.5},
-                "carve": {"carved": {"a": 0.6}, "skipped": {}},
-                "carve_full": {"carved": {}, "skipped": {"b": "open"}},
                 "scenes": [{"name": "bedroom_only", "file": "bedroom_only.json"}],
             }
         )
@@ -119,4 +117,3 @@ class TestBuild:
         """
         report = _build(models, tmp_path / "page")
         assert report["sealed"]["sealed_volume_m3"] == 3.3
-        assert report["carve"]["carved"] == {"a": 0.6}

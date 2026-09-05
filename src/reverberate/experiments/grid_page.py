@@ -98,7 +98,6 @@ def build(
         "room": geometry.record(),
         "theory": prediction.record(),
         "sealed": manifest.get("sealed" if scene_name.startswith("bedroom") else "sealed_full"),
-        "carve": manifest.get("carve" if scene_name.startswith("bedroom") else "carve_full"),
         "placement": placement,
         # The measured sources, as opposed to the placed ones. Empty for the
         # same reason: there is nothing measured on this grid.

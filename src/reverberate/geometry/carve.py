@@ -58,7 +58,6 @@ __all__ = [
     "CarveReport",
     "CarveResult",
     "carve_collider",
-    "carve_report",
 ]
 
 #: Side of the cell the carve is decided on, in metres. One fixed value for
@@ -70,9 +69,13 @@ __all__ = [
 #: memory.
 CARVE_PITCH_M = 0.006
 
-#: Largest occupancy array a single template may use, in cells. A four metre
-#: object at 6 mm is 3e8 cells and three of those arrays is a gigabyte; past
-#: this the pitch is coarsened for that template alone and the fact recorded.
+#: Largest occupancy array a single template may use, in cells. Past it the
+#: carve is refused rather than retried at a coarser pitch: a second pitch is a
+#: second geometry, and this module's whole discipline is that a substitution is
+#: never silent. No template in this apartment reaches it -- all 257 cache
+#: entries are at ``CARVE_PITCH_M`` -- so the branch that coarsened was never
+#: once exercised, and an unexercised branch that changes the shape is worse
+#: than a refusal that names itself.
 MAX_CELLS = 120_000_000
 
 #: Triangles a carve may keep, as a multiple of the collider it replaces.
@@ -102,10 +105,8 @@ class CarveResult:
     reason: str = ""
     collider_volume: float = 0.0
     carved_volume: float = 0.0
-    render_volume: float = 0.0
     collider_faces: int = 0
     carved_faces: int = 0
-    pitch: float = CARVE_PITCH_M
 
     @property
     def shrink(self) -> float:
@@ -306,20 +307,14 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
     if not isinstance(render, trimesh.Trimesh) or len(render.faces) == 0:
         base.reason = "render mesh unreadable"
         return base
-    base.render_volume = abs(float(render.volume))
 
     pitch = CARVE_PITCH_M
     low = np.minimum(render.bounds[0], collider.bounds[0]) - 3 * pitch
     high = np.maximum(render.bounds[1], collider.bounds[1]) + 3 * pitch
     cells = np.prod(np.ceil((high - low) / pitch) + 4)
     if cells > MAX_CELLS:
-        # Coarsen rather than skip: a half-resolution carve on a large object
-        # still removes the cavity, and the object that needs it most -- a
-        # wardrobe, a car -- is exactly the one that is too big at 6 mm.
-        pitch *= float(np.cbrt(cells / MAX_CELLS))
-        low = np.minimum(render.bounds[0], collider.bounds[0]) - 3 * pitch
-        high = np.maximum(render.bounds[1], collider.bounds[1]) + 3 * pitch
-    base.pitch = pitch
+        base.reason = f"too large to carve at {pitch * 1000:.0f} mm ({cells / 1e6:.0f}M cells)"
+        return base
     extent = np.ceil((high - low) / pitch).astype(np.int64) + 4
     shape: tuple[int, int, int] = (int(extent[0]), int(extent[1]), int(extent[2]))
 
@@ -400,11 +395,6 @@ def _cache_dir() -> Path:
     return path
 
 
-def carve_report() -> CarveReport:
-    """A fresh report for one scene assembly."""
-    return CarveReport()
-
-
 def carve_collider(hssd_root: Path, template: str, collider: trimesh.Trimesh) -> CarveResult:
     """The carve for ``template``, from disk when it has been computed before.
 
@@ -430,10 +420,8 @@ def carve_collider(hssd_root: Path, template: str, collider: trimesh.Trimesh) ->
         "reason": result.reason,
         "collider_volume": result.collider_volume,
         "carved_volume": result.carved_volume,
-        "render_volume": result.render_volume,
         "collider_faces": result.collider_faces,
         "carved_faces": result.carved_faces,
-        "pitch": result.pitch,
     }
     if result.carved:
         result.mesh.export(mesh_file)

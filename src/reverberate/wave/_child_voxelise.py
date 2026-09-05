@@ -221,7 +221,7 @@ def main() -> int:
     sim_comms.prepare_source_signals(job.get("probe_duration", 0.001), sig_type="impulse")
     sim_comms.save(compress=compress)
 
-    vox_grid = VoxGrid(room_geo, cart_grid, Nvox_est=job.get("nvox_est"), Nh=job.get("nh"))
+    vox_grid = VoxGrid(room_geo, cart_grid, Nh=job.get("nh"))
     timed("vox_grid_fill_s", lambda: vox_grid.fill(Nprocs=nprocs))
     vox_grid.print_stats()
 

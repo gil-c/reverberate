@@ -129,14 +129,14 @@ class SceneSpec:
     #: That heuristic was tuned when the fill scanned every triangle per voxel;
     #: patch 6 removed that cost, so smaller lattices are now free and a whole
     #: flat at 16 kHz would otherwise ask for 17.5 million voxel objects.
+    #:
+    #: PFFDTD also accepts a target voxel *count* and derives ``Nh`` from it.
+    #: That second door is not opened here: it says the same thing less
+    #: directly, and the two are mutually exclusive in ``VoxGrid.__init__``
+    #: behind a bare assertion.
     nh: int | None = None
-    #: The same lever from the other end: a target voxel count, from which
-    #: PFFDTD derives ``Nh``. At most one of the two may be set.
-    nvox_est: int | None = None
 
     def __post_init__(self) -> None:
-        if self.nh is not None and self.nvox_est is not None:
-            raise ValueError("set nh or nvox_est, not both: PFFDTD asserts on it")
         if self.slabs < 1:
             raise ValueError(f"slabs must be at least 1, not {self.slabs}")
 
@@ -343,7 +343,6 @@ def voxelise(
         "compress": None,
         "slabs": spec.slabs,
         "nh": spec.nh,
-        "nvox_est": spec.nvox_est,
     }
 
     child = Path(__file__).with_name("_child_voxelise.py")
@@ -397,7 +396,6 @@ def voxelise(
             # recorded, because an entry made in slabs did not run
             # ``check_adj_full`` and a reader should be able to see that.
             "nh": spec.nh,
-            "nvox_est": spec.nvox_est,
             "Tc": spec.tc,
             "rh": spec.rh,
             "fcc": spec.fcc,

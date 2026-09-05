@@ -724,7 +724,6 @@ def write_voxel_payload(
         "cell_m": blocks.cell_m,
         "h_m": blocks.h_m,
         "sealed_quads": sealed_quads,
-        "aggregated": blocks.aggregated,
         "labels": labels,
         "corners_url": "voxels.f32",
         "index_url": "voxels_index.u32",

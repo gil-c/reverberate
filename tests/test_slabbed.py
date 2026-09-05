@@ -14,7 +14,6 @@ import importlib
 import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from reverberate.wave.voxelise import SceneSpec
@@ -56,7 +55,7 @@ def make_spec(tmp_path: Path, **extra: object) -> SceneSpec:
 
 
 class TestTheLeversAreOutsideTheKey:
-    """Slabbing, ``nh`` and ``nvox_est`` change the route, not the destination.
+    """Slabbing and ``nh`` change the route, not the destination.
 
     A boundary node's row is decided by the triangles crossing its own six legs,
     and every voxel is handed every triangle overlapping it plus a one-cell
@@ -83,12 +82,6 @@ class TestTheLeversAreOutsideTheKey:
 
 
 class TestGuards:
-    def test_nh_and_nvox_est_are_mutually_exclusive(self, tmp_path: Path) -> None:
-        """PFFDTD asserts on it deep inside ``VoxGrid.__init__``, where the
-        failure is a bare ``assert Nh is None`` with no message."""
-        with pytest.raises(ValueError, match="not both"):
-            make_spec(tmp_path / "a", nh=8, nvox_est=1000)
-
     def test_slabs_must_be_at_least_one(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="at least 1"):
             make_spec(tmp_path / "a", slabs=0)
@@ -97,9 +90,9 @@ class TestGuards:
 class TestTheChildCarriesThem:
     """The levers are useless if the job dict drops them."""
 
-    def test_the_job_dict_names_all_three(self) -> None:
+    def test_the_job_dict_names_both_levers(self) -> None:
         source = (WAVE / "voxelise.py").read_text()
-        for field in ('"slabs": spec.slabs', '"nh": spec.nh', '"nvox_est": spec.nvox_est'):
+        for field in ('"slabs": spec.slabs', '"nh": spec.nh'):
             assert field in source
 
     def test_the_child_cuts_along_the_engines_outermost_axis(self) -> None:
@@ -116,16 +109,3 @@ class TestTheChildCarriesThem:
         because the slabs are already in order."""
         child = (WAVE / "_child_voxelise.py").read_text()
         assert "keep = np.argsort(moved)" in child
-
-
-def test_the_engine_axis_order_matches_upstreams_rule() -> None:
-    """``_slabbed_adj`` reimplements ``rotate_sim_data``'s permutation rather
-    than calling it, because that function reads the whole grid into memory.
-    A reimplementation is only safe while it agrees, so state the rule here:
-    axes sorted by extent, descending.
-    """
-    grid = np.array([2894, 360, 2265])
-    assert list(np.argsort(grid)[::-1]) == [0, 2, 1]
-    # And the flat one this was built for: scene x stays outermost, which is
-    # why the flat is cut in x.
-    assert int(np.argsort(grid)[::-1][0]) == 0

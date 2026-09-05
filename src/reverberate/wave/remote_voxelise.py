@@ -225,7 +225,6 @@ def run_child(
         "compress": None,
         "slabs": spec.slabs,
         "nh": spec.nh,
-        "nvox_est": spec.nvox_est,
     }
     remote = (
         f"cd {shlex.quote(remote_dir)} && "

@@ -122,6 +122,11 @@ went wrong.
   never executes. Fixing it roughly halves the rental cost. It also prompts on a
   stdin the child has consumed, so too little space reads as a hang.
 - **`ROADMAP_v7.md` is not updated.** W31 is delivered and W21 has advanced.
+- **`data/cache/carve/` holds entries from several source versions at once.**
+  The stamp includes the module's digest, so old entries are never *served* --
+  but they are never swept either, and comparing against a glob picks them up
+  indiscriminately. That produced two false "the carve changed" alarms in one
+  session. A prune of stamps other than the current one would help.
 
 ---
 
