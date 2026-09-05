@@ -304,8 +304,13 @@ def test_build_script_pins_the_commit_b1_measured() -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_pffdtd.sh"
     text = script.read_text()
     assert "aa319f6c86517cb95aabfae8656277da62c3ead5" in text
-    for patch in ("-arch=sm_", "np.finfo(float)", "numpy==1.26.4", "pffdtd_compat"):
+    for patch in ("-arch=sm_", "numpy==1.26.4", "pffdtd_compat"):
         assert patch in text, f"build script lost the {patch!r} patch"
+    # np.finfo(np.float) is *not* in this list any more. It was a sed here and
+    # is patch 7 in reverberate.wave.vendored now, which is checked by
+    # tests/test_voxelise.py. Two repairs of one line, one of them invisible in
+    # review, is how the checkout came to differ from what any file described.
+    assert "np.finfo(float)" not in text
 
 
 def test_ledger_file_is_one_json_object_per_line(tmp_path: Path) -> None:

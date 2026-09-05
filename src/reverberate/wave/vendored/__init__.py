@@ -30,10 +30,20 @@ UPSTREAM_SHA256 = {
     "python/voxelizer/vox_scene.py": (
         "c37f3529e6b07ee322335c9ed0da8bac931c060dc708548ad7280df3437f445b"
     ),
+    "python/voxelizer/vox_grid_base.py": (
+        "ba5bcd3b8e3c01b7d337a8a5c14391e800cf68d4e8cd3cc44e2160ca19dc8e11"
+    ),
+    "python/common/myfuncs.py": (
+        "7e8db50e1c815618f2679ec1089c48712e1e4a48aff38f573032a5dad43b8922"
+    ),
 }
 
 #: Path inside the checkout -> the file here that replaces it.
-PATCHED_FILES = {"python/voxelizer/vox_scene.py": "vox_scene.py"}
+PATCHED_FILES = {
+    "python/voxelizer/vox_scene.py": "vox_scene.py",
+    "python/voxelizer/vox_grid_base.py": "vox_grid_base.py",
+    "python/common/myfuncs.py": "myfuncs.py",
+}
 
 
 def patched_path(relative: str) -> Path:

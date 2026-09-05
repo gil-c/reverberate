@@ -9,6 +9,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.geometry.carve`, which carves HSSD's collision proxies back to
+  the shape the render mesh proves. The colliders are convex decompositions, so
+  everything hollow or concave reaches the grid as a solid lump: measured on
+  `bedroom.001` of `102344022`, unioned collider volume against render volume is
+  176x on the basket, 49x on a decoration, 39x and 24x on the lamps, 26x on the
+  wardrobes, 12x on the carpet, and **2.02x over the whole room**. That is what
+  makes the voxel view look inflated beside the mesh view, and it changes surface
+  area and the volume patch 5 seals along with it.
+
+  The render mesh cannot be substituted -- not one in the room is watertight,
+  they run to 28 668 disconnected shells apiece, and they carry 647 k triangles
+  against the colliders' 73 k -- but it can say where there is air. So the
+  collider solid and the render surface are rasterised onto a 6 mm grid, the
+  complement of the surface is flood filled from the border, and whatever that
+  fill reached is removed from the solid; marching cubes returns one closed body,
+  decimated to a triangle budget. Worst cases on this room come back at 2.4x
+  from 97.3x, 2.4x from 39.2x and 1.3x from 35.9x.
+
+  It is never a silent substitution. A carve that comes back empty or open, or
+  that no reduction can bring inside the budget while staying closed, is
+  discarded for the plain collider, and `CarveReport` names every template in
+  each case in the manifest. Three things it took to get right, each measured
+  rather than guessed: trimesh's `method="ray"` leaked on 42 of 47 templates and
+  is replaced by a conservative bounding-box rasteriser; eroding the finished
+  carve rather than only the collider's solid took one wardrobe to 0.1 per cent
+  of itself, trading an object that is too fat for one the grid may not resolve;
+  and a single decimation target refused 17 of 41 templates, so the budget is a
+  back-off ladder with an absolute cap under it.
+- `reverberate.experiments.grid_page`, which publishes a voxelisation as a run
+  page with no solve behind it. The acoustic view answers the question the mesh
+  view cannot -- the mesh says what left the exporter, the grid says what the
+  solver received -- and until now the only way to see it was to render a run,
+  which means a placement, comms files, a solve, responses and audio. Looking at
+  the geometry cost a GPU. The sections that need responses come out empty
+  rather than invented, and `omissions` says so on the page: no source, no
+  receiver, no dry voice, and a plausible-looking pair nobody placed would be
+  exactly the claim this page must not make.
+- **Slabbed voxelisation**, so peak memory is a slab of the grid and not the
+  grid. `SceneSpec.slabs` consolidates that many groups of voxels in turn, each
+  appended to `vox_out.h5` before the next is built; `nh` and `nvox_est` expose
+  the voxel side that PFFDTD's `fac = 0.025` heuristic otherwise picks alone.
+  All three are outside the cache key on purpose: a boundary node's row is
+  decided by the triangles crossing its own six legs, every voxel is handed
+  every triangle overlapping it plus a one-cell halo, and so how the work is
+  divided cannot reach the answer.
+
+  That is checked rather than argued. `scripts/check_slabs.sh` voxelises one
+  bedroom whole, in 2 slabs, in 5, at another voxel side, and at both together,
+  and compares the four datasets the engine reads: **all identical**. The rotate
+  and sort passes are done per slab rather than by `rotate_sim_data` afterwards,
+  because those read the whole of `adj_bn` and `bn_ixyz` into memory -- 15 GB at
+  16 kHz on this flat -- which is the ceiling slabbing exists to remove. It is
+  only correct because a slab is cut along the axis those passes put outermost,
+  making it a contiguous range of engine indices, so sorting inside each slab
+  and concatenating in order is already the global sort.
+
+  `check_adj_full` does not run on a slabbed entry: it memory-maps one byte per
+  grid point, 151 GB for that scene, and it verifies the whole grid rather than
+  a piece of it. The manifest records `slabs`, `nh` and `nvox_est` so a reader
+  can see which entries had it.
+- `reverberate.wave.remote_voxelise` and `scripts/remote_chain.py`, the
+  half of roadmap section 11 that was never built. "Voxelisation happens here,
+  on whatever CPU is cheapest" could only ever mean this laptop, because nothing
+  put PFFDTD's Python side, its numpy below 2, or this project's three patched
+  files on a rented box. Nothing in it touches the GPU: Vast prices a machine by
+  its card, so the cheapest way to buy forty cores is to rent one whose GPU sits
+  idle, which inverts B0's mistake rather than repeating it.
+
+  Proven end to end on one bedroom at 4 kHz: provision 1.4 min, upload 0.2,
+  voxelise 1.6, fetch 0.1, and 3 932 047 boundary nodes came back matching the
+  local count exactly. The whole-flat run at 16 kHz is **not** proven -- see the
+  handover note in the pull request.
+
+  `MachineNeed` sizes the machine by arithmetic over the grid the job will
+  build -- the disk from `Nx*Ny*Nz`, the memory from the node count and the
+  block lattice -- and refuses offers that cannot meet it *before* an instance
+  exists. It reproduces what the runs actually used: 349 GB against the 330 the
+  flat at 16 kHz needed, and 18 GB against the 16.9 the lossless payload used.
+  Asked for a lossless payload of the flat at 16 kHz it answers 774 GB of
+  memory and rents nothing, which is the correct answer and took seven hours of
+  swap to learn the other way.
+
+  `--payload` builds the viewer's files on the machine that has just made the
+  grid and fetches only those: 185 MB comes home and 25 GB stays where it was
+  made. It needs numpy and h5py, which PFFDTD's own interpreter already has, so
+  there is no second provisioning and no second rental.
+
+  Four rentals bought four lessons, each now a guard: the ssh identity is looked
+  up from the account and matched against a local key *before* renting, because
+  a mismatch is fifteen minutes of an instance refusing `publickey` and then
+  tearing down having done nothing; transfers are `rsync --partial` with four
+  retries rather than one `scp` that dies at 25 GB; `--need-free-gb` refuses
+  before uploading, because PFFDTD's own disk guard prompts on a stdin the child
+  has already consumed and that reads as a hang rather than as a full disk; and
+  teardown is now conditional. That last one matters most.
+- `scripts/check_vox_index.sh`, patch 6's acceptance test: one bedroom
+  voxelised with and without the index, `vox_out.h5` compared byte for byte.
+
 - `reverberate.experiments.scene_export`, `.run`, `.compare` and `.engine`, the
   measurement harness that had survived four sessions as four throwaway scripts
   under `data/runs/`. Named for what they do rather than for the roadmap item
@@ -56,6 +154,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Destroying a rented instance on *any* failure deleted a good result.** The
+  first whole-flat run voxelised correctly and then died fetching 25 GB, and the
+  teardown in the `finally` could not tell "the compute failed" from "only the
+  retrieval failed", so it threw away a finished grid and its timings. That is
+  W29's own lesson -- a grid dying with the machine that made it -- repeated in a
+  file that cites W29. `RetrievalFailed` now carries the distinction: a failure
+  before the compute still tears down immediately, and a failure after it leaves
+  the instance running with the ssh command printed, while the watchdog still
+  ends it at the deadline.
+- **Eleven of the twenty-eight pieces standing in the bedroom never reached the
+  solver.** The room's furniture was chosen by asking `room_of` which polygon
+  the instance's *origin point* falls in, while the shell was extruded from
+  `isolated_storey`: two footprints for one scene, and the one deciding the
+  furniture was never the one drawing the room. An asset's origin sits in the
+  wall band, so every picture hanging on the bedroom's own walls answered
+  `"doorway"` and was dropped, leaving a bare wall where it hung. Scoping by
+  footprint against the same polygon the shell comes from admits the four
+  pictures and nothing else -- 17 obstacles become 21, and 7.97 m2 of picture
+  appears in `bedroom_only.json` where there was none -- and the four wardrobes
+  in the adjoining closets still stay out, which is right, because the
+  bedroom's shell does not enclose them. The split is 0.83 against 0.00, so
+  there is no threshold here to tune. `room_of` keeps the job it is right for,
+  which is labelling which room a source or a receiver stands in.
+- **Voxelising a whole flat took a night because of one line.** PFFDTD's
+  `vox_grid_base.fill` compares every triangle against every voxel with no
+  spatial index, so the cost is `O(Nvox x Ntris)` and, through VoxGrid's own
+  `Nvox_est` heuristic, grows as `Ntris^1.5`. Measured at 4 kHz: 1.8e9
+  elementary comparisons for a bedroom and 2.0e12 for the flat, which is
+  61 626 s of one core. Patch 6 bins each triangle into the index range its
+  bounding box spans, once, so the per-voxel search is a slice: the flat's fill
+  is 67 s and the bedroom's 8.37 s becomes 1.33 s. **The whole storey at 4 kHz,
+  carved, voxelises end to end in 27.6 minutes** -- 3 244 563 triangles,
+  66 159 665 boundary nodes, 235 s of fill against 1 420 s of `calc_adj`, which
+  is where the next lever is. Acceptance is identity, not
+  speed -- candidate lists are built ascending by triangle index, the order
+  `np.nonzero` produced, and `vox_out.h5` is byte for byte what it was, same
+  88 826 940 bytes and same sha256. A lattice the binning does not recognise
+  falls back to upstream's scan rather than to a guess.
+- **A fresh PFFDTD checkout at the pinned commit could not voxelise at all.**
+  `np.float` was removed in numpy 1.20 and upstream still reads it in
+  `common/myfuncs.py`. The repair was in this machine's checkout, applied by
+  hand and recorded in no file, so it was outside `PATCHED_FILES`:
+  `ensure_patched` neither knew about it nor would restore it, and nothing in
+  the repository said why the checkout worked. It is patch 7 now, a whole file
+  under the same pin as the rest.
+- **Two voxelisations sharing a working directory destroyed each other.**
+  PFFDTD spills per-voxel results through a *relative* `mmap_dat/` and
+  memory-maps `adj_check.dat` beside it, both cleared at the start of every
+  run, and the child inherited whatever directory the caller happened to stand
+  in. The loser died on an assertion about triangle counts that reads like a
+  defect in the scene rather than a collision. The child now runs in the
+  entry's own staging directory, which is keyed per cache entry and per pid, so
+  the scratch cannot collide -- and it is deleted before the entry is
+  published, since the staging directory is also what gets published.
 - **The voxelisation cache was never published, so a grid died with the worktree
   that computed it.** `reverberate.wave.vox_store` has been able to push and pull
   a cache entry since it was written, and nothing ever called it: both callers of
@@ -92,6 +244,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at. Entries cached under the old key are orphaned and can be deleted.
 
 ### Changed
+
+- The acoustic view renders a run that has no responses behind it. Every panel
+  below the voxelisation reads a sample, and `data.dry_voice.member_name` threw
+  on a grid published on its own, which took the whole page down rather than
+  its lower half. They are now replaced by one line saying nothing was solved
+  on this grid, because an empty decay curve looks like a decay that was
+  measured and came out flat. The camera stands in the middle of the room at
+  eye height when there is no receiver to stand at, instead of staying at the
+  origin -- which in this scene is inside the floor, and renders as one flat
+  wall of colour that reads as a broken page.
+- The acoustic view says which of the two it is drawing. Blocks are sized to a
+  cube budget, so a fine grid is drawn coarser than it is -- the 16 kHz bedroom
+  is 13 917 266 blocks of 4.09 mm standing for 63 430 624 nodes of 2.04 mm --
+  and a thin object aggregated away reads exactly like a thin object the
+  voxeliser missed. `VoxelCloud.aggregated` and the payload note now name the
+  block size against the grid step whenever they differ.
 
 - **The catalogue no longer stores anything above 4 kHz as though it were
   data.** The 8 kHz column was the 4 kHz value repeated, which was defensible

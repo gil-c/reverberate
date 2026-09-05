@@ -52,7 +52,7 @@ from reverberate.geometry.apartment import build_apartment, instances_on_storey
 from reverberate.geometry.hssd_room import load_object_instances
 from reverberate.geometry.orientation import BOTH
 from reverberate.geometry.pra_room import MeshMaterialAssignment
-from reverberate.geometry.sim_geometry import room_of, simulation_geometry
+from reverberate.geometry.sim_geometry import instances_in_room, simulation_geometry
 
 __all__ = [
     "C_AIR",
@@ -330,12 +330,13 @@ def export(
 
     # The listener's room alone, which fixes the source and receiver and is also
     # the domain of the 16 kHz cost probe.
-    in_room = [
-        i
-        for i in instances
-        if room_of(storey, float(i.translation[0]), float(i.translation[2])) == room_name
-    ]
+    #
+    # Scoped by footprint against the same polygon the shell is extruded from,
+    # not by the instance's origin point: see instances_in_room. The origin test
+    # this replaces dropped every picture on the bedroom's own walls, because an
+    # asset's origin sits in the wall band where no room polygon contains it.
     room_storey = isolated_storey(storey, room_name)
+    in_room = instances_in_room(hssd_root, room_storey, instances)
     room_assignments, room_summary = simulation_geometry(hssd_root, room_storey, in_room, seed=seed)
     src, rec = source_receiver(room_assignments)
     print(f"{scene_id}/{room_name} (room only): {room_summary.summary()}")
@@ -376,6 +377,19 @@ def export(
         # census can be checked against it. See reverberate.geometry.sealed.
         "sealed": room_summary.sealed.record(),
         "sealed_full": full_summary.sealed.record(),
+        # What the carve did to HSSD's collision proxies. Carried here for the
+        # same reason as the sealing census: the difference between the mesh a
+        # viewer sees and the solid the solver received is 2.02x in volume on
+        # this room, and a number in the manifest is the only place that can be
+        # checked. See reverberate.geometry.carve.
+        "carve": {
+            "carved": room_summary.carve.carved,
+            "skipped": room_summary.carve.skipped,
+        },
+        "carve_full": {
+            "carved": full_summary.carve.carved,
+            "skipped": full_summary.carve.skipped,
+        },
         "scenes": [s.as_dict() for s in scenes],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))

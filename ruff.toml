@@ -3,7 +3,11 @@ src = ["src", "tests"]
 # Third-party files this project replaces wholesale inside the vendored
 # PFFDTD checkout. They are 2021 code kept byte-close to upstream so the
 # diff against it stays reviewable; reformatting them would destroy that.
-extend-exclude = ["src/reverberate/wave/vendored/vox_scene.py"]
+extend-exclude = [
+    "src/reverberate/wave/vendored/vox_scene.py",
+    "src/reverberate/wave/vendored/vox_grid_base.py",
+    "src/reverberate/wave/vendored/myfuncs.py",
+]
 
 [lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
