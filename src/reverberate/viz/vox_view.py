@@ -31,6 +31,7 @@ import json
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -322,6 +323,28 @@ def _block_keys(subs: list[np.ndarray], span: int, shape: np.ndarray) -> np.ndar
     )
 
 
+def _read_nodes(handle: Any, total: int, chunk: int = 1 << 24) -> tuple[Any, Any, Any]:
+    """``bn_ixyz``, ``mat_bn`` and the inert flag, without three copies of the grid.
+
+    ``adj_bn`` is six bytes a node and is only ever reduced to one boolean, so
+    reading it whole costs 6.5 GB on the flat at 16 kHz to produce 1.1 GB. Read
+    in chunks, reduce each, and the transient is the chunk.
+
+    ``bn_ixyz`` is read at its stored width rather than widened to int64 on the
+    way in: it is 1 089 464 499 values on that grid, and the difference between
+    asking h5py for int64 and letting the caller widen only where it must is
+    8.7 GB of resident array.
+    """
+    index = np.asarray(handle["bn_ixyz"][:])
+    material = np.asarray(handle["mat_bn"][:], dtype=np.int8)
+    adjacency = handle["adj_bn"]
+    inert = np.empty(total, dtype=bool)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        inert[start:stop] = ~np.asarray(adjacency[start:stop], dtype=bool).any(axis=1)
+    return index, material, inert
+
+
 def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     """The binning itself. See :func:`read_voxels`."""
     from reverberate.wave.comms import transpose_order
@@ -330,23 +353,34 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     with h5py.File(cache_dir / "vox_out.h5", "r") as handle:
         _, ny, nz = (int(handle[k][()]) for k in ("Nx", "Ny", "Nz"))
         h_m = float(handle["h"][()])
-        index = np.asarray(handle["bn_ixyz"][:], dtype=np.int64)
-        material = np.asarray(handle["mat_bn"][:], dtype=np.int8)
-        inert = ~np.asarray(handle["adj_bn"][:], dtype=bool).any(axis=1)
+        total = int(handle["bn_ixyz"].shape[0])
+        index, material, inert = _read_nodes(handle, total)
     with h5py.File(cache_dir / "cart_grid.h5", "r") as handle:
         axes = [np.asarray(handle[k][:], dtype=np.float64) for k in ("xv", "yv", "zv")]
-
-    total = int(index.size)
     # Two conventions meet here and neither is guessable from the other. The
     # index is flat over the engine's grid with the last axis contiguous, and
     # the engine's axes are ``cart_grid``'s permuted into descending extent by
     # ``rotate_sim_data``. Undo the permutation, so what comes out is in the
     # scene's own frame and can be drawn against the mesh.
-    subs = [index // (ny * nz), (index // nz) % ny, index % nz]
+    #
+    # Held as int32. A subscript is bounded by its axis, 11 549 at the worst on
+    # the flat at 16 kHz, so int64 buys nothing and costs 13 GB: three of these
+    # for 1 089 464 499 nodes is 26 GB as int64 and 13 as int32, against 32 GB
+    # of memory. The arithmetic that builds them is still done in the index's
+    # own width, one axis at a time, so nothing overflows on the way.
     order = transpose_order((axes[0].size, axes[1].size, axes[2].size))
-    scene_subs: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * 3
-    for engine_axis, cart_axis in enumerate(order):
-        scene_subs[int(cart_axis)] = subs[engine_axis]
+    scene_subs: list[np.ndarray] = [np.empty(0, dtype=np.int32)] * 3
+    plane = np.int64(ny) * np.int64(nz)
+    for engine_axis, divisor, modulus in (
+        (0, plane, None),
+        (1, np.int64(nz), np.int64(ny)),
+        (2, None, np.int64(nz)),
+    ):
+        part = index if divisor is None else index // divisor
+        if modulus is not None:
+            part = part % modulus
+        scene_subs[int(order[engine_axis])] = part.astype(np.int32, copy=False)
+        del part
 
     # Boundary nodes cover a surface, so halving the block size roughly
     # quadruples the count: step through powers of two rather than solving for

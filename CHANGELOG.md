@@ -69,6 +69,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grid point, 151 GB for that scene, and it verifies the whole grid rather than
   a piece of it. The manifest records `slabs`, `nh` and `nvox_est` so a reader
   can see which entries had it.
+- `reverberate.wave.remote_voxelise` and `scripts/poc_remote_voxelise.py`, the
+  half of roadmap section 11 that was never built. "Voxelisation happens here,
+  on whatever CPU is cheapest" could only ever mean this laptop, because nothing
+  put PFFDTD's Python side, its numpy below 2, or this project's three patched
+  files on a rented box. Nothing in it touches the GPU: Vast prices a machine by
+  its card, so the cheapest way to buy forty cores is to rent one whose GPU sits
+  idle, which inverts B0's mistake rather than repeating it.
+
+  Proven end to end on one bedroom at 4 kHz: provision 1.4 min, upload 0.2,
+  voxelise 1.6, fetch 0.1, and 3 932 047 boundary nodes came back matching the
+  local count exactly. The whole-flat run at 16 kHz is **not** proven -- see the
+  handover note in the pull request.
+
+  Four rentals bought four lessons, each now a guard: the ssh identity is looked
+  up from the account and matched against a local key *before* renting, because
+  a mismatch is fifteen minutes of an instance refusing `publickey` and then
+  tearing down having done nothing; transfers are `rsync --partial` with four
+  retries rather than one `scp` that dies at 25 GB; `--need-free-gb` refuses
+  before uploading, because PFFDTD's own disk guard prompts on a stdin the child
+  has already consumed and that reads as a hang rather than as a full disk; and
+  teardown is now conditional. That last one matters most.
 - `scripts/check_vox_index.sh`, patch 6's acceptance test: one bedroom
   voxelised with and without the index, `vox_out.h5` compared byte for byte.
 
@@ -119,6 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Destroying a rented instance on *any* failure deleted a good result.** The
+  first whole-flat run voxelised correctly and then died fetching 25 GB, and the
+  teardown in the `finally` could not tell "the compute failed" from "only the
+  retrieval failed", so it threw away a finished grid and its timings. That is
+  W29's own lesson -- a grid dying with the machine that made it -- repeated in a
+  file that cites W29. `RetrievalFailed` now carries the distinction: a failure
+  before the compute still tears down immediately, and a failure after it leaves
+  the instance running with the ssh command printed, while the watchdog still
+  ends it at the deadline.
 - **Eleven of the twenty-eight pieces standing in the bedroom never reached the
   solver.** The room's furniture was chosen by asking `room_of` which polygon
   the instance's *origin point* falls in, while the shell was extruded from
