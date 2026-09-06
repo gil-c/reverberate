@@ -15,6 +15,7 @@ import trimesh
 from reverberate.geometry.carve import (
     CarveReport,
     CarveResult,
+    _carve_uncached,
     _outside,
     _surface_cells,
     _to_budget,
@@ -111,6 +112,30 @@ class TestToBudget:
 
         monkeypatch.setattr(carve, "ABSOLUTE_CAP", 1)  # type: ignore[attr-defined]
         assert _to_budget(trimesh.creation.box(), 1) is None
+
+
+class TestNothingToRemove:
+    def test_a_carve_that_removes_nothing_leaves_the_collider_alone(self, tmp_path: Path) -> None:
+        """An object whose render mesh is its own collider has no air to remove.
+
+        What the carve would hand back is that mesh resampled at 6 mm and then
+        decimated: approximate where the collider is exact, for no volume
+        recovered. It was also the one non-deterministic step in the pipeline --
+        whether the decimation stayed closed decided the geometry, and that
+        answer differs between platforms.
+        """
+        sphere = trimesh.creation.icosphere(subdivisions=4)
+        directory = tmp_path / "objects" / "a"
+        directory.mkdir(parents=True)
+        for name in ("abc.glb", "abc.collider.glb"):
+            exported = sphere.export(file_type="glb")
+            assert isinstance(exported, bytes)
+            (directory / name).write_bytes(exported)
+
+        result = _carve_uncached(tmp_path, "abc", sphere)
+        assert not result.carved
+        assert "nothing to remove" in result.reason
+        assert len(result.mesh.faces) == len(sphere.faces)
 
 
 class TestCarveReport:

@@ -93,6 +93,10 @@ BUDGET_FLOOR = 2000
 #: to save a rounding error on the triangle count.
 ABSOLUTE_CAP = 25_000
 
+#: Above this share of the collider's volume, a carve has removed nothing worth
+#: the substitution and the collider is kept. See :func:`_carve_uncached`.
+KEEP_FRACTION = 0.98
+
 
 @dataclass
 class CarveResult:
@@ -356,6 +360,17 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
     carved = trimesh.Trimesh(vertices * pitch + low - 2 * pitch, faces, process=True)
     if not carved.is_watertight:
         base.reason = "carve came back open"
+        return base
+
+    # A carve that removed nothing is not a carve. What comes back here is the
+    # collider resampled at the carve pitch and then decimated, so accepting it
+    # would trade an exact mesh for an approximate one and win no volume back.
+    # It is also the only place the pipeline was not deterministic: on an object
+    # with no air to remove, whether the decimation stayed closed decided the
+    # geometry, and that answer differs between platforms.
+    kept_share = abs(float(carved.volume)) / max(base.collider_volume, 1e-12)
+    if kept_share >= KEEP_FRACTION:
+        base.reason = f"carve kept {kept_share:.0%} of the collider; nothing to remove"
         return base
 
     budget = max(BUDGET_FLOOR, int(BUDGET_FACTOR * len(collider.faces)))
