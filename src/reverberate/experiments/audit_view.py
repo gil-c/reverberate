@@ -74,7 +74,10 @@ BUILD_NOTE = (
     "Faces between touching blocks are not drawn and coplanar faces of the same "
     "material are merged into rectangles, so the solid is the same one the "
     "solver reads. Nothing is smoothed: the staircase is what the wave equation "
-    "was solved on."
+    "was solved on. Deep crimson is sealed, the inside of a solid object, which "
+    "the solver carries no sound through; grey is rigid. Neither is reachable "
+    "by a material colour. Two materials of this flat's fifty-one can still "
+    "look alike, so the legend names them and the colour only separates them."
 )
 
 

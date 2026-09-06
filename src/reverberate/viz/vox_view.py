@@ -954,9 +954,10 @@ def write_voxel_payload(
             "rectangles, so this is the same solid as "
             f"{blocks.drawn * 12:,} cube triangles in {surface.triangles:,}. "
             "Nothing is dropped: the merged area matches the visible face area "
-            "exactly. Pink is sealed -- blocks holding no material at all, the "
-            "insides of solid objects, which the solver carries no sound "
-            "through."
+            "exactly. Deep crimson is sealed -- blocks holding no material at "
+            "all, the insides of solid objects, which the solver carries no "
+            "sound through -- and grey is rigid. Neither colour is reachable by "
+            "a material, which is what the first palette got wrong."
         ),
     }
     (target / "voxels.json").write_text(json.dumps(record))

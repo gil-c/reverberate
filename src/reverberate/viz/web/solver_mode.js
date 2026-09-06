@@ -194,6 +194,38 @@ export async function buildVoxelCloud(THREE, data) {
   return fetchQuadMesh(THREE, data.baseUrl, meta);
 }
 
+//: The sealed inside of a solid object, which the solver carries no sound
+//: through, and the far side of a boundary the room cannot hear.
+//:
+//: **Both are reserved, and the first version's was not.** It painted sealed
+//: at (0.85, 0.25, 0.55) and walked the material hues by the golden ratio at
+//: one lightness, which put ``shell`` -- the walls, a third of the drawn area
+//: of every room -- at (0.83, 0.27, 0.72), a distance of 0.036 in RGB. A
+//: reader standing in the bedroom could not tell a wall from the inside of one,
+//: which is exactly the judgement this view exists to support. These are the
+//: furthest usable pair from the material palette below: 0.379 and 0.372,
+//: against 0.134 before, and 0.563 from each other.
+const SEALED_RGB = [0.48, 0.03, 0.14];
+const RIGID_RGB = [0.45, 0.45, 0.48];
+
+/** A material's colour: seventeen hues over three lightnesses.
+ *
+ * Stable across runs, because the label list is sorted before it is written and
+ * the index is a position in it.
+ *
+ * Not a golden-ratio walk over one lightness, which is what this replaces. With
+ * this flat's fifty-one materials that walk spaces hues 0.02 apart and puts the
+ * closest pair 0.018 apart in RGB; spreading the same count over three
+ * lightnesses gives 0.066, which is 3.7 times better. **It is still not enough
+ * to name a material by its colour at fifty-one of them**, and the page says so:
+ * the palette separates a floor from a sofa, and the legend is what names them.
+ */
+function materialColour(rgb, index) {
+  const hue = (index % 17) / 17;
+  const lightness = [0.78, 0.62, 0.46][Math.floor(index / 17) % 3];
+  return rgb.setHSL(hue, 0.6, lightness);
+}
+
 /** One payload of merged quads, as a mesh: fetch the three arrays and shade them.
  *
  * Shared by the single-payload view and the tiered audit view, because the
@@ -221,11 +253,9 @@ export async function fetchQuadMesh(THREE, base, meta) {
   const rgb = new THREE.Color();
   for (let v = 0; v < labels.length; v++) {
     const kind = labels[v];
-    if (kind === -2) rgb.setRGB(0.85, 0.25, 0.55); // sealed inside
-    else if (kind < 0) rgb.setRGB(0.45, 0.45, 0.48); // rigid, still coupled
-    // Distinct hues per material, stable across runs because the label list is
-    // sorted before it is written and the index is a position in it.
-    else rgb.setHSL((kind * 0.61803398875) % 1, 0.62, 0.55);
+    if (kind === -2) rgb.setRGB(...SEALED_RGB);
+    else if (kind < 0) rgb.setRGB(...RIGID_RGB);
+    else materialColour(rgb, kind);
     colour[v * 3] = rgb.r;
     colour[v * 3 + 1] = rgb.g;
     colour[v * 3 + 2] = rgb.b;
@@ -267,12 +297,19 @@ export async function fetchQuadMesh(THREE, base, meta) {
  * the first time its room is entered, tile by tile, nearest first, and kept.
  */
 //: The most quads the fine tier may hold at once, across every tile drawn.
-//: Eight million is sixteen million triangles and about 640 MB of buffers.
-//: Every room but one draws whole at this figure; the living room is 13.7 M
-//: quads and draws the nearest 59 per cent of itself, which the status line
-//: reports as a tile count rather than leaving the far end to look like
-//: geometry the voxeliser lost.
-const FINE_QUAD_BUDGET = 8_000_000;
+//:
+//: Sixteen million, which is enough that **every room of this flat draws
+//: whole**: the largest is the living room at 13.7 M quads, 15.25 M with the
+//: coarse tier of everywhere else, about 1.2 GB of buffers. Measured on an
+//: M-series laptop and it holds.
+//:
+//: Set for that deliberately, against a cheaper eight million. At eight the
+//: living room drew 17 of its 28 tiles and the ceiling had holes in it, and on
+//: an audit view a hole is the worst thing a picture can have: it is
+//: indistinguishable from geometry the voxeliser lost, which is the exact
+//: judgement a reader is here to make. Lower it if a card cannot hold this,
+//: and the status line will say how many tiles of the room are drawn.
+const FINE_QUAD_BUDGET = 16_000_000;
 
 export async function buildAuditGrid(THREE, data, onStatus) {
   const audit = data.audit;
@@ -421,7 +458,7 @@ export async function buildAuditGrid(THREE, data, onStatus) {
    * Measured against the grid rather than against the floor plan, and measured
    * on the Python side where the grid is: the outline is a plan and cannot say
    * where the wardrobe is, so the most open point *of the outline* put the
-   * camera inside solid geometry, filling the view with the pink of a sealed
+   * camera inside solid geometry, filling the view with the crimson of a sealed
    * interior. A reader who has just opened the page reads that as a broken
    * page, not as a camera inside the furniture.
    */
