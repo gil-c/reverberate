@@ -42,6 +42,7 @@ __all__ = [
     "read_surface",
     "read_voxels",
     "surface_of",
+    "write_quads",
     "write_voxel_payload",
 ]
 
@@ -105,6 +106,12 @@ class VoxelCloud:
     #: ends -- see :func:`_corners_of`, which clips to it.
     bounds_lo: np.ndarray
     bounds_hi: np.ndarray
+    #: (n,) int8 room index per block, or None when the grid has not been
+    #: partitioned. It travels with the block rather than being recovered from
+    #: the position later because :func:`surface_of` merges on it: without it
+    #: in the key, one quad would span two rooms and the audit view could not
+    #: draw one room at the grid's own step and its neighbours coarser.
+    room: np.ndarray | None = None
 
     @property
     def drawn(self) -> int:
@@ -280,6 +287,7 @@ def _cached_blocks(cache_dir: Path, target_cubes: int) -> VoxelCloud | None:
                 h_m=float(data["h_m"]),
                 bounds_lo=data["bounds_lo"],
                 bounds_hi=data["bounds_hi"],
+                room=data["room"] if "room" in data.files else None,
             )
     except (OSError, KeyError, ValueError, zipfile.BadZipFile):
         # A half written or stale file is worth rebuilding rather than
@@ -290,18 +298,20 @@ def _cached_blocks(cache_dir: Path, target_cubes: int) -> VoxelCloud | None:
 def _write_cached_blocks(cache_dir: Path, target_cubes: int, cloud: VoxelCloud) -> None:
     path = _blocks_path(cache_dir, target_cubes)
     staging = path.with_suffix(".partial.npz")
+    stored: dict[str, Any] = {
+        "positions": cloud.positions,
+        "material": cloud.material,
+        "inert": cloud.inert,
+        "total_nodes": cloud.total_nodes,
+        "cell_m": cloud.cell_m,
+        "h_m": cloud.h_m,
+        "bounds_lo": cloud.bounds_lo,
+        "bounds_hi": cloud.bounds_hi,
+    }
+    if cloud.room is not None:
+        stored["room"] = cloud.room
     try:
-        np.savez(
-            staging,
-            positions=cloud.positions,
-            material=cloud.material,
-            inert=cloud.inert,
-            total_nodes=cloud.total_nodes,
-            cell_m=cloud.cell_m,
-            h_m=cloud.h_m,
-            bounds_lo=cloud.bounds_lo,
-            bounds_hi=cloud.bounds_hi,
-        )
+        np.savez(staging, **stored)
         staging.replace(path)
     except OSError:
         # A read-only or full cache is a slow viewer, not a broken one.
@@ -345,31 +355,27 @@ def _read_nodes(handle: Any, total: int, chunk: int = 1 << 24) -> tuple[Any, Any
     return index, material, inert
 
 
-def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
-    """The binning itself. See :func:`read_voxels`."""
+def scene_subs(
+    index: np.ndarray, ny: int, nz: int, shape: tuple[int, int, int]
+) -> list[np.ndarray]:
+    """Flat engine indices back to subscripts in the scene's own frame.
+
+    Two conventions meet here and neither is guessable from the other. The
+    index is flat over the engine's grid with the last axis contiguous, and the
+    engine's axes are ``cart_grid``'s permuted into descending extent by
+    ``rotate_sim_data``. Undoing the permutation is what lets the result be
+    drawn against the mesh.
+
+    Held as int32. A subscript is bounded by its axis, 11 549 at the worst on
+    the flat at 16 kHz, so int64 buys nothing and costs 13 GB: three of these
+    for 1 089 464 499 nodes is 26 GB as int64 and 13 as int32. The arithmetic
+    that builds them is still done in the index's own width, one axis at a
+    time, so nothing overflows on the way.
+    """
     from reverberate.wave.comms import transpose_order
 
-    cache_dir = Path(cache_dir)
-    with h5py.File(cache_dir / "vox_out.h5", "r") as handle:
-        _, ny, nz = (int(handle[k][()]) for k in ("Nx", "Ny", "Nz"))
-        h_m = float(handle["h"][()])
-        total = int(handle["bn_ixyz"].shape[0])
-        index, material, inert = _read_nodes(handle, total)
-    with h5py.File(cache_dir / "cart_grid.h5", "r") as handle:
-        axes = [np.asarray(handle[k][:], dtype=np.float64) for k in ("xv", "yv", "zv")]
-    # Two conventions meet here and neither is guessable from the other. The
-    # index is flat over the engine's grid with the last axis contiguous, and
-    # the engine's axes are ``cart_grid``'s permuted into descending extent by
-    # ``rotate_sim_data``. Undo the permutation, so what comes out is in the
-    # scene's own frame and can be drawn against the mesh.
-    #
-    # Held as int32. A subscript is bounded by its axis, 11 549 at the worst on
-    # the flat at 16 kHz, so int64 buys nothing and costs 13 GB: three of these
-    # for 1 089 464 499 nodes is 26 GB as int64 and 13 as int32, against 32 GB
-    # of memory. The arithmetic that builds them is still done in the index's
-    # own width, one axis at a time, so nothing overflows on the way.
-    order = transpose_order((axes[0].size, axes[1].size, axes[2].size))
-    scene_subs: list[np.ndarray] = [np.empty(0, dtype=np.int32)] * 3
+    order = transpose_order(shape)
+    subs: list[np.ndarray] = [np.empty(0, dtype=np.int32)] * 3
     plane = np.int64(ny) * np.int64(nz)
     for engine_axis, divisor, modulus in (
         (0, plane, None),
@@ -379,70 +385,132 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
         part = index if divisor is None else index // divisor
         if modulus is not None:
             part = part % modulus
-        scene_subs[int(order[engine_axis])] = part.astype(np.int32, copy=False)
+        subs[int(order[engine_axis])] = part.astype(np.int32, copy=False)
         del part
+    return subs
 
-    # Boundary nodes cover a surface, so halving the block size roughly
-    # quadruples the count: step through powers of two rather than solving for
-    # one, which would need the surface area this is being used to estimate.
-    #
-    # Everything below is sized by the number of *occupied* blocks, never by
-    # the number of cells. A first version counted densely over the lattice,
-    # which at the grid's own 2 mm is a 34 GB occupancy array and a 481 GB
-    # material tally: it does not fail, it swaps, which is worse than failing.
-    shape = np.array([axis.size for axis in axes], dtype=np.int64)
+
+def span_for(subs: list[np.ndarray], shape: np.ndarray, target_cubes: int) -> int:
+    """The smallest power-of-two block that fits ``target_cubes`` blocks.
+
+    Boundary nodes cover a surface, so halving the block size roughly
+    quadruples the count: stepping through powers of two is cheaper than
+    solving for one, which would need the surface area this is being used to
+    estimate.
+
+    **Counted on the blocks that survive, not on the nodes, at every step but
+    the first.** The version this replaces called ``np.unique`` on the full
+    node list once per candidate span -- a sort of an 8.7 GB int64 key array,
+    five times over, for the flat at 16 kHz, which is where its 7 h 37 at
+    15 per cent CPU and 34.4 GB of swap went. Each coarser span is a function
+    of the finer one's subscripts, so one sort at the finest span answers for
+    every span above it, over an array that shrinks fourfold each time.
+    """
+    keys = np.unique(_block_keys(subs, 1, shape))
     span = 1
-    while span < 4096:
-        if np.unique(_block_keys(scene_subs, span, shape)).size <= target_cubes:
-            break
+    while span < 4096 and keys.size > target_cubes:
         span *= 2
+        coarse = -(-shape // span)
+        prev = -(-shape // (span // 2))
+        # Back to subscripts at the finer span, then down to this one. Cheaper
+        # than re-deriving from the nodes, and the array is already unique.
+        ia = keys // (prev[1] * prev[2])
+        ib = (keys // prev[2]) % prev[1]
+        ic = keys % prev[2]
+        keys = np.unique((ia // 2) * (coarse[1] * coarse[2]) + (ib // 2) * coarse[2] + (ic // 2))
+    return span
 
-    # ``inverse`` numbers the occupied blocks 0..n-1, so every count that
-    # follows is over blocks that exist rather than cells that might.
-    unique_keys, inverse, occupancy = np.unique(
-        _block_keys(scene_subs, span, shape), return_inverse=True, return_counts=True
-    )
-    found = unique_keys.size
 
-    # A block is sealed only when *nothing* in it carries a material and every
-    # node in it has lost its adjacency. A block at a surface holds both sides
-    # of it, and calling that sealed because half its nodes are would paint
-    # every wall in the room the colour of the sealing.
-    #
-    # The adjacency is read rather than inferred from the material because the
-    # two only agree after patch 5. On a grid voxelised before it, a node can
-    # be rigid and still coupled to its neighbours -- which is the defect that
-    # patch exists for, and the view must be able to show it rather than
-    # quietly relabel it as sealed.
-    inert_count = np.bincount(inverse, weights=inert, minlength=found)
-    carried, all_rigid = _commonest_material(inverse, material, found)
-    block_inert = all_rigid & (inert_count >= occupancy)
-    # Otherwise it takes the commonest material it actually has, ignoring the
-    # rigid nodes, which are the far side of a boundary the room cannot hear.
-    #
-    # A block with no material nodes at all is rigid regardless of whether it
-    # is also sealed: ``block_inert`` additionally demands every node have
-    # lost adjacency, which a rigid-but-still-coupled block -- the very defect
-    # patch 5 exists to fix -- does not satisfy. Gating on ``block_inert``
-    # here would leave such a block's ``argmax`` of an all-zero row, material
-    # index 0, standing as if it were commonly that material.
-    block_material = carried
-    block_material[all_rigid] = -1
+def blocks_from_nodes(
+    subs: list[np.ndarray],
+    material: np.ndarray,
+    inert: np.ndarray,
+    room: np.ndarray | None,
+    span: int,
+    axes: list[np.ndarray],
+    h_m: float,
+    total_nodes: int,
+) -> VoxelCloud:
+    """Group nodes into blocks of ``span`` cells and say what each block is.
 
-    # Back from the packed key to a centre in the scene's own frame.
-    coarse = -(-shape // span)
-    ia = unique_keys // (coarse[1] * coarse[2])
-    ib = (unique_keys // coarse[2]) % coarse[1]
-    ic = unique_keys % coarse[2]
+    Everything here is sized by the number of *occupied* blocks, never by the
+    number of cells. A first version counted densely over the lattice, which at
+    the grid's own 2 mm is a 34 GB occupancy array and a 481 GB material tally:
+    it does not fail, it swaps, which is worse than failing.
+
+    **At ``span`` 1 there is nothing to group.** A block is a node, so the
+    grouping -- a sort of the whole key array with an int64 inverse beside it,
+    26 GB for the flat at 16 kHz -- is skipped entirely and the node arrays are
+    the answer. That is the case the audit view spends its time in.
+    """
+    shape = np.array([axis.size for axis in axes], dtype=np.int64)
+    if span == 1:
+        found = int(subs[0].size)
+        occupancy = np.ones(found, dtype=np.int64)
+        block_material = material.astype(np.int8, copy=True)
+        block_inert = inert.astype(bool, copy=False)
+        block_room = None if room is None else room.astype(np.int8, copy=False)
+        ia, ib, ic = subs
+    else:
+        # ``inverse`` numbers the occupied blocks 0..n-1, so every count that
+        # follows is over blocks that exist rather than cells that might.
+        unique_keys, first, inverse, occupancy = np.unique(
+            _block_keys(subs, span, shape),
+            return_index=True,
+            return_inverse=True,
+            return_counts=True,
+        )
+        found = unique_keys.size
+
+        # A block is sealed only when *nothing* in it carries a material and
+        # every node in it has lost its adjacency. A block at a surface holds
+        # both sides of it, and calling that sealed because half its nodes are
+        # would paint every wall in the room the colour of the sealing.
+        #
+        # The adjacency is read rather than inferred from the material because
+        # the two only agree after patch 5. On a grid voxelised before it, a
+        # node can be rigid and still coupled to its neighbours -- which is the
+        # defect that patch exists for, and the view must be able to show it
+        # rather than quietly relabel it as sealed.
+        inert_count = np.bincount(inverse, weights=inert, minlength=found)
+        carried, all_rigid = _commonest_material(inverse, material, found)
+        block_inert = np.asarray(all_rigid & (inert_count >= occupancy))
+        # Otherwise it takes the commonest material it actually has, ignoring
+        # the rigid nodes, which are the far side of a boundary the room cannot
+        # hear.
+        #
+        # A block with no material nodes at all is rigid regardless of whether
+        # it is also sealed: ``block_inert`` additionally demands every node
+        # have lost adjacency, which a rigid-but-still-coupled block -- the
+        # very defect patch 5 exists to fix -- does not satisfy. Gating on
+        # ``block_inert`` here would leave such a block's ``argmax`` of an
+        # all-zero row, material index 0, standing as if it were commonly that
+        # material.
+        block_material = carried
+        block_material[all_rigid] = -1
+        # The block's room is its **first node's**, not the majority's. A block
+        # straddling the partition is seen by both rooms' passes, and each pass
+        # holds every node in it, so the first node in the grid's own order is
+        # the one answer the two passes cannot disagree on. A majority vote
+        # would be taken over whatever subset each pass happened to hold, and a
+        # straddling block would then be drawn twice or not at all.
+        block_room = None if room is None else room[first].astype(np.int8)
+
+        # Back from the packed key to a subscript on the coarse lattice.
+        coarse = -(-shape // span)
+        ia = unique_keys // (coarse[1] * coarse[2])
+        ib = (unique_keys // coarse[2]) % coarse[1]
+        ic = unique_keys % coarse[2]
+
     # A block of ``span`` cells starting at ``idx`` holds the nodes idx to
     # idx+span-1, so its centre is half of *that* span past the first, not half
     # a block past it: with no aggregation the cube must sit on the node.
     half = 0.5 * (span - 1) * h_m
     positions = np.stack(
         [
-            axes[0][np.minimum(ia * span, shape[0] - 1)] + half,
-            axes[1][np.minimum(ib * span, shape[1] - 1)] + half,
-            axes[2][np.minimum(ic * span, shape[2] - 1)] + half,
+            axes[0][np.minimum(np.asarray(ia) * span, shape[0] - 1)] + half,
+            axes[1][np.minimum(np.asarray(ib) * span, shape[1] - 1)] + half,
+            axes[2][np.minimum(np.asarray(ic) * span, shape[2] - 1)] + half,
         ],
         axis=1,
     ).astype(np.float32)
@@ -455,14 +523,50 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
 
     return VoxelCloud(
         positions=positions,
-        material=block_material,
+        material=np.asarray(block_material),
         inert=np.asarray(block_inert),
-        total_nodes=total,
+        total_nodes=total_nodes,
         cell_m=span * h_m,
         h_m=h_m,
         bounds_lo=bounds_lo,
         bounds_hi=bounds_hi,
+        room=block_room,
     )
+
+
+#: What :func:`read_grid_nodes` hands back: the three scene-frame subscript
+#: arrays, the material, the inert flag, the three axes, the grid step, the
+#: node count and the engine index it was all derived from.
+GridNodes = tuple[
+    list[np.ndarray], np.ndarray, np.ndarray, list[np.ndarray], float, int, np.ndarray
+]
+
+
+def read_grid_nodes(cache_dir: Path) -> GridNodes:
+    """Every boundary node of a cached voxelisation, in the scene's own frame.
+
+    Returns the three subscript arrays, the material, the inert flag, the three
+    axes, the grid step, the node count and the engine index. The index is
+    handed back because the audit pipeline writes per-room shards keyed on it.
+    """
+    cache_dir = Path(cache_dir)
+    with h5py.File(cache_dir / "vox_out.h5", "r") as handle:
+        _, ny, nz = (int(handle[k][()]) for k in ("Nx", "Ny", "Nz"))
+        h_m = float(handle["h"][()])
+        total = int(handle["bn_ixyz"].shape[0])
+        index, material, inert = _read_nodes(handle, total)
+    with h5py.File(cache_dir / "cart_grid.h5", "r") as handle:
+        axes = [np.asarray(handle[k][:], dtype=np.float64) for k in ("xv", "yv", "zv")]
+    subs = scene_subs(index, ny, nz, (axes[0].size, axes[1].size, axes[2].size))
+    return subs, material, inert, axes, h_m, total, index
+
+
+def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
+    """The binning itself. See :func:`read_voxels`."""
+    subs, material, inert, axes, h_m, total, _ = read_grid_nodes(cache_dir)
+    shape = np.array([axis.size for axis in axes], dtype=np.int64)
+    span = span_for(subs, shape, target_cubes)
+    return blocks_from_nodes(subs, material, inert, None, span, axes, h_m, total)
 
 
 @dataclass
@@ -479,6 +583,10 @@ class VoxelSurface:
     blocks: VoxelCloud
     #: How many quads survived merging.
     quads: int
+    #: (q,) int8 room index per quad, or None when the grid was not
+    #: partitioned. One per quad and not per corner: a quad never spans two
+    #: rooms, because the room is part of the key it was merged on.
+    quad_room: np.ndarray | None = None
 
     @property
     def triangles(self) -> int:
@@ -517,124 +625,208 @@ def surface_of(cloud: VoxelCloud) -> VoxelSurface:
     The staircase survives both, on purpose. It is what the solver works on,
     and smoothing it here would draw a room the wave equation was not solved
     in.
+
+    **Sparse, and that is what makes the native grid reachable.** The first
+    version built the whole block lattice as an ``int16`` volume and walked its
+    slices. That costs the *lattice*, in both memory and time, and the lattice
+    is not the picture: 1.14 GB and 21.8 s for one bedroom at 4.09 mm blocks,
+    9.2 GB for the same bedroom at the grid's own 2.04 mm, and **295 TB for the
+    whole flat**. Since the blocks are a surface inside that volume, almost all
+    of it is empty, so the work here is proportional to the blocks that exist:
+    each slice is meshed from its own occupied cells and nothing the size of
+    the lattice is ever allocated or scanned. The whole flat at 16 kHz is
+    1 089 464 499 blocks against 1.476e11 cells, a ratio of 135.
     """
-    # Computed once and threaded through rather than re-derived by each of
-    # _dense_labels and _corners_of: cloud.lattice is a min/max reduction over
-    # every block position, and _corners_of alone is called once per emitted
-    # quad batch, so re-deriving it there repeats that reduction thousands of
-    # times over a grid with thousands of slices per axis.
     origin, shape = cloud.lattice
-    label = _dense_labels(cloud, origin, shape)
-    # label's NO_FACE sentinel already says which cells are occupied, so a
-    # second dense array built by _dense_blocks purely to answer that would be
-    # a redundant lattice-sized allocation and scatter alongside this one.
-    occupied = label != NO_FACE
+    cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int32)
+    # Sealed folds in as its own label, exactly as the dense pass did: -2 for
+    # a block the solver carries no sound through, -1 rigid, 0.. material.
+    label = np.where(cloud.inert, np.int16(-2), cloud.material.astype(np.int16)).astype(np.int16)
+    # The room joins the key rather than riding beside it. Merging is what
+    # would otherwise cross the partition: two blocks of the same material on
+    # either side of a shared wall are coplanar and adjacent, so they would
+    # become one rectangle belonging to neither room. With the room in the key
+    # the rectangle stops at the partition, which costs a few quads along each
+    # shared wall and is what makes "this room at 2 mm, its neighbours at 8"
+    # expressible at all.
+    keyed = _room_keyed(label, cloud.room)
+
     corners: list[np.ndarray] = []
     labels: list[np.ndarray] = []
+    rooms: list[np.ndarray] = []
     quads = 0
 
     for axis in range(3):
-        near = np.moveaxis(occupied, axis, 0)
-        near_label = np.moveaxis(label, axis, 0)
-        # One slice's shape is the same for every side and every i along this
-        # axis, so these are allocated once per axis and overwritten in place
-        # for each slice below, rather than each slice reallocating its own --
-        # _greedy_quads runs roughly two sides times a thousand slices per
-        # axis on the shipped grid, and its largest scratch array alone is
-        # multiple megabytes.
-        kind_buf = np.empty(near.shape[1:], dtype=np.int16)
-        changed_buf = np.empty(near.shape[1:], dtype=bool)
-        ends_buf = np.empty((near.shape[1] + 1, near.shape[2]), dtype=np.int64)
-        for side in (0, 1):
-            for i in range(near.shape[0]):
-                behind = None
-                if side == 0 and i > 0:
-                    behind = near[i - 1]
-                elif side == 1 and i + 1 < near.shape[0]:
-                    behind = near[i + 1]
-                visible = near[i] if behind is None else near[i] & ~behind
-                if not visible.any():
-                    continue
-                kind_buf[:] = NO_FACE
-                kind_buf[visible] = near_label[i][visible]
-                merged = _greedy_quads(kind_buf, changed_buf, ends_buf)
-                if merged.size == 0:
-                    continue
-                corners.append(_corners_of(cloud, axis, side, i, merged, origin))
-                labels.append(np.repeat(merged[:, 4].astype(np.int16), 4))
-                quads += int(merged.shape[0])
+        first, second = (a for a in range(3) if a != axis)
+        # Slices are visited in order along ``axis``, so the blocks are sorted
+        # by their subscript on it once and read back as contiguous runs.
+        # ``bincount`` gives the run lengths without a second pass.
+        along = cells[:, axis]
+        depth = int(shape[axis])
+        order = np.argsort(along, kind="stable")
+        bounds = np.concatenate(([0], np.cumsum(np.bincount(along, minlength=depth))))
+        width = int(shape[second])
+
+        plane = (cells, keyed, order, bounds, first, second, width)
+        behind = np.zeros(0, np.int64)
+        here = _slice_cells(*plane, 0) if depth else _EMPTY_SLICE
+        for i in range(depth):
+            ahead = _slice_cells(*plane, i + 1) if i + 1 < depth else _EMPTY_SLICE
+            key, u, v, kind = here
+            if key.size:
+                for side, neighbour in ((0, behind), (1, ahead[0])):
+                    visible = _not_in(key, neighbour)
+                    if not visible.any():
+                        continue
+                    merged = _slice_quads(u[visible], v[visible], kind[visible])
+                    if merged.size == 0:
+                        continue
+                    corners.append(_corners_of(cloud, axis, side, i, merged, origin))
+                    face, where = _room_unkeyed(merged[:, 4], cloud.room)
+                    labels.append(np.repeat(face, 4))
+                    if where is not None:
+                        rooms.append(where)
+                    quads += int(merged.shape[0])
+            behind = key
+            here = ahead
 
     if not corners:
-        empty = np.zeros((0, 3), np.float32)
-        return VoxelSurface(empty, np.zeros(0, np.uint32), np.zeros(0, np.int16), cloud, 0)
+        empty_points = np.zeros((0, 3), np.float32)
+        blank = np.zeros(0, np.int8) if cloud.room is not None else None
+        return VoxelSurface(
+            empty_points, np.zeros(0, np.uint32), np.zeros(0, np.int16), cloud, 0, blank
+        )
     points = np.concatenate(corners).astype(np.float32)
     base = (np.arange(quads, dtype=np.uint32) * 4)[:, None]
     index = (base + np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)).ravel()
-    return VoxelSurface(points, index, np.concatenate(labels), cloud, quads)
+    return VoxelSurface(
+        points,
+        index,
+        np.concatenate(labels),
+        cloud,
+        quads,
+        np.concatenate(rooms) if rooms else None,
+    )
 
 
-def _greedy_quads(
-    kind: np.ndarray,
-    changed: np.ndarray | None = None,
-    ends: np.ndarray | None = None,
-) -> np.ndarray:
-    """Merge one slice of face labels into the fewest rectangles.
+#: How the room and the face label share one integer. A label runs from -2
+#: (sealed) through -1 (rigid) to the material count, which is 51 on this flat,
+#: so a byte with a bias holds it and the room multiplies past it.
+_LABEL_BIAS = 128
+_LABEL_SPAN = 256
 
-    Returns ``(n, 5)`` of ``u0, v0, u1, v1, label``, ends exclusive.
+
+def _room_keyed(label: np.ndarray, room: np.ndarray | None) -> np.ndarray:
+    """One merge key per block, folding the room in when there is one."""
+    if room is None:
+        return label.astype(np.int32)
+    return room.astype(np.int32) * _LABEL_SPAN + (label.astype(np.int32) + _LABEL_BIAS)
+
+
+def _room_unkeyed(
+    keys: np.ndarray, room: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Split a merged key back into the face label and the room it belongs to."""
+    if room is None:
+        return keys.astype(np.int16), None
+    return (keys % _LABEL_SPAN - _LABEL_BIAS).astype(np.int16), (keys // _LABEL_SPAN).astype(
+        np.int8
+    )
+
+
+#: One slice's cells: the packed ``(u, v)`` key, the two subscripts and the
+#: merge label, all in one order.
+_Slice = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+
+_EMPTY_SLICE: _Slice = (
+    np.zeros(0, np.int64),
+    np.zeros(0, np.int64),
+    np.zeros(0, np.int64),
+    np.zeros(0, np.int32),
+)
+
+
+def _slice_cells(
+    cells: np.ndarray,
+    keyed: np.ndarray,
+    order: np.ndarray,
+    bounds: np.ndarray,
+    first: int,
+    second: int,
+    width: int,
+    i: int,
+) -> _Slice:
+    """One slice's cells, sorted by a packed ``(u, v)`` key.
+
+    Sorted because the two neighbouring slices are searched against it to
+    decide which faces are hidden, and ``searchsorted`` over the slice is what
+    keeps that test off the lattice.
+    """
+    picked = order[bounds[i] : bounds[i + 1]]
+    u = cells[picked, first].astype(np.int64)
+    v = cells[picked, second].astype(np.int64)
+    key = u * width + v
+    inner = np.argsort(key)
+    return key[inner], u[inner], v[inner], keyed[picked][inner]
+
+
+def _not_in(key: np.ndarray, other: np.ndarray) -> np.ndarray:
+    """True where ``key`` is absent from the sorted, unique ``other``.
+
+    A face is drawn only where the neighbouring slice has no block behind it.
+    Both slices hold one entry per lattice cell, so their keys are unique and
+    a single ``searchsorted`` answers for the whole slice.
+    """
+    if other.size == 0:
+        return np.ones(key.size, dtype=bool)
+    at = np.searchsorted(other, key)
+    np.minimum(at, other.size - 1, out=at)
+    return np.asarray(other[at] != key)
+
+
+def _slice_quads(u: np.ndarray, v: np.ndarray, kind: np.ndarray) -> np.ndarray:
+    """Merge one slice's visible cells into the fewest rectangles.
+
+    Returns ``(n, 5)`` of ``u0, v0, u1, v1, label``, ends exclusive: the same
+    contract as :func:`_greedy_quads`, and the same rectangles, but the work is
+    proportional to the cells present rather than to the plane they sit in.
+    That is the whole difference, and at the grid's own step the plane is four
+    orders of magnitude larger than the cells on it.
 
     Two passes, and the second is what makes a floor one rectangle rather than
     one strip per row: runs along u are found first, then runs spanning exactly
-    the same u with the same label in consecutive v are merged. A full 2D
-    greedy mesher does no better on axis-aligned geometry, which is what a
-    voxel grid is made of.
-
-    Vectorised over the whole slice: the obvious loop over rows and runs is
-    twenty times slower, and the grid's own resolution has a thousand slices
-    per axis.
-
-    ``changed`` (``kind.shape``, bool) and ``ends`` (``(kind.shape[0] + 1,
-    kind.shape[1])``, int64) are optional scratch buffers, both fully
-    overwritten before they are read. Passed in and reused rather than
-    allocated fresh, a caller invoking this once per slice of a much larger
-    volume -- :func:`surface_of` does, thousands of times per axis -- turns
-    thousands of transient multi-megabyte allocations into one pair per axis.
+    the same u with the same label in consecutive v are merged.
     """
-    width = kind.shape[0]
-    if changed is None:
-        changed = np.empty_like(kind, dtype=bool)
-    changed[0] = True
-    changed[1:] = kind[1:] != kind[:-1]
-    run_u, run_v = np.nonzero(changed)
-    labels = kind[run_u, run_v]
-    keep = labels != NO_FACE
-    run_u, run_v, labels = run_u[keep], run_v[keep], labels[keep]
-    if run_u.size == 0:
+    if u.size == 0:
         return np.zeros((0, 5), dtype=np.int64)
 
-    # A run ends at the next change in its own column, or at the edge.
-    if ends is None:
-        ends = np.empty((width + 1, kind.shape[1]), dtype=np.int64)
-    ends[:] = width
-    rows = np.nonzero(changed)[0]
-    ends[:-1][changed] = rows
-    # In place: accumulate reads and writes the same (reversed) positions in
-    # the same sequential order, so this is safe, and it is what keeps this
-    # from being a second fresh (width + 1, height) array every call.
-    np.minimum.accumulate(ends[::-1], axis=0, out=ends[::-1])
-    run_end = ends[run_u + 1, run_v]
+    # A run is a maximal set of consecutive u, in one v, carrying one label.
+    order = np.lexsort((u, v))
+    u, v, kind = u[order], v[order], kind[order]
+    opens = np.empty(u.size, dtype=bool)
+    opens[0] = True
+    opens[1:] = (v[1:] != v[:-1]) | (u[1:] != u[:-1] + 1) | (kind[1:] != kind[:-1])
+    start = np.flatnonzero(opens)
+    last = np.concatenate((start[1:], [u.size])) - 1
+    run_u0, run_v, run_kind = u[start], v[start], kind[start]
+    run_u1 = u[last] + 1
 
     # Runs merge down v when start, end and label match and v is consecutive,
-    # so sorting by those three puts every mergeable chain together.
-    order = np.lexsort((run_v, labels, run_end, run_u))
-    u0, v0, u1, lab = run_u[order], run_v[order], run_end[order], labels[order]
-    breaks = np.empty(u0.size, dtype=bool)
+    # so sorting by those three puts every mergeable chain together. The key
+    # order is _greedy_quads's, so the two emit rectangles in the same order.
+    chain = np.lexsort((run_v, run_kind, run_u1, run_u0))
+    a0, a1, av, kinds = run_u0[chain], run_u1[chain], run_v[chain], run_kind[chain]
+    breaks = np.empty(a0.size, dtype=bool)
     breaks[0] = True
     breaks[1:] = (
-        (u0[1:] != u0[:-1]) | (u1[1:] != u1[:-1]) | (lab[1:] != lab[:-1]) | (v0[1:] != v0[:-1] + 1)
+        (a0[1:] != a0[:-1])
+        | (a1[1:] != a1[:-1])
+        | (kinds[1:] != kinds[:-1])
+        | (av[1:] != av[:-1] + 1)
     )
-    start = np.flatnonzero(breaks)
-    stop = np.r_[start[1:], u0.size] - 1
-    return np.stack([u0[start], v0[start], u1[start], v0[stop] + 1, lab[start]], axis=1)
+    head = np.flatnonzero(breaks)
+    tail = np.concatenate((head[1:], [a0.size])) - 1
+    return np.stack([a0[head], av[head], a1[head], av[tail] + 1, kinds[head]], axis=1)
 
 
 def _dense_blocks(cloud: VoxelCloud) -> np.ndarray:
@@ -643,22 +835,6 @@ def _dense_blocks(cloud: VoxelCloud) -> np.ndarray:
     cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int64)
     grid = np.zeros(tuple(shape), dtype=bool)
     grid[cells[:, 0], cells[:, 1], cells[:, 2]] = True
-    return grid
-
-
-def _dense_labels(cloud: VoxelCloud, origin: np.ndarray, shape: np.ndarray) -> np.ndarray:
-    """Material per lattice cell, with sealed folded in as its own label.
-
-    ``origin``/``shape`` come from :attr:`VoxelCloud.lattice`, taken as
-    arguments rather than read again here, so a caller looping over many
-    slices of the result -- :func:`surface_of` does -- pays for that
-    reduction once.
-    """
-    cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int64)
-    grid = np.full(tuple(shape), NO_FACE, dtype=np.int16)
-    grid[cells[:, 0], cells[:, 1], cells[:, 2]] = np.where(
-        cloud.inert, np.int16(-2), cloud.material.astype(np.int16)
-    )
     return grid
 
 
@@ -698,6 +874,42 @@ def _corners_of(
         cloud.bounds_hi[other[1]],
     )
     return out.reshape(-1, 3)
+
+
+def write_quads(
+    surface: VoxelSurface, keep: np.ndarray | None, target: Path, stem: str
+) -> dict[str, object]:
+    """Write a subset of a merged surface as the three arrays the browser reads.
+
+    ``keep`` selects quads, not corners: the audit view splits one merged
+    surface into a payload per room and, for a room too heavy to draw whole,
+    per tile. **The split is applied to the finished quads and never to the
+    blocks they came from.** Cutting the block set first would leave each
+    piece's edge blocks unable to see their neighbours, so they would emit
+    faces that do not exist in the grid -- a picture of the cut rather than of
+    the room. A quad already merged is simply assigned to one file.
+    """
+    target = Path(target)
+    target.mkdir(parents=True, exist_ok=True)
+    corners = surface.corners.reshape(-1, 4, 3)
+    label = surface.label.reshape(-1, 4)[:, 0]
+    if keep is not None:
+        corners, label = corners[keep], label[keep]
+    quads = int(corners.shape[0])
+    base = (np.arange(quads, dtype=np.uint32) * 4)[:, None]
+    index = (base + np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)).ravel()
+    (target / f"{stem}.f32").write_bytes(corners.reshape(-1, 3).astype(np.float32).tobytes())
+    (target / f"{stem}_index.u32").write_bytes(index.tobytes())
+    (target / f"{stem}_label.i16").write_bytes(np.repeat(label, 4).astype(np.int16).tobytes())
+    return {
+        "quads": quads,
+        "triangles": quads * 2,
+        "sealed_quads": int(np.count_nonzero(label == -2)),
+        "bytes": quads * 80,
+        "corners_url": f"{stem}.f32",
+        "index_url": f"{stem}_index.u32",
+        "label_url": f"{stem}_label.i16",
+    }
 
 
 def write_voxel_payload(

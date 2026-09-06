@@ -191,7 +191,16 @@ function drawSpectrogram(canvas, spec) {
 export async function buildVoxelCloud(THREE, data) {
   const meta = data.voxels;
   if (!meta) return null;
-  const base = data.baseUrl;
+  return fetchQuadMesh(THREE, data.baseUrl, meta);
+}
+
+/** One payload of merged quads, as a mesh: fetch the three arrays and shade them.
+ *
+ * Shared by the single-payload view and the tiered audit view, because the
+ * colour *is* the datum and two copies of this would be two chances for a
+ * material to be drawn one hue in one tier and another hue in the next.
+ */
+export async function fetchQuadMesh(THREE, base, meta) {
   const [corners, index, label] = await Promise.all([
     fetch(`${base}/${meta.corners_url}`).then((r) => r.arrayBuffer()),
     fetch(`${base}/${meta.index_url}`).then((r) => r.arrayBuffer()),
@@ -242,6 +251,267 @@ export async function buildVoxelCloud(THREE, data) {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = "voxels";
   return mesh;
+}
+
+/** The tiered audit view: the room you stand in at the grid's own step.
+ *
+ * A whole flat at 16 kHz is 1 089 464 499 boundary nodes and roughly 28 M
+ * merged quads, about 2.2 GB. No browser holds that, and thinning it would
+ * make the picture a sample rather than an audit. So the flat is published
+ * room by room in two tiers of the *same* grid -- the solver's own step, and
+ * that step aggregated to the cell size of the band below -- and this draws the
+ * coarse tier everywhere plus the fine tier of one room.
+ *
+ * Nothing is loaded that is not being looked at. Coarse tiers come in at the
+ * start because together they are tens of megabytes; a fine tier is fetched
+ * the first time its room is entered, tile by tile, nearest first, and kept.
+ */
+//: The most quads the fine tier may hold at once, across every tile drawn.
+//: Eight million is sixteen million triangles and about 640 MB of buffers.
+//: Every room but one draws whole at this figure; the living room is 13.7 M
+//: quads and draws the nearest 59 per cent of itself, which the status line
+//: reports as a tile count rather than leaving the far end to look like
+//: geometry the voxeliser lost.
+const FINE_QUAD_BUDGET = 8_000_000;
+
+export async function buildAuditGrid(THREE, data, onStatus) {
+  const audit = data.audit;
+  if (!audit || !audit.rooms || !audit.rooms.length) return null;
+  const base = `${data.baseUrl}/${audit.dir || "voxels"}`;
+  const group = new THREE.Group();
+  group.name = "audit-grid";
+
+  const state = audit.rooms.map((room) => ({
+    room,
+    coarse: null,
+    // One entry per fine tile: its mesh once fetched, and the promise while it
+    // is in flight, so walking in and out of a room does not fetch it twice.
+    tiles: room.fine.tiles.map((file) => ({ file, mesh: null, loading: null, drawn: false })),
+  }));
+  let selected = null;
+  let drawnQuads = 0;
+
+  const say = () => {
+    if (!onStatus) return;
+    const entry = selected === null ? null : state[selected];
+    const coarse = state.reduce(
+      (sum, other, i) => sum + (i === selected ? 0 : other.room.coarse.quads),
+      0
+    );
+    onStatus({
+      room: entry ? entry.room.name : null,
+      fine_mm: entry ? entry.room.fine.cell_m * 1000 : null,
+      coarse_mm: audit.rooms[0].coarse.cell_m * 1000,
+      tiles_drawn: entry ? entry.tiles.filter((tile) => tile.drawn).length : 0,
+      tiles: entry ? entry.tiles.length : 0,
+      quads: coarse + drawnQuads,
+      megabytes: Math.round(((coarse + drawnQuads) * 80) / 1e6),
+    });
+  };
+
+  // Every room's coarse tier, up front: this is the picture of the whole flat
+  // and it is what a reader sees before choosing anywhere to stand. On this
+  // scene it is 2.57 M quads, which is about what the 4 kHz whole-flat view
+  // already draws.
+  for (const entry of state) {
+    const holder = new THREE.Group();
+    holder.name = `${entry.room.name}-coarse`;
+    for (const file of entry.room.coarse.tiles) {
+      holder.add(await fetchQuadMesh(THREE, `${base}/${entry.room.dir}`, file));
+    }
+    entry.coarse = holder;
+    group.add(holder);
+  }
+  say();
+
+  /** The distance from a point to a tile's own bounding box, zero inside it. */
+  const reach = (file, at) => {
+    const [lo, hi] = file.bounds;
+    let sum = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      const value = at.getComponent(axis);
+      const gap = Math.max(lo[axis] - value, 0, value - hi[axis]);
+      sum += gap * gap;
+    }
+    return sum;
+  };
+
+  /** Draw as much of the selected room's fine tier as the budget allows.
+   *
+   * Nearest first, because a reader auditing a room is looking at the wall in
+   * front of them. A tile already fetched is kept in memory and only hidden, so
+   * turning round is free after the first pass.
+   */
+  const refresh = async (at) => {
+    if (selected === null) return;
+    const entry = state[selected];
+    const order = entry.tiles
+      .map((tile, index) => ({ index, far: reach(tile.file, at) }))
+      .sort((left, right) => left.far - right.far);
+
+    let spent = 0;
+    const wanted = new Set();
+    for (const { index } of order) {
+      const quads = Number(entry.tiles[index].file.quads);
+      if (spent && spent + quads > FINE_QUAD_BUDGET) break;
+      spent += quads;
+      wanted.add(index);
+    }
+
+    for (const [index, tile] of entry.tiles.entries()) {
+      if (!wanted.has(index)) {
+        if (tile.mesh) tile.mesh.visible = false;
+        tile.drawn = false;
+        continue;
+      }
+      if (!tile.mesh) {
+        tile.loading =
+          tile.loading || fetchQuadMesh(THREE, `${base}/${entry.room.dir}`, tile.file);
+        const mesh = await tile.loading;
+        // The reader may have walked into another room while this was in
+        // flight; the tile is kept, but it is not put on screen.
+        if (selected === null || state[selected] !== entry) return;
+        tile.mesh = mesh;
+        group.add(mesh);
+      }
+      tile.mesh.visible = true;
+      tile.drawn = true;
+    }
+    drawnQuads = spent;
+    entry.coarse.visible = false;
+    say();
+  };
+
+  /** Draw one room at the grid's own step, and everything else coarse. */
+  const select = async (name, at) => {
+    const next = state.findIndex((entry) => entry.room.name === name);
+    if (next < 0 || next === selected) return;
+    if (selected !== null) {
+      const previous = state[selected];
+      previous.coarse.visible = true;
+      for (const tile of previous.tiles) {
+        if (tile.mesh) tile.mesh.visible = false;
+        tile.drawn = false;
+      }
+    }
+    selected = next;
+    drawnQuads = 0;
+    say();
+    await refresh(at);
+  };
+
+  /** Which room a point on the floor is in, or null outside every outline. */
+  const roomAt = (x, z) => {
+    for (const entry of state) {
+      for (const ring of entry.room.outline || []) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const [xi, zi] = ring[i];
+          const [xj, zj] = ring[j];
+          if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) inside = !inside;
+        }
+        if (inside) return entry.room.name;
+      }
+    }
+    return null;
+  };
+
+  /** The most open point of a room's floor, and how far it is from a wall.
+   *
+   * A reader dropped into a room they are auditing must not start inside the
+   * wall or inside the bed: the view fills with the pink of a sealed interior
+   * and reads as a broken page. The apartment's three other modes answer this
+   * with the same search over the walkable outline, but that outline arrives
+   * with the scene and a run page opens before it, so the room's own ring --
+   * which travels in this payload -- is used instead.
+   */
+  const standIn = (name) => {
+    const entry = state.find((other) => other.room.name === name) || state[0];
+    let best = null;
+    let clearest = -Infinity;
+    for (const ring of entry.room.outline || []) {
+      const xs = ring.map((p) => p[0]);
+      const zs = ring.map((p) => p[1]);
+      const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+      const [z0, z1] = [Math.min(...zs), Math.max(...zs)];
+      for (let i = 1; i < 20; i++) {
+        for (let j = 1; j < 20; j++) {
+          const x = x0 + ((x1 - x0) * i) / 20;
+          const z = z0 + ((z1 - z0) * j) / 20;
+          if (roomAt(x, z) !== entry.room.name) continue;
+          let near = Infinity;
+          for (let k = 0, m = ring.length - 1; k < ring.length; m = k++) {
+            const [ax, az] = ring[m];
+            const [bx, bz] = ring[k];
+            const dx = bx - ax;
+            const dz = bz - az;
+            const along = Math.max(
+              0,
+              Math.min(1, ((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz || 1))
+            );
+            near = Math.min(near, Math.hypot(x - ax - along * dx, z - az - along * dz));
+          }
+          if (near > clearest) {
+            clearest = near;
+            best = [x, z];
+          }
+        }
+      }
+    }
+    return best;
+  };
+
+  // The grid's own extent, from the tiles rather than from the meshes: it is
+  // wanted before any fine tile is fetched, and a page that ships no triangles
+  // has nothing else to stand the camera in. Every quad of the flat lies inside
+  // it, so it is the same box the mesh view would have reported.
+  const bounds = new THREE.Box3();
+  const corner = new THREE.Vector3();
+  for (const entry of state) {
+    for (const tier of [entry.room.fine, entry.room.coarse]) {
+      for (const file of tier.tiles) {
+        for (const point of file.bounds) bounds.expandByPoint(corner.fromArray(point));
+      }
+    }
+  }
+
+  return { group, select, refresh, roomAt, standIn, bounds, rooms: audit.rooms, note: audit.note };
+}
+
+
+/** The tiered grid's controls and, more importantly, what is actually drawn.
+ *
+ * A reader looking at a room drawn at 8.17 mm while the page says 16 kHz would
+ * take an aggregated feature for a missing one, which is the exact mistake this
+ * view exists to prevent. So the step in force is on screen at all times, next
+ * to the room it applies to, and the coarse step is named beside it.
+ */
+function auditSection(audit) {
+  if (!audit) return "";
+  const options = audit.rooms
+    .map(
+      (room) =>
+        `<option value="${escapeHtml(room.name)}">${escapeHtml(room.name)} ` +
+        `(${room.area_m2.toFixed(1)} m², ${room.fine.quads.toLocaleString()} quads` +
+        `${room.fine.tiles.length > 1 ? `, ${room.fine.tiles.length} tiles` : ""})</option>`
+    )
+    .join("");
+  const fine = audit.rooms[0].fine.cell_m * 1000;
+  const coarse = audit.rooms[0].coarse.cell_m * 1000;
+  const nodes = audit.total_nodes.toLocaleString();
+  return `<h2>Voxelisation</h2>
+    <p class="caption">${escapeHtml(audit.note)}</p>
+    <label>room drawn at ${fine.toFixed(2)} mm
+      <select id="audit-room">${options}</select></label>
+    <label><input type="checkbox" id="audit-follow" checked>
+      follow me: draw the room I am standing in</label>
+    <p class="caption" id="audit-status">${nodes} boundary nodes at
+      ${fine.toFixed(2)} mm. One room at that step, every other room at
+      ${coarse.toFixed(2)} mm.</p>
+    <p class="caption">The triangle mesh is not on this page. This flat's
+      exported model is 192 MB of triangles and they would reach the browser as
+      JSON to be hidden behind the grid; the grid is the picture here. The
+      material table below still names every group the solver was sent.</p>`;
 }
 
 /** The air the solver sealed off, as a table a reader can challenge.
@@ -324,8 +594,11 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <div class="legend">${legend}</div>
 
     ${sealedSection(data.sealed)}
+    ${auditSection(data.audit)}
     ${
-      data.voxels
+      data.audit
+        ? ""
+        : data.voxels
         ? `<h2>Voxelisation</h2>
            <label><input type="checkbox" id="run-voxels" checked> the grid the solver read (untick for the triangles it was sent)</label>
            <p class="caption">${escapeHtml(data.voxels.note)}

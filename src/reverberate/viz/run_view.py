@@ -210,13 +210,22 @@ def absorption_colour(alpha: float) -> list[int]:
 
 
 def surface_groups(
-    model: dict[str, Any], materials: Mapping[str, Sequence[float]] | None = None
+    model: dict[str, Any],
+    materials: Mapping[str, Sequence[float]] | None = None,
+    geometry: bool = True,
 ) -> list[dict[str, Any]]:
     """The solver's own surface list, one entry per material group.
 
     ``model_json`` stores each group as flat triangle indices into its own
     point list, which is what PFFDTD reads. It is handed to the browser in that
     same shape so nothing is re-derived on the way.
+
+    ``geometry`` may be turned off, and for the whole flat it must be. The
+    triangles reach the browser as JSON, and this scene's exported model is
+    192 MB of them: a page that hides the mesh behind a tiered grid would still
+    make a reader download and parse a quarter of a gigabyte to see nothing
+    drawn from it. Without it the group keeps its label, its colour and its
+    triangle count, so the legend and the material table are unchanged.
 
     Its ``color`` field is not passed through. The exporter writes ``[128, 128,
     128]`` into every group because PFFDTD ignores it, so honouring it renders
@@ -227,15 +236,21 @@ def surface_groups(
     materials = materials or {}
     groups = []
     for label, group in sorted(model.get("mats_hash", {}).items()):
-        points = np.asarray(group["pts"], dtype=float)
-        triangles = np.asarray(group["tris"], dtype=int)
+        # Only counted when the geometry is off. Building the arrays to throw
+        # them away is minutes on this flat: 3.2 M triangles across 51 groups,
+        # each a Python list numpy has to walk element by element.
+        count = len(group["tris"])
+        points = np.asarray(group["pts"], dtype=float) if geometry else np.zeros((0, 3))
+        triangles = np.asarray(group["tris"], dtype=int) if geometry else np.zeros((count, 3), int)
         coefficients = materials.get(label)
         alpha = float(coefficients[band]) if coefficients is not None else None
         groups.append(
             {
                 "label": label,
-                "positions": [round(float(value), 5) for value in points.ravel()],
-                "indices": [int(value) for value in triangles.ravel()],
+                "positions": (
+                    [round(float(value), 5) for value in points.ravel()] if geometry else []
+                ),
+                "indices": [int(value) for value in triangles.ravel()] if geometry else [],
                 "colour": absorption_colour(alpha) if alpha is not None else list(UNKNOWN_COLOUR),
                 "absorption": None if alpha is None else round(alpha, 3),
                 "triangles": int(triangles.shape[0]) if triangles.ndim > 1 else 0,
@@ -449,6 +464,35 @@ def _write_voxels(
     return write_voxel_payload(read_surface(cache_dir, budget), labels, target)
 
 
+#: Where a run keeps a tiered audit payload, if it has one. Written by
+#: :mod:`reverberate.experiments.audit_view`, one directory per room.
+AUDIT_DIR = "voxels"
+
+
+def _link_audit(run_dir: Path, target: Path) -> dict[str, Any] | None:
+    """Expose a run's tiered audit payload, if it built one, without copying it.
+
+    Linked rather than copied for the same reason the scenes are: the whole
+    flat at 16 kHz is about 2.2 GB of quads across thirteen rooms, and the site
+    is a temporary directory that would otherwise hold a second copy of it for
+    as long as the viewer runs.
+    """
+    source = run_dir / AUDIT_DIR
+    index = source / "rooms.json"
+    if not index.is_file():
+        return None
+    link = target / AUDIT_DIR
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
+        shutil.rmtree(link)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(source.resolve(), target_is_directory=True)
+    record: dict[str, Any] = json.loads(index.read_text())
+    record["dir"] = AUDIT_DIR
+    return record
+
+
 def model_json_of(run_dir: Path, report: dict[str, Any]) -> Path:
     """Where the run's exported model actually is.
 
@@ -496,7 +540,8 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         shutil.copytree(source_audio, target / "audio", dirs_exist_ok=True)
         audio_names = {path.name for path in source_audio.glob("*.wav")}
 
-    groups = surface_groups(model, model_materials(model_json))
+    audit = _link_audit(run_dir, target)
+    groups = surface_groups(model, model_materials(model_json), geometry=audit is None)
     placement = report["placement"]
     scene = run_scene(run_dir)
     payload = {
@@ -514,7 +559,11 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         # the simulation carrying sound through a region, and the whole reason
         # the census exists is that this must be visible rather than inferred.
         "sealed": report.get("sealed"),
-        "voxels": _write_voxels(report, target, store),
+        # A run with a tiered audit payload does not also build the single
+        # one: they draw the same grid, and the tiered one is the only form a
+        # whole flat at 16 kHz exists in.
+        "audit": audit,
+        "voxels": None if audit else _write_voxels(report, target, store),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
         "binaural_note": report["binaural_note"],

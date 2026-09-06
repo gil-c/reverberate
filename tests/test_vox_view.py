@@ -16,12 +16,57 @@ import numpy as np
 import pytest
 
 from reverberate.viz.vox_view import (
+    NO_FACE,
     _blocks_path,
     _dense_blocks,
+    _slice_quads,
     read_voxels,
     surface_of,
     write_voxel_payload,
 )
+
+
+def cells_of(kind: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A dense slice of face labels as the sparse mesher's three arrays."""
+    u, v = np.nonzero(kind != NO_FACE)
+    return u.astype(np.int64), v.astype(np.int64), kind[u, v].astype(np.int32)
+
+
+def dense_quads(kind: np.ndarray) -> np.ndarray:
+    """The plane-walking mesher :func:`_slice_quads` replaced, kept as the oracle.
+
+    Two passes, and the second is what makes a floor one rectangle rather than
+    one strip per row: runs along u are found first, then runs spanning exactly
+    the same u with the same label in consecutive v are merged. It is correct
+    and it is unusable at the grid's own step, which is why it lives here.
+    """
+    width = kind.shape[0]
+    changed = np.empty_like(kind, dtype=bool)
+    changed[0] = True
+    changed[1:] = kind[1:] != kind[:-1]
+    run_u, run_v = np.nonzero(changed)
+    labels = kind[run_u, run_v]
+    keep = labels != NO_FACE
+    run_u, run_v, labels = run_u[keep], run_v[keep], labels[keep]
+    if run_u.size == 0:
+        return np.zeros((0, 5), dtype=np.int64)
+
+    ends = np.empty((width + 1, kind.shape[1]), dtype=np.int64)
+    ends[:] = width
+    ends[:-1][changed] = np.nonzero(changed)[0]
+    np.minimum.accumulate(ends[::-1], axis=0, out=ends[::-1])
+    run_end = ends[run_u + 1, run_v]
+
+    order = np.lexsort((run_v, labels, run_end, run_u))
+    u0, v0, u1, lab = run_u[order], run_v[order], run_end[order], labels[order]
+    breaks = np.empty(u0.size, dtype=bool)
+    breaks[0] = True
+    breaks[1:] = (
+        (u0[1:] != u0[:-1]) | (u1[1:] != u1[:-1]) | (lab[1:] != lab[:-1]) | (v0[1:] != v0[:-1] + 1)
+    )
+    start = np.flatnonzero(breaks)
+    stop = np.r_[start[1:], u0.size] - 1
+    return np.stack([u0[start], v0[start], u1[start], v0[stop] + 1, lab[start]], axis=1)
 
 
 def write_cache(root: Path, nodes: int = 1000) -> Path:
@@ -262,55 +307,56 @@ class TestSurface:
 
     def test_a_flat_face_of_one_material_becomes_one_quad(self) -> None:
         """The whole point: a floor is one rectangle, not one per cell."""
-        from reverberate.viz.vox_view import _greedy_quads
-
-        kind = np.full((6, 5), 3, dtype=np.int16)
-        merged = _greedy_quads(kind)
+        merged = _slice_quads(*cells_of(np.full((6, 5), 3, dtype=np.int16)))
 
         assert merged.shape[0] == 1
         assert list(merged[0]) == [0, 0, 6, 5, 3]
 
     def test_two_materials_do_not_merge_into_one_quad(self) -> None:
         """Merging across a material boundary would draw the wrong colour."""
-        from reverberate.viz.vox_view import _greedy_quads
-
         kind = np.full((6, 5), 3, dtype=np.int16)
         kind[3:] = 7
-        merged = _greedy_quads(kind)
+        merged = _slice_quads(*cells_of(kind))
 
         assert merged.shape[0] == 2
         assert sorted(int(row[4]) for row in merged) == [3, 7]
 
     def test_nothing_is_drawn_where_there_is_no_face(self) -> None:
-        from reverberate.viz.vox_view import NO_FACE, _greedy_quads
+        assert _slice_quads(*cells_of(np.full((4, 4), NO_FACE, dtype=np.int16))).shape[0] == 0
 
-        assert _greedy_quads(np.full((4, 4), NO_FACE, dtype=np.int16)).shape[0] == 0
 
-    def test_reused_scratch_buffers_do_not_leak_between_slices(self) -> None:
-        """``surface_of`` passes the same ``changed``/``ends`` buffers to every
-        slice of an axis rather than allocating fresh ones. Both are fully
-        overwritten before they are read, so a second call reusing a first
-        call's buffers must answer only for its own, smaller ``kind`` -- not
-        for whatever the first call's larger region left behind in them.
-        """
-        from reverberate.viz.vox_view import NO_FACE, _greedy_quads
+class TestSliceQuads:
+    """The sparse mesher against the dense one it replaced.
 
-        changed = np.empty((6, 5), dtype=bool)
-        ends = np.empty((7, 5), dtype=np.int64)
+    The dense version walked a whole plane per slice, which costs the *lattice*
+    and not the picture: 1.14 GB and 21.8 s for one bedroom at 4.09 mm blocks,
+    9.2 GB for the same bedroom at the grid's own 2.04 mm, and 295 TB for the
+    whole flat. The sparse one costs the cells that exist. They must agree
+    rectangle for rectangle, because a merge that quietly dropped a face would
+    also report a smaller triangle count and look like a better mesher.
+    """
 
-        full = np.full((6, 5), 3, dtype=np.int16)
-        first = _greedy_quads(full, changed, ends)
-        assert list(first[0]) == [0, 0, 6, 5, 3]
+    def test_it_agrees_with_the_dense_mesher(self) -> None:
+        """Randomised, because the cases that separate two meshers are runs
+        that end at a plane edge and single cells wedged between two labels,
+        and a hand-written slice contains neither by accident."""
+        rng = np.random.default_rng(0)
+        for _ in range(300):
+            width = int(rng.integers(1, 9))
+            height = int(rng.integers(1, 9))
+            kind = rng.integers(-2, int(rng.integers(0, 4)) + 1, (width, height)).astype(np.int16)
+            kind[rng.random((width, height)) < 0.3] = NO_FACE
 
-        partial = np.full((6, 5), NO_FACE, dtype=np.int16)
-        partial[2:4, 1:3] = 7
-        second = _greedy_quads(partial, changed, ends)
-        assert second.shape[0] == 1
-        assert list(second[0]) == [2, 1, 4, 3, 7]
+            mine = _slice_quads(*cells_of(kind))
+            theirs = dense_quads(kind)
 
-        # And unbuffered, for the same inputs, agrees -- proving the buffers
-        # are what changed, not the algorithm.
-        assert np.array_equal(second, _greedy_quads(partial))
+            assert np.array_equal(
+                mine[np.lexsort(mine.T[::-1])], theirs[np.lexsort(theirs.T[::-1])]
+            ), kind
+
+    def test_an_empty_slice_yields_no_rectangle(self) -> None:
+        empty = np.zeros(0, dtype=np.int64)
+        assert _slice_quads(empty, empty, empty.astype(np.int16)).shape == (0, 5)
 
 
 class TestCommonestMaterial:
