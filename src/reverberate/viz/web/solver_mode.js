@@ -416,49 +416,18 @@ export async function buildAuditGrid(THREE, data, onStatus) {
     return null;
   };
 
-  /** The most open point of a room's floor, and how far it is from a wall.
+  /** Where to stand to look at a room, and how much clear space is there.
    *
-   * A reader dropped into a room they are auditing must not start inside the
-   * wall or inside the bed: the view fills with the pink of a sealed interior
-   * and reads as a broken page. The apartment's three other modes answer this
-   * with the same search over the walkable outline, but that outline arrives
-   * with the scene and a run page opens before it, so the room's own ring --
-   * which travels in this payload -- is used instead.
+   * Measured against the grid rather than against the floor plan, and measured
+   * on the Python side where the grid is: the outline is a plan and cannot say
+   * where the wardrobe is, so the most open point *of the outline* put the
+   * camera inside solid geometry, filling the view with the pink of a sealed
+   * interior. A reader who has just opened the page reads that as a broken
+   * page, not as a camera inside the furniture.
    */
   const standIn = (name) => {
     const entry = state.find((other) => other.room.name === name) || state[0];
-    let best = null;
-    let clearest = -Infinity;
-    for (const ring of entry.room.outline || []) {
-      const xs = ring.map((p) => p[0]);
-      const zs = ring.map((p) => p[1]);
-      const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
-      const [z0, z1] = [Math.min(...zs), Math.max(...zs)];
-      for (let i = 1; i < 20; i++) {
-        for (let j = 1; j < 20; j++) {
-          const x = x0 + ((x1 - x0) * i) / 20;
-          const z = z0 + ((z1 - z0) * j) / 20;
-          if (roomAt(x, z) !== entry.room.name) continue;
-          let near = Infinity;
-          for (let k = 0, m = ring.length - 1; k < ring.length; m = k++) {
-            const [ax, az] = ring[m];
-            const [bx, bz] = ring[k];
-            const dx = bx - ax;
-            const dz = bz - az;
-            const along = Math.max(
-              0,
-              Math.min(1, ((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz || 1))
-            );
-            near = Math.min(near, Math.hypot(x - ax - along * dx, z - az - along * dz));
-          }
-          if (near > clearest) {
-            clearest = near;
-            best = [x, z];
-          }
-        }
-      }
-    }
-    return best;
+    return entry.room.stand || null;
   };
 
   // The grid's own extent, from the tiles rather than from the meshes: it is
@@ -475,7 +444,7 @@ export async function buildAuditGrid(THREE, data, onStatus) {
     }
   }
 
-  return { group, select, refresh, roomAt, standIn, bounds, rooms: audit.rooms, note: audit.note };
+  return { group, select, refresh, say, roomAt, standIn, bounds, rooms: audit.rooms, note: audit.note };
 }
 
 

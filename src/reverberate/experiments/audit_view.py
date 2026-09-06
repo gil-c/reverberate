@@ -40,7 +40,7 @@ import h5py
 import numpy as np
 
 from reverberate.experiments.run import entry_from_key
-from reverberate.geometry.rooms import Partition, partition_of_scene
+from reverberate.geometry.rooms import Partition, _rasterise, partition_of_scene
 from reverberate.viz.vox_view import (
     blocks_from_nodes,
     scene_subs,
@@ -139,6 +139,88 @@ def membership_mask(partition: Partition, halo: int) -> np.ndarray:
         near = ndimage.binary_dilation(partition.raster == index, cross, iterations=halo)
         mask |= near.astype(np.uint16) << np.uint16(index)
     return mask
+
+
+#: The band of heights a standing point must be clear through, in metres above
+#: the grid's floor. A reader's eye is at 1.6 m and their head is not a point.
+HEAD_BAND_M = (1.2, 1.9)
+
+#: Side of the cell the standing search works on, in metres. Coarse on purpose:
+#: it is looking for the middle of the floor, not for a gap between two chairs.
+STAND_CELL_M = 0.05
+
+
+def stand_points(
+    cache_dir: Path,
+    partition: Partition,
+    axes: list[np.ndarray],
+    ny: int,
+    nz: int,
+    shape: tuple[int, int, int],
+) -> dict[str, list[float]]:
+    """The most open point of each room's floor, measured against the grid.
+
+    A reader dropped into a room they are auditing must not start inside the
+    wardrobe. The room outline cannot say where the wardrobe is -- it is a floor
+    plan -- and standing at the outline's most open point put the camera inside
+    solid geometry, which fills the view with the pink of a sealed interior and
+    reads as a broken page rather than as a camera inside the furniture.
+
+    So the grid answers instead. Every boundary node between
+    :data:`HEAD_BAND_M` is stamped onto a coarse plan of the flat, and each room
+    takes the cell of its own that is farthest from anything stamped. That is
+    the middle of the free floor at head height, furniture included, and it is
+    the same measurement whatever the band or the scene.
+
+    Returns, per room, ``[x, z, clearance]`` in metres. The clearance travels
+    because a room with none -- a closet packed to the ceiling -- should say so
+    rather than look like a room the reader failed to find.
+    """
+    from scipy import ndimage
+
+    low = float(axes[1][0]) + HEAD_BAND_M[0]
+    high = float(axes[1][0]) + HEAD_BAND_M[1]
+    band = (np.searchsorted(axes[1], low), np.searchsorted(axes[1], high))
+    step = max(1, int(round(STAND_CELL_M / float(axes[0][1] - axes[0][0]))))
+    plan = np.zeros((-(-shape[0] // step), -(-shape[2] // step)), dtype=bool)
+
+    with h5py.File(cache_dir / "vox_out.h5", "r") as handle:
+        total = int(handle["bn_ixyz"].shape[0])
+        for start in range(0, total, CHUNK):
+            index = np.asarray(handle["bn_ixyz"][start : min(start + CHUNK, total)])
+            subs = scene_subs(index, ny, nz, shape)
+            del index
+            at_head = (subs[1] >= band[0]) & (subs[1] < band[1])
+            plan[subs[0][at_head] // step, subs[2][at_head] // step] = True
+            del subs
+
+    # Distance to the nearest occupied cell, in metres, over the whole plan;
+    # each room then takes the best cell it owns. One transform for every room
+    # rather than one each, because clearance does not stop at a partition: a
+    # doorway's free space belongs to whichever room the cell is in.
+    clear = ndimage.distance_transform_edt(~plan) * step * float(axes[0][1] - axes[0][0])
+    # Inside the room's own polygon, not inside its share of the partition. The
+    # partition fills every cell of the bounding box, so a room on the outside
+    # wall owns a slab of empty ground beyond it -- and that slab has the
+    # largest clearance in the flat, which is where the first version stood the
+    # reader: eleven metres clear, in the garden, eight metres from the bedroom.
+    coarse = _rasterise(list(partition.rooms), axes[0][::step], axes[2][::step])
+    coarse = coarse[: plan.shape[0], : plan.shape[1]]
+
+    found: dict[str, list[float]] = {}
+    for position, room in enumerate(partition.rooms):
+        mine = coarse == position
+        if not mine.any():
+            continue
+        masked = np.where(mine, clear, -1.0)
+        flat = int(np.argmax(masked))
+        ix, iz = divmod(flat, plan.shape[1])
+        found[room.name] = [
+            round(float(axes[0][min(ix * step, shape[0] - 1)]), 3),
+            round(float(axes[2][min(iz * step, shape[2] - 1)]), 3),
+            round(float(masked[ix, iz]), 3),
+        ]
+    return found
 
 
 def _scan_room(
@@ -263,8 +345,16 @@ def build(
     coarse_span: int = COARSE_SPAN,
     quad_budget: int = QUAD_BUDGET,
     only: list[str] | None = None,
+    index_only: bool = False,
 ) -> dict[str, Any]:
-    """Build both tiers for every room and write them under ``out``."""
+    """Build both tiers for every room and write them under ``out``.
+
+    ``index_only`` rewrites ``rooms.json`` from the payloads already on disk and
+    builds nothing. Everything in it beyond the tier records -- the room's
+    regions, its outline, where a reader should stand -- is derived from the
+    partition and the grid, so it is refreshed on every run anyway; this is the
+    way to refresh it without spending the thirteen minutes again. It still
+    reads the grid once, because the standing point is measured against it."""
     entry = entry_from_key(cache_key)
     cache_dir = entry.path
     out = Path(out)
@@ -281,10 +371,11 @@ def build(
     partition = partition_of_scene(Path(hssd_root), scene_id, axes[0], axes[2])
     mask = membership_mask(partition, halo_for(coarse_span))
     labels = sorted(json.loads((cache_dir / "manifest.json").read_text()).get("materials") or {})
+    standing = stand_points(cache_dir, partition, axes, ny, nz, shape)
 
     rooms: list[dict[str, Any]] = []
     for index, room in enumerate(partition.rooms):
-        if only and room.name not in only:
+        if index_only or (only and room.name not in only):
             continue
         started = time.time()
         subs, material, inert = _scan_room(cache_dir, mask, index, shape, ny, nz)
@@ -317,6 +408,7 @@ def build(
                 # decimals is a centimetre, which is finer than the question
                 # "am I in the kitchen" can be asked at.
                 "outline": _outline(room.polygon),
+                "stand": standing.get(room.name),
                 "dir": target.name,
                 "fine": fine.record(),
                 "coarse": coarse.record(),
@@ -336,7 +428,7 @@ def build(
     # so building them a few at a time is the normal way to run this; an index
     # that forgot the rooms built an hour ago would make that unusable.
     index_path = out / "voxels" / "rooms.json"
-    if only and index_path.is_file():
+    if (only or index_only) and index_path.is_file():
         previous = json.loads(index_path.read_text())
         fresh = {room["name"] for room in rooms}
         rooms = [room for room in previous.get("rooms", []) if room["name"] not in fresh] + rooms
@@ -353,6 +445,7 @@ def build(
             published["regions"] = list(source.regions)
             published["area_m2"] = round(source.area_m2, 3)
             published["outline"] = _outline(source.polygon)
+            published["stand"] = standing.get(source.name)
 
     record = {
         "cache_key": cache_key,
@@ -380,6 +473,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coarse-span", type=int, default=COARSE_SPAN)
     parser.add_argument("--quad-budget", type=int, default=QUAD_BUDGET)
     parser.add_argument("--only", nargs="*", default=None, help="build these rooms only")
+    parser.add_argument(
+        "--index-only",
+        action="store_true",
+        help="rewrite rooms.json from the payloads on disk, merging nothing",
+    )
     args = parser.parse_args(argv)
 
     record = build(
@@ -390,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         args.coarse_span,
         args.quad_budget,
         args.only,
+        args.index_only,
     )
     fine = sum(int(room["fine"]["quads"]) for room in record["rooms"])
     coarse = sum(int(room["coarse"]["quads"]) for room in record["rooms"])

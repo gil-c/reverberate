@@ -577,6 +577,8 @@ PAGE_MUST_HAVE = [
     ("for (const mode of SCENE_MODES) groups[mode] = null;", "assembly invalidates only its modes"),
     ('if (activeMode !== "acoustic") activeMode = null;', "assembly does not evict a shown run"),
     ("if (chosen === null) {", "assembly claims the view only if unclaimed"),
+    ("if (auditStand) {", "a tiered grid says where to stand; the bounds centre is a wall"),
+    ("grid.select(here, camera.position)", "the tier follows the room the reader walks into"),
     ("setBusy(assemblyMessage);", "a mode switch keeps the build message up"),
     ('? "loading solver run…" : assemblyMessage', "the run's wait is named without losing it"),
     ('if (button.disabled) button.classList.remove("active");', "no highlight on a dead button"),

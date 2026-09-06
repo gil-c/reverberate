@@ -42,9 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from every tier of the picture.
 
 - A room selector and a follow-the-reader mode in the viewer's acoustic page,
-  with the block size in force printed beside the room it applies to. A room
-  drawn at 8.17 mm under a page that says 16 kHz would make an aggregated
-  feature read as a missing one.
+  with the block size in force printed beside the room it applies to, the tile
+  count when a room is too large to draw whole, and the coordinates the reader
+  is standing at. A room drawn at 8.17 mm under a page that says 16 kHz would
+  make an aggregated feature read as a missing one, and a defect is reported by
+  where it was seen from.
+
+- A measured standing point per room, in `audit_view.stand_points`. Every
+  boundary node at head height is stamped onto a coarse plan of the flat and
+  each room takes the cell of its own polygon farthest from anything stamped.
+  The floor plan cannot answer this -- it does not know where the wardrobe is --
+  and `standAt`'s centre-of-the-bounds fallback is a wall once the run is a
+  whole flat rather than one room. Both put the camera inside solid geometry,
+  which fills the view with the pink of a sealed interior and reads as a broken
+  page.
 
 - `reverberate.geometry.carve`, which carves HSSD's collision proxies back to
   the shape the render mesh proves. The colliders are convex decompositions, so

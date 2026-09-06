@@ -180,6 +180,11 @@
       // the animation loop asks the hook where the camera is on every frame.
       let auditFollow = null;
       let auditRoom = null;
+      // Where a reader should stand to look at the room now drawn, measured
+      // against the grid rather than guessed from the bounds. Null until a
+      // tiered grid is attached, which is what leaves the old behaviour in
+      // place for a run that has one room and real receivers.
+      let auditStand = null;
 
       function ringContains(x, z, ring) {
         let inside = false;
@@ -356,6 +361,7 @@
         // before it does.
         auditFollow = null;
         auditRoom = null;
+        auditStand = null;
         const data = await loadRun(apartmentRuns[runChoice].url);
         const view = buildRunGroup(THREE, data);
         // Narrower residual: if run.json fetches themselves resolved out of
@@ -430,9 +436,13 @@
             state.tiles > 1
               ? `, ${state.tiles_drawn} of ${state.tiles} tiles (nearest first)`
               : "";
+          const at = camera.position;
           status.textContent =
             `${room}${tiles}, everything else at ${state.coarse_mm.toFixed(2)} mm. ` +
-            `${state.quads.toLocaleString()} quads drawn, about ${state.megabytes} MB.`;
+            `${state.quads.toLocaleString()} quads drawn, about ${state.megabytes} MB. ` +
+            // Where the reader is standing, because a defect is reported by
+            // where it was seen from and the scene has no other landmark.
+            `Standing at ${at.x.toFixed(2)}, ${at.y.toFixed(2)}, ${at.z.toFixed(2)}.`;
         };
         setBusy("loading the grid…");
         const grid = await buildAuditGrid(THREE, data, say);
@@ -455,9 +465,9 @@
         // inside the mattress. The apartment's own spawn point is the most open
         // point of its walkable outline, which is exactly the right answer and
         // is already computed for the other three modes.
+        auditStand = () => grid.standIn(auditRoom || grid.rooms[0].name);
         if (!data.receivers.length) {
-          const room = grid.rooms[0].name;
-          const at = grid.standIn(room);
+          const at = auditStand();
           if (at) camera.position.set(at[0], grid.bounds.min.y + EYE_HEIGHT, at[1]);
         }
 
@@ -467,7 +477,12 @@
           picker.onchange = () => {
             if (follow) follow.checked = false;
             auditRoom = picker.value;
+            // Walk there as well as draw it. Picking a room from a list and
+            // staying where you were shows the room you left, redrawn coarse.
+            const at = grid.standIn(picker.value);
+            if (at) camera.position.set(at[0], grid.bounds.min.y + EYE_HEIGHT, at[1]);
             grid.select(picker.value, camera.position);
+            grid.say();
           };
         }
         // A large room is drawn nearest tiles first, so walking across it has
@@ -486,9 +501,16 @@
           } else if (auditRoom && chosenAt.distanceTo(camera.position) > 0.5) {
             chosenAt.copy(camera.position);
             grid.refresh(camera.position);
+          } else if (auditRoom && chosenAt.distanceTo(camera.position) > 0.05) {
+            grid.say();
           }
         };
         auditFollow();
+        // Said again once the camera has been stood in a room: the first call
+        // reported the position the reader was left at by the apartment, which
+        // is not where they now are, and the whole point of the readout is that
+        // a defect is reported by where it was seen from.
+        grid.say();
       }
 
       function standAt(receiverIndex) {
@@ -504,8 +526,20 @@
         // camera would otherwise stay wherever it was left -- which on a first
         // load is the origin, and the origin of this scene is in the floor. The
         // room then renders as one flat wall of colour and reads as a broken
-        // page rather than as a camera inside the carpet. So stand in the
-        // middle of it at eye height instead.
+        // page rather than as a camera inside the carpet.
+        //
+        // The middle of the bounds answers that for one room and not for a
+        // flat: the centre of thirteen rooms is inside a wall, and this took
+        // the camera straight back out of the room the tiered grid had just
+        // stood it in. A tiered grid ships a measured standing point per room,
+        // so it is asked first.
+        if (auditStand) {
+          const at = auditStand();
+          if (at) {
+            camera.position.set(at[0], runView.bounds.min.y + EYE_HEIGHT, at[1]);
+            return;
+          }
+        }
         const { min, max } = runView.bounds;
         camera.position.set((min.x + max.x) / 2, min.y + EYE_HEIGHT, (min.z + max.z) / 2);
       }
