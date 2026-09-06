@@ -429,7 +429,7 @@ def _write_voxels(
     cache_dir = _voxel_cache_dir(str(key), report.get("cache_root"), run, store)
     if cache_dir is None:
         return None
-    from reverberate.viz.vox_view import read_surface, write_voxel_payload
+    from reverberate.viz.vox_view import TARGET_CUBES, read_surface, write_voxel_payload
 
     # The labels come from the voxelisation's own manifest, and nowhere else.
     # A node carries a material *index*, and the index is a position in the
@@ -439,7 +439,14 @@ def _write_voxels(
     # empty list that merely looked like a material list.
     manifest = json.loads((cache_dir / "manifest.json").read_text())
     labels = sorted(manifest.get("materials") or {})
-    return write_voxel_payload(read_surface(cache_dir), labels, target)
+    # How finely this run asks to be drawn. The block size is picked to fit a
+    # budget of blocks, and the budget -- not the grid -- is what decides what
+    # a reader sees: this flat comes out at 16.34 mm blocks at 4, 8 *and*
+    # 16 kHz under the default, because its surface area is the same at all
+    # three. A grid published to be looked at rather than solved on can afford
+    # more, and says so here rather than having it guessed.
+    budget = int(report.get("viewer_cubes") or TARGET_CUBES)
+    return write_voxel_payload(read_surface(cache_dir, budget), labels, target)
 
 
 def model_json_of(run_dir: Path, report: dict[str, Any]) -> Path:

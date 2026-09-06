@@ -14,3 +14,11 @@ __pycache__/
 .venv-setup.log
 .coverage
 htmlcov/
+
+# PFFDTD's voxeliser spills one HDF5 per voxel into a *relative* mmap_dat/ and
+# memory-maps adj_check.dat beside it. The child is given its own staging
+# directory now (see reverberate.wave.voxelise), but anything run by hand from
+# the repository root still lands here, and 26 642 of them once reached a
+# commit.
+mmap_dat/
+adj_check.dat

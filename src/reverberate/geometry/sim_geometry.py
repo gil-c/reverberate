@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pyroomacoustics as pra
 import trimesh
-from shapely.geometry import Point
+from shapely.geometry import MultiPoint, Point
 
 from reverberate.geometry.apartment import (
     Storey,
@@ -36,6 +36,7 @@ from reverberate.geometry.apartment import (
     extrude_storey,
     instances_on_storey,
 )
+from reverberate.geometry.carve import CarveReport, CarveResult, carve_collider
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
@@ -43,6 +44,13 @@ from reverberate.geometry.orientation import BOTH, orient_for_air
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.geometry.sealed import SealedReport, sealed_regions
 from reverberate.viz.room_surfaces import shell_surface_labels
+
+#: Every template carved so far this process, keyed by template name. Written
+#: by ``_load_and_union`` because that is where a template is turned into a mesh
+#: exactly once; read by :func:`simulation_geometry` to build the scene's report.
+#: A plain dict rather than a return value, because ``_load_and_union`` is
+#: ``lru_cache``d and a cached call must still be able to report what it did.
+_CARVE_RESULTS: dict[str, CarveResult] = {}
 
 
 @dataclass
@@ -72,6 +80,12 @@ class GeometrySummary:
     #: can show what the simulation stopped carrying sound through: sealing is
     #: correct, and it must not therefore be silent.
     sealed: SealedReport = field(default_factory=SealedReport)
+    #: What the carve did to the colliders this scene placed. HSSD's collision
+    #: proxies are convex decompositions and run to 2.02x the render volume on
+    #: this bedroom, so the difference between what is drawn and what is
+    #: simulated is a number the report must carry rather than a surprise on
+    #: screen. See :mod:`reverberate.geometry.carve`.
+    carve: CarveReport = field(default_factory=CarveReport)
 
     @property
     def total_walls(self) -> int:
@@ -85,7 +99,7 @@ class GeometrySummary:
             f"watertight={self.shell_watertight}), {self.obstacle_count} obstacles "
             f"totalling {self.obstacle_faces} faces, {self.total_walls} pra walls, "
             f"{oriented} faces oriented, {len(self.unmerged)} unmerged, "
-            f"{self.sealed.summary()}"
+            f"{self.carve.summary()}, {self.sealed.summary()}"
         )
 
 
@@ -148,7 +162,14 @@ def _load_and_union(hssd_root: Path, template: str) -> tuple[trimesh.Trimesh, bo
     mesh = trimesh.load(asset.collider, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):
         return None
-    return outer_surface(mesh)
+    united, merged = outer_surface(mesh)
+    # The carve goes here, after the union and inside the cache, so that it is
+    # applied exactly once per template and both the solver and the acoustic
+    # view receive the same mesh. A carve that could not be made returns the
+    # collider unchanged and says why; see reverberate.geometry.carve.
+    result = carve_collider(hssd_root, template, united)
+    _CARVE_RESULTS[template] = result
+    return result.mesh, merged
 
 
 def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
@@ -166,6 +187,71 @@ def obstacle_collider(hssd_root: Path, template: str) -> trimesh.Trimesh | None:
     """
     result = _load_and_union(hssd_root, template)
     return result[0] if result is not None else None
+
+
+def instances_in_room(
+    hssd_root: Path,
+    room: Storey,
+    instances: list[FurnitureInstance],
+) -> list[FurnitureInstance]:
+    """The furniture that stands in ``room``, by footprint rather than by origin.
+
+    The rule this replaces asked :func:`room_of` which room the instance's
+    *translation point* falls in. That point is the asset's authored origin, and
+    for anything mounted on or against a wall it lands in the wall band, where
+    no room polygon contains it. ``room_of`` then answers ``"doorway"`` and the
+    piece is dropped -- while the shell, built from the same room's polygon, is
+    left with a bare wall where it hung. Two footprints for one scene, and the
+    one that decided the furniture was never the one that drew the room.
+
+    Measured on ``bedroom.001`` of ``102344022``: 28 pieces stand in the room,
+    the origin test exported 17. The four missing pictures hang on the bedroom's
+    own walls and cover 8.0 m2, 11 per cent of its furniture surface.
+
+    So ask the geometry instead. A piece belongs to the room when the footprint
+    of the mesh the solver would receive overlaps the room's own walkable
+    polygon. That is the same collider, through the same cache, that
+    :func:`obstacle_assignments` goes on to place, so the test cannot disagree
+    with what is simulated. On the same room it separates cleanly -- the four
+    pictures overlap by 0.83 and 0.84, everything it excludes overlaps by
+    exactly zero -- so there is no threshold here to tune, and the four
+    wardrobes in the adjoining closets stay out, which is right: the bedroom's
+    shell does not enclose them.
+    """
+    kept: list[FurnitureInstance] = []
+    for instance in instances:
+        mesh = obstacle_collider(hssd_root, instance.template_name)
+        if mesh is None:
+            continue
+        placed = mesh.copy()
+        placed.apply_transform(instance.transform_matrix())
+        footprint = MultiPoint([(x, z) for x, _, z in placed.vertices]).convex_hull
+        overlap = footprint.intersection(room.walkable)
+        # Positive overlapping area, not mere contact: a piece standing against
+        # the far side of a wall touches the room's outline and belongs to the
+        # room behind it. A footprint with no area of its own -- a sheet hung
+        # exactly in the wall plane -- has no area to overlap either, so it is
+        # asked the only question left, whether it meets the room at all.
+        inside = overlap.area > 0.0 if footprint.area > 0.0 else footprint.intersects(room.walkable)
+        if inside:
+            kept.append(instance)
+    return kept
+
+
+def carve_of(instances: list[FurnitureInstance]) -> CarveReport:
+    """What the carve did to the templates ``instances`` placed.
+
+    Read back out of ``_CARVE_RESULTS`` rather than collected on the way
+    through, because ``_load_and_union`` is cached: the second placement of a
+    wardrobe never enters the function, so a report built from return values
+    would count the scene's templates once each only by accident.
+    """
+    report = CarveReport()
+    for template in dict.fromkeys(instance.template_name for instance in instances):
+        result = _CARVE_RESULTS.get(template)
+        if result is not None:
+            report.add(template, result)
+    return report
 
 
 def shell_assignments(storey: Storey, seed: int = 0) -> list[MeshMaterialAssignment]:
@@ -297,6 +383,7 @@ def simulation_geometry(
             for assignment in everything
             if assignment.sides is not None
         ),
+        carve=carve_of(instances),
         sealed=sealed_regions(list(everything), unmerged=frozenset(unmerged)),
     )
     return everything, summary

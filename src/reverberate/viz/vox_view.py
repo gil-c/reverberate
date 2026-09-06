@@ -31,6 +31,7 @@ import json
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -121,12 +122,81 @@ class VoxelCloud:
         shape = np.rint((high - low) / self.cell_m).astype(np.int64) + 1
         return low, shape
 
+    @property
+    def aggregated(self) -> bool:
+        """True when a drawn cube is bigger than the grid step it stands for.
+
+        The block size is chosen to fit a cube budget, so a fine grid is drawn
+        coarser than it is: the 16 kHz bedroom is 63 430 624 nodes of 2.04 mm
+        drawn as 13 917 266 blocks of 4.09 mm. That is a picture of the grid,
+        not the grid, and a viewer comparing it against the mesh needs to be
+        told which of the two they are looking at -- a thin object aggregated
+        away reads exactly like a thin object the voxeliser missed.
+        """
+        return self.cell_m > self.h_m * 1.0001
+
     def summary(self) -> str:
-        return (
-            f"{self.drawn:,} cubes of {self.cell_m * 1000:.0f} mm for "
-            f"{self.total_nodes:,} boundary nodes at {self.h_m * 1000:.2f} mm, "
-            f"{int(self.inert.sum()):,} inert"
+        scale = (
+            f", aggregated {self.cell_m / self.h_m:.0f}x from {self.h_m * 1000:.2f} mm"
+            if self.aggregated
+            else " at the grid's own step"
         )
+        return (
+            f"{self.drawn:,} cubes of {self.cell_m * 1000:.2f} mm for "
+            f"{self.total_nodes:,} boundary nodes at {self.h_m * 1000:.2f} mm"
+            f"{scale}, {int(self.inert.sum()):,} inert"
+        )
+
+
+def _commonest_material(
+    inverse: np.ndarray, material: np.ndarray, found: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per block: the material most of its nodes carry, and whether it has none.
+
+    By sorting rather than by tallying. The tally this replaces was a dense
+    ``(blocks, materials)`` count, which is fine for a bedroom's thirteen
+    materials at a coarse block and is **28 GB** for the flat's fifty-one at the
+    grid's own step -- so it, and not the browser, was what stopped a whole flat
+    being drawn at full resolution.
+
+    Sorting on ``block * kinds + material`` puts every (block, material) pair
+    together, so the run lengths *are* the counts and the longest run in each
+    block is its answer. Peak memory is a handful of arrays the length of the
+    node list, whatever the material count.
+
+    Rigid nodes, ``material == -1``, are excluded from the vote: they are the
+    far side of a boundary the room cannot hear. A block with nothing but rigid
+    nodes has no material at all, which the second return value marks.
+    """
+    kinds = int(material.max()) + 1
+    voting = material >= 0
+    carried = np.zeros(found, dtype=np.int8)
+    if not voting.any():
+        return carried, np.ones(found, dtype=bool)
+
+    pairs = inverse[voting] * kinds + material[voting].astype(np.int64)
+    pairs.sort()
+    # Run boundaries, hence run lengths, hence the count of each material in
+    # each block -- without ever materialising the blocks-by-materials grid.
+    edges = np.flatnonzero(np.diff(pairs))
+    starts = np.concatenate(([0], edges + 1))
+    counts = np.diff(np.concatenate((starts, [pairs.size])))
+    run_block, run_material = np.divmod(pairs[starts], kinds)
+
+    # The winner per block: order by block, then by count, then by *descending*
+    # material, and take the last run of each block. The last key is what makes
+    # a tie fall to the lower material index, which is what ``argmax`` over the
+    # dense tally did -- without it the two disagree on every block where two
+    # materials are level, which random blocks hit immediately.
+    picked = np.lexsort((-run_material, counts, run_block))
+    block_sorted = run_block[picked]
+    last = np.flatnonzero(np.diff(block_sorted))
+    last = np.concatenate((last, [block_sorted.size - 1]))
+    carried[block_sorted[last]] = run_material[picked][last].astype(np.int8)
+
+    all_rigid = np.ones(found, dtype=bool)
+    all_rigid[run_block] = False
+    return carried, all_rigid
 
 
 def read_voxels(cache_dir: Path, target_cubes: int = TARGET_CUBES) -> VoxelCloud:
@@ -253,6 +323,28 @@ def _block_keys(subs: list[np.ndarray], span: int, shape: np.ndarray) -> np.ndar
     )
 
 
+def _read_nodes(handle: Any, total: int, chunk: int = 1 << 24) -> tuple[Any, Any, Any]:
+    """``bn_ixyz``, ``mat_bn`` and the inert flag, without three copies of the grid.
+
+    ``adj_bn`` is six bytes a node and is only ever reduced to one boolean, so
+    reading it whole costs 6.5 GB on the flat at 16 kHz to produce 1.1 GB. Read
+    in chunks, reduce each, and the transient is the chunk.
+
+    ``bn_ixyz`` is read at its stored width rather than widened to int64 on the
+    way in: it is 1 089 464 499 values on that grid, and the difference between
+    asking h5py for int64 and letting the caller widen only where it must is
+    8.7 GB of resident array.
+    """
+    index = np.asarray(handle["bn_ixyz"][:])
+    material = np.asarray(handle["mat_bn"][:], dtype=np.int8)
+    adjacency = handle["adj_bn"]
+    inert = np.empty(total, dtype=bool)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        inert[start:stop] = ~np.asarray(adjacency[start:stop], dtype=bool).any(axis=1)
+    return index, material, inert
+
+
 def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     """The binning itself. See :func:`read_voxels`."""
     from reverberate.wave.comms import transpose_order
@@ -261,23 +353,34 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     with h5py.File(cache_dir / "vox_out.h5", "r") as handle:
         _, ny, nz = (int(handle[k][()]) for k in ("Nx", "Ny", "Nz"))
         h_m = float(handle["h"][()])
-        index = np.asarray(handle["bn_ixyz"][:], dtype=np.int64)
-        material = np.asarray(handle["mat_bn"][:], dtype=np.int8)
-        inert = ~np.asarray(handle["adj_bn"][:], dtype=bool).any(axis=1)
+        total = int(handle["bn_ixyz"].shape[0])
+        index, material, inert = _read_nodes(handle, total)
     with h5py.File(cache_dir / "cart_grid.h5", "r") as handle:
         axes = [np.asarray(handle[k][:], dtype=np.float64) for k in ("xv", "yv", "zv")]
-
-    total = int(index.size)
     # Two conventions meet here and neither is guessable from the other. The
     # index is flat over the engine's grid with the last axis contiguous, and
     # the engine's axes are ``cart_grid``'s permuted into descending extent by
     # ``rotate_sim_data``. Undo the permutation, so what comes out is in the
     # scene's own frame and can be drawn against the mesh.
-    subs = [index // (ny * nz), (index // nz) % ny, index % nz]
+    #
+    # Held as int32. A subscript is bounded by its axis, 11 549 at the worst on
+    # the flat at 16 kHz, so int64 buys nothing and costs 13 GB: three of these
+    # for 1 089 464 499 nodes is 26 GB as int64 and 13 as int32, against 32 GB
+    # of memory. The arithmetic that builds them is still done in the index's
+    # own width, one axis at a time, so nothing overflows on the way.
     order = transpose_order((axes[0].size, axes[1].size, axes[2].size))
-    scene_subs: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * 3
-    for engine_axis, cart_axis in enumerate(order):
-        scene_subs[int(cart_axis)] = subs[engine_axis]
+    scene_subs: list[np.ndarray] = [np.empty(0, dtype=np.int32)] * 3
+    plane = np.int64(ny) * np.int64(nz)
+    for engine_axis, divisor, modulus in (
+        (0, plane, None),
+        (1, np.int64(nz), np.int64(ny)),
+        (2, None, np.int64(nz)),
+    ):
+        part = index if divisor is None else index // divisor
+        if modulus is not None:
+            part = part % modulus
+        scene_subs[int(order[engine_axis])] = part.astype(np.int32, copy=False)
+        del part
 
     # Boundary nodes cover a surface, so halving the block size roughly
     # quadruples the count: step through powers of two rather than solving for
@@ -288,7 +391,6 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # which at the grid's own 2 mm is a 34 GB occupancy array and a 481 GB
     # material tally: it does not fail, it swaps, which is worse than failing.
     shape = np.array([axis.size for axis in axes], dtype=np.int64)
-    kinds = int(material.max()) + 2  # -1 rigid, then 0..max
     span = 1
     while span < 4096:
         if np.unique(_block_keys(scene_subs, span, shape)).size <= target_cubes:
@@ -301,9 +403,6 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
         _block_keys(scene_subs, span, shape), return_inverse=True, return_counts=True
     )
     found = unique_keys.size
-    tally = np.bincount(
-        inverse * kinds + (material.astype(np.int64) + 1), minlength=found * kinds
-    ).reshape(found, kinds)
 
     # A block is sealed only when *nothing* in it carries a material and every
     # node in it has lost its adjacency. A block at a surface holds both sides
@@ -316,7 +415,7 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # patch exists for, and the view must be able to show it rather than
     # quietly relabel it as sealed.
     inert_count = np.bincount(inverse, weights=inert, minlength=found)
-    all_rigid = tally[:, 1:].sum(axis=1) == 0
+    carried, all_rigid = _commonest_material(inverse, material, found)
     block_inert = all_rigid & (inert_count >= occupancy)
     # Otherwise it takes the commonest material it actually has, ignoring the
     # rigid nodes, which are the far side of a boundary the room cannot hear.
@@ -327,7 +426,7 @@ def _bin_voxels(cache_dir: Path, target_cubes: int) -> VoxelCloud:
     # patch 5 exists to fix -- does not satisfy. Gating on ``block_inert``
     # here would leave such a block's ``argmax`` of an all-zero row, material
     # index 0, standing as if it were commonly that material.
-    block_material = tally[:, 1:].argmax(axis=1).astype(np.int8)
+    block_material = carried
     block_material[all_rigid] = -1
 
     # Back from the packed key to a centre in the scene's own frame.
@@ -630,8 +729,15 @@ def write_voxel_payload(
         "index_url": "voxels_index.u32",
         "label_url": "voxels_label.i16",
         "note": (
-            f"The solver's own grid at {blocks.h_m * 1000:.2f} mm, in blocks of "
-            f"{blocks.cell_m * 1000:.1f} mm. Faces between touching blocks are "
+            (
+                f"Aggregated {blocks.cell_m / blocks.h_m:.0f}x: this is a "
+                f"picture of the grid, not the grid. A feature thinner than "
+                f"{blocks.cell_m * 1000:.1f} mm may be here and not drawn. "
+                if blocks.aggregated
+                else "Drawn at the grid's own step, one cube per node. "
+            )
+            + f"The solver's own grid at {blocks.h_m * 1000:.2f} mm, in blocks of "
+            f"{blocks.cell_m * 1000:.2f} mm. Faces between touching blocks are "
             "not drawn and coplanar faces of the same material are merged into "
             "rectangles, so this is the same solid as "
             f"{blocks.drawn * 12:,} cube triangles in {surface.triangles:,}. "

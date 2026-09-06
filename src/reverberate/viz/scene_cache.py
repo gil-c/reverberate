@@ -57,6 +57,7 @@ CACHE_NAME = "scenes"
 SOURCES = (
     "acoustics.py",
     "geometry/apartment.py",
+    "geometry/carve.py",
     "geometry/hssd_assets.py",
     "geometry/hssd_room.py",
     "geometry/materials.py",

@@ -16,6 +16,7 @@ from shapely.geometry import Point
 from reverberate.geometry.apartment import Storey, build_storey
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
 from reverberate.geometry.sim_geometry import (
+    carve_of,
     obstacle_assignments,
     obstacle_collider,
     outer_surface,
@@ -116,15 +117,20 @@ def instance(template: str, x: float = 0.0) -> FurnitureInstance:
 
 
 def test_the_collider_reaches_the_solver_with_every_triangle(tmp_path: Path) -> None:
-    """Nothing is decimated any more, so the count must match exactly.
+    """Nothing is reduced without the report saying so.
 
-    ``<=`` would pass while a reduction quietly came back; this is the
-    assertion that makes its return a failing test.
+    This object's render mesh *is* its collider, so the carve has no air to
+    remove and hands the collider back whole. Asserting the exact count with
+    ``carve_of`` beside it is what separates the two ways the count could drop:
+    a declared carve, or the silent decimation this path used to do. ``<=``
+    alone would pass for either.
     """
     dense_faces = build_object_tree(tmp_path)
-    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, [instance("abc")])
+    placed = [instance("abc")]
+    assignments, unresolved, unmerged = obstacle_assignments(tmp_path, placed)
     assert unresolved == []
     assert unmerged == []
+    assert carve_of(placed).carved == {}
     assert len(assignments[0].mesh.faces) == dense_faces
 
 

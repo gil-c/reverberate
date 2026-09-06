@@ -63,10 +63,22 @@ class TestEnsurePatched:
 
     @staticmethod
     def _checkout(root: Path, contents: bytes) -> Path:
-        target = root / "python" / "voxelizer" / "vox_scene.py"
-        target.parent.mkdir(parents=True)
-        target.write_bytes(contents)
-        return target
+        """A checkout holding every file the pin covers, all with ``contents``.
+
+        All of them, not just the one a test is about: ``ensure_patched`` walks
+        the whole of ``PATCHED_FILES`` and a checkout missing one of them is
+        not the situation any of these tests means to describe.
+        """
+        for relative in vendored.PATCHED_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        return root / "python" / "voxelizer" / "vox_scene.py"
+
+    @staticmethod
+    def _all_declared(digest: str) -> dict[str, str]:
+        """``UPSTREAM_SHA256`` with every entry claiming ``digest``."""
+        return dict.fromkeys(vendored.UPSTREAM_SHA256, digest)
 
     def test_it_installs_our_copy_over_the_upstream_it_was_derived_from(
         self, tmp_path: Path
@@ -76,17 +88,20 @@ class TestEnsurePatched:
         target = self._checkout(tmp_path / "pffdtd", b"whatever")
         # Stand in for the real upstream by declaring its digest.
         digest = hashlib.sha256(b"whatever").hexdigest()
-        with mock.patch.dict(vendored.UPSTREAM_SHA256, {"python/voxelizer/vox_scene.py": digest}):
+        with mock.patch.dict(vendored.UPSTREAM_SHA256, self._all_declared(digest)):
             written = ensure_patched(tmp_path / "pffdtd")
-        assert written == ["python/voxelizer/vox_scene.py"]
+        assert written == list(vendored.PATCHED_FILES)
         assert target.read_bytes() == ours
         assert not upstream.exists()
 
     def test_installing_twice_writes_once(self, tmp_path: Path) -> None:
         """Idempotent, so calling it before every voxelisation costs nothing."""
-        ours = vendored.patched_path("python/voxelizer/vox_scene.py").read_bytes()
-        self._checkout(tmp_path / "pffdtd", ours)
-        assert ensure_patched(tmp_path / "pffdtd") == []
+        root = tmp_path / "pffdtd"
+        for relative in vendored.PATCHED_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(vendored.patched_path(relative).read_bytes())
+        assert ensure_patched(root) == []
 
     def test_it_refuses_a_file_it_did_not_derive_from(self, tmp_path: Path) -> None:
         """A changed upstream is a merge nobody did, not a file to overwrite."""
@@ -102,9 +117,12 @@ class TestEnsurePatched:
         call does not raise proves the second call skipped verification
         entirely, rather than merely being fast.
         """
-        ours = vendored.patched_path("python/voxelizer/vox_scene.py").read_bytes()
         root = tmp_path / "pffdtd"
-        target = self._checkout(root, ours)
+        for relative in vendored.PATCHED_FILES:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(vendored.patched_path(relative).read_bytes())
+        target = root / "python" / "voxelizer" / "vox_scene.py"
         assert ensure_patched(root) == []
 
         target.write_bytes(b"neither upstream nor ours")
@@ -149,6 +167,45 @@ class TestPatchedVoxeliser:
         assert "adj_bn[back_side,:] = False" in source
         assert "REVERBERATE PATCH 5" in source
 
+    def test_the_index_never_changes_what_the_solver_is_given(self) -> None:
+        """Patch 6 is a speed change, so the acceptance is identity.
+
+        Not asserted here -- a real voxelisation needs the PFFDTD checkout and
+        several minutes -- but the source has to keep the two properties the
+        identity rests on, and both are one edit away from being lost:
+
+        - the candidate lists stay ascending by triangle index, which is the
+          order ``np.nonzero`` produced, so ``candidates[hits]`` is unchanged;
+        - a lattice the binning does not recognise falls back to the scan
+          rather than to a guess.
+
+        The measured run is in ``scripts/check_vox_index.sh``: one bedroom at
+        4 kHz, with and without the patch, ``vox_out.h5`` byte for byte.
+        """
+        source = vendored.patched_path("python/voxelizer/vox_grid_base.py").read_text()
+        assert "REVERBERATE PATCH 6" in source
+        assert "kind='stable'" in source
+        assert "return None" in source
+
+    def test_the_numpy_repair_is_declared_rather_than_applied_by_hand(self) -> None:
+        """``np.float`` went in numpy 1.20 and upstream still reads it.
+
+        The fix was in the checkout, made by hand and recorded in no file, so
+        ``ensure_patched`` neither knew about it nor would restore it: a fresh
+        clone at the pinned commit could not voxelise at all.
+        """
+        assert "python/common/myfuncs.py" in vendored.PATCHED_FILES
+        source = vendored.patched_path("python/common/myfuncs.py").read_text()
+        assert "np.finfo(float).eps" in source
+        assert "np.float)" not in source
+
+    def test_every_replacement_declares_the_upstream_it_came_from(self) -> None:
+        """A file in ``PATCHED_FILES`` with no digest would install over
+        anything, which is the check the whole module exists for."""
+        assert set(vendored.PATCHED_FILES) == set(vendored.UPSTREAM_SHA256)
+        for relative in vendored.PATCHED_FILES:
+            assert vendored.patched_path(relative).is_file()
+
     def test_the_voxeliser_is_part_of_the_cache_key(self, tmp_path: Path) -> None:
         """Otherwise an entry from before the patch answers for one after it.
 
@@ -176,3 +233,50 @@ class TestPatchedVoxeliser:
         first = spec.key
         Path(spec.model_json).unlink()
         assert spec.key == first
+
+
+class TestScratchDirectory:
+    """Two voxelisations must not share a scratch directory."""
+
+    def test_the_child_runs_in_its_own_staging_directory(self, tmp_path: Path) -> None:
+        """PFFDTD spills per-voxel results through a *relative* ``mmap_dat/``.
+
+        ``vox_scene.py:61`` sets ``DAT_FOLDER = 'mmap_dat'`` and clears it at the
+        start of every run, and ``adj_check.dat`` is memory-mapped beside it. A
+        child inheriting the caller's working directory therefore shares that
+        scratch with every other voxelisation started from the same place, and
+        the loser dies on an assertion about triangle counts that reads like a
+        defect in the scene rather than a collision.
+
+        Asserted on the ``cwd`` the subprocess is given, because that is the
+        whole of the fix and the alternative -- running two real voxelisations
+        and checking neither corrupts the other -- costs minutes and a
+        gigabyte.
+        """
+        import importlib
+        from unittest import mock
+
+        # By path, not ``from reverberate.wave import voxelise``: the package
+        # re-exports the *function* of that name, which would shadow the module.
+        module = importlib.import_module("reverberate.wave.voxelise")
+
+        spec = make_spec(tmp_path)
+        recorded: dict[str, object] = {}
+
+        def fake_run(argv: list[str], **kwargs: object) -> object:
+            recorded.update(kwargs)
+            raise RuntimeError("stop here: the call is what is under test")
+
+        with (
+            mock.patch.object(module, "ensure_patched", lambda: []),
+            mock.patch.object(module, "pffdtd_dir", lambda: tmp_path),
+            mock.patch.object(module, "pffdtd_python", lambda: "python"),
+            mock.patch.object(module.subprocess, "run", fake_run),
+            mock.patch.object(module, "cache_root", lambda: tmp_path / "cache"),
+            pytest.raises(RuntimeError, match="stop here"),
+        ):
+            module.voxelise(spec)
+
+        cwd = recorded.get("cwd")
+        assert cwd is not None
+        assert Path(str(cwd)).name.startswith(f".{spec.key}.partial.")

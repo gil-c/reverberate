@@ -341,7 +341,18 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
            is where a mislaid material or an unsealed interior hides.</p>`
     }
 
-    <h2>Sample</h2>
+    ${
+      // A grid published on its own has no responses, and every panel below
+      // reads one. Rendering them empty would be worse than leaving them out:
+      // an empty decay curve looks like a decay that was measured and came out
+      // flat. What is missing is said once, here, and the reason is carried in
+      // `omissions` further down.
+      data.samples.length === 0
+        ? `<h2>Responses</h2>
+           <p class="caption">None. Nothing was solved on this grid -- this page
+           is the geometry and the grid the solver would read, published so the
+           scene can be checked before any GPU time is spent on it.</p>`
+        : `<h2>Sample</h2>
     <select id="run-pick">${data.samples
       .map((s, i) => `<option value="${i}">${escapeHtml(s.label)}</option>`)
       .join("")}</select>
@@ -365,11 +376,12 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <p class="caption">${escapeHtml(data.band_note || "")}</p>
 
     <h2>Listen</h2>
-    <p class="caption">dry: ${escapeHtml(data.dry_voice.member_name)},
-    ${escapeHtml(data.dry_voice.licence)}${data.dry_voice.anechoic ? ", anechoic" : ""}</p>
+    <p class="caption">dry: ${escapeHtml(data.dry_voice?.member_name ?? "")},
+    ${escapeHtml(data.dry_voice?.licence ?? "")}${data.dry_voice?.anechoic ? ", anechoic" : ""}</p>
     <audio id="run-dry" controls preload="none"></audio>
     <p class="caption" style="margin-top:.6rem">wet: the same voice through this response</p>
-    <audio id="run-wet" controls preload="none"></audio>
+    <audio id="run-wet" controls preload="none"></audio>`
+    }
 
     <h2>What this is not</h2>
     <p class="note">${escapeHtml(data.binaural_note)}</p>
@@ -404,8 +416,10 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
 
   const byId = (id) => element.querySelector(`#${id}`);
   const dry = byId("run-dry");
-  if (data.dry_audio) dry.src = `${data.baseUrl}/${data.dry_audio}`;
-  else dry.hidden = true;
+  if (dry) {
+    if (data.dry_audio) dry.src = `${data.baseUrl}/${data.dry_audio}`;
+    else dry.hidden = true;
+  }
   const wet = byId("run-wet");
   const pick = byId("run-pick");
 
@@ -450,11 +464,17 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     }
   }
 
-  pick.addEventListener("change", () => show(Number(pick.value)));
-  byId("run-stand").addEventListener("click", () => {
-    const sample = data.samples[Number(pick.value)];
-    if (sample) onStand?.(sample);
-  });
-  show(0);
+  // A grid published without a solve renders none of the response panels, so
+  // none of these elements exist. Wiring them unconditionally threw before the
+  // voxels had a chance to draw, which turned a page missing its lower half
+  // into a page missing everything.
+  if (pick) {
+    pick.addEventListener("change", () => show(Number(pick.value)));
+    byId("run-stand")?.addEventListener("click", () => {
+      const sample = data.samples[Number(pick.value)];
+      if (sample) onStand?.(sample);
+    });
+    show(0);
+  }
   return show;
 }
