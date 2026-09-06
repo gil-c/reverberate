@@ -240,6 +240,7 @@ export async function fetchQuadMesh(THREE, base, meta) {
   ]);
   const position = new Float32Array(corners);
   const labels = new Int16Array(label);
+  const indices = new Uint32Array(index);
 
   // Unlit, with the shading in the vertex colours.
   //
@@ -261,11 +262,22 @@ export async function fetchQuadMesh(THREE, base, meta) {
     colour[v * 3 + 2] = rgb.b;
   }
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
-  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index), 1));
-  geometry.computeVertexNormals();
+  // Two meshes, not one: the sealed insides are drawn apart so they can be
+  // looked at and switched off.
+  //
+  // They are 42 per cent of the drawn area of this flat and they are hidden
+  // behind the material layer in front of them, so a reader has no way to
+  // check the sealing worked -- or to see the cost -- while the two are one
+  // mesh. Splitting on the label costs nothing but the index: the positions,
+  // the colours and the normals are computed once and shared by both.
+  const whole = new THREE.BufferGeometry();
+  const positions = new THREE.BufferAttribute(position, 3);
+  const colours = new THREE.BufferAttribute(colour, 3);
+  whole.setAttribute("position", positions);
+  whole.setAttribute("color", colours);
+  whole.setIndex(new THREE.BufferAttribute(indices, 1));
+  whole.computeVertexNormals();
+  const normals = whole.getAttribute("normal");
 
   // Shade from the normal rather than from a light, so a face keeps its own
   // colour and only its orientation changes how bright it is.
@@ -278,9 +290,35 @@ export async function fetchQuadMesh(THREE, base, meta) {
        vColor.rgb *= 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);`
     );
   };
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.name = "voxels";
-  return mesh;
+  const group = new THREE.Group();
+  group.name = "voxels";
+  // One quad is four corners and six indices, so a quad's label is at 4q and
+  // its triangles at 6q. Nothing is reordered: the two index arrays are a
+  // partition of the one above. Counted first and then filled, because pushing
+  // onto a plain array is 90 million appends on this flat's largest room.
+  const quads = labels.length / 4;
+  let sealedQuads = 0;
+  for (let q = 0; q < quads; q++) if (labels[q * 4] === -2) sealedQuads++;
+  const parts = {
+    solid: { at: 0, into: new Uint32Array((quads - sealedQuads) * 6) },
+    sealed: { at: 0, into: new Uint32Array(sealedQuads * 6) },
+  };
+  for (let q = 0; q < quads; q++) {
+    const part = parts[labels[q * 4] === -2 ? "sealed" : "solid"];
+    for (let k = 0; k < 6; k++) part.into[part.at++] = indices[q * 6 + k];
+  }
+  for (const [name, part] of Object.entries(parts)) {
+    if (!part.into.length) continue;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", positions);
+    geometry.setAttribute("color", colours);
+    geometry.setAttribute("normal", normals);
+    geometry.setIndex(new THREE.BufferAttribute(part.into, 1));
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = name;
+    group.add(mesh);
+  }
+  return group;
 }
 
 /** The tiered audit view: the room you stand in at the grid's own step.
@@ -318,6 +356,9 @@ export async function buildAuditGrid(THREE, data, onStatus) {
   const group = new THREE.Group();
   group.name = "audit-grid";
 
+  // Which of the two layers are on screen. Held here rather than read back off
+  // the meshes because a tile fetched later has to arrive matching it.
+  const layers = { solid: true, sealed: true };
   const state = audit.rooms.map((room) => ({
     room,
     coarse: null,
@@ -328,6 +369,8 @@ export async function buildAuditGrid(THREE, data, onStatus) {
   let selected = null;
   let drawnQuads = 0;
 
+  const sealedOf = (tier) => tier.tiles.reduce((sum, file) => sum + (file.sealed_quads || 0), 0);
+
   const say = () => {
     if (!onStatus) return;
     const entry = selected === null ? null : state[selected];
@@ -335,13 +378,20 @@ export async function buildAuditGrid(THREE, data, onStatus) {
       (sum, other, i) => sum + (i === selected ? 0 : other.room.coarse.quads),
       0
     );
+    // What the sealed layer costs, on screen, because that is the number the
+    // choice to keep or drop it turns on.
+    const sealed =
+      state.reduce((sum, other, i) => sum + (i === selected ? 0 : sealedOf(other.room.coarse)), 0) +
+      (entry ? entry.tiles.filter((t) => t.drawn).reduce((sum, t) => sum + (t.file.sealed_quads || 0), 0) : 0);
     onStatus({
+      layers,
       room: entry ? entry.room.name : null,
       fine_mm: entry ? entry.room.fine.cell_m * 1000 : null,
       coarse_mm: audit.rooms[0].coarse.cell_m * 1000,
       tiles_drawn: entry ? entry.tiles.filter((tile) => tile.drawn).length : 0,
       tiles: entry ? entry.tiles.length : 0,
       quads: coarse + drawnQuads,
+      sealed_quads: sealed,
       megabytes: Math.round(((coarse + drawnQuads) * 80) / 1e6),
     });
   };
@@ -358,6 +408,9 @@ export async function buildAuditGrid(THREE, data, onStatus) {
     }
     entry.coarse = holder;
     group.add(holder);
+    holder.traverse((node) => {
+      if (node.name in layers) node.visible = layers[node.name];
+    });
   }
   say();
 
@@ -410,6 +463,11 @@ export async function buildAuditGrid(THREE, data, onStatus) {
         if (selected === null || state[selected] !== entry) return;
         tile.mesh = mesh;
         group.add(mesh);
+        // Arriving switched off if the layer is off, or walking into a new
+        // corner of a room brings the hidden layer back one tile at a time.
+        mesh.traverse((node) => {
+          if (node.name in layers) node.visible = layers[node.name];
+        });
       }
       tile.mesh.visible = true;
       tile.drawn = true;
@@ -453,6 +511,22 @@ export async function buildAuditGrid(THREE, data, onStatus) {
     return null;
   };
 
+  /** Show or hide a layer everywhere: the surfaces, or the sealed insides.
+   *
+   * The sealed insides are 42 per cent of the drawn area and every one of them
+   * sits behind a material face, so while the two are one mesh a reader has no
+   * way to check the sealing worked, or to see what it costs. Taking the
+   * surfaces away is what makes them visible; taking *them* away is what shows
+   * the cost.
+   */
+  const showLayer = (name, visible) => {
+    layers[name] = visible;
+    group.traverse((node) => {
+      if (node.name === name) node.visible = visible;
+    });
+    say();
+  };
+
   /** Where to stand to look at a room, and how much clear space is there.
    *
    * Measured against the grid rather than against the floor plan, and measured
@@ -481,7 +555,18 @@ export async function buildAuditGrid(THREE, data, onStatus) {
     }
   }
 
-  return { group, select, refresh, say, roomAt, standIn, bounds, rooms: audit.rooms, note: audit.note };
+  return {
+    group,
+    select,
+    refresh,
+    say,
+    showLayer,
+    roomAt,
+    standIn,
+    bounds,
+    rooms: audit.rooms,
+    note: audit.note,
+  };
 }
 
 
@@ -511,6 +596,16 @@ function auditSection(audit) {
       <select id="audit-room">${options}</select></label>
     <label><input type="checkbox" id="audit-follow" checked>
       follow me: draw the room I am standing in</label>
+    <label><input type="checkbox" id="audit-solid" checked>
+      the surfaces sound meets</label>
+    <label><input type="checkbox" id="audit-sealed" checked>
+      the sealed insides, in deep crimson</label>
+    <p class="caption">Untick the surfaces to see the sealed insides, which are
+      otherwise behind them. They are the inward face of every closed object's
+      shell: PFFDTD stores boundary nodes only, so the middle of a solid is not
+      in the grid at all, and the shell's inner side has nothing behind it to
+      hide it. Nothing there carries sound. On this flat they are 42 per cent of
+      the drawn area.</p>
     <p class="caption" id="audit-status">${nodes} boundary nodes at
       ${fine.toFixed(2)} mm. One room at that step, every other room at
       ${coarse.toFixed(2)} mm.</p>
