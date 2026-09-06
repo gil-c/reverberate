@@ -114,28 +114,57 @@ class TestToBudget:
         assert _to_budget(trimesh.creation.box(), 1) is None
 
 
-class TestNothingToRemove:
-    def test_a_carve_that_removes_nothing_leaves_the_collider_alone(self, tmp_path: Path) -> None:
-        """An object whose render mesh is its own collider has no air to remove.
+def _object_tree(root: Path, render: trimesh.Trimesh, collider: trimesh.Trimesh) -> None:
+    directory = root / "objects" / "a"
+    directory.mkdir(parents=True)
+    for name, mesh in (("abc.glb", render), ("abc.collider.glb", collider)):
+        exported = mesh.export(file_type="glb")
+        assert isinstance(exported, bytes)
+        (directory / name).write_bytes(exported)
 
-        What the carve would hand back is that mesh resampled at 6 mm and then
-        decimated: approximate where the collider is exact, for no volume
-        recovered. It was also the one non-deterministic step in the pipeline --
-        whether the decimation stayed closed decided the geometry, and that
-        answer differs between platforms.
-        """
+
+class TestNothingToRemove:
+    """The fill decides, and it counts cells.
+
+    Comparing the isosurface's volume against the collider's instead would
+    compare two different rasterisations: measured, that runs to +1 per cent on
+    a sphere and -4 per cent on a small box, which is larger than the signal.
+    """
+
+    def test_an_object_with_no_air_inside_keeps_its_collider(self, tmp_path: Path) -> None:
+        """A carve that removes nothing would be the collider resampled at 6 mm
+        and decimated: approximate where the collider is exact, for no volume
+        recovered. It was also the pipeline's one non-deterministic step, since
+        whether that decimation stayed closed decided the geometry and the
+        answer differs between platforms."""
         sphere = trimesh.creation.icosphere(subdivisions=4)
-        directory = tmp_path / "objects" / "a"
-        directory.mkdir(parents=True)
-        for name in ("abc.glb", "abc.collider.glb"):
-            exported = sphere.export(file_type="glb")
-            assert isinstance(exported, bytes)
-            (directory / name).write_bytes(exported)
+        _object_tree(tmp_path, sphere, sphere)
 
         result = _carve_uncached(tmp_path, "abc", sphere)
         assert not result.carved
-        assert "nothing to remove" in result.reason
+        assert "no air inside" in result.reason
         assert len(result.mesh.faces) == len(sphere.faces)
+
+    def test_a_gap_the_render_mesh_proves_is_still_carved(self, tmp_path: Path) -> None:
+        """The guard above must not swallow the case the carve exists for.
+
+        Two legs under one bounding block is the shape of every inflated
+        collider in the bedroom: the fill walks in from outside and the block
+        loses the space between them.
+        """
+        left = trimesh.creation.box(extents=(0.1, 0.4, 0.3))
+        left.apply_translation([-0.25, 0.0, 0.0])
+        right = trimesh.creation.box(extents=(0.1, 0.4, 0.3))
+        right.apply_translation([0.25, 0.0, 0.0])
+        render = trimesh.util.concatenate([left, right])
+        assert isinstance(render, trimesh.Trimesh)
+        collider = trimesh.creation.box(extents=(0.6, 0.4, 0.3))
+        _object_tree(tmp_path, render, collider)
+
+        result = _carve_uncached(tmp_path, "abc", collider)
+        assert result.carved, result.reason
+        assert result.shrink < 0.5
+        assert result.mesh.is_watertight
 
 
 class TestCarveReport:
