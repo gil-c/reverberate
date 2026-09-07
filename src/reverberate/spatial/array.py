@@ -233,14 +233,22 @@ def check_clearance(
         ranges.append(np.arange(low, high, dtype=np.int64))
 
     nx, ny, nz = grid.shape
-    ix, iy, iz = np.meshgrid(*ranges, indexing="ij")
-    inside = (
-        (axes[0][ix] - design.centre[0]) ** 2
-        + (axes[1][iy] - design.centre[1]) ** 2
-        + (axes[2][iz] - design.centre[2]) ** 2
-    ) <= radius**2
-    flat = (ix * (nz * ny) + iy * nz + iz)[inside].ravel()
-    ball = np.unique(engine_indices(flat, grid))
+    # Built one x slice at a time. At the 16 kHz step a ball of 18 cm spans
+    # 355 cells a side, and the three coordinate arrays of that box together
+    # are a gigabyte, which is a great deal of memory to spend on a check.
+    slices = []
+    iy, iz = np.meshgrid(ranges[1], ranges[2], indexing="ij")
+    plane = (axes[1][iy] - design.centre[1]) ** 2 + (axes[2][iz] - design.centre[2]) ** 2
+    flat_plane = (iy * nz + iz).ravel()
+    plane = plane.ravel()
+    for index in ranges[0]:
+        budget = radius**2 - (axes[0][index] - design.centre[0]) ** 2
+        if budget < 0.0:
+            continue
+        keep = flat_plane[plane <= budget]
+        if keep.size:
+            slices.append(engine_indices(keep + index * (nz * ny), grid))
+    ball = np.unique(np.concatenate(slices)) if slices else np.zeros(0, dtype=np.int64)
 
     hits = 0
     with h5py.File(entry_dir / "vox_out.h5", "r") as handle:
@@ -248,7 +256,12 @@ def check_clearance(
         total = int(boundary.shape[0])
         for start in range(0, total, chunk):
             block = np.asarray(boundary[start : start + chunk])
-            hits += int(np.intersect1d(ball, block, assume_unique=False).size)
+            # Searched the cheap way round: the boundary node list is tens of
+            # millions of entries and the ball is fixed, so each block is
+            # looked up in the ball rather than the other way about.
+            position = np.searchsorted(ball, block)
+            position = np.clip(position, 0, max(ball.size - 1, 0))
+            hits += int(np.count_nonzero(ball[position] == block)) if ball.size else 0
     record = {
         "centre": [round(float(v), 5) for v in design.centre],
         "ball_radius_m": round(radius, 5),

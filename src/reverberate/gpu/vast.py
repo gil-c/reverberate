@@ -37,9 +37,12 @@ import urllib.request
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from reverberate.settings import runs_dir
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle, needed for the annotation only
+    from reverberate.wave.remote import Machine
 
 __all__ = [
     "API_KEY_ENV",
@@ -52,9 +55,11 @@ __all__ = [
     "cheapest",
     "estimate_cost_usd",
     "ledger_total_usd",
+    "account_identity",
     "rent",
     "search_query",
     "teardown",
+    "wait_for_ssh",
 ]
 
 #: Vast.ai credential, read from the process environment only (section 10).
@@ -310,7 +315,7 @@ class VastClient:
         self._key = key
         self._timeout = timeout
 
-    def _request(
+    def request(
         self,
         method: str,
         path: str,
@@ -342,7 +347,7 @@ class VastClient:
         """
         filters = {**parse_query(query), "order": [["dph_total", "asc"]], "limit": limit}
         params = urllib.parse.urlencode({"q": json.dumps(filters)})
-        payload = self._request("GET", f"/bundles/?{params}")
+        payload = self.request("GET", f"/bundles/?{params}")
         offers = [Offer.from_api(raw) for raw in payload.get("offers", [])]
         return sorted(offers, key=lambda offer: offer.dph_total)
 
@@ -352,7 +357,7 @@ class VastClient:
         The listing lives under ``/api/v1``: since 2026-08 the ``v0`` form
         answers HTTP 410 and names its replacement.
         """
-        payload = self._request("GET", "/instances/", api_version="v1")
+        payload = self.request("GET", "/instances/", api_version="v1")
         return [Instance.from_api(raw) for raw in payload.get("instances", [])]
 
     def instance(self, instance_id: int) -> Instance | None:
@@ -363,7 +368,7 @@ class VastClient:
         the listing endpoint is being moved around.
         """
         try:
-            payload = self._request("GET", f"/instances/{instance_id}/")
+            payload = self.request("GET", f"/instances/{instance_id}/")
         except VastError:
             return None
         raw = payload.get("instances")
@@ -383,7 +388,7 @@ class VastClient:
         onstart_cmd: str = "touch /root/.onstart_done; sleep infinity",
     ) -> int:
         """Rent ``offer_id`` and return the new instance id."""
-        payload = self._request(
+        payload = self.request(
             "PUT",
             f"/asks/{offer_id}/",
             {
@@ -400,7 +405,7 @@ class VastClient:
 
     def destroy(self, instance_id: int) -> None:
         """Ask Vast.ai to destroy an instance. Verify with :meth:`instance`."""
-        self._request("DELETE", f"/instances/{instance_id}/")
+        self.request("DELETE", f"/instances/{instance_id}/")
 
     def destroy_and_verify(self, instance_id: int, attempts: int = 5, pause: float = 20.0) -> bool:
         """Destroy, then confirm it is gone. Section 13.5: do not assume."""
@@ -492,6 +497,60 @@ def rent(
         }
     )
     return Rental(instance_id=instance_id, offer=offer, deadline=deadline, watchdog_pid=pid)
+
+
+def account_identity(client: VastClient) -> Path:
+    """The local private key whose public half Vast will install, or refuse.
+
+    Checked before renting. The alternative is what it cost to learn: an
+    instance comes up, ssh answers ``Permission denied (publickey)`` on every
+    poll for the full timeout, and the run tears down having done nothing.
+    """
+    registered = {
+        (key.get("public_key") or "").split()[1]
+        for key in client.request("GET", "/ssh/")
+        if len((key.get("public_key") or "").split()) > 1
+    }
+    if not registered:
+        raise VastError("the Vast account has no ssh key registered; add one in the console")
+    for public in sorted(Path.home().joinpath(".ssh").glob("*.pub")):
+        blob = public.read_text().split()
+        if len(blob) > 1 and blob[1] in registered:
+            private = public.with_suffix("")
+            if private.is_file():
+                return private
+    raise VastError(
+        "no private key here matches a key registered on the Vast account, so ssh into "
+        "the instance would be refused; nothing was rented"
+    )
+
+
+def wait_for_ssh(
+    client: VastClient, instance_id: int, identity: Path, timeout: float = 900.0
+) -> Machine:
+    """Block until the instance answers a command, not merely until it exists.
+
+    **Readiness is ssh answering.** The API reports ``running`` one second after
+    create and then reverts to ``loading``, which cost three premature
+    teardowns before it was believed; it supplies the host and the port and
+    nothing else.
+    """
+    from reverberate.wave.remote import Machine, _run
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        instance = client.instance(instance_id)
+        if instance is None:
+            raise VastError(f"instance {instance_id} vanished while starting")
+        if instance.ssh_host and instance.status == "running":
+            machine = Machine(host=instance.ssh_host, port=instance.ssh_port, identity=identity)
+            try:
+                _run(machine.ssh_command("true"), what="ssh probe", timeout=30)
+                return machine
+            except Exception:  # noqa: BLE001 - not up yet is the common case
+                pass
+        time.sleep(15)
+    raise TimeoutError(f"instance {instance_id} never answered on ssh")
 
 
 def teardown(client: VastClient, instance_id: int) -> bool:
