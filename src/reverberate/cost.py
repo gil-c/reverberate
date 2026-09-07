@@ -29,18 +29,30 @@ is in the constants' own documentation.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 __all__ = [
     "BYTES_PER_POINT",
     "CUDA_CONTEXT_BYTES",
+    "PAD_CELLS",
     "SECONDS_PER_POINT_STEP",
     "SolveCost",
     "cards_for",
     "estimate",
+    "grid_points_for",
+    "solver_rate_hz",
     "steps_for",
 ]
+
+#: Cells of absorbing exterior PFFDTD puts on every face of the box, from
+#: ``CartGrid(offset=3.5)``. Hard-coded in the voxeliser and therefore here:
+#: it adds 7 cells to every axis, which is 14 mm at 16 kHz and matters only for
+#: a small domain.
+PAD_CELLS = 3.5
 
 #: Seconds of solver per grid point per time step, on one A100 80 GB.
 #:
@@ -72,6 +84,62 @@ BYTES_PER_POINT = 8.94
 #: Fixed device memory a CUDA context costs before any grid is allocated.
 #: **Measured**, 2.13 GB, and it comes off the card's capacity once per card.
 CUDA_CONTEXT_BYTES = 2.13e9
+
+
+def grid_points_for(
+    span_m: Sequence[float],
+    fmax_hz: float,
+    *,
+    ppw: float = 10.5,
+    temperature_c: float = 20.0,
+) -> int:
+    """Grid points a bounding box of ``span_m`` costs at ``fmax_hz``.
+
+    Reproduces ``CartGrid`` exactly, which is what lets a room be priced before
+    it is voxelised: ``ceil((span + 2 x 3.5 h) / h) + 1`` per axis, multiplied.
+    Checked against the cache manifest for ``bedroom_only`` at 16 kHz, where it
+    gives 4 607 993 520 points on the nose.
+
+    **This is the fourth-power law made concrete.** ``h`` goes as ``1 / fmax``,
+    so points go as the cube of ``fmax`` and the number of time steps goes as
+    the first power, and a solve costs the fourth. Halving the top frequency of
+    a band divides its cost by sixteen.
+
+    ``span_m`` is the box, not the room. Memory follows the bounding box and
+    eroding a domain to its reachable air buys nothing, so an L-shaped hallway
+    of 48 m3 inside a 151 m3 box is priced at 151.
+    """
+    if fmax_hz <= 0.0 or ppw <= 0.0:
+        raise ValueError(f"fmax and points per wavelength must be positive, got {fmax_hz}, {ppw}")
+    span = np.asarray(span_m, dtype=float)
+    if span.shape != (3,):
+        raise ValueError(f"span must be three dimensional, got shape {span.shape}")
+    if np.any(span <= 0.0):
+        raise ValueError(f"every span must be positive, got {span}")
+    step = _sound_speed(temperature_c) / (fmax_hz * ppw)
+    shape = np.ceil((span + 2.0 * PAD_CELLS * step) / step).astype(np.int64) + 1
+    return int(np.prod(shape))
+
+
+def solver_rate_hz(fmax_hz: float, *, ppw: float = 10.5) -> float:
+    """The grid's own step rate, ``c sqrt(3) / h``, in hertz.
+
+    The sound speed cancels: ``h = c / (fmax x ppw)``, so the rate is just
+    ``sqrt(3) x fmax x ppw`` and a warmer room does not cost more steps. About
+    291 kHz at 16 kHz and 10.5 points per wavelength.
+
+    PFFDTD's realised rate differs from this by about 0.1 per cent, so prefer a
+    voxelisation manifest's ``sample_rate_hz`` when the entry exists. This is
+    for pricing a room that has not been voxelised yet.
+    """
+    if fmax_hz <= 0.0 or ppw <= 0.0:
+        raise ValueError(f"fmax and points per wavelength must be positive, got {fmax_hz}, {ppw}")
+    return float(math.sqrt(3.0) * fmax_hz * ppw)
+
+
+def _sound_speed(temperature_c: float) -> float:
+    """PFFDTD's own sound speed, so ``h`` matches what ``SimConsts`` computes."""
+    return float(343.2 * math.sqrt(temperature_c / 20.0))
 
 
 def steps_for(duration_s: float, sample_rate_hz: float) -> int:
