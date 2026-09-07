@@ -33,10 +33,12 @@ not about physics, and it happens last.
 relative level between two receivers of one run is a measurement and dividing
 each by its own peak would destroy it. A single gain is applied when writing a
 WAV, is the same for every channel of that file, and is returned so it can be
-recorded. And **air absorption is not modelled**: the solver has no viscosity
-term and no Stokes filter is applied here, so the treble of a long tail is
-overstated. Said out loud because the roadmap's own cost argument leans on air
-absorbing treble.
+recorded. And air absorption is **not** applied by the four steps above: the
+solver has no viscosity term. It is a fifth step, :func:`apply_air_absorption`,
+which a caller applies explicitly and declares, because it carries two
+parameters -- temperature and relative humidity -- that a response cannot be
+read without. A response that has not been through it overstates the treble of
+a long tail by 38 per cent of T60 at 16 kHz.
 """
 
 from __future__ import annotations
@@ -52,6 +54,8 @@ from reverberate.experiments.engine import sim_consts
 
 __all__ = [
     "Reduced",
+    "air_absorption_np_per_m",
+    "apply_air_absorption",
     "convolve",
     "integrate_and_lowcut",
     "lowpass",
@@ -204,3 +208,120 @@ def write_wav(
         str(path), (block * gain).T, int(round(sample_rate_hz)), subtype="FLOAT", format="WAV"
     )
     return gain
+
+
+def air_absorption_np_per_m(
+    frequency_hz: np.ndarray,
+    *,
+    temperature_c: float = 20.0,
+    humidity_percent: float = 50.0,
+    pressure_kpa: float = 101.325,
+) -> np.ndarray:
+    """Atmospheric absorption in nepers per metre, ISO 9613-1.
+
+    The pure tone attenuation coefficient of still air, from the relaxation
+    frequencies of oxygen and nitrogen plus the classical term. Returned in
+    nepers rather than decibels because what uses it is an exponential gain,
+    and converting in the caller is where a factor of 8.686 goes missing.
+
+    **Humidity is not a detail.** At 16 kHz the coefficient runs from 0.25 dB/m
+    at 80 per cent relative humidity to 0.47 dB/m at 30, a factor of 1.9, so
+    every response that has been through this filter has to declare the two
+    parameters beside the number.
+    """
+    frequency = np.asarray(frequency_hz, dtype=float)
+    temperature = temperature_c + 273.15
+    reference_temperature = 293.15
+    triple_point = 273.16
+    pressure = pressure_kpa / 101.325
+    ratio = temperature / reference_temperature
+
+    saturation = 10.0 ** (-6.8346 * (triple_point / temperature) ** 1.261 + 4.6151)
+    molar_water = humidity_percent * saturation / pressure
+
+    oxygen = pressure * (24.0 + 4.04e4 * molar_water * (0.02 + molar_water) / (0.391 + molar_water))
+    nitrogen = (
+        pressure
+        * ratio**-0.5
+        * (9.0 + 280.0 * molar_water * np.exp(-4.170 * (ratio ** (-1.0 / 3.0) - 1.0)))
+    )
+
+    classical = 1.84e-11 / pressure * np.sqrt(ratio)
+    relaxation = ratio**-2.5 * (
+        0.01275 * np.exp(-2239.1 / temperature) / (oxygen + frequency**2 / oxygen)
+        + 0.1068 * np.exp(-3352.0 / temperature) / (nitrogen + frequency**2 / nitrogen)
+    )
+    decibels_per_metre = 8.686 * frequency**2 * (classical + relaxation)
+    return np.asarray(decibels_per_metre / 8.686, dtype=float)
+
+
+def apply_air_absorption(
+    signals: np.ndarray,
+    sample_rate_hz: float,
+    *,
+    sound_speed_m_s: float = 343.0,
+    temperature_c: float = 20.0,
+    humidity_percent: float = 50.0,
+    pressure_kpa: float = 101.325,
+    start_time_s: float = 0.0,
+    frame: int = 128,
+) -> np.ndarray:
+    """Apply atmospheric absorption to an impulse response, in place of a solver term.
+
+    **This is exact rather than a concession, and the reason is the geometry of
+    an impulse response.** Every sample arriving at time ``t`` has travelled
+    exactly ``c t`` of path, whatever route it took around the room, so air
+    absorption is precisely a per sample frequency dependent gain
+    ``exp(-m(f) c t)``. It is a time varying filter, not a diffuse field
+    approximation, it applies retroactively to responses already computed, and
+    it needs no change to the pinned solver, whose kernel would otherwise carry
+    a Stokes term in its inner loop.
+
+    It matters most exactly where this project is most expensive. On W29's own
+    measured decay the correction is -0.7 per cent of T60 at 1 kHz and
+    **-37.7 per cent at 16 kHz**.
+
+    Implemented as a short time Fourier transform with a square root Hann
+    window at three quarters overlap, which sums to a constant and so
+    reconstructs exactly when the gain is one. The frame is short on purpose:
+    the gain varies across a frame, and the error from freezing it at the
+    frame's centre is second order in the frame length, about 0.002 dB at
+    16 kHz for 128 samples at 48 kHz.
+
+    ``start_time_s`` is the propagation time of the response's first sample.
+    Zero for a response the solver started at the source, which is every
+    response this project writes.
+    """
+    block = np.atleast_2d(np.asarray(signals, dtype=float))
+    if frame < 8 or frame % 4:
+        raise ValueError("frame must be a multiple of 4 and at least 8 samples")
+    hop = frame // 4
+    window = np.sqrt(0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(frame) / frame))
+
+    length = block.shape[1]
+    padded = np.zeros((block.shape[0], length + 2 * frame), dtype=float)
+    padded[:, frame : frame + length] = block
+    out = np.zeros_like(padded)
+    # The overlap sum of the analysis window times the synthesis window, summed
+    # rather than quoted: the constant depends on the window and the hop, and a
+    # remembered one is how a whole response acquires a quiet 2.5 dB of gain.
+    overlap = np.zeros(padded.shape[1])
+
+    frequency = np.fft.rfftfreq(frame, 1.0 / sample_rate_hz)
+    attenuation = air_absorption_np_per_m(
+        frequency,
+        temperature_c=temperature_c,
+        humidity_percent=humidity_percent,
+        pressure_kpa=pressure_kpa,
+    )
+    for start in range(0, padded.shape[1] - frame + 1, hop):
+        centre = (start + frame / 2.0 - frame) / sample_rate_hz + start_time_s
+        gain = np.exp(-attenuation * sound_speed_m_s * max(centre, 0.0))
+        spectrum = np.fft.rfft(padded[:, start : start + frame] * window, axis=-1)
+        out[:, start : start + frame] += np.fft.irfft(spectrum * gain, n=frame, axis=-1) * window
+        overlap[start : start + frame] += window * window
+    interior = slice(frame, frame + length)
+    if np.min(overlap[interior]) <= 0.0:
+        raise ValueError("the window and hop do not cover every sample")
+    result = out[:, interior] / overlap[interior]
+    return result if np.ndim(signals) > 1 else np.asarray(result[0])

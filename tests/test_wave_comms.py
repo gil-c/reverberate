@@ -31,6 +31,7 @@ from reverberate.wave.comms import (
     Grid,
     fold_fcc,
     interp_weights,
+    nearest_node,
     source_signal,
     transpose_order,
     write_comms,
@@ -190,6 +191,59 @@ class TestWriteComms:
             # out_alpha is in the caller's receiver order, not the sorted one:
             # the engine applies out_reorder to the signals, not to the weights.
             assert np.allclose(handle["out_alpha"][...].sum(axis=1), 1.0)
+
+    def test_a_nearest_node_receiver_has_one_weight_of_one(self, tmp_path: Path) -> None:
+        """Snapped to a node, so no interpolation error and one row per receiver."""
+        directory = write_grid(tmp_path / "entry", make_grid())
+        receivers = np.array([[0.31, 0.42, 0.19], [0.2, 0.6, 0.1]])
+        out = write_comms(
+            directory,
+            np.array([0.2, 0.3, 0.1]),
+            receivers,
+            0.005,
+            out_path=tmp_path / "comms_out.h5",
+            interpolation="nearest",
+        )
+        with h5py.File(out, "r") as handle:
+            assert handle["out_alpha"].shape == (2, 1)
+            assert np.array_equal(handle["out_alpha"][...], np.ones((2, 1)))
+            assert handle["Nr"][()] == 2
+
+    def test_the_nearest_node_is_the_nearest_node(self) -> None:
+        grid = make_grid()
+        coordinate, index = nearest_node(np.array([0.31, 0.42, 0.19]), grid)
+        assert np.allclose(coordinate, [0.3, 0.4, 0.2])
+        nx, ny, nz = grid.shape
+        assert index == 3 * nz * ny + 4 * nz + 2
+        # A point already on a node keeps it.
+        assert np.allclose(nearest_node(np.array([0.2, 0.5, 0.1]), grid)[0], [0.2, 0.5, 0.1])
+
+    def test_the_nearest_node_stays_on_the_fcc_subgrid(self) -> None:
+        """Only nodes of even index sum exist on FCC, so an odd corner is not a node."""
+        grid = make_grid(fcc_flag=1)
+        nx, ny, nz = grid.shape
+        for point in ([0.31, 0.42, 0.19], [0.11, 0.13, 0.09], [0.25, 0.25, 0.25]):
+            _, index = nearest_node(np.array(point), grid)
+            iz = index % nz
+            iy = (index - iz) // nz % ny
+            ix = ((index - iz) // nz - iy) // ny
+            assert (ix + iy + iz) % 2 == 0
+
+    def test_a_point_outside_the_grid_has_no_nearest_node(self) -> None:
+        with pytest.raises(ValueError, match="outside the grid"):
+            nearest_node(np.array([0.2, 0.3, 9.0]), make_grid())
+
+    def test_an_unknown_interpolation_is_refused(self, tmp_path: Path) -> None:
+        directory = write_grid(tmp_path / "entry", make_grid())
+        with pytest.raises(ValueError, match="unknown interpolation"):
+            write_comms(
+                directory,
+                np.array([0.2, 0.3, 0.1]),
+                np.array([[0.3, 0.4, 0.2]]),
+                0.005,
+                out_path=tmp_path / "comms_out.h5",
+                interpolation="quadratic",  # type: ignore[arg-type]
+            )
 
     def test_it_needs_a_receiver(self, tmp_path: Path) -> None:
         directory = write_grid(tmp_path / "entry", make_grid())

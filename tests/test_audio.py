@@ -16,7 +16,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from reverberate import metrics
 from reverberate.audio import (
+    air_absorption_np_per_m,
+    apply_air_absorption,
     convolve,
     integrate_and_lowcut,
     lowpass,
@@ -172,3 +175,62 @@ def test_the_written_peak_leaves_the_asked_for_headroom(tmp_path: Path) -> None:
 def test_a_silent_signal_does_not_divide_by_zero(tmp_path: Path) -> None:
     pytest.importorskip("soundfile")
     assert write_wav(tmp_path / "silence.wav", np.zeros((2, 32)), 48_000.0) == 1.0
+
+
+def test_the_iso_coefficients_match_the_published_table() -> None:
+    """20 C and 50 per cent relative humidity, the figures the roadmap quotes."""
+    frequency = np.array([1000.0, 2000.0, 4000.0, 8000.0, 16000.0])
+    decibels = air_absorption_np_per_m(frequency) * 8.686
+    assert np.allclose(decibels, [0.0047, 0.0099, 0.0297, 0.1053, 0.3645], atol=5e-5)
+
+
+def test_humidity_moves_the_top_octave_by_a_factor_of_nearly_two() -> None:
+    """It is a declared parameter of a response, not a detail."""
+    top = np.array([16000.0])
+    dry = air_absorption_np_per_m(top, humidity_percent=30.0)[0]
+    damp = air_absorption_np_per_m(top, humidity_percent=80.0)[0]
+    assert dry / damp == pytest.approx(1.85, rel=0.05)
+
+
+def test_a_delayed_impulse_comes_back_with_exactly_its_own_air_gain() -> None:
+    """The claim the filter makes: a sample at t has travelled c t, so its gain is known."""
+    rate, samples, arrival = 48000.0, 32768, 0.05
+    impulse = np.zeros((1, samples))
+    impulse[0, int(arrival * rate)] = 1.0
+    filtered = apply_air_absorption(impulse, rate, sound_speed_m_s=343.0)
+    frequency = np.fft.rfftfreq(samples, 1.0 / rate)
+    expected = np.exp(-air_absorption_np_per_m(frequency) * 343.0 * arrival)
+    band = (frequency > 50.0) & (frequency < 20000.0)
+    error_db = 20.0 * np.log10(np.abs(np.fft.rfft(filtered[0])[band]) / expected[band])
+    assert np.max(np.abs(error_db)) < 0.1
+
+
+def test_air_absorption_reconstructs_exactly_when_there_is_nothing_to_absorb() -> None:
+    """The overlap add has to be transparent, or every response acquires a quiet gain."""
+    rng = np.random.default_rng(0)
+    signal = rng.standard_normal((2, 4096))
+    assert np.allclose(apply_air_absorption(signal, 48000.0, sound_speed_m_s=0.0), signal)
+
+
+def test_air_absorption_takes_the_expected_bite_out_of_a_measured_decay() -> None:
+    """W29's own 0.29 s decay loses 38 per cent of its 16 kHz T60 and none of its 500 Hz."""
+    rate = 48000.0
+    time = np.arange(int(0.6 * rate)) / rate
+    rng = np.random.default_rng(0)
+    tail = rng.standard_normal((1, time.size)) * np.exp(-3.0 * np.log(10.0) * time / 0.29)
+    before = metrics.rt60_per_band(tail[0], int(rate))
+    after = metrics.rt60_per_band(apply_air_absorption(tail, rate)[0], int(rate))
+    bands = metrics.band_centres(int(rate))
+    change = after / before - 1.0
+    assert change[bands.index(500)] == pytest.approx(0.0, abs=0.02)
+    assert change[bands.index(16000)] == pytest.approx(-0.377, abs=0.03)
+
+
+def test_a_frame_that_cannot_overlap_add_is_refused() -> None:
+    with pytest.raises(ValueError, match="multiple of 4"):
+        apply_air_absorption(np.zeros((1, 64)), 48000.0, frame=30)
+
+
+def test_a_one_dimensional_response_stays_one_dimensional() -> None:
+    out = apply_air_absorption(np.zeros(512), 48000.0)
+    assert out.ndim == 1
