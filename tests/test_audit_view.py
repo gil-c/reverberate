@@ -27,8 +27,10 @@ from reverberate.geometry.rooms import Partition, RoomPartition, _fill_unclaimed
 from reverberate.viz.vox_view import blocks_from_nodes, read_grid_nodes, surface_of
 
 
-def face_area(corners: np.ndarray) -> float:
+def face_area(corners: np.ndarray, keep: np.ndarray | None = None) -> float:
     quads = corners.reshape(-1, 4, 3).astype(np.float64)
+    if keep is not None:
+        quads = quads[keep]
     return float(
         np.abs(np.cross(quads[:, 1] - quads[:, 0], quads[:, 3] - quads[:, 0])).sum(axis=1).sum()
     )
@@ -91,9 +93,14 @@ def test_tiering_draws_the_same_faces_as_one_untiered_merge(
     spanning two rooms, so the partitioned picture is legitimately made of a
     few more, smaller quads. If any *face* were added or lost the area would
     move, and nothing else about the picture can.
+
+    Compared against the untiled merge **with its sealed faces taken off**,
+    which is the one thing the payload deliberately leaves out. Everything
+    else must survive tiling exactly.
     """
     subs, material, inert, axes, h_m, total, _ = read_grid_nodes(grid)
     whole = surface_of(blocks_from_nodes(subs, material, inert, None, span, axes, h_m, total))
+    unsealed = whole.label.reshape(-1, 4)[:, 0] != -2
 
     with h5py.File(grid / "vox_out.h5", "r") as handle:
         ny, nz = int(handle["Ny"][()]), int(handle["Nz"][()])
@@ -102,6 +109,7 @@ def test_tiering_draws_the_same_faces_as_one_untiered_merge(
 
     tiered = 0.0
     nodes = 0
+    dropped = 0
     for index, room in enumerate(split.rooms):
         room_subs, room_material, room_inert = _scan_room(grid, mask, index, shape, ny, nz)
         room_of = split.raster[room_subs[0], room_subs[2]]
@@ -119,12 +127,15 @@ def test_tiering_draws_the_same_faces_as_one_untiered_merge(
             10**9,
         )
         nodes += plan.nodes
+        dropped += plan.sealed_left_out
         for entry in plan.files:
             corners = np.fromfile(tmp_path / room.name / str(entry["corners_url"]), np.float32)
             tiered += face_area(corners)
 
     assert nodes == total, "the partition must own every node of the grid"
-    assert tiered == pytest.approx(face_area(whole.corners), rel=1e-6)
+    assert tiered == pytest.approx(face_area(whole.corners, unsealed), rel=1e-6)
+    assert dropped == int((~unsealed).sum()), "every sealed face must be counted, not merely gone"
+    assert dropped > 0, "the fixture must actually seal something, or this asserts nothing"
 
 
 def test_a_room_too_heavy_to_draw_whole_is_cut_without_adding_a_face(

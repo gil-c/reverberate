@@ -73,10 +73,12 @@ __all__ = [
 #: is drawn, so what a coarser block costs is where inside it the boundary
 #: was, and which material won a majority in it, and nothing else.
 #:
-#: The grid's own 2 mm is one block per node and is not reachable yet:
-#: :func:`_dense_blocks` materialises the whole lattice, 9.2 GB of labels at
-#: that resolution, and the build runs into hours. Slicing it is the work that
-#: unlocks native, and it is not done.
+#: The grid's own 2 mm is one block per node, and it is now reachable: the
+#: merge below is sparse, so nothing the size of the lattice is allocated and
+#: the whole flat at 16 kHz builds room by room. This budget is what the
+#: *single-payload* path still uses, for a run that has one room and no
+#: partition to tier by; the tiered path takes its block size outright. See
+#: :mod:`reverberate.experiments.audit_view`.
 TARGET_CUBES = 20_000_000
 
 
@@ -829,15 +831,6 @@ def _slice_quads(u: np.ndarray, v: np.ndarray, kind: np.ndarray) -> np.ndarray:
     return np.stack([a0[head], av[head], a1[head], av[tail] + 1, kinds[head]], axis=1)
 
 
-def _dense_blocks(cloud: VoxelCloud) -> np.ndarray:
-    """The blocks back on a dense lattice, so neighbours can be looked up."""
-    origin, shape = cloud.lattice
-    cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int64)
-    grid = np.zeros(tuple(shape), dtype=bool)
-    grid[cells[:, 0], cells[:, 1], cells[:, 2]] = True
-    return grid
-
-
 def _corners_of(
     cloud: VoxelCloud, axis: int, side: int, i: int, merged: np.ndarray, origin: np.ndarray
 ) -> np.ndarray:
@@ -921,25 +914,15 @@ def write_voxel_payload(
     ten times that as text, and the browser wants typed arrays at the end of it
     either way.
     """
-    target = Path(target)
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "voxels.f32").write_bytes(surface.corners.tobytes())
-    (target / "voxels_index.u32").write_bytes(surface.index.tobytes())
-    (target / "voxels_label.i16").write_bytes(surface.label.tobytes())
+    written = write_quads(surface, None, target, "voxels")
     blocks = surface.blocks
-    sealed_quads = int(np.count_nonzero(surface.label[::4] == -2))
     record = {
-        "quads": surface.quads,
-        "triangles": surface.triangles,
+        **written,
         "blocks": blocks.drawn,
         "total_nodes": blocks.total_nodes,
         "cell_m": blocks.cell_m,
         "h_m": blocks.h_m,
-        "sealed_quads": sealed_quads,
         "labels": labels,
-        "corners_url": "voxels.f32",
-        "index_url": "voxels_index.u32",
-        "label_url": "voxels_label.i16",
         "note": (
             (
                 f"Aggregated {blocks.cell_m / blocks.h_m:.0f}x: this is a "

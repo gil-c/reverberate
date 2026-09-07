@@ -9,53 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `reverberate.experiments.audit_view`, which draws the whole flat at 16 kHz by
-  tiering it rather than thinning it. The room a reader stands in is drawn at
-  the solver's own 2.043 mm and every other room at 8.17 mm, which is the 4 kHz
-  cell, and both tiers come from the same voxelisation so the picture has one
-  staircase rather than a seam at every room boundary. On scene `102344022` the
-  whole flat's 1 089 464 499 boundary nodes come out as **29.1 M quads across
-  twelve rooms**, built in 13 minutes on a laptop peaking at 16 GB, in per-room
-  steps of under three minutes. See `docs/adr/0007-tiered-audit-view.md`.
+- `reverberate.experiments.audit_view` and `reverberate.geometry.rooms`: the
+  whole flat drawn at the solver's own 2.043 mm, which was out of reach before.
+  Scene `102344022`'s 1 089 464 499 boundary nodes come out as **20 116 117
+  quads over twelve rooms**, built in 13 minutes on a laptop peaking at 16 GB.
 
-  Nothing is dropped and nothing is smoothed. The partition is asserted total --
-  the per-room node counts sum to the grid's own -- and the tiering is asserted
-  exact: the summed face area of the per-room payloads equals the area of one
-  untiered merge of the same grid. A room too heavy for one file is cut into
-  tiles, and the cut is applied to the **finished quads** by centroid, never to
-  the blocks: cutting the blocks would leave each piece's edge blocks unable to
-  see their neighbours, so they would emit faces the grid does not have.
+  The picture is tiered, not thinned. The room a reader stands in draws at
+  2.043 mm and every other room at 8.17 mm, the 4 kHz cell, both from the *same*
+  voxelisation so there is no seam at a room boundary. A "room" is the everyday
+  one: seven of this scene's nineteen regions are closets, and each joins the
+  room its **doorway** reaches, which is not the room it shares most boundary
+  with -- W34 measured those two disagreeing on five of seven.
 
-- `reverberate.geometry.rooms`, the everyday-room partition. HSSD splits a
-  wardrobe from the bedroom it opens into, and seven of this scene's nineteen
-  interior regions are such closets. They are folded into the room their
-  **doorway** reaches, read out of the stage mesh by `apartment.find_doorways`.
-  Shared boundary is the obvious criterion and it is the wrong one: W34 measured
-  the two disagreeing on five of seven, because a closet shares 2.10 m with the
-  room behind it and 2.10 m with the room in front. The derived mapping
-  reproduces W34's by hand exactly, and gives **12 rooms**, not the 13 recorded
-  there, which counted the garage twice.
+  Two things are asserted rather than hoped. The partition is total: the
+  per-room node counts sum to the grid's own. And the tiering is exact: the
+  summed face area of the per-room payloads equals one untiled merge of the same
+  grid, per material label. A room too heavy for one file is cut into tiles by
+  the centroid of **finished quads**, never by cutting blocks, which would emit
+  faces the grid does not have.
 
-  A boundary node sits *on* a surface, so a great many fall in the wall band
-  that no polygon contains. Those take the nearest room from a distance
-  transform of the raster, because a node with no owner would vanish silently
-  from every tier of the picture.
+  The sealed insides are merged and then left out, which is **42 per cent of the
+  payload**: they are the inward face of every closed body's shell, and the
+  material face in front hides every one. The count is published per room, a
+  block that is rigid and still coupled is kept because that is the defect
+  sealing exists to fix, and the seal itself is checked as a number -- a flood
+  fill finds 266 regions totalling 3.98 m3 cut off from every room.
 
-- A room selector and a follow-the-reader mode in the viewer's acoustic page,
-  with the block size in force printed beside the room it applies to, the tile
-  count when a room is too large to draw whole, and the coordinates the reader
-  is standing at. A room drawn at 8.17 mm under a page that says 16 kHz would
-  make an aggregated feature read as a missing one, and a defect is reported by
-  where it was seen from.
-
-- A measured standing point per room, in `audit_view.stand_points`. Every
-  boundary node at head height is stamped onto a coarse plan of the flat and
-  each room takes the cell of its own polygon farthest from anything stamped.
-  The floor plan cannot answer this -- it does not know where the wardrobe is --
-  and `standAt`'s centre-of-the-bounds fallback is a wall once the run is a
-  whole flat rather than one room. Both put the camera inside solid geometry,
-  which fills the view with the pink of a sealed interior and reads as a broken
-  page.
+  Reasoning, measurements and the four rejected alternatives are in
+  `docs/adr/0007-tiered-audit-view.md`.
 
 - `reverberate.geometry.carve`, which carves HSSD's collision proxies back to
   the shape the render mesh proves. The colliders are convex decompositions, so

@@ -66,6 +66,25 @@ Three consequences follow and each was measured rather than assumed.
   edge blocks unable to see their neighbours, so they would emit faces the grid
   does not have. Assigning a merged quad to a tile by its centroid cannot.
 
+### The sealed faces are merged and then left out
+
+42 per cent of the merged area of this flat is the inward face of a closed
+body's shell. PFFDTD stores boundary nodes only, so the middle of a solid is
+not in the grid; the shell's inner side has nothing behind it and is therefore
+drawn, and the material face in front of it hides every one. They are merged --
+never excluded from the merge, because a sealed block still hides the back of
+the material block in front of it -- and then not written.
+
+**What it does not drop is the defect.** A block that is rigid and still
+coupled, which is what patch 5 exists to fix, carries a different label and is
+drawn. And the seal itself is checked as a number rather than as geometry: a
+flood fill of the 1 kHz grid finds 266 regions totalling 3.98 m3 completely cut
+off from every room, so the sealing holds on every closed body.
+
+The count is published per room and on the page. A picture that quietly dropped
+42 per cent of what it merged would be the exact failure this view exists to
+catch.
+
 ## What this rests on, and what it costs
 
 The partition is asserted **total**: the per-room node counts sum to the grid's
@@ -86,6 +105,13 @@ already exists, and it puts a seam at every room boundary: two voxelisations
 staircase differently, so the join would be an artefact of the mixing and a
 reader auditing geometry would have to learn to ignore it. Aggregating the
 16 kHz grid by four gives the same 8.17 mm cell out of one grid.
+
+**Keeping the sealed faces behind a switch.** They were briefly published as a
+second mesh per tile with a checkbox, which is how the 42 per cent was seen at
+all. It is a real capability and it was still the wrong trade: the payload has
+to carry them either way, so the browser pays the download and the checkbox
+only saves the draw. The flood fill answers the question the switch was for, in
+one number, and the switch went.
 
 **Renting.** The plan budgeted 1.5 to 2.5 h on a 64 GB machine and about
 1.50 USD. With the sparse merge and the per-room split the whole flat at 16 kHz

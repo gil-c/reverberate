@@ -17,13 +17,28 @@ import pytest
 
 from reverberate.viz.vox_view import (
     NO_FACE,
+    VoxelCloud,
     _blocks_path,
-    _dense_blocks,
     _slice_quads,
     read_voxels,
     surface_of,
     write_voxel_payload,
 )
+
+
+def dense_blocks(cloud: VoxelCloud) -> np.ndarray:
+    """The blocks back on a dense lattice, so neighbours can be looked up.
+
+    The oracle for the area assertion below, and nothing else uses it. It was
+    production code until the merge went sparse; a lattice-sized allocation is
+    exactly what that change removed, so the one place still entitled to make
+    one is a test that checks the sparse answer against the obvious one.
+    """
+    origin, shape = cloud.lattice
+    cells = np.rint((cloud.positions - origin) / cloud.cell_m).astype(np.int64)
+    grid = np.zeros(tuple(shape), dtype=bool)
+    grid[cells[:, 0], cells[:, 1], cells[:, 2]] = True
+    return grid
 
 
 def cells_of(kind: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -279,7 +294,7 @@ class TestSurface:
         cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
         surface = surface_of(cloud)
 
-        occupied = _dense_blocks(cloud)
+        occupied = dense_blocks(cloud)
         visible = 0
         for axis in range(3):
             faces = np.moveaxis(occupied, axis, 0)

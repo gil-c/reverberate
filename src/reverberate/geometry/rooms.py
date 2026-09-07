@@ -90,22 +90,6 @@ class Partition:
     xv: np.ndarray
     zv: np.ndarray
 
-    @property
-    def names(self) -> list[str]:
-        return [room.name for room in self.rooms]
-
-    def of_nodes(self, sub_x: np.ndarray, sub_z: np.ndarray) -> np.ndarray:
-        """The room index of every node, from its x and z subscripts."""
-        return np.asarray(self.raster[sub_x, sub_z])
-
-    def summary(self) -> str:
-        rows = ", ".join(
-            f"{room.name} {room.area_m2:.1f} m2"
-            + (f" (+{len(room.regions) - 1})" if len(room.regions) > 1 else "")
-            for room in self.rooms
-        )
-        return f"{len(self.rooms)} rooms: {rows}"
-
 
 def merge_closets(regions: list[RoomRegion], doorways: list[Polygon]) -> list[RoomPartition]:
     """Fold every region under :data:`MIN_ROOM_AREA` into the room it opens into.

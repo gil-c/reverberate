@@ -48,7 +48,15 @@ from reverberate.viz.vox_view import (
     write_quads,
 )
 
-__all__ = ["BUILD_NOTE", "TierPlan", "build", "halo_for", "main", "membership_mask"]
+__all__ = [
+    "BUILD_NOTE",
+    "SEALED_LEFT_OUT",
+    "TierPlan",
+    "build",
+    "halo_for",
+    "main",
+    "membership_mask",
+]
 
 #: The coarse tier's block, as a multiple of the grid step. Four at 16 kHz is
 #: 8.17 mm, which is exactly the 4 kHz cell, so "the other rooms at the 4 kHz
@@ -68,16 +76,27 @@ QUAD_BUDGET = 500_000
 #: 220 MB of transient across the three arrays, and the read is sequential.
 CHUNK = 1 << 24
 
+#: Why the sealed insides are not in the payload, said on the page.
+SEALED_LEFT_OUT = (
+    "The sealed insides are merged and then left out. They are the inward face "
+    "of every closed body's shell -- PFFDTD stores boundary nodes only, so the "
+    "middle of a solid is not in the grid and that face has nothing behind it "
+    "to hide it. Every one of them sits behind the material face in front, so "
+    "no reader ever sees one, and on this flat they are 42 per cent of the "
+    "merged area. They are counted per room rather than silently absent. What "
+    "is *not* dropped is a block that is rigid and still coupled, which is the "
+    "defect sealing exists to fix: that carries a different label and is drawn."
+)
+
 BUILD_NOTE = (
     "Two tiers of one grid. The selected room draws at the solver's own step; "
     "every other room draws aggregated, at the cell size of the band below. "
     "Faces between touching blocks are not drawn and coplanar faces of the same "
     "material are merged into rectangles, so the solid is the same one the "
     "solver reads. Nothing is smoothed: the staircase is what the wave equation "
-    "was solved on. Deep crimson is sealed, the inside of a solid object, which "
-    "the solver carries no sound through; grey is rigid. Neither is reachable "
-    "by a material colour. Two materials of this flat's fifty-one can still "
-    "look alike, so the legend names them and the colour only separates them."
+    "was solved on. Grey is rigid, a block carrying no material at all. Two "
+    "materials of this flat's fifty-one can still look alike, so the legend "
+    "names them and the colour only separates them."
 )
 
 
@@ -91,6 +110,10 @@ class TierPlan:
     nodes: int
     quads: int
     files: list[dict[str, Any]]
+    #: Sealed faces merged and then left out of the payload. Counted and
+    #: published rather than simply absent: a picture that quietly drops 42 per
+    #: cent of what it merged is the kind of thing this view exists to catch.
+    sealed_left_out: int = 0
 
     def record(self) -> dict[str, Any]:
         return {
@@ -99,6 +122,7 @@ class TierPlan:
             "blocks": self.blocks,
             "nodes": self.nodes,
             "quads": self.quads,
+            "sealed_left_out": self.sealed_left_out,
             "tiles": self.files,
             "aggregated": self.span > 1,
         }
@@ -312,6 +336,19 @@ def _write_tier(
     surface = surface_of(cloud)
     assert surface.quad_room is not None
     mine = surface.quad_room == room
+    # The sealed faces are merged and then not written. They are the inward
+    # side of every closed body's shell, and they are 42 per cent of the area:
+    # each one sits behind the material face in front of it, so no reader ever
+    # sees one, and shipping them costs the browser almost half its memory for
+    # nothing. See SEALED_LEFT_OUT.
+    #
+    # Merged first and dropped after, never excluded from the merge: a sealed
+    # block still hides the back of the material block in front of it, and
+    # removing it earlier would expose that face and draw a surface the solver
+    # does not have.
+    sealed = surface.label.reshape(-1, 4)[:, 0] == -2
+    left_out = int((mine & sealed).sum())
+    mine = mine & ~sealed
     corners = surface.corners.reshape(-1, 4, 3)[mine]
     tile_of, count = _tile(corners, budget, int(mine.sum()))
     # A rebuild at a different tile size leaves the previous one's files behind,
@@ -337,6 +374,7 @@ def _write_tier(
         nodes=int((room_of == room).sum()),
         quads=int(mine.sum()),
         files=files,
+        sealed_left_out=left_out,
     )
 
 
@@ -380,7 +418,7 @@ def build(
     for index, room in enumerate(partition.rooms):
         if index_only or (only and room.name not in only):
             continue
-        started = time.time()
+        started, spent = time.time(), time.process_time()
         subs, material, inert = _scan_room(cache_dir, mask, index, shape, ny, nz)
         room_of = partition.raster[subs[0], subs[2]]
         target = out / "voxels" / room.name.replace(" ", "_")
@@ -416,13 +454,19 @@ def build(
                 "fine": fine.record(),
                 "coarse": coarse.record(),
                 "build_s": round(time.time() - started, 1),
+                # Wall clock *and* processor time, because the two disagree for
+                # a reason worth seeing. A laptop that suspends mid-build makes
+                # a room look a hundred times slower while it computed at the
+                # usual rate: 5848 s of wall against 37 s of work is a lid that
+                # closed, not a slow merge, and one number cannot tell which.
+                "cpu_s": round(time.process_time() - spent, 1),
                 "working_set": int(material.size),
             }
         )
         print(
             f"{room.name:16s} {fine.nodes:>12,} nodes  fine {fine.quads:>9,} quads "
             f"in {len(fine.files)} tile(s)  coarse {coarse.quads:>8,}  "
-            f"{rooms[-1]['build_s']:.0f}s",
+            f"{rooms[-1]['cpu_s']:.0f}s cpu of {rooms[-1]['build_s']:.0f}s wall",
             flush=True,
         )
 
@@ -460,6 +504,10 @@ def build(
         "quad_budget": quad_budget,
         "labels": labels,
         "note": BUILD_NOTE,
+        "sealed_note": SEALED_LEFT_OUT,
+        "sealed_left_out": sum(
+            int(room[tier]["sealed_left_out"]) for room in rooms for tier in ("fine", "coarse")
+        ),
         "rooms": rooms,
     }
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,10 +543,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     fine = sum(int(room["fine"]["quads"]) for room in record["rooms"])
     coarse = sum(int(room["coarse"]["quads"]) for room in record["rooms"])
+    dropped = int(record["sealed_left_out"])
     print(
         f"\n{len(record['rooms'])} rooms, {record['total_nodes']:,} nodes: "
         f"fine {fine:,} quads ({fine * 80 / 1e6:.0f} MB), "
-        f"coarse {coarse:,} quads ({coarse * 80 / 1e6:.0f} MB)"
+        f"coarse {coarse:,} quads ({coarse * 80 / 1e6:.0f} MB); "
+        f"{dropped:,} sealed quads merged and left out "
+        f"({100 * dropped / max(1, dropped + fine + coarse):.0f} per cent, "
+        f"{dropped * 80 / 1e6:.0f} MB saved)"
     )
     return 0
 

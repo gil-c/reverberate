@@ -437,14 +437,9 @@
               ? `, ${state.tiles_drawn} of ${state.tiles} tiles (nearest first)`
               : "";
           const at = camera.position;
-          const off = Object.entries(state.layers || {})
-            .filter(([, on]) => !on)
-            .map(([name]) => name);
           status.textContent =
-            (off.length ? `Hiding: ${off.join(", ")}. ` : "") +
             `${room}${tiles}, everything else at ${state.coarse_mm.toFixed(2)} mm. ` +
-            `${state.quads.toLocaleString()} quads drawn, about ${state.megabytes} MB, ` +
-            `of which ${Math.round((100 * state.sealed_quads) / state.quads)} per cent sealed. ` +
+            `${state.quads.toLocaleString()} quads drawn, about ${state.megabytes} MB. ` +
             // Where the reader is standing, because a defect is reported by
             // where it was seen from and the scene has no other landmark.
             `Standing at ${at.x.toFixed(2)}, ${at.y.toFixed(2)}, ${at.z.toFixed(2)}.`;
@@ -470,10 +465,6 @@
         // inside the mattress. The apartment's own spawn point is the most open
         // point of its walkable outline, which is exactly the right answer and
         // is already computed for the other three modes.
-        for (const [id, layer] of [["audit-solid", "solid"], ["audit-sealed", "sealed"]]) {
-          const box = document.getElementById(id);
-          if (box) box.onchange = () => grid.showLayer(layer, box.checked);
-        }
         auditStand = () => grid.standIn(auditRoom || grid.rooms[0].name);
         if (!data.receivers.length) {
           const at = auditStand();
