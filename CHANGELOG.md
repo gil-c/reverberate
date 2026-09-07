@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.experiments.audit_view` and `reverberate.geometry.rooms`: the
+  whole flat drawn at the solver's own 2.043 mm, which was out of reach before.
+  Scene `102344022`'s 1 089 464 499 boundary nodes come out as **20 116 117
+  quads over twelve rooms**, built in 13 minutes on a laptop peaking at 16 GB.
+
+  The picture is tiered, not thinned. The room a reader stands in draws at
+  2.043 mm and every other room at 8.17 mm, the 4 kHz cell, both from the *same*
+  voxelisation so there is no seam at a room boundary. A "room" is the everyday
+  one: seven of this scene's nineteen regions are closets, and each joins the
+  room its **doorway** reaches, which is not the room it shares most boundary
+  with -- W34 measured those two disagreeing on five of seven.
+
+  Two things are asserted rather than hoped. The partition is total: the
+  per-room node counts sum to the grid's own. And the tiering is exact: the
+  summed face area of the per-room payloads equals one untiled merge of the same
+  grid, per material label. A room too heavy for one file is cut into tiles by
+  the centroid of **finished quads**, never by cutting blocks, which would emit
+  faces the grid does not have.
+
+  The sealed insides are merged and then left out, which is **42 per cent of the
+  payload**: they are the inward face of every closed body's shell, and the
+  material face in front hides every one. The count is published per room, a
+  block that is rigid and still coupled is kept because that is the defect
+  sealing exists to fix, and the seal itself is checked as a number -- a flood
+  fill finds 266 regions totalling 3.98 m3 cut off from every room.
+
+  Reasoning, measurements and the four rejected alternatives are in
+  `docs/adr/0007-tiered-audit-view.md`.
+
 - `reverberate.geometry.carve`, which carves HSSD's collision proxies back to
   the shape the render mesh proves. The colliders are convex decompositions, so
   everything hollow or concave reaches the grid as a solid lump: measured on
@@ -152,6 +181,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixes the 2021 source needs on a current stack.
 - `reverberate.settings`, the single data root setting every stage writes under.
 
+### Changed
+
+- `vox_view.surface_of` merges sparsely. It used to allocate the block lattice
+  as an `int16` volume -- 1.14 GB for one bedroom at 4.09 mm blocks, 9.2 GB for
+  the same bedroom at 2.04 mm and **295 TB for the whole flat** -- and walk its
+  slices, so it cost the lattice rather than the picture. Each slice is now
+  meshed from the cells it holds. Measured on the bedroom's own 16 kHz blocks:
+  identical quads, **22.1 s to 6.0 s**, and the allocation gone. The dense
+  mesher moves into the test suite as the oracle the sparse one is checked
+  against.
+
+- `vox_view` takes the block size instead of searching for it. The search called
+  `np.unique` on the full node key array once per candidate span, about five
+  sorts of 8.7 GB for the flat at 16 kHz, which is where a seven-hour run at
+  15 per cent CPU with 34.4 GB of swap went. At the grid's own step a block *is*
+  a node, so the grouping is skipped entirely rather than made cheaper; where a
+  budget is still given, each coarser span is counted from the finer span's own
+  unique blocks.
+
+- A run that publishes a tiered grid no longer ships its triangle mesh to the
+  browser. This flat's exported model is 192 MB of triangles and the page hides
+  them behind the grid, so a reader would have downloaded and parsed a quarter
+  of a gigabyte of JSON to see nothing drawn from it. The page says so rather
+  than leaving an absent view to be discovered.
+
 ### Fixed
 
 - **Destroying a rented instance on *any* failure deleted a good result.** The
@@ -242,6 +296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipeline exists to amortise. The key is now taken over the mesh alone, and a
   file whose layout is unrecognised is still hashed whole rather than guessed
   at. Entries cached under the old key are orphaned and can be deleted.
+
 
 ### Changed
 

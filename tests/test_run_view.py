@@ -577,6 +577,8 @@ PAGE_MUST_HAVE = [
     ("for (const mode of SCENE_MODES) groups[mode] = null;", "assembly invalidates only its modes"),
     ('if (activeMode !== "acoustic") activeMode = null;', "assembly does not evict a shown run"),
     ("if (chosen === null) {", "assembly claims the view only if unclaimed"),
+    ("if (auditStand) {", "a tiered grid says where to stand; the bounds centre is a wall"),
+    ("grid.select(here, camera.position)", "the tier follows the room the reader walks into"),
     ("setBusy(assemblyMessage);", "a mode switch keeps the build message up"),
     ('? "loading solver run…" : assemblyMessage', "the run's wait is named without losing it"),
     ('if (button.disabled) button.classList.remove("active");', "no highlight on a dead button"),
@@ -686,3 +688,69 @@ def test_the_grid_is_pulled_from_the_store_when_this_machine_has_none(
     assert payload["voxels"] is not None
     assert payload["voxels"]["labels"] == ["carpet", "shell"]
     assert (tmp_path / "data" / "cache" / "vox" / key / "vox_out.h5").is_file()
+
+
+def test_a_tiered_audit_payload_replaces_the_single_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run that published a tiered grid draws that, and only that.
+
+    The two describe the same boundary, so building both would put opaque faces
+    exactly where the grid is and cost a second copy of it. The tiered form is
+    also the only one a whole flat at 16 kHz exists in: one payload of it is
+    about 2.2 GB.
+    """
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    run = _write_run(tmp_path)
+    tiered = {
+        "total_nodes": 42,
+        "note": "two tiers of one grid",
+        "rooms": [{"name": "kitchen", "dir": "kitchen", "fine": {}, "coarse": {}}],
+    }
+    (run / "voxels").mkdir()
+    (run / "voxels" / "rooms.json").write_text(json.dumps(tiered))
+
+    build_site(run, tmp_path / "site")
+
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+    assert payload["voxels"] is None
+    assert payload["audit"]["rooms"][0]["name"] == "kitchen"
+    assert payload["audit"]["dir"] == "voxels"
+
+
+def test_the_tiered_payload_is_linked_rather_than_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole flat at 16 kHz is about 2.2 GB of quads, and the site is a
+    temporary directory that would otherwise hold a second copy of it for as
+    long as the viewer runs."""
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    run = _write_run(tmp_path)
+    (run / "voxels").mkdir()
+    (run / "voxels" / "rooms.json").write_text(json.dumps({"total_nodes": 1, "rooms": []}))
+    (run / "voxels" / "kitchen.f32").write_bytes(b"quads")
+
+    build_site(run, tmp_path / "site")
+
+    link = tmp_path / "site" / "voxels"
+    assert link.is_symlink()
+    assert (link / "kitchen.f32").read_bytes() == b"quads"
+
+
+def test_the_triangles_are_left_out_when_the_grid_is_the_picture() -> None:
+    """192 MB of exported triangles reach the browser as JSON. A page that
+    hides them behind a tiered grid must not also make a reader download them,
+    and the legend needs only the label, the colour and the count."""
+    model = {
+        "mats_hash": {
+            "carpet": {"pts": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "tris": [[0, 1, 2]], "sides": 2}
+        }
+    }
+
+    with_mesh = surface_groups(model, {"carpet": [0.2] * 11})
+    without = surface_groups(model, {"carpet": [0.2] * 11}, geometry=False)
+
+    assert with_mesh[0]["positions"] and with_mesh[0]["indices"]
+    assert without[0]["positions"] == [] and without[0]["indices"] == []
+    assert without[0]["triangles"] == with_mesh[0]["triangles"] == 1
+    assert without[0]["colour"] == with_mesh[0]["colour"]
