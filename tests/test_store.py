@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from reverberate import store as store_module
 from reverberate.store import (
@@ -98,7 +99,7 @@ class _TruncatingClient:
     def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
         return {"ContentLength": len(self.objects[Key]), "Metadata": {}}
 
-    def copy_object(self, **kwargs: Any) -> None:  # pragma: no cover - must not run
+    def copy(self, **kwargs: Any) -> None:  # pragma: no cover - must not run
         raise AssertionError("a short upload must never be promoted")
 
     def delete_object(self, Bucket: str, Key: str) -> None:  # noqa: N803
@@ -237,3 +238,82 @@ def test_the_store_is_opened_once_and_kept(monkeypatch: pytest.MonkeyPatch) -> N
     first = store_module.shared_store()
     assert store_module.shared_store() is first
     assert opened == [1]
+
+
+class _RecordingClient:
+    """A client that records the calls, so the promotion path can be pinned.
+
+    S3 caps a single-part server-side copy at 5 GB. No artefact of this project
+    reached it until the whole flat at 16 kHz: 25.2 GB of grid uploaded, then
+    ``EntityTooLarge`` on the promotion, so the store had never once been able
+    to publish a file that size and nothing said so. The managed ``copy``
+    splits it; ``copy_object`` does not, and must not come back.
+    """
+
+    def __init__(self, staged: dict[str, int] | None = None) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.staged = staged or {}
+        self.calls: list[str] = []
+
+    def upload_fileobj(self, handle: Any, Bucket: str, Key: str, **_: Any) -> None:  # noqa: N803
+        self.calls.append("upload_fileobj")
+        self.objects[Key] = handle.read()
+
+    def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        if Key in self.objects:
+            return {"ContentLength": len(self.objects[Key]), "Metadata": {}}
+        if Key in self.staged:
+            return {"ContentLength": self.staged[Key], "Metadata": {}}
+        raise ClientError(
+            {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+            "HeadObject",
+        )
+
+    def copy(self, **_: Any) -> None:
+        self.calls.append("copy")
+
+    def copy_object(self, **_: Any) -> None:  # pragma: no cover - must not run
+        raise AssertionError("copy_object caps at 5 GB; the managed copy must be used")
+
+    def delete_object(self, Bucket: str, Key: str) -> None:  # noqa: N803
+        self.calls.append("delete_object")
+        self.objects.pop(Key, None)
+
+
+def test_promotion_uses_the_copy_that_survives_a_file_over_five_gigabytes(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "vox_out.h5"
+    payload.write_bytes(b"a grid")
+    client = _RecordingClient()
+
+    B2Store(client=client, bucket="Clarify").put_file("vox/a/vox_out.h5", payload)
+
+    assert "copy" in client.calls
+
+
+def test_an_upload_interrupted_before_promotion_is_not_sent_again(tmp_path: Path) -> None:
+    """25 GB for one grid at 16 kHz, and a terabyte is about 22 hours. The
+    staging name is the file's own digest, so the bytes of a failed attempt are
+    already under the name the next one would choose."""
+    payload = tmp_path / "vox_out.h5"
+    payload.write_bytes(b"a grid")
+    staging = f"{STAGING}{digest_of_file(payload)}"
+    client = _RecordingClient(staged={staging: payload.stat().st_size})
+
+    B2Store(client=client, bucket="Clarify").put_file("vox/a/vox_out.h5", payload)
+
+    assert "upload_fileobj" not in client.calls
+    assert "copy" in client.calls
+
+
+def test_a_staged_object_of_the_wrong_size_is_sent_again(tmp_path: Path) -> None:
+    """Resuming on a name alone would promote whatever half-file was there."""
+    payload = tmp_path / "vox_out.h5"
+    payload.write_bytes(b"a grid")
+    staging = f"{STAGING}{digest_of_file(payload)}"
+    client = _RecordingClient(staged={staging: 2})
+
+    B2Store(client=client, bucket="Clarify").put_file("vox/a/vox_out.h5", payload)
+
+    assert "upload_fileobj" in client.calls
