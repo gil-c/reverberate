@@ -219,18 +219,38 @@ class B2Store:
         return digest
 
     def put_file(self, key: str, path: Path) -> str:
+        """Upload a file and promote it to ``key``, resuming a staged one.
+
+        The staging name is the file's own digest, so an upload interrupted
+        after the bytes landed but before the promotion has already left them
+        under the name the next attempt would choose. Sending them again costs
+        the whole file: 25 GB for one grid at 16 kHz, and the roadmap's own
+        bandwidth arithmetic puts a terabyte at about 22 hours. So a staged
+        object of the right size is promoted rather than re-sent.
+        """
         digest = digest_of_file(path)
         staging = f"{STAGING}{digest}"
         size = path.stat().st_size
-        with path.open("rb") as handle:
-            self._client.upload_fileobj(
-                handle,
-                self._bucket,
-                staging,
-                ExtraArgs={"Metadata": {DIGEST_META: digest}},
-            )
+        if not self._staged(staging, size):
+            with path.open("rb") as handle:
+                self._client.upload_fileobj(
+                    handle,
+                    self._bucket,
+                    staging,
+                    ExtraArgs={"Metadata": {DIGEST_META: digest}},
+                )
         self._promote(staging, self._key(key, False), size, digest)
         return digest
+
+    def _staged(self, staging: str, size: int) -> bool:
+        """Whether the whole file is already sitting under its staging name."""
+        try:
+            head = self._client.head_object(Bucket=self._bucket, Key=staging)
+        except Exception as error:  # noqa: BLE001 - botocore raises a generated class
+            if _is_missing(error):
+                return False
+            raise
+        return int(head["ContentLength"]) == size
 
     def _promote(self, staging: str, key: str, size: int, digest: str) -> None:
         """Copy a staged object to its real key once its size is confirmed.
@@ -244,12 +264,16 @@ class B2Store:
         if int(head["ContentLength"]) != size:
             self._client.delete_object(Bucket=self._bucket, Key=staging)
             raise StoreError(f"short upload for {key!r}: {head['ContentLength']} of {size} bytes")
-        self._client.copy_object(
+        # The managed copy, not ``copy_object``. A single-part server-side copy
+        # is capped at 5 GB, which no artefact of this project reached until the
+        # whole flat at 16 kHz: 25.2 GB of grid uploaded, then
+        # ``EntityTooLarge`` on the promotion, so the store had never once been
+        # able to publish a file that size. ``copy`` splits it into parts.
+        self._client.copy(
+            CopySource={"Bucket": self._bucket, "Key": staging},
             Bucket=self._bucket,
             Key=key,
-            CopySource={"Bucket": self._bucket, "Key": staging},
-            Metadata={DIGEST_META: digest},
-            MetadataDirective="REPLACE",
+            ExtraArgs={"Metadata": {DIGEST_META: digest}, "MetadataDirective": "REPLACE"},
         )
         self._client.delete_object(Bucket=self._bucket, Key=staging)
 
