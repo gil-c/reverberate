@@ -469,16 +469,33 @@ def _write_voxels(
 AUDIT_DIR = "voxels"
 
 
-def _link_audit(run_dir: Path, target: Path) -> dict[str, Any] | None:
+def _link_audit(
+    run_dir: Path, target: Path, store: ObjectStore | None = None
+) -> dict[str, Any] | None:
     """Expose a run's tiered audit payload, if it built one, without copying it.
 
     Linked rather than copied for the same reason the scenes are: the whole
-    flat at 16 kHz is about 2.2 GB of quads across thirteen rooms, and the site
+    flat at 16 kHz is about 1.7 GB of quads across twelve rooms, and the site
     is a temporary directory that would otherwise hold a second copy of it for
     as long as the viewer runs.
+
+    Pulled from the store when this checkout has none, which is the same order
+    the grid follows above: local, then remote, then say so. A payload is
+    derived and could be rebuilt instead, but rebuilding is thirteen minutes of
+    one core and fetching is a download, so a reader who only wants to look
+    should not have to compute.
     """
     source = run_dir / AUDIT_DIR
     index = source / "rooms.json"
+    if not index.is_file() and store is not None:
+        from reverberate.viz.payload_store import fetch_payload
+
+        run = run_dir.name
+        try:
+            if fetch_payload(store, run, source) is not None:
+                print(f"{run}: no audit payload on this machine, pulled it from the store")
+        except Exception as error:  # noqa: BLE001 - a store that will not answer is not a failure
+            print(f"{run}: the store could not deliver the audit payload ({error})")
     if not index.is_file():
         return None
     link = target / AUDIT_DIR
@@ -540,7 +557,7 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         shutil.copytree(source_audio, target / "audio", dirs_exist_ok=True)
         audio_names = {path.name for path in source_audio.glob("*.wav")}
 
-    audit = _link_audit(run_dir, target)
+    audit = _link_audit(run_dir, target, store)
     groups = surface_groups(model, model_materials(model_json), geometry=audit is None)
     placement = report["placement"]
     scene = run_scene(run_dir)

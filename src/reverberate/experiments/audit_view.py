@@ -387,6 +387,7 @@ def build(
     quad_budget: int = QUAD_BUDGET,
     only: list[str] | None = None,
     index_only: bool = False,
+    publish: bool = False,
 ) -> dict[str, Any]:
     """Build both tiers for every room and write them under ``out``.
 
@@ -512,7 +513,28 @@ def build(
     }
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(record, indent=1) + "\n")
+    if publish:
+        _publish(out, index_path.parent)
     return record
+
+
+def _publish(out: Path, payload: Path) -> None:
+    """Share the payload, and say plainly when there is nowhere to share it.
+
+    Silence is the failure mode this project has already paid for: W29's
+    voxelisation lived in a worktree, was never published, and went with the
+    worktree. A build that meant to publish and could not must not look like
+    one that did.
+    """
+    from reverberate.store import shared_store
+    from reverberate.viz.payload_store import publish_payload
+
+    store = shared_store()
+    if store is None:
+        print("no store on this machine, so the payload stays local")
+        return
+    digests = publish_payload(store, out.name, payload)
+    print(f"published {len(digests)} files to runs/{out.name}/voxels/")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -529,6 +551,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="rewrite rooms.json from the payloads on disk, merging nothing",
     )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="upload the payload to the object store when it is built",
+    )
     args = parser.parse_args(argv)
 
     record = build(
@@ -540,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         args.quad_budget,
         args.only,
         args.index_only,
+        args.publish,
     )
     fine = sum(int(room["fine"]["quads"]) for room in record["rooms"])
     coarse = sum(int(room["coarse"]["quads"]) for room in record["rooms"])

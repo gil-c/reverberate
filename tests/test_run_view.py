@@ -754,3 +754,52 @@ def test_the_triangles_are_left_out_when_the_grid_is_the_picture() -> None:
     assert without[0]["positions"] == [] and without[0]["indices"] == []
     assert without[0]["triangles"] == with_mesh[0]["triangles"] == 1
     assert without[0]["colour"] == with_mesh[0]["colour"]
+
+
+def test_the_audit_payload_is_pulled_from_the_store_when_this_machine_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Local, then remote, then say so -- the order the grid already follows.
+
+    A second checkout, or a rented machine, opens the run page and finds no
+    payload. Rebuilding it is thirteen minutes of one core; fetching it is a
+    download, and a reader who only wants to look should not have to compute.
+    """
+    from reverberate.store import MemoryStore
+    from reverberate.viz.payload_store import publish_payload
+    from test_payload_store import write_payload
+
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    store = MemoryStore()
+    publish_payload(store, "run", write_payload(tmp_path / "published" / "voxels"))
+    run = _write_run(tmp_path)
+    assert not (run / "voxels").exists()
+
+    build_site(run, tmp_path / "site", store)
+
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+    assert payload["audit"]["rooms"][0]["name"] == "room0"
+    assert (run / "voxels" / "room0" / "fine.f32").is_file()
+    assert "pulled it from the store" in capsys.readouterr().out
+
+
+def test_a_store_that_will_not_answer_leaves_the_page_standing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A page without the grid view is a worse trade than no page at all."""
+
+    class Broken:
+        def __getattr__(self, name: str) -> object:
+            def boom(*args: object, **kwargs: object) -> object:
+                raise RuntimeError("the bucket is on fire")
+
+            return boom
+
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    run = _write_run(tmp_path)
+
+    build_site(run, tmp_path / "site", Broken())  # type: ignore[arg-type]
+
+    payload = json.loads((tmp_path / "site" / "run.json").read_text())
+    assert payload["audit"] is None
+    assert "could not deliver the audit payload" in capsys.readouterr().out
