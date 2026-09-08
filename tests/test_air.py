@@ -284,6 +284,20 @@ def test_atmosphere_records_what_a_report_must_declare() -> None:
     assert record["standard"] == "ISO 9613-1"
 
 
+def test_the_humidity_is_recorded_under_both_names() -> None:
+    """Two branches named the same quantity differently, and no conflict said so.
+
+    The W10 branch calls it ``humidity_percent``; this one called it
+    ``relative_humidity_pct``. Git merges two report writers without a word,
+    and a reader looking for one key would not find the other. Both are
+    written until this module is deleted and the surviving name is the only
+    one left.
+    """
+    record = Atmosphere(relative_humidity_pct=35.0).record()
+    assert record["humidity_percent"] == 35.0
+    assert record["relative_humidity_pct"] == 35.0
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

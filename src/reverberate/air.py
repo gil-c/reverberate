@@ -15,7 +15,7 @@ per-sample, frequency-dependent gain ``exp(-m(f) c t)``. It is a time-varying
 filter on a signal that already exists, not an approximation that a diffuse
 field assumption has to excuse. So it costs no rental, it applies
 retroactively to every response already computed, and it needs no patch to the
-pinned solver. See ``docs/adr/0008-air-absorption-as-post-processing.md``.
+pinned solver. See ``docs/adr/0009-air-absorption-as-post-processing.md``.
 
 **Humidity is not a detail and must be declared with every run.** At 16 kHz the
 attenuation runs from 0.252 dB/m at 80 per cent relative humidity to 0.466 at
@@ -110,9 +110,21 @@ class Atmosphere:
         return self.temperature_c + 273.15
 
     def record(self) -> dict[str, Any]:
-        """What a ``report.json`` carries, so the decay can be reproduced."""
+        """What a ``report.json`` carries, so the decay can be reproduced.
+
+        **The humidity is written under both names, on purpose.** The W10
+        branch's own ``Atmosphere`` calls it ``humidity_percent`` and this one
+        called it ``relative_humidity_pct``. That is not a merge conflict and
+        nothing would have said so: two runs would simply record the same
+        quantity under two keys, and a reader looking for one would not find
+        the other. Reports already published by this branch carry
+        ``relative_humidity_pct``, so it stays; ``humidity_percent`` is the name
+        that survives the merge, so it is written too. When this module is
+        deleted the alias goes with it and the surviving key is the only one.
+        """
         return {
             "temperature_c": self.temperature_c,
+            "humidity_percent": self.relative_humidity_pct,
             "relative_humidity_pct": self.relative_humidity_pct,
             "pressure_kpa": self.pressure_kpa,
             "standard": "ISO 9613-1",

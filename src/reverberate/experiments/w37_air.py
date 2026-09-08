@@ -59,7 +59,7 @@ TRICK = (
     "absorption is exactly the per-sample gain exp(-m(f) c t) and not an "
     "approximation. It is free because it is arithmetic on a stored response, "
     "and it is exact because the solver's output is an impulse response rather "
-    "than a field. See docs/adr/0008-air-absorption-as-post-processing.md."
+    "than a field. See docs/adr/0009-air-absorption-as-post-processing.md."
 )
 
 #: The geometry this pair of runs was shot on, and what replaced it.

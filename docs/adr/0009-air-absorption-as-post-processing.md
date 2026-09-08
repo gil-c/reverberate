@@ -1,6 +1,12 @@
-# 0008: atmospheric absorption is applied after the solve, not inside it
+# 0009: atmospheric absorption is applied after the solve, not inside it
 
 Status: accepted.
+
+Numbered 0009 rather than 0008 because the W10 branch, which merges first by
+agreement of both sessions, holds 0008 for its ambisonic decoding decision. Two
+files carrying one number is not a merge conflict and nothing would have said
+so: git merges them as two distinct paths and the collision only appears the
+first time somebody writes "ADR 0008" and means one of them.
 
 ## Context
 
