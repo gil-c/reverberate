@@ -412,22 +412,38 @@ def apply_air_absorption(
     **What the frame buys is a dynamic range, not a length of time.** The error
     appears where the signal at a frequency has fallen below what leaks into
     that bin from the loud part of the spectrum, so what decides it is the ratio
-    between the two. Measured on a 16 kHz tone, which falls 125 dB per second to
-    air alone: every frame tracks the analytic decay exactly until it reaches
-    its own floor, and then flattens onto it.
+    between the two. Duration only decides how long the signal takes to fall
+    that far, which is why it works as a rule of thumb and fails as an
+    explanation.
 
-    | frame | leakage floor, below the tone's own start |
+    **The quantity is where the curve leaves the analytic line, and not any
+    floor it settles on**, because it settles on nothing: on a 16 kHz tone
+    filtered here, once the tone is dead the block levels of the last half
+    second span 43 dB at a 128 sample frame and 104 dB at 2048. That residue is
+    numerical, any single number drawn from it depends on how it is averaged,
+    and two implementations comparing tail averages will disagree by tens of dB
+    while both filters are right. Two sessions of this project did exactly that.
+
+    So: a 16 kHz tone falls 125 dB per second to air alone, and each frame
+    follows that line until it departs from it by more than 6 dB, at
+
+    | frame | departs below the tone's start at |
     | --- | --- |
-    | 128 | -96 dB |
-    | 256 | -110 dB |
-    | 512 | -125 dB |
-    | 1024 | -140 dB |
-    | 2048 | -156 dB |
-    | 4096 | -171 dB |
+    | 128 | -86 dB |
+    | 256 | -100 dB |
+    | 512 | -115 dB |
+    | 1024 | -129 dB |
+    | 2048 | -145 dB |
 
-    **Doubling the frame buys about 15 dB of floor and nothing else.** Duration
-    only decides how long the signal takes to fall that far, which is why it
-    works as a rule of thumb and fails as an explanation.
+    A doubling buys of the order of 14 dB here. **The constant is not settled**:
+    another implementation of the same filter measured a different absolute
+    level on this same definition, so only the shape is agreed and the number
+    below is this implementation's own.
+
+    **The margin a caller actually needs is enormous.** The default frame holds
+    the line to about -100 dB, and the top band of a measured room response
+    falls of the order of 30 dB. That is the mechanical reason an audit of real
+    responses moves T30 by 0.37 per cent.
 
     A delta and a pure tone reach the floor quickly, because they leave nothing
     at the top of the band; a room response does not, because its tail is

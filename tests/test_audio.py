@@ -371,20 +371,23 @@ def test_a_real_decaying_response_barely_notices_the_frame_length() -> None:
         assert abs(difference) < 0.2
 
 
-def test_doubling_the_frame_buys_about_fifteen_decibels_of_floor() -> None:
-    """The limit is a dynamic range, not a length of time.
+def test_a_longer_frame_follows_the_analytic_decay_further_down() -> None:
+    """The well posed quantity, after a tail average turned out not to be one.
 
-    A 16 kHz tone falls 125 dB per second to air alone. Every frame follows that
-    exactly until it meets its own spectral leakage, then flattens onto it. What
-    a longer frame buys is a lower floor, and duration only decides how long the
-    signal takes to reach it.
+    Once a 16 kHz tone is dead the block levels of the last half second span
+    tens of dB, so any single number drawn from that residue depends on how it
+    is averaged; two sessions of this project compared tail averages and
+    disagreed by 50 dB while both filters were right. What is well posed is
+    where the curve leaves the analytic line, which does not depend on anything
+    that happens after it.
     """
     rate = 48000.0
-    time = np.arange(int(3.0 * rate)) / rate
+    time = np.arange(int(4.0 * rate)) / rate
     tone = np.sin(2.0 * np.pi * 16000.0 * time)[np.newaxis, :]
-    block = int(0.02 * rate)
+    block = int(0.01 * rate)
+    slope = DECIBELS_PER_NEPER * air_absorption_np_per_m(np.array([16000.0]))[0] * 343.0
 
-    def floor_db(frame: int) -> float:
+    def departure_db(frame: int) -> float:
         filtered = apply_air_absorption(tone, rate, frame=frame)[0]
         count = filtered.size // block
         envelope = 20.0 * np.log10(
@@ -393,11 +396,28 @@ def test_doubling_the_frame_buys_about_fifteen_decibels_of_floor() -> None:
             )
             + 1e-300
         )
-        settled = envelope[int(0.8 * count) : int(0.95 * count)].mean()
-        return float(settled - envelope[0])
+        centres = (np.arange(count) + 0.5) * 0.01
+        kept = centres > 0.15
+        line = envelope[kept][0] - slope * (centres[kept] - centres[kept][0])
+        adrift = np.flatnonzero(envelope[kept] - line > 6.0)
+        return float(line[adrift[0]] - envelope[kept][0]) if adrift.size else float("-inf")
 
-    floors = [floor_db(frame) for frame in (256, 512, 1024, 2048)]
-    steps = np.diff(floors)
-    assert np.all(steps < -12.0)
-    assert np.all(steps > -18.0)
-    assert floors[0] < -100.0
+    levels = [departure_db(frame) for frame in (256, 512, 1024, 2048)]
+    assert np.all(np.diff(levels) < -8.0)
+    assert levels[0] < -90.0
+
+
+def test_the_dead_tail_is_residue_and_not_a_floor() -> None:
+    """Why a tail average must not be quoted as a property of the filter."""
+    rate = 48000.0
+    time = np.arange(int(4.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)[np.newaxis, :]
+    block = int(0.01 * rate)
+    filtered = apply_air_absorption(tone, rate, frame=2048)[0]
+    tail = filtered[int(3.5 * rate) :]
+    count = tail.size // block
+    levels = 20.0 * np.log10(
+        np.array([np.sqrt(np.mean(tail[i * block : (i + 1) * block] ** 2)) for i in range(count)])
+        + 1e-300
+    )
+    assert levels.max() - levels.min() > 40.0
