@@ -89,7 +89,10 @@ class BinauralDecoder:
             "filter_length": self.length,
             "sample_rate_hz": self.sample_rate_hz,
             "modelling_delay_samples": self.modelling_delay_samples,
-            "magls_cut_on_hz": self.cut_on_hz,
+            # None rather than a number a JSON reader cannot express: a decoder
+            # that never switches to matching magnitude is the plain fit, and
+            # writing infinity here produces a file that is not JSON.
+            "magls_cut_on_hz": self.cut_on_hz if np.isfinite(self.cut_on_hz) else None,
             "covariance_constrained": self.covariance_constrained,
             "note": (
                 "magnitude least squares above the cut-on and a diffuse field "

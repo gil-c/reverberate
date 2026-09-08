@@ -383,7 +383,12 @@ def prepare_room(out_dir: Path, entry_path: Path, *, double_precision: bool = Fa
         receivers,
         plan["samples"] / plan["sample_rate_hz"],
         diff_source=not double_precision,
-        out_path=comms_dir / "source0.h5",
+        # Named for the engine, not for the source. ``execute`` renames on the
+        # way in for a local run, but ``remote.upload`` refuses by name any file
+        # that is not one of the four the engine reads, which is a rule worth
+        # keeping: an unexpected file on a rented machine is a data policy
+        # problem and not merely a slow upload. So the name is right here.
+        out_path=comms_dir / "comms_out.h5",
         interpolation="nearest",
     )
 

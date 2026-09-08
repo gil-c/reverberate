@@ -18,6 +18,7 @@ from reverberate.spatial.encode import (
     encode_spectrum,
     numerical_wavenumber,
     shell_weights,
+    well_posed,
 )
 from reverberate.spatial.field import plane_wave_coefficients
 from reverberate.spatial.sh import acn, channel_count, degrees_of, scene_to_ambisonic
@@ -205,6 +206,53 @@ def test_bins_above_the_band_limit_are_left_at_zero() -> None:
     )
     assert np.any(out[0] != 0.0)
     assert np.all(out[1] == 0.0)
+
+
+def test_a_gate_that_closes_on_everything_is_reported_rather_than_silent() -> None:
+    """The trap: a margin tuned at fit order ten, subtracted from a small one.
+
+    At a fit order of five the gate sits at ``k r = 1``, which at 16 kHz is a
+    radius of 1.1 mm, under one grid cell. The fit is then determined by its
+    regularisation and not by the field, and the only symptom is a direction of
+    arrival that quietly drifts by degrees.
+    """
+    array = an_array()
+    frequency = np.array([1000.0, 16000.0])
+    k = 2.0 * np.pi * frequency / SOUND_SPEED
+    healthy = well_posed(array, frequency, k, EncoderSettings(order=7, fit_order=10))
+    assert healthy["under_determined_hz"] == []
+    assert healthy["least_admitted"] > healthy["unknowns"]
+
+    starved = well_posed(array, frequency, k, EncoderSettings(order=3, fit_order=5))
+    assert starved["under_determined_hz"] == [16000.0]
+    assert starved["least_admitted"] < starved["unknowns"]
+
+
+def test_the_gate_is_allowed_below_the_order_being_reported() -> None:
+    """The premise of the design, kept as a test so a floor is not added again.
+
+    An order is recoverable from a shell where ``k r`` is well under it, because
+    the limit here is dynamic range and not a microphone's noise. Forcing the
+    gate up to the output order costs 22 dB at 8 kHz, measured.
+    """
+    array = an_array()
+    frequency = np.array([8000.0])
+    settings = EncoderSettings(order=7, fit_order=10)
+    assert settings.gate_kr < settings.order
+    generous = conditioning(array, frequency, sound_speed_m_s=SOUND_SPEED, settings=settings)
+    raised = conditioning(
+        array,
+        frequency,
+        sound_speed_m_s=SOUND_SPEED,
+        settings=EncoderSettings(order=7, fit_order=10, gate_margin=3.0),
+    )
+    assert generous.error_db[0, 7] < raised.error_db[0, 7] - 10.0
+
+
+def test_the_conditioning_report_carries_the_well_posedness_check() -> None:
+    array = an_array()
+    report = conditioning(array, np.array([4000.0]), sound_speed_m_s=SOUND_SPEED)
+    assert report.record()["well_posed"]["unknowns"] == channel_count(10)
 
 
 def test_a_pressure_block_of_the_wrong_shape_is_refused() -> None:

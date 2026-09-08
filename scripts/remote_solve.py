@@ -144,6 +144,17 @@ def rank_offers(
     return known + unknown
 
 
+def say(message: str) -> None:
+    """Print and flush.
+
+    Every line this driver prints is progress on a job of hours, and Python
+    buffers stdout when it is redirected to a file. A run whose log stays empty
+    for three hours cannot be watched, cannot be diagnosed while it is alive,
+    and looks identical to a hang.
+    """
+    print(message, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True, help="a run directory holding plan.json")
@@ -152,10 +163,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-dph", type=float, default=0.70)
     parser.add_argument("--double", action="store_true")
     parser.add_argument("--yes", action="store_true", help="required to spend money")
+    parser.add_argument(
+        "--instance",
+        type=int,
+        default=None,
+        help=(
+            "attach to an instance already rented rather than renting another. "
+            "For the case this exists for: a run that failed after the rental "
+            "and before the solve, where renting again pays twice for the same "
+            "boot and the same build"
+        ),
+    )
     args = parser.parse_args(argv)
 
     plan = json.loads((args.run / "plan.json").read_text())
-    comms = args.run / "comms" / "source0.h5"
+    comms = args.run / "comms" / "comms_out.h5"
     if not comms.is_file():
         raise SystemExit(f"{comms} is missing: run the prepare step first")
     entry = entry_from_key(args.key)
@@ -167,65 +189,93 @@ def main(argv: list[str] | None = None) -> int:
     client = vast.VastClient()
     identity = vast.account_identity(client)
     anchor_hours = float(plan["cost"]["estimated_gpu_s"]) / 3600.0
-    offers = client.search(
-        vast.search_query(
-            gpu_name="",
-            min_disk_gb=int(need.disk_gb),
-            min_gpu_ram_gb=need.vram_gb,
-            min_reliability=0.99,
-        ),
-        limit=200,
-    )
-    ranked = rank_offers(
-        [offer for offer in offers if offer.dph_total <= args.max_dph],
-        need,
-        anchor_hours,
-        args.hours,
-    )
-    if not ranked:
-        raise SystemExit(f"nothing under {args.max_dph} USD/h meets: {need.why}")
     files = engine_inputs(entry, comms)
     upload_gb = sum(f.stat().st_size for f in files) / 1e9
+    say(f"run {args.run.name}, cache {args.key}")
+    say(f"  needs {need.vram_gb:.0f} GB VRAM, {need.ram_gb:.0f} GB RAM, {need.disk_gb:.0f} GB disk")
+    say(f"  because {need.why}")
+    say(f"  the solver takes {anchor_hours:.2f} h on the anchor, an {ANCHOR_GPU}")
+    say(f"  upload {upload_gb:.2f} GB, fetch {plan['cost']['sim_outs_bytes'] / 1e9:.2f} GB")
+    say(f"  ledger stands at {vast.ledger_total_usd(vast.read_ledger()):.2f} USD")
 
-    print(f"run {args.run.name}, cache {args.key}")
-    print(
-        f"  needs {need.vram_gb:.0f} GB VRAM, {need.ram_gb:.0f} GB RAM, {need.disk_gb:.0f} GB disk"
-    )
-    print(f"  because {need.why}")
-    print(f"  the solver takes {anchor_hours:.2f} h on the anchor, an {ANCHOR_GPU}")
-    print(f"\n  {len(ranked)} offers meet it, ranked by what the whole job costs:")
-    for candidate, hours, cost, why in ranked[:6]:
-        if hours is None or cost is None:
-            print(f"    {candidate.id} {candidate.gpu_name} {candidate.dph_total:.3f} USD/h: {why}")
-            continue
-        flag = "" if hours <= args.hours else f"  OVER THE {args.hours:g} h CAP"
-        print(
-            f"    {candidate.id} {candidate.gpu_name} {candidate.dph_total:.3f} USD/h -> "
-            f"{hours:.2f} h, {cost:.2f} USD ({why}){flag}"
+    offer = None
+    hours: float | None = None
+    cost: float | None = None
+    why = ""
+    if args.instance is None:
+        # Ranked by what the whole job costs rather than by the hourly rate. The
+        # search is skipped entirely when attaching, because an instance already
+        # rented is not a choice between offers and a market that has moved on
+        # is no reason to refuse to use it.
+        offers = client.search(
+            vast.search_query(
+                gpu_name="",
+                min_disk_gb=int(need.disk_gb),
+                min_gpu_ram_gb=need.vram_gb,
+                min_reliability=0.99,
+            ),
+            limit=200,
         )
-    offer, hours, cost, why = ranked[0]
-    if hours is not None and hours > args.hours:
-        raise SystemExit(
-            f"the best offer needs {hours:.2f} h against a {args.hours:g} h cap; "
-            "raise the cap or the rate rather than starting a run that cannot finish"
+        ranked = rank_offers(
+            [candidate for candidate in offers if candidate.dph_total <= args.max_dph],
+            need,
+            anchor_hours,
+            args.hours,
         )
-    budget = vast.estimate_cost_usd(offer.dph_total, args.hours)
-    print(f"\n  chosen: {offer.describe()}")
-    print(f"  cap {args.hours:g} h -> at most {budget:.2f} USD at the offer's rate")
-    print(f"  upload {upload_gb:.2f} GB, fetch {plan['cost']['sim_outs_bytes'] / 1e9:.2f} GB")
-    print(f"  ledger stands at {vast.ledger_total_usd(vast.read_ledger()):.2f} USD")
+        if not ranked:
+            raise SystemExit(f"nothing under {args.max_dph} USD/h meets: {need.why}")
+        say(f"\n  {len(ranked)} offers meet it, ranked by what the whole job costs:")
+        for candidate, candidate_hours, candidate_cost, candidate_why in ranked[:6]:
+            if candidate_hours is None or candidate_cost is None:
+                say(
+                    f"    {candidate.id} {candidate.gpu_name} "
+                    f"{candidate.dph_total:.3f} USD/h: {candidate_why}"
+                )
+                continue
+            flag = "" if candidate_hours <= args.hours else f"  OVER THE {args.hours:g} h CAP"
+            say(
+                f"    {candidate.id} {candidate.gpu_name} {candidate.dph_total:.3f} USD/h -> "
+                f"{candidate_hours:.2f} h, {candidate_cost:.2f} USD ({candidate_why}){flag}"
+            )
+        offer, hours, cost, why = ranked[0]
+        if hours is not None and hours > args.hours:
+            raise SystemExit(
+                f"the best offer needs {hours:.2f} h against a {args.hours:g} h cap; "
+                "raise the cap or the rate rather than starting a run that cannot finish"
+            )
+        say(f"\n  chosen: {offer.describe()}")
+        say(
+            f"  cap {args.hours:g} h -> at most "
+            f"{vast.estimate_cost_usd(offer.dph_total, args.hours):.2f} USD at the offer's rate"
+        )
     if not args.yes:
-        print("\nnothing rented: pass --yes once the figures above are approved")
+        say("\nnothing rented: pass --yes once the figures above are approved")
         return 0
 
-    rental = vast.rent(client, offer, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20)
-    print(f"rented {rental.instance_id}, watchdog pid {rental.watchdog_pid}")
+    if args.instance is None:
+        assert offer is not None
+        rental = vast.rent(
+            client, offer, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
+        )
+        instance_id = rental.instance_id
+        say(f"rented {instance_id}, watchdog pid {rental.watchdog_pid}")
+    else:
+        instance_id = int(args.instance)
+        existing = client.instance(instance_id)
+        if existing is None:
+            raise SystemExit(f"instance {instance_id} does not exist; nothing to attach to")
+        attached_gpu, attached_dph = existing.gpu_name, existing.dph_total
+        say(
+            f"attached to {instance_id}, {existing.gpu_name} at {existing.dph_total:.3f} USD/h, "
+            f"up {existing.uptime_hours():.2f} h. Its own watchdog still holds the deadline; "
+            "no second rental and no second ledger row"
+        )
     retrieved = False
     try:
-        machine = vast.wait_for_ssh(client, rental.instance_id, identity)
-        print(f"ssh up at {machine.host}:{machine.port}")
+        machine = vast.wait_for_ssh(client, instance_id, identity)
+        say(f"ssh up at {machine.host}:{machine.port}")
         built = provision(machine, Path("scripts/build_pffdtd.sh"))
-        print(f"engine built in {built / 60:.1f} min")
+        say(f"engine built in {built / 60:.1f} min")
         result = solve(
             machine,
             files,
@@ -248,9 +298,9 @@ def main(argv: list[str] | None = None) -> int:
                         "fetch_s": result.fetch_s,
                         "uploaded_bytes": result.uploaded_bytes,
                         "where": f"{machine.user}@{machine.host}:{machine.port}",
-                        "instance_id": rental.instance_id,
-                        "gpu": offer.gpu_name,
-                        "quoted_dph": offer.dph_total,
+                        "instance_id": instance_id,
+                        "gpu": offer.gpu_name if offer else attached_gpu,
+                        "quoted_dph": offer.dph_total if offer else attached_dph,
                         "predicted_hours": hours,
                         "predicted_cost_usd": cost,
                         "bandwidth_note": why,
@@ -260,14 +310,14 @@ def main(argv: list[str] | None = None) -> int:
                 ]
             },
         )
-        print(f"solved in {result.engine_s / 3600:.2f} h, fetched in {result.fetch_s:.0f} s")
+        say(f"solved in {result.engine_s / 3600:.2f} h, fetched in {result.fetch_s:.0f} s")
     finally:
         if retrieved:
-            print("tearing down, the artefact is home")
-            vast.teardown(client, rental.instance_id)
+            say("tearing down, the artefact is home")
+            vast.teardown(client, instance_id)
         else:
-            print(
-                f"NOT tearing down instance {rental.instance_id}: the artefact is not home. "
+            say(
+                f"NOT tearing down instance {instance_id}: the artefact is not home. "
                 f"The watchdog destroys it at the {args.hours:g} h deadline regardless. "
                 f"Fetch by hand from /root/run/sim_outs.h5 before then if the solve finished."
             )

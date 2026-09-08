@@ -36,7 +36,7 @@ rehearsal box, not assumed here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import numpy as np
@@ -56,6 +56,7 @@ __all__ = [
     "encode_spectrum",
     "numerical_wavenumber",
     "shell_weights",
+    "well_posed",
 ]
 
 #: Which wavenumber the radial terms are evaluated at. ``ideal`` is
@@ -99,7 +100,18 @@ class EncoderSettings:
 
     @property
     def gate_kr(self) -> float:
-        """The ``k r`` at which a shell starts being dropped."""
+        """The ``k r`` at which a shell starts being dropped.
+
+        Deliberately allowed to fall below the order being reported. That is the
+        whole premise of this design: an order is recoverable from a shell where
+        ``k r`` is well under it, because the limit here is dynamic range and
+        not a microphone's noise. Measured, order 7 comes back at -48 dB from a
+        gate of 6, and a floor at the output order costs 22 dB at 8 kHz.
+
+        What it must not do is close on everything, which is a condition on the
+        number of receivers admitted rather than on the order.
+        :func:`well_posed` is where that is checked.
+        """
         return float(self.fit_order) - float(self.gate_margin)
 
     def record(self) -> dict[str, Any]:
@@ -222,6 +234,41 @@ def shell_weights(radii: np.ndarray, k: np.ndarray, settings: EncoderSettings) -
     width = max(float(settings.gate_taper), 1e-9)
     ramp = np.clip((kr - low) / width, 0.0, 1.0)
     return np.asarray(0.5 * (1.0 + np.cos(np.pi * ramp)), dtype=float)
+
+
+def well_posed(
+    design: ArrayDesign, frequency_hz: np.ndarray, k: np.ndarray, settings: EncoderSettings
+) -> dict[str, Any]:
+    """Where the gate leaves fewer receivers than the fit has unknowns.
+
+    The gate is what stops a shell the truncated fit cannot describe from
+    folding into the orders that are kept, and it is stated as an offset below
+    the fit order. Subtracting a margin tuned at a fit order of ten from a small
+    one closes it on almost everything: at a fit order of five the gate sits at
+    ``k r = 1``, which at 16 kHz is a radius of 1.1 mm, smaller than the grid
+    cell, so the fit is determined by its regularisation and nothing else. That
+    was measured as a direction of arrival error rising from 0.04 degrees to
+    7.7 above 4 kHz, and it was silent.
+
+    So the condition is counted rather than argued: the admitted weight has to
+    exceed the number of unknowns. Reported rather than raised, because a
+    frequency at the very bottom of the band legitimately has little to fit.
+    """
+    weights = shell_weights(design.radii, k, settings)
+    admitted = weights.sum(axis=1)
+    unknowns = channel_count(settings.fit_order)
+    short = admitted < unknowns
+    return {
+        "unknowns": int(unknowns),
+        "receivers": int(design.count),
+        "under_determined_hz": [round(float(f), 1) for f in np.atleast_1d(frequency_hz)[short]],
+        "least_admitted": round(float(admitted.min()), 1),
+        "note": (
+            "the gate admits fewer receivers than the fit has unknowns at these "
+            "frequencies, so the answer there is set by the regularisation "
+            "rather than by the field"
+        ),
+    }
 
 
 def _basis(design: ArrayDesign, order: int) -> np.ndarray:
@@ -356,10 +403,12 @@ class ConditioningReport:
     effective_order: np.ndarray
     noise_floor_db: float
     threshold_db: float
+    well_posed: dict[str, Any] = field(default_factory=dict)
 
     def record(self) -> dict[str, Any]:
         return {
             "frequency_hz": [round(float(f), 1) for f in self.frequency_hz],
+            "well_posed": self.well_posed,
             "effective_order": [int(n) for n in self.effective_order],
             "error_db": [[round(float(v), 1) for v in row] for row in self.error_db],
             "noise_floor_db": self.noise_floor_db,
@@ -435,8 +484,10 @@ def conditioning(
                 break
             highest = n
         effective[row] = highest
+    posedness = well_posed(design, frequency, k, settings)
     return ConditioningReport(
         frequency_hz=frequency,
+        well_posed=posedness,
         error_db=error,
         effective_order=effective,
         noise_floor_db=noise_floor_db,
