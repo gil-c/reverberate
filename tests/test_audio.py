@@ -421,3 +421,54 @@ def test_the_dead_tail_is_residue_and_not_a_floor() -> None:
         + 1e-300
     )
     assert levels.max() - levels.min() > 40.0
+
+
+def test_the_window_pair_is_worth_fifty_decibels_of_leakage() -> None:
+    """Why two correct implementations of this filter differed by 70 dB.
+
+    A Hann pair is a squared window, whose spectrum falls away far faster than a
+    cosine one, so it keeps leakage out of a weak bin much longer. Neither pair
+    is wrong. The square root pair is kept for splitting the modification evenly
+    between analysis and synthesis, and this test exists so that the price of
+    that choice stays a measured number rather than a forgotten one.
+    """
+    rate, frame = 48000.0, 256
+    time = np.arange(int(4.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)
+    hann = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(frame) / frame)
+    attenuation = air_absorption_np_per_m(np.fft.rfftfreq(frame, 1.0 / rate))
+    slope = DECIBELS_PER_NEPER * air_absorption_np_per_m(np.array([16000.0]))[0] * 343.0
+
+    def overlap_add(analysis: np.ndarray, synthesis: np.ndarray) -> np.ndarray:
+        hop = frame // 4
+        padded = np.zeros(tone.size + 2 * frame)
+        padded[frame : frame + tone.size] = tone
+        out = np.zeros_like(padded)
+        weight = np.zeros_like(padded)
+        for start in range(0, padded.size - frame + 1, hop):
+            centre = (start + frame / 2.0 - frame) / rate
+            gain = np.exp(-attenuation * 343.0 * max(centre, 0.0))
+            spectrum = np.fft.rfft(padded[start : start + frame] * analysis)
+            out[start : start + frame] += np.fft.irfft(spectrum * gain, n=frame) * synthesis
+            weight[start : start + frame] += analysis * synthesis
+        inside = slice(frame, frame + tone.size)
+        return out[inside] / weight[inside]
+
+    def departure_db(signal: np.ndarray) -> float:
+        block = int(0.01 * rate)
+        count = signal.size // block
+        envelope = 20.0 * np.log10(
+            np.array(
+                [np.sqrt(np.mean(signal[i * block : (i + 1) * block] ** 2)) for i in range(count)]
+            )
+            + 1e-300
+        )
+        centres = (np.arange(count) + 0.5) * 0.01
+        kept = centres > 0.15
+        line = envelope[kept][0] - slope * (centres[kept] - centres[kept][0])
+        adrift = np.flatnonzero(envelope[kept] - line > 6.0)
+        return float(line[adrift[0]] - envelope[kept][0]) if adrift.size else float("-inf")
+
+    root = departure_db(overlap_add(np.sqrt(hann), np.sqrt(hann)))
+    squared = departure_db(overlap_add(hann, hann))
+    assert squared < root - 40.0

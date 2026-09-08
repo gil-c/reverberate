@@ -435,10 +435,29 @@ def apply_air_absorption(
     | 1024 | -129 dB |
     | 2048 | -145 dB |
 
-    A doubling buys of the order of 14 dB here. **The constant is not settled**:
-    another implementation of the same filter measured a different absolute
-    level on this same definition, so only the shape is agreed and the number
-    below is this implementation's own.
+    A doubling buys of the order of 14 dB here.
+
+    **Those levels belong to the square root Hann pair specifically, and the
+    choice of pair is worth 50 to 70 dB.** Another implementation of this filter
+    measured levels far lower on this same definition, and the whole difference
+    is the window scheme rather than the statistic. Measured here, departure
+    level with a Hann pair against the square root pair, same gain surface and
+    same overlap:
+
+    | frame | square root Hann | Hann | difference |
+    | --- | --- | --- | --- |
+    | 128 | -86 dB | -136 dB | 50 dB |
+    | 256 | -100 dB | -151 dB | 51 dB |
+    | 512 | -115 dB | -171 dB | 56 dB |
+    | 1024 | -129 dB | -199 dB | 70 dB |
+
+    A Hann pair is a squared window, whose spectrum falls away far faster, so it
+    keeps leakage out of a weak bin much longer, and the gap widens with the
+    frame. **Neither is wrong and both are exact wherever there is signal.** The
+    square root pair is kept because it splits the modification evenly between
+    analysis and synthesis, which the other does not, and because the margin
+    below is already enormous. Anyone who ever needs another 50 dB of it should
+    change the pair rather than the frame.
 
     **The margin a caller actually needs is enormous.** The default frame holds
     the line to about -100 dB, and the top band of a measured room response
