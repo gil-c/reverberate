@@ -24,18 +24,33 @@ fill reached. What is left is the collider minus the air the render mesh proves
 is there, and marching cubes turns it back into one closed surface -- which is
 exactly the property the collider was being kept for.
 
-**It is never a silent substitution.** A carve that comes back empty, open, or
-that the triangle budget cannot be reduced to without opening, is discarded and
-the plain collider is used. :class:`CarveReport` names every template in each
-case, and :func:`carve_summary` puts the counts where the manifest can carry
-them. The whole point of the change is that the picture stops lying; a fallback
-nobody can see would be the same fault in the other direction.
+**It is never a silent substitution.** A carve that comes back empty or open is
+discarded and the plain collider is used. :class:`CarveReport` names every
+template in each case, and names separately the ones whose shipped mesh sits
+outside :data:`VOLUME_TOLERANCE` of its own isosurface. The whole point of the
+change is that the picture stops lying; a fallback nobody can see would be the
+same fault in the other direction.
 
 **The triangle budget is not optional.** Marching cubes on one wardrobe at 6 mm
 returns 207 312 triangles against the collider's 5 848, and voxelisation cost is
 driven by triangle count. Each carve is decimated to a multiple of the collider
 it replaces, so the scene grows by a bounded factor rather than by whatever the
 isosurface happened to need.
+
+*But the budget must not be a way of losing the object.* Reaching it was gated
+on ``trimesh``'s ``is_watertight``, which asks for edge-manifoldness on top of
+closure, and a hard-decimated isosurface fails that on a few dozen edges out of
+a million while remaining perfectly closed. Measured on this flat, that rule
+discarded the carve for **46 of 135 templates -- 89 placed instances holding
+41.6 m3 of collider**: the christmas tree went into the grid as a 0.95 m3 solid
+cone where its carve is 0.13, the carpet as 0.83 m3 where its carve is 0.18, the
+curtain as 0.56 against 0.17. Closure is now
+:func:`~reverberate.geometry.orientation.is_closed` and the ladder in
+:func:`_to_budget` spans the factor of eight its own docstring always claimed.
+All 46 come back. Over the flat's 231 placed instances that is **54.55 m3 of
+simulated obstacle down to 36.38**, for **2 165 150 obstacle triangles up to
+3 218 826** -- half again as much voxelisation, against a third of the volume
+that was never there.
 """
 
 from __future__ import annotations
@@ -51,6 +66,7 @@ from scipy import ndimage
 from skimage import measure
 
 from reverberate.geometry.hssd_assets import resolve_asset
+from reverberate.geometry.orientation import is_closed
 from reverberate.settings import data_root
 
 __all__ = [
@@ -60,14 +76,53 @@ __all__ = [
     "carve_collider",
 ]
 
-#: Side of the cell the carve is decided on, in metres. One fixed value for
-#: every scene and every ``fmax``, deliberately: the bedroom at 16 kHz and the
-#: apartment at 4 kHz must be the *same* geometry, or nothing measured on one
-#: says anything about the other. 6 mm sits below the 8.17 mm grid step at
-#: 4 kHz, so the carve never invents detail the coarser of the two grids cannot
-#: see, and above the point where a template's occupancy array stops fitting in
-#: memory.
+#: Coarsest side of the cell the carve is decided on, in metres, and the pitch
+#: every template falls back to. 6 mm sits below the 8.17 mm grid step at 4 kHz,
+#: so the carve never invents detail the coarser of this project's two grids
+#: cannot see, and it is what every template used before the pitch became a
+#: per-template choice.
 CARVE_PITCH_M = 0.006
+
+#: The pitches a template may be carved on, coarsest first. Chosen per template
+#: by :func:`pitch_for` and **never by ``fmax``**: the bedroom at 16 kHz and the
+#: apartment at 4 kHz must be the *same* geometry, or nothing measured on one
+#: says anything about the other. Every rung is a function of the template's own
+#: bounds and its own render mesh, so one template gets one pitch whatever grid
+#: is later laid over it.
+#:
+#: 2 mm is the floor because the finest grid this project builds is 2.043 mm, at
+#: 16 kHz and 10.5 points per wavelength. A carve finer than that would decide
+#: occupancy no solver here can read.
+CARVE_PITCH_LADDER = (0.006, 0.004, 0.003, 0.002)
+
+#: The most faces the carve will let an isosurface reach, which is what bounds
+#: the pitch from below on a large object. Past about two million the reduction
+#: to a scene-affordable budget stops holding the volume: measured, the carpet's
+#: 1 865 356 faces came back 0.5 per cent small at 2 000 and the curtain's
+#: 1 646 378 came back **40 per cent large**. A finer pitch that cannot be
+#: carried by a mesh is not a finer carve, it is a worse one.
+ISO_FACE_CAP = 2_000_000
+
+#: Isosurface faces per square metre of render surface, times pitch squared --
+#: the constant that lets :func:`pitch_for` predict an isosurface without
+#: building one. Measured over nine templates of this flat at 6 mm: 0.98
+#: (dresser), 1.22 (couch), 1.24 (fridge), 1.49 (piano), 1.94 (christmas tree),
+#: 2.00 (carpet), 2.03 (plant), 2.39 (car), 4.30 (curtain). The top of that
+#: range is used, because this number decides whether to spend a pitch and
+#: over-estimating costs a refinement while under-estimating costs the mesh.
+FACES_PER_AREA = 4.5
+
+#: How much of the coarse carve's volume a finer pitch must keep to be believed.
+#: The flood fill is stopped by the conservatively marked shell of the render
+#: mesh, and that shell is what plugs the mesh's own holes -- HSSD's render
+#: meshes are wide open, the fridge's 1 676 faces carrying 1 416 boundary edges.
+#: The plugging band narrows with the pitch, so a finer pitch is where a leak
+#: would first appear, and a leak does not look like a refinement: it collapses
+#: the carve by three orders of magnitude (measured at 0.979 m3 to 0.001 on that
+#: fridge, with a rasteriser tight enough to let go). Refinement between rungs
+#: runs to a factor of two either way, so a tenth is far below any real one and
+#: far above any leak.
+LEAK_FLOOR = 0.10
 
 #: Largest occupancy array a single template may use, in cells. Past it the
 #: carve is refused rather than retried at a coarser pitch: a second pitch is a
@@ -93,6 +148,18 @@ BUDGET_FLOOR = 2000
 #: to save a rounding error on the triangle count.
 ABSOLUTE_CAP = 25_000
 
+#: How far a decimated carve's volume may sit from the isosurface it reduces,
+#: as a fraction. The isosurface is the shape the occupancy decided; the mesh
+#: only carries it, so a reduction that restates it a fifth larger is not a
+#: cheaper version of the carve, it is a different object -- and larger is the
+#: direction this whole module exists to fight. :func:`_to_budget` climbs its
+#: ladder until a rung lands inside this band, spending triangles to keep the
+#: shape; when none does it returns the closest rung anyway and
+#: :attr:`CarveResult.volume_error` records the miss, because the alternative
+#: is the collider and the collider is wrong by an order of magnitude rather
+#: than by a fifth.
+VOLUME_TOLERANCE = 0.10
+
 #: Above this share of the collider's own cells, the fill has removed nothing
 #: worth the substitution and the collider is kept. Counted in cells rather than
 #: in volume: both sides then come from the same rasteriser, so the comparison
@@ -112,6 +179,20 @@ class CarveResult:
     reason: str = ""
     collider_volume: float = 0.0
     carved_volume: float = 0.0
+    #: How far the shipped mesh's volume sits from the isosurface it was
+    #: reduced from, as a fraction. Zero when nothing was decimated. Above
+    #: :data:`VOLUME_TOLERANCE` the mesh is still the better of the two
+    #: available answers, and this is what says so out loud rather than leaving
+    #: it to be discovered.
+    volume_error: float = 0.0
+    #: The cell the occupancy was decided on, in metres. One per template, and
+    #: never a function of ``fmax``. See :func:`pitch_for`.
+    pitch_m: float = CARVE_PITCH_M
+    #: The pitch whose carve was rejected as a leak, when one was, else 0.0.
+    #: A finer pitch that comes back three orders of magnitude smaller has not
+    #: refined the shape, it has let the flood fill inside; recorded rather
+    #: than silently stepped over. See :data:`LEAK_FLOOR`.
+    leaked_at_m: float = 0.0
 
     @property
     def shrink(self) -> float:
@@ -127,21 +208,112 @@ class CarveReport:
 
     carved: dict[str, float] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    #: Templates whose shipped mesh sits outside :data:`VOLUME_TOLERANCE` of
+    #: its own isosurface, and by how much. Named rather than counted only: the
+    #: mesh is still much closer to the object than the collider it replaces,
+    #: but it is the one place the carve's shape is decided by the decimator
+    #: rather than by the occupancy, and that has to be readable.
+    strained: dict[str, float] = field(default_factory=dict)
+    #: The pitch each carved template was decided on, in millimetres. Not a
+    #: uniform number any more, so the manifest has to carry it: two templates
+    #: of the same scene can be carved on different cells, and which one an
+    #: object got is the difference between a chunky lamp and a clean one.
+    pitch_mm: dict[str, float] = field(default_factory=dict)
+    #: Templates where a finer pitch was tried and rejected as a leak, and the
+    #: pitch that was rejected, in millimetres.
+    leaked: dict[str, float] = field(default_factory=dict)
 
     def add(self, template: str, result: CarveResult) -> None:
         if result.carved:
             self.carved[template] = round(result.shrink, 4)
+            self.pitch_mm[template] = round(result.pitch_m * 1000, 2)
+            if result.volume_error > VOLUME_TOLERANCE:
+                self.strained[template] = round(result.volume_error, 4)
         else:
             self.skipped[template] = result.reason
+        if result.leaked_at_m:
+            self.leaked[template] = round(result.leaked_at_m * 1000, 2)
 
     def summary(self) -> str:
         if not self.carved and not self.skipped:
             return "no carve"
         kept = np.mean(list(self.carved.values())) if self.carved else 1.0
+        strained = f", {len(self.strained)} off their isosurface" if self.strained else ""
+        pitches = sorted(set(self.pitch_mm.values()))
+        cell = (
+            f", on {'/'.join(f'{p:g}' for p in pitches)} mm cells"
+            if len(pitches) > 1
+            else f", on {pitches[0]:g} mm cells"
+            if pitches
+            else ""
+        )
         return (
             f"{len(self.carved)} colliders carved to {kept:.0%} of their volume, "
-            f"{len(self.skipped)} left as they are"
+            f"{len(self.skipped)} left as they are{strained}{cell}"
         )
+
+
+def grid_for(
+    render: trimesh.Trimesh, collider: trimesh.Trimesh, pitch: float
+) -> tuple[np.ndarray, tuple[int, int, int], float]:
+    """The occupancy grid one pitch asks for: its origin, its shape, its cells.
+
+    Three cells of margin each way, because :func:`_surface_cells` marks a
+    triangle's whole bounding box and :func:`_outside` fills from the border --
+    a surface touching the border would have nothing outside it to fill from.
+    """
+    low = np.minimum(render.bounds[0], collider.bounds[0]) - 3 * pitch
+    high = np.maximum(render.bounds[1], collider.bounds[1]) + 3 * pitch
+    extent = np.ceil((high - low) / pitch).astype(np.int64) + 4
+    shape = (int(extent[0]), int(extent[1]), int(extent[2]))
+    return low, shape, float(shape[0]) * shape[1] * shape[2]
+
+
+def pitch_for(render: trimesh.Trimesh, collider: trimesh.Trimesh) -> float:
+    """The finest pitch this template can be carved on, from its own two meshes.
+
+    **Why the pitch was ever one number.** It had to be independent of ``fmax``,
+    or the same flat at 4 and at 16 kHz would be two different objects and
+    nothing measured on one would say anything about the other. That is still
+    true, and nothing here reads ``fmax``: the answer is a function of the
+    template's bounds and its render area alone, so a template has one pitch
+    for every grid ever laid over it.
+
+    **Why one number was still wrong.** 6 mm is a different statement about a
+    2.3 m christmas tree than about a 30 cm lamp. On the lamp it is five per
+    cent of the object in every direction -- the occupancy is fifty cells across
+    and the carve is visibly chunky -- while the isosurface it produces is
+    small enough to carry ten times over. The pitch was being set by the largest
+    object in the dataset and paid for by the smallest.
+
+    **Two ceilings, and they bind on different objects.**
+
+    *Memory.* :data:`MAX_CELLS` is what a template's occupancy array may cost,
+    and it is what stops a car or a carpet going below 6 mm at all.
+
+    *The mesh.* An isosurface is only useful if the triangle budget can carry
+    it, and past :data:`ISO_FACE_CAP` it cannot -- see that constant for the two
+    measurements that fix it. The size is predicted rather than built:
+    marching cubes emits of the order of one face per boundary cell face, so it
+    scales as the render surface over the pitch squared, and
+    :data:`FACES_PER_AREA` is that constant measured across this flat.
+
+    So the objects that gain are the small ones, which is where the coarse pitch
+    was worst and the refinement is cheapest. A christmas tree stays at 6 mm,
+    and correctly: its limit is the budget its 1.9 million faces have to reduce
+    to, not the cell they were decided on.
+    """
+    area = float(render.area)
+    for pitch in sorted(CARVE_PITCH_LADDER):
+        if pitch >= CARVE_PITCH_M:
+            break
+        _, _, cells = grid_for(render, collider, pitch)
+        if cells > MAX_CELLS:
+            continue
+        if area > 0.0 and FACES_PER_AREA * area / pitch**2 > ISO_FACE_CAP:
+            continue
+        return pitch
+    return CARVE_PITCH_M
 
 
 def _surface_cells(
@@ -218,6 +390,50 @@ def _eroded(solid: np.ndarray) -> np.ndarray:
     return thinner if thinner.sum() >= 0.5 * solid.sum() else solid
 
 
+def _tightened(solid: np.ndarray, air: np.ndarray) -> np.ndarray:
+    """``solid`` less the air, with the cell the conservative marking hid given back.
+
+    :func:`_eroded` takes off the shell that over-marking added to the
+    *collider*. The render mesh was over-marked by exactly the same rule and
+    nothing ever gave that cell back, so the two sides of the subtraction were
+    not symmetric: the solid was measured to its true face and the air was
+    measured one cell short of its own, everywhere. Every carve came out a cell
+    fat, and on an object whose surface is mostly shell that cell is most of the
+    object -- this flat's christmas tree kept 0.325 m3 where the same fill run
+    symmetrically keeps 0.171.
+
+    So grow the air by the one cell it was denied. What that adds is precisely
+    the outer layer of the render surface's own marked shell: cells the surface
+    passes through, which are part air and part solid, and which the fill
+    stopped in front of. Half of such a cell is air on average, and a grid
+    cannot hold half a cell, so the choice is which way to round -- and rounding
+    both sides the same way is the only one that leaves no bias.
+
+    Body by body, and never past half of one. A sheet one cell thick is all
+    shell, and growing the air into it from both faces at once deletes it: a
+    picture's canvas, a curtain, a carpet. Those are exactly the objects the
+    carve exists to recover, so a connected body that would lose more than half
+    of itself keeps its fat cell instead, which is the same bound
+    :func:`_eroded` uses and for the same reason. Measured over this flat's
+    twelve largest refused templates, the guard fires on the carpet, the
+    curtain and one decoration -- all three sheets -- and lets the tree lose
+    47 per cent, the plant 26 and the piano 17.
+    """
+    kept: np.ndarray = solid & ~air
+    tight: np.ndarray = solid & ~ndimage.binary_dilation(air)
+    labels, count = ndimage.label(kept)
+    if count == 0:
+        return kept
+    before = np.bincount(labels.ravel(), minlength=count + 1)
+    after = np.bincount(labels.ravel(), weights=tight.ravel(), minlength=count + 1)
+    fat = np.flatnonzero(after < 0.5 * before)
+    fat = fat[fat > 0]
+    if fat.size == 0:
+        return tight
+    grown: np.ndarray = tight | (np.isin(labels, fat) & kept)
+    return grown
+
+
 def _outside(surface: np.ndarray) -> np.ndarray:
     """Cells reachable from the grid's border without crossing ``surface``."""
     labels, _ = ndimage.label(~surface)
@@ -239,23 +455,53 @@ def _outside(surface: np.ndarray) -> np.ndarray:
 def _to_budget(mesh: trimesh.Trimesh, budget: int) -> trimesh.Trimesh | None:
     """``mesh`` decimated towards ``budget`` triangles, or None if none holds.
 
-    Watertightness is the whole reason the collider is used at all, so a
-    reduction that loses it is not a cheaper version of the mesh, it is a
-    different kind of object.
+    Closure is the whole reason the collider is used at all, so a reduction
+    that loses it is not a cheaper version of the mesh, it is a different kind
+    of object. Closure, and not ``trimesh``'s ``is_watertight``: that also
+    demands edge-manifoldness, which a hard-decimated isosurface fails on a few
+    dozen edges while remaining perfectly closed, and demanding it here refused
+    **46 of this flat's 135 templates** -- 89 placed instances holding 41.6 m3
+    of collider, the christmas tree and the carpet and the curtain among them.
+    See :func:`~reverberate.geometry.orientation.is_closed`.
 
     Asking for the budget once and giving up refused 11 of 47 templates: a
     marching cubes surface is uniform, and taking 46 000 triangles to 2 000 in
     one step pinches it open somewhere almost every time. So the budget is a
     target, not a cliff -- back off by doubling and take the first reduction
-    that stays closed. Four steps is a factor of eight, past which the mesh is
-    not worth the triangles and the collider is the better answer.
+    that stays closed and keeps the volume. Four steps is a factor of eight,
+    past which the mesh is not worth the triangles.
+
+    **The volume is a second condition, and it is two sided.** The isosurface
+    is the shape the occupancy decided; the mesh only carries it, so a
+    reduction that restates it a fifth larger is not a cheaper carve, it is a
+    different object -- and larger is the direction this module exists to
+    fight. This flat's curtain carves to 0.118 m3 and comes back 0.165 at 2 000
+    triangles. So each rung is asked to land inside
+    :data:`VOLUME_TOLERANCE`, and the ladder is what pays for it: a rung that
+    misses is refused and the next one up is asked instead, spending triangles
+    to keep the shape.
+
+    When no rung lands inside the band, the closest one is returned anyway
+    rather than nothing. What "nothing" means here is the plain collider, and
+    on the templates that reach this line the collider is worse by an order of
+    magnitude, not by a fifth: one decoration's isosurface holds 0.028 m3
+    against a 0.325 m3 collider. Trading a shape that is 20 per cent off for
+    one that is 1 060 per cent off is not a defence of accuracy. The caller
+    records how far off it was, so a reader can see which meshes are in this
+    case -- see :attr:`CarveResult.volume_error`.
     """
     if len(mesh.faces) <= budget:
         return mesh
     import fast_simplification
 
     volume = abs(float(mesh.volume))
-    for target in (budget, int(budget * 1.4), budget * 2):
+    best: trimesh.Trimesh | None = None
+    best_error = float("inf")
+    # Four rungs spanning a factor of eight, which is what the paragraph above
+    # has always described. The code stopped at 2x, so the back-off it promised
+    # was really a third of one -- worth naming, because the far end of this
+    # ladder is where a large isosurface is caught.
+    for target in (budget, budget * 2, budget * 4, budget * 8):
         if target >= len(mesh.faces):
             # Nothing left to ask for: the mesh is already under this target, so
             # the ladder is exhausted and the caller decides whether the
@@ -267,19 +513,22 @@ def _to_budget(mesh: trimesh.Trimesh, budget: int) -> trimesh.Trimesh | None:
         reduced = trimesh.Trimesh(vertices, faces, process=True)
         reduced.update_faces(reduced.nondegenerate_faces())
         reduced.remove_unreferenced_vertices()
-        if len(reduced.faces) == 0 or not reduced.is_watertight:
+        if len(reduced.faces) == 0 or not is_closed(reduced):
             continue
-        # Watertight is not enough on its own. Trimesh calls a mesh watertight
-        # when every edge is used twice, and a pair of triangles back to back
-        # satisfies that while enclosing nothing: reducing a twelve face box to
-        # one triangle returns a "closed" body of zero volume. Half the volume
-        # is a wide bound -- decimation of an isosurface loses a per cent or so
-        # -- but it is the one that separates a simplified solid from a sheet.
-        if abs(float(reduced.volume)) >= 0.5 * volume:
+        # Closed is not enough on its own. A pair of triangles back to back has
+        # no boundary edge and one consistent winding while enclosing nothing:
+        # reducing a twelve face box to one triangle returns a "closed" body of
+        # zero volume, and the band's own floor is what rejects it.
+        error = abs(abs(float(reduced.volume)) - volume) / volume if volume > 0.0 else float("inf")
+        if error <= VOLUME_TOLERANCE:
             return reduced
-    # No reduction held. An isosurface that will not simplify is usually a
-    # genuinely intricate shape rather than a broken one, so keep it undecimated
-    # when it is small enough to afford, and let the collider stand otherwise.
+        if error < best_error:
+            best, best_error = reduced, error
+
+    # No rung kept the volume. An isosurface that will not simplify is usually a
+    # genuinely intricate shape rather than a broken one, and undecimated it is
+    # the exact shape the occupancy decided -- better than any reduction of it,
+    # so it is offered before one. Keep it when it is small enough to afford.
     #
     # Two caps, because the budget is relative and the cost is not. A budget of
     # 4x a 108 face picture is 2 000 triangles and refuses a 12 000 triangle
@@ -289,7 +538,39 @@ def _to_budget(mesh: trimesh.Trimesh, budget: int) -> trimesh.Trimesh | None:
     # starts to matter against a scene of a million and a half.
     if len(mesh.faces) <= max(int(1.25 * budget), ABSOLUTE_CAP):
         return mesh
-    return None
+
+    # Too many triangles to ship whole, and no reduction of it kept the volume.
+    # The closest one is still the better of the two answers left: on the
+    # templates that reach this line the collider is out by an order of
+    # magnitude, not by a fifth. ``None`` is kept for the case where nothing
+    # closed came back at all, which is the only one where there is no carve to
+    # choose between.
+    return best
+
+
+@dataclass
+class _Occupancy:
+    """One pitch's answer: what the collider fills, and what survives the fill."""
+
+    solid: np.ndarray | None
+    kept: np.ndarray
+    low: np.ndarray
+
+
+def _occupancy(render: trimesh.Trimesh, collider: trimesh.Trimesh, pitch: float) -> _Occupancy:
+    """Rasterise both meshes at ``pitch`` and subtract the air from the solid."""
+    low, shape, _ = grid_for(render, collider, pitch)
+    # The collider is closed, so its solid is everything the fill cannot reach.
+    # Deriving it the same way as the render's air keeps one rasteriser and one
+    # fill in the module rather than two conventions that have to agree.
+    solid = _eroded(~_outside(_surface_cells(collider, pitch, low, shape)))
+    if not solid.any():
+        return _Occupancy(solid=None, kept=solid, low=low)
+    air = _outside(_surface_cells(render, pitch, low, shape))
+    # The solid was eroded by the cell the marking added to it, and the air is
+    # grown by the cell the same marking took from it, so both sides of the
+    # subtraction are measured the same way. See :func:`_tightened`.
+    return _Occupancy(solid=solid, kept=_tightened(solid, air), low=low)
 
 
 def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -> CarveResult:
@@ -312,37 +593,38 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
         base.reason = "render mesh unreadable"
         return base
 
-    pitch = CARVE_PITCH_M
-    low = np.minimum(render.bounds[0], collider.bounds[0]) - 3 * pitch
-    high = np.maximum(render.bounds[1], collider.bounds[1]) + 3 * pitch
-    cells = np.prod(np.ceil((high - low) / pitch) + 4)
+    pitch = pitch_for(render, collider)
+    base.pitch_m = pitch
+    low, shape, cells = grid_for(render, collider, CARVE_PITCH_M)
     if cells > MAX_CELLS:
-        base.reason = f"too large to carve at {pitch * 1000:.0f} mm ({cells / 1e6:.0f}M cells)"
+        base.reason = (
+            f"too large to carve at {CARVE_PITCH_M * 1000:.0f} mm ({cells / 1e6:.0f}M cells)"
+        )
         return base
-    extent = np.ceil((high - low) / pitch).astype(np.int64) + 4
-    shape: tuple[int, int, int] = (int(extent[0]), int(extent[1]), int(extent[2]))
 
     try:
-        # The collider is closed, so its solid is everything the fill cannot
-        # reach. Deriving it the same way as the render's air keeps one
-        # rasteriser and one fill in the module rather than two conventions
-        # that have to agree.
-        solid = _eroded(~_outside(_surface_cells(collider, pitch, low, shape)))
-        air = _outside(_surface_cells(render, pitch, low, shape))
+        occupancy = _occupancy(render, collider, pitch)
+        # A finer pitch is where a leak would first show, because the band of
+        # conservatively marked cells that plugs the render mesh's own holes
+        # narrows with it. So the coarse carve is computed as well and the fine
+        # one is measured against it -- see :data:`LEAK_FLOOR`. Only when a
+        # finer pitch was actually chosen: at 6 mm there is nothing to compare
+        # against and the coarse pass is the pass.
+        if pitch < CARVE_PITCH_M:
+            reference = _occupancy(render, collider, CARVE_PITCH_M)
+            fine = occupancy.kept.sum() * pitch**3
+            coarse = reference.kept.sum() * CARVE_PITCH_M**3
+            if fine < LEAK_FLOOR * coarse:
+                base.leaked_at_m = pitch
+                base.pitch_m = pitch = CARVE_PITCH_M
+                occupancy = reference
     except Exception as error:  # trimesh raises several unrelated types here
         base.reason = f"rasterisation failed: {type(error).__name__}"
         return base
-    if not solid.any():
+    if occupancy.solid is None:
         base.reason = "empty occupancy"
         return base
-
-    # One erosion undoes the shell that conservative marking added. The
-    # rasterisation deliberately over-marks so the fill cannot leak, which grows
-    # the solid outward by about a cell; left in, it puts the carve *above* the
-    # collider it is supposed to be shrinking -- measured at 114 per cent on one
-    # decoration. Eroding by the same cell it was grown by restores the volume
-    # and keeps the error symmetric instead of one-sided.
-    kept = solid & ~air
+    solid, kept, low = occupancy.solid, occupancy.kept, occupancy.low
     if not kept.any():
         base.reason = "carve removed everything"
         return base
@@ -371,8 +653,20 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
     except Exception as error:
         base.reason = f"marching cubes failed: {type(error).__name__}"
         return base
-    carved = trimesh.Trimesh(vertices * pitch + low - 2 * pitch, faces, process=True)
-    if not carved.is_watertight:
+    # Index space back to metres, and the half cell matters. A cell whose index
+    # is ``i`` covers ``[low + i*pitch, low + (i+1)*pitch)`` -- that is what
+    # ``_surface_cells`` floors into -- so the sample that stands for it sits at
+    # its *centre*, ``low + (i + 0.5)*pitch``. ``np.pad(..., 2)`` puts that
+    # sample at field index ``i + 2``, so index ``v`` is at
+    # ``low + (v - 1.5)*pitch``. Subtracting two whole cells instead moved every
+    # carved object half a carve cell towards the origin corner: 3 mm on all
+    # three axes, which is one and a half grid steps at 16 kHz. It showed up as
+    # a fringe of boundary nodes on each object's -x, -y and -z faces and a
+    # surface cut flush on the opposite three -- measured on the 68 carved
+    # templates of this flat as a median centroid shift of (-2.9, -2.0, -2.7) mm
+    # against their own colliders.
+    carved = trimesh.Trimesh((vertices - 1.5) * pitch + low, faces, process=True)
+    if not is_closed(carved):
         base.reason = "carve came back open"
         return base
 
@@ -385,6 +679,9 @@ def _carve_uncached(hssd_root: Path, template: str, collider: trimesh.Trimesh) -
     base.mesh = reduced
     base.carved = True
     base.carved_volume = abs(float(reduced.volume))
+    isosurface_volume = abs(float(carved.volume))
+    if isosurface_volume > 0.0:
+        base.volume_error = abs(base.carved_volume - isosurface_volume) / isosurface_volume
     return base
 
 
@@ -434,6 +731,9 @@ def carve_collider(hssd_root: Path, template: str, collider: trimesh.Trimesh) ->
         "reason": result.reason,
         "collider_volume": result.collider_volume,
         "carved_volume": result.carved_volume,
+        "volume_error": result.volume_error,
+        "pitch_m": result.pitch_m,
+        "leaked_at_m": result.leaked_at_m,
     }
     if result.carved:
         result.mesh.export(mesh_file)

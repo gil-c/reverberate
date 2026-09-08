@@ -48,6 +48,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CACHE_FILES",
+    "MIN_NH",
+    "VOXEL_BUDGET",
+    "nh_for",
     "CacheEntry",
     "PFFDTD_DIR_ENV",
     "ensure_patched",
@@ -60,6 +63,37 @@ __all__ = [
     "pffdtd_python",
     "voxelise",
 ]
+
+#: The most voxel objects a search grid may hold. **This is what ``nh`` really
+#: trades**, and stating it as a cell count hid the trade.
+#:
+#: ``calc_adj`` walks a voxel's triangles in Python and allocates arrays over
+#: the whole voxel for each one, so its cost per voxel is that voxel's triangle
+#: count times its padded point count. Shrinking a voxel cuts the second factor
+#: as the cube and raises the first only as a triangle's chance of spanning
+#: several voxels, so **small voxels are cheaper at every band** -- and the only
+#: thing that stops them is that each one is a Python object with lists.
+#:
+#: So the budget is the object count and ``nh`` follows from it.
+#: :data:`VOXEL_BUDGET` is read off W32's proven run: 40 cells on this flat's
+#: 16 kHz grid is 2.35 million voxels and 3.08 hours, and that is the one
+#: setting with a whole-flat run behind it.
+#:
+#: **What a fixed cell count cost.** 40 is 8.2 cm at 16 kHz and **1.31 m at
+#: 1 kHz**, where it holds a large share of four million triangles. Measured on
+#: a rented 48 core box: fifteen minutes with one core at 100 per cent, one
+#: process holding 3.7 GB, and not a single new voxel written. The arithmetic
+#: above puts that run at eleven days. The same rule expressed as a budget
+#: gives 4 cells at 1 kHz and 10 at 4 kHz, and reproduces 40 at 16 kHz.
+VOXEL_BUDGET = 2_400_000
+
+#: The smallest ``Nh`` PFFDTD will accept. ``vox_grid.py:84`` asserts
+#: ``Nh > 3`` -- "not good to have too much overlap" -- and it is right: a voxel
+#: carries a one cell halo on each face, so at four cells the halo is already
+#: 216 points against 64 that are its own, and below that the run is mostly
+#: halo. Worth naming because :func:`nh_for` would otherwise ask for 2 at 1 kHz
+#: and die on an assertion after the grid was built.
+MIN_NH = 4
 
 #: Where PFFDTD is checked out, and which interpreter can import it.
 PFFDTD_DIR_ENV = "PFFDTD_DIR"
@@ -89,6 +123,22 @@ def pffdtd_dir() -> Path:
 def pffdtd_python() -> str:
     """The interpreter that can import PFFDTD, defaulting to this one."""
     return os.environ.get(PFFDTD_PYTHON_ENV) or sys.executable
+
+
+def nh_for(shape: tuple[int, int, int], max_voxels: int = VOXEL_BUDGET) -> int:
+    """The smallest ``Nh`` whose lattice over ``shape`` stays under ``max_voxels``.
+
+    The caller states how many voxel objects it can hold and gets a cell count,
+    which is the only way round that survives changing the band. See
+    :data:`VOXEL_BUDGET` for what the other way round cost.
+    """
+    for nh in range(MIN_NH, 4097):
+        voxels = 1
+        for size in shape:
+            voxels *= -(-int(size) // nh)
+        if voxels <= max_voxels:
+            return nh
+    raise ValueError(f"no Nh under 4096 fits {shape} into {max_voxels} voxels")
 
 
 @dataclass(frozen=True)
@@ -129,6 +179,11 @@ class SceneSpec:
     #: That heuristic was tuned when the fill scanned every triangle per voxel;
     #: patch 6 removed that cost, so smaller lattices are now free and a whole
     #: flat at 16 kHz would otherwise ask for 17.5 million voxel objects.
+    #:
+    #: **In grid steps, so it is band dependent.** Use :func:`nh_for` to get it
+    #: from a voxel budget rather than writing a number that only holds at one
+    #: ``fmax``; :data:`VOXEL_BUDGET` records what a fixed number cost at
+    #: 1 kHz.
     #:
     #: PFFDTD also accepts a target voxel *count* and derives ``Nh`` from it.
     #: That second door is not opened here: it says the same thing less
