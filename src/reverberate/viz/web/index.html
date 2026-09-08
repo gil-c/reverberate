@@ -815,7 +815,10 @@
         // leads because a room with a run is the only place all three modes
         // have something to show.
         select.innerHTML = [
-          ...runs.map((r) => `<option value="run:${r.name}">${r.scene_id} · ${r.room} · simulated</option>`),
+          // The run's own name is on the option because it is the only part
+          // that differs: twelve runs of one flat all read "102344022 ·
+          // bedroom.001 · simulated", and a reader cannot pick one from that.
+          ...runs.map((r) => `<option value="run:${r.name}">${r.name} · ${r.scene_id} · ${r.room}</option>`),
           ...apartments.map((a) => `<option value="${a.id}">${a.label}</option>`),
         ].join("");
         select.onchange = () => openSelection(select.value);
