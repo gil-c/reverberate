@@ -514,7 +514,8 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
     cost study or a domain census, has a plan and a report and none of the
     placement a page needs. Checking only that the two files exist let one such
     directory raise ``KeyError`` inside the builder's loop and take down the
-    whole viewer, every other run with it.
+    whole viewer, every other run with it. The promise in this docstring was
+    already the right one; it just was not kept.
     """
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
