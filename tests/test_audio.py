@@ -24,6 +24,7 @@ from reverberate.audio import (
     air_absorption_np_per_m,
     apply_air_absorption,
     convolve,
+    frame_for,
     integrate_and_lowcut,
     lowpass,
     peak_gain,
@@ -290,3 +291,55 @@ def test_a_passed_gain_overrides_the_per_file_one(tmp_path: Path) -> None:
     assert used == 0.5
     samples, _ = soundfile.read(str(tmp_path / "q.wav"))
     assert np.max(np.abs(samples)) == pytest.approx(0.005, abs=1e-6)
+
+
+@pytest.mark.parametrize(("duration", "arrival"), [(0.5, 0.45), (1.0, 0.9)])
+def test_a_long_response_keeps_its_air_gain_exact(duration: float, arrival: float) -> None:
+    """The defect a 50 ms test could not see, and which a 0.5 s room response has.
+
+    The gain ``exp(-m(f) c t)`` grows steeper in frequency as ``t`` does: at 1 s
+    it falls 125 dB across the band. A short frame resolves frequency too
+    coarsely for that, and leakage from the loud bottom swamps the quiet top. A
+    128 sample frame is 0.008 dB out at 50 ms and 0.79 dB out at 500 ms.
+    """
+    rate = 48000.0
+    samples = int(duration * rate)
+    impulse = np.zeros((1, samples))
+    impulse[0, int(arrival * rate)] = 1.0
+    filtered = apply_air_absorption(impulse, rate, sound_speed_m_s=343.0)
+    frequency = np.fft.rfftfreq(samples, 1.0 / rate)
+    expected = np.exp(-air_absorption_np_per_m(frequency) * 343.0 * arrival)
+    # Only where the answer is above the numerical floor: past 1 s the top of
+    # the band is genuinely gone, which is the physics rather than an error.
+    band = (frequency > 50.0) & (frequency < 16000.0) & (expected > 1e-6)
+    error = 20.0 * np.log10(np.abs(np.fft.rfft(filtered[0])[band]) / expected[band])
+    assert np.max(np.abs(error)) < 0.1
+
+
+def test_the_frame_grows_with_the_response_it_is_given() -> None:
+    assert frame_for(0.06) == 256
+    assert frame_for(0.5) == 512
+    assert frame_for(1.0) == 1024
+    assert frame_for(2.0) == 2048
+    assert frame_for(0.5) < frame_for(2.0)
+
+
+def test_a_frame_chosen_by_the_caller_is_not_corrected() -> None:
+    """Trusted, because a caller who states one has a reason this cannot know."""
+    signal = np.zeros((1, 4096))
+    signal[0, 100] = 1.0
+    assert apply_air_absorption(signal, 48000.0, frame=128).shape == signal.shape
+
+
+def test_reconstruction_is_the_summed_normalisation_and_not_the_window() -> None:
+    """Corrected after another session measured it: any window pair reconstructs.
+
+    The exactness comes from dividing by the summed product of the analysis and
+    synthesis windows. The square root Hann pair is kept because it splits the
+    modification evenly between the two, not because it is uniquely exact.
+    """
+    rng = np.random.default_rng(2)
+    signal = rng.standard_normal((1, 8192))
+    for frame in (128, 512, 2048):
+        reconstructed = apply_air_absorption(signal, 48000.0, sound_speed_m_s=0.0, frame=frame)
+        assert np.max(np.abs(reconstructed - signal)) < 1e-12
