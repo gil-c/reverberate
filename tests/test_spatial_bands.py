@@ -14,6 +14,7 @@ from reverberate.spatial.bands import (
     calibration_bands_hz,
     centre_offsets,
     extend,
+    extend_spectrum,
     pad_order,
 )
 from reverberate.spatial.encode import Ambisonic
@@ -220,4 +221,107 @@ def test_a_tail_cannot_be_shorter_than_what_was_solved() -> None:
             atmosphere=Atmosphere(),
             sound_speed_m_s=SOUND_SPEED,
             seed=0,
+        )
+
+
+def _decaying_field(
+    t60_by_band: dict[int, float], seconds: float = 0.4, seed: int = 5
+) -> Ambisonic:
+    """A first order field whose octave bands decay at known rates, all directions alike."""
+    rng = np.random.default_rng(seed)
+    samples = int(seconds * RATE)
+    time = np.arange(samples) / RATE
+    bands = metrics.octave_filter(rng.standard_normal(samples), RATE)
+    centres = metrics.band_centres(RATE)
+    w = np.zeros(samples)
+    for band, centre in enumerate(centres):
+        w += bands[band] * 10.0 ** (-3.0 * time / t60_by_band[int(centre)])
+    ratios = np.array([1.0, 0.6, -0.3, 0.45])
+    return Ambisonic(
+        signals=np.outer(ratios, w), sample_rate_hz=float(RATE), order=1, centre=np.zeros(3)
+    )
+
+
+def test_the_extension_leaves_the_solved_band_alone_and_fills_the_rest() -> None:
+    truth = _decaying_field({c: 0.3 for c in metrics.band_centres(RATE)})
+    solved = Ambisonic(
+        signals=signal.sosfiltfilt(
+            signal.butter(8, 8000 / (RATE / 2), output="sos"), truth.signals, axis=-1
+        ),
+        sample_rate_hz=float(RATE),
+        order=1,
+        centre=np.zeros(3),
+    )
+    t60 = np.full(len(metrics.band_centres(RATE)), 0.3)
+    extended, record = extend_spectrum(
+        solved, fmax_hz=8000.0, t60_s=t60, atmosphere=Atmosphere(), sound_speed_m_s=SOUND_SPEED
+    )
+    assert extended.signals.shape == solved.signals.shape
+    # Below the template top nothing moved, to the leakage of one Hann frame.
+    spectrum = np.abs(np.fft.rfft(extended.signals[0] - solved.signals[0]))
+    had_spectrum = np.abs(np.fft.rfft(solved.signals[0]))
+    below = np.fft.rfftfreq(solved.signals.shape[1], 1.0 / RATE) < 6000.0
+    residual_db = 10 * np.log10((spectrum[below] ** 2).sum() / (had_spectrum[below] ** 2).sum())
+    assert residual_db < -30.0
+    # Above it there is now the truth's energy, where the low pass had left little.
+    got = metrics.octave_filter(extended.signals[0], RATE)
+    had = metrics.octave_filter(solved.signals[0], RATE)
+    want = metrics.octave_filter(truth.signals[0], RATE)
+    top = list(metrics.band_centres(RATE)).index(16000)
+    assert (got[top] ** 2).sum() > 10.0 * (had[top] ** 2).sum()
+    assert abs(10 * np.log10((got[top] ** 2).sum() / (want[top] ** 2).sum())) < 3.0
+    assert record["synthesised_hz"][0] == pytest.approx(7200.0)
+
+
+def test_the_synthesised_octave_decays_at_the_rate_it_was_told() -> None:
+    centres = metrics.band_centres(RATE)
+    truth_t60 = {c: 0.5 for c in centres}
+    truth_t60[16000] = 0.15
+    truth = _decaying_field(truth_t60, seconds=0.6)
+    solved = Ambisonic(
+        signals=signal.sosfiltfilt(
+            signal.butter(8, 8000 / (RATE / 2), output="sos"), truth.signals, axis=-1
+        ),
+        sample_rate_hz=float(RATE),
+        order=1,
+        centre=np.zeros(3),
+    )
+    t60 = np.array([truth_t60[c] for c in centres], dtype=float)
+    # The air term is inside those decay times already; a dry atmosphere keeps
+    # the check about the rule and not about ISO 9613-1.
+    extended, _ = extend_spectrum(
+        solved,
+        fmax_hz=8000.0,
+        t60_s=t60,
+        atmosphere=Atmosphere(humidity_percent=100.0),
+        sound_speed_m_s=1e-9,
+    )
+    # Judged against the truth's own measurement, not the number it was built
+    # from: the octave filter bank leaks the slower neighbour into this band,
+    # for the truth and for the synthesis alike.
+    measured = metrics.rt60_per_band(extended.signals[0], RATE)
+    reference = metrics.rt60_per_band(truth.signals[0], RATE)
+    top = list(centres).index(16000)
+    assert measured[top] == pytest.approx(reference[top], rel=0.25)
+    assert measured[top] < 0.7 * reference[top - 1]
+    # And the direction survives: the channel ratios in the new octave are the old ones.
+    hf = signal.sosfiltfilt(
+        signal.butter(8, [10000 / (RATE / 2), 20000 / (RATE / 2)], btype="band", output="sos"),
+        extended.signals,
+        axis=-1,
+    )
+    ratios = hf[1:] @ hf[0] / (hf[0] @ hf[0])
+    assert ratios == pytest.approx([0.6, -0.3, 0.45], abs=0.02)
+
+
+def test_the_extension_refuses_a_ceiling_under_the_solved_band() -> None:
+    truth = _decaying_field({c: 0.3 for c in metrics.band_centres(RATE)}, seconds=0.1)
+    with pytest.raises(ValueError, match="nothing to synthesise"):
+        extend_spectrum(
+            truth,
+            fmax_hz=8000.0,
+            t60_s=np.full(8, 0.3),
+            atmosphere=Atmosphere(),
+            sound_speed_m_s=SOUND_SPEED,
+            ceiling_hz=5000.0,
         )

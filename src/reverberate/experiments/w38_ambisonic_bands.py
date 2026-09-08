@@ -50,9 +50,16 @@ from reverberate.experiments.w10_render import (
     spatial_report,
 )
 from reverberate.experiments.w37_window import mean_absorption_of
-from reverberate.metrics import band_centres
-from reverberate.spatial.bands import BandSolve, assemble, centre_offsets, extend
+from reverberate.metrics import band_centres, rt60_per_band
+from reverberate.spatial.bands import (
+    BandSolve,
+    assemble,
+    centre_offsets,
+    extend,
+    extend_spectrum,
+)
 from reverberate.spatial.encode import EncoderSettings
+from reverberate.tail import transpose
 from reverberate.wave import Machine, engine_inputs
 
 __all__ = ["BANDS", "assemble_run", "main", "outer_radius_for", "plan_bands", "prepare_bands"]
@@ -224,8 +231,15 @@ def assemble_run(
     plain_decode: bool = False,
     seed: int = 20260908,
     rendered: dict[str, Any] | None = None,
+    ceiling_hz: float | None = None,
 ) -> dict[str, Any]:
-    """Encode each band on its own array, assemble, decode, measure. Nothing is written."""
+    """Encode each band on its own array, assemble, decode, measure. Nothing is written.
+
+    ``ceiling_hz`` is how far up the spectrum is synthesised from the top solved
+    octave, by :func:`reverberate.spatial.bands.extend_spectrum`; ``None`` goes
+    to the delivery rate's Nyquist, ``0`` leaves the response at the high
+    band's own ``fmax``. W39 measured the rule on a real 16 kHz response.
+    """
     plan = json.loads((out / "plan.json").read_text())
     missing = [name for name in BANDS if name not in plan.get("bands", {})]
     if missing:
@@ -266,7 +280,33 @@ def assemble_run(
         tails.append(record)
     assembled, assembly = assemble(solves["low"], solves["mid"], solves["high"])
 
+    fmax_high = solves["high"].fmax_hz
+    extension: dict[str, Any] | None = None
+    if ceiling_hz is None or ceiling_hz > fmax_high:
+        # The decay above the solve from the room's absorption and the air, the
+        # band holding the solve's own edge predicted rather than read, since
+        # half of it is the low pass skirt.
+        prediction = transpose(
+            rt60_per_band(assembled.signals[0], rate),
+            absorption,
+            rate,
+            mid_fmax_hz=0.7 * fmax_high,
+            atmosphere=atmosphere,
+            sound_speed_m_s=float(plan["sound_speed_m_s"]),
+        )
+        assembled, extension = extend_spectrum(
+            assembled,
+            fmax_hz=fmax_high,
+            t60_s=np.asarray(prediction.t60_s, dtype=float),
+            atmosphere=atmosphere,
+            sound_speed_m_s=float(plan["sound_speed_m_s"]),
+            ceiling_hz=ceiling_hz,
+        )
+        extension["transposition"] = prediction.record()
+        extension["validated_by"] = "w39_extension_check"
+
     extra = {
+        "spectral_extension": extension,
         "kind": plan["kind"],
         "trick": plan["trick"],
         "assembly": assembly,
@@ -392,6 +432,7 @@ def _assemble(args: argparse.Namespace) -> int:
         plain_decode=args.plain_decode,
         seed=args.seed,
         rendered=rendered,
+        ceiling_hz=args.ceiling,
     )
     settings = _settings(args.order, args.fit_order, float(report["band_plans"]["high"]["fmax_hz"]))
     finish_run(
@@ -412,6 +453,10 @@ def _assemble(args: argparse.Namespace) -> int:
         )
     for row in report["tails"]:
         print(f"{row['band']:>4}: tail from {row['computed_s']} s to {row['total_s']} s")
+    if report.get("spectral_extension"):
+        ext = report["spectral_extension"]
+        low_hz, high_hz = ext["synthesised_hz"]
+        print(f"spectrum synthesised from {low_hz:g} to {high_hz:g} Hz")
     return 0
 
 
@@ -467,6 +512,13 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--audio", action="store_true")
     build.add_argument("--publish", action="store_true")
     build.add_argument("--seed", type=int, default=20260908)
+    build.add_argument(
+        "--ceiling",
+        type=float,
+        default=None,
+        help="synthesise the spectrum up to this frequency from the top solved octave; "
+        "default the delivery Nyquist, 0 for none",
+    )
     build.set_defaults(func=_assemble)
 
     args = parser.parse_args(argv)

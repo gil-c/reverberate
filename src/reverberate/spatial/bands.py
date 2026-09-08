@@ -63,6 +63,7 @@ __all__ = [
     "calibration_bands_hz",
     "centre_offsets",
     "extend",
+    "extend_spectrum",
     "pad_order",
 ]
 
@@ -322,3 +323,141 @@ def extend(
         ),
     }
     return BandSolve(solve.name, extended, solve.fmax_hz, solve.grid_step_m), record
+
+
+def _t60_per_bin(
+    frequency_hz: np.ndarray,
+    band_centres_hz: np.ndarray,
+    t60_s: np.ndarray,
+    atmosphere: Atmosphere,
+    sound_speed_m_s: float,
+) -> np.ndarray:
+    """Decay time at every bin, the surface term interpolated and the air term exact.
+
+    The per band decay carries both the boundary and the air. The two are
+    separated at the band centres, the boundary part is held per octave band
+    and past the last band, and the air part is put back at each bin's own
+    frequency from ISO 9613-1, so the extension above the last octave the
+    catalogue knows about still loses exactly what air takes.
+    """
+    centres = np.asarray(band_centres_hz, dtype=float)
+    decay = np.asarray(t60_s, dtype=float)
+    usable = np.isfinite(decay) & (decay > 0.0)
+    if usable.sum() < 2:
+        raise ValueError("at least two bands need a finite decay to extend from")
+    air_band = atmosphere.attenuation_db_per_m(centres[usable]) * sound_speed_m_s
+    surface_rate = np.maximum(60.0 / decay[usable] - air_band, 1e-6)
+    # Piecewise constant per octave, because that is what the catalogue is: an
+    # absorption is a number per band, and a bin belongs to the band whose
+    # centre is nearest on a log axis. Past the last band the last one holds.
+    nearest = np.abs(
+        np.log(np.maximum(frequency_hz, 1.0))[:, None] - np.log(centres[usable])[None, :]
+    ).argmin(axis=1)
+    rate = np.log(surface_rate)[nearest]
+    air = atmosphere.attenuation_db_per_m(frequency_hz) * sound_speed_m_s
+    return np.asarray(60.0 / (np.exp(rate) + air), dtype=float)
+
+
+def extend_spectrum(
+    ambisonic: Ambisonic,
+    *,
+    fmax_hz: float,
+    t60_s: np.ndarray,
+    atmosphere: Atmosphere,
+    sound_speed_m_s: float,
+    ceiling_hz: float | None = None,
+    template_top: float = 0.9,
+    frame: int = 256,
+) -> tuple[Ambisonic, dict[str, Any]]:
+    """Synthesise the spectrum above ``fmax_hz`` from the octave the solver did compute.
+
+    **What is copied, and why that is allowed.** Every bin above the solved
+    band takes the short time spectrum of the bin an octave (or two, or three)
+    below it, in every channel at once. For a discrete arrival the ratios
+    between spherical harmonic channels depend on its direction and not on its
+    frequency, so the copy carries every early reflection's instant and
+    direction up unchanged; for the diffuse tail it carries independent
+    per channel noise up, which is what the diffuse field is. What it does not
+    carry is the true fine structure of the interference between arrivals at
+    those frequencies, which two grids of the same room already fail to share
+    (W3's -6 dB floor), and which nothing downstream reads.
+
+    **What is changed is the decay.** Energy at a frequency decays at that
+    frequency's own rate, boundary and air together, so the copied bin is
+    multiplied by ``10^(-1.5 t (1 / T60(f) - 1 / T60(f_source)))``: unity at the
+    direct sound, the difference of the two Eyring lines afterwards. That is
+    the reflection count argument in its integrated form, and it is the same
+    rule whether the sample sits in an early reflection or in the tail.
+
+    Below ``template_top * fmax_hz`` nothing is touched; above it everything is
+    replaced, including the band limiting skirt of the solve itself. Hann
+    analysis and synthesis at three quarters overlap reconstruct exactly, so
+    the untouched part comes back to rounding.
+    """
+    from scipy import signal as dsp
+
+    from reverberate.metrics import band_centres
+
+    rate = float(ambisonic.sample_rate_hz)
+    ceiling = min(rate / 2.0, ceiling_hz if ceiling_hz is not None else rate / 2.0)
+    top = template_top * fmax_hz
+    if not 0.0 < top < ceiling:
+        raise ValueError(f"nothing to synthesise between {top:g} and {ceiling:g} Hz")
+    overlap = frame - frame // 4
+    frequency, times, spectra = dsp.stft(
+        ambisonic.signals, fs=rate, nperseg=frame, noverlap=overlap, boundary="zeros", padded=True
+    )
+    decay = _t60_per_bin(
+        frequency,
+        np.asarray(band_centres(int(round(rate))), dtype=float),
+        t60_s,
+        atmosphere,
+        sound_speed_m_s,
+    )
+    step = frequency[1] - frequency[0]
+    targets = np.flatnonzero((frequency > top) & (frequency <= ceiling))
+    octaves = np.ceil(np.log2(frequency[targets] / top)).astype(int)
+    sources = np.rint(frequency[targets] / 2.0**octaves / step).astype(int)
+    # Amplitude falls 60 dB in one T60, so 10^(-3 t / T60), and the copied bin
+    # carries the difference between its own line and its source's.
+    gain = 10.0 ** (
+        -3.0 * times[None, :] * (1.0 / decay[targets][:, None] - 1.0 / decay[sources][:, None])
+    )
+    # A bin moved to another frequency must advance its phase at that
+    # frequency from frame to frame, or the overlapping frames cancel where
+    # they meet: the phase vocoder's rule, and without it the copy lost 8 dB.
+    hop = frame - overlap
+    frames = np.arange(spectra.shape[2])
+    advance = np.exp(2j * np.pi * (targets - sources)[:, None] * hop * frames[None, :] / frame)
+    spectra[:, targets, :] = spectra[:, sources, :] * (gain * advance)[None, :, :]
+    spectra[:, frequency > ceiling, :] = 0.0
+    _, restored = dsp.istft(spectra, fs=rate, nperseg=frame, noverlap=overlap)
+    signals = np.asarray(restored, dtype=float)[:, : ambisonic.signals.shape[1]]
+    extended = Ambisonic(
+        signals=np.ascontiguousarray(signals),
+        sample_rate_hz=rate,
+        order=ambisonic.order,
+        centre=ambisonic.centre,
+        normalisation=ambisonic.normalisation,
+        ordering=ambisonic.ordering,
+    )
+    before = float((ambisonic.signals**2).sum())
+    after = float((signals**2).sum())
+    record = {
+        "solved_to_hz": fmax_hz,
+        "template_hz": [round(top / 2.0, 1), round(top, 1)],
+        "synthesised_hz": [round(top, 1), round(ceiling, 1)],
+        "octaves_copied": int(octaves.max()) if len(octaves) else 0,
+        "frame": frame,
+        "t60_used_s": {
+            str(int(c)): (None if not np.isfinite(v) else round(float(v), 4))
+            for c, v in zip(band_centres(int(round(rate))), t60_s, strict=True)
+        },
+        "energy_added_db": round(10.0 * np.log10(max(after, 1e-30) / max(before, 1e-30)), 3),
+        "rule": (
+            "each bin above the template takes the bin one or more octaves below it in "
+            "every channel, times 10^(-3 t (1/T60(f) - 1/T60(f_source))); direction and "
+            "timing of every arrival are carried up, the fine structure is not"
+        ),
+    }
+    return extended, record
