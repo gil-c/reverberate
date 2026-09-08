@@ -79,7 +79,16 @@ _API_VERSION = "v0"
 
 
 class VastError(RuntimeError):
-    """Any failure talking to Vast.ai, or any refusal to spend."""
+    """Any failure talking to Vast.ai, or any refusal to spend.
+
+    ``status`` carries the HTTP code when there was one, so a caller can tell a
+    machine that does not exist from an API it could not reach. That difference
+    decides whether a rented card gets destroyed.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -359,7 +368,7 @@ class VastClient:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as error:
             # The body can echo the request; never let it reach a log with the key in it.
-            raise VastError(f"{method} {path} failed: HTTP {error.code}") from None
+            raise VastError(f"{method} {path} failed: HTTP {error.code}", error.code) from None
         except urllib.error.URLError as error:
             hint = ""
             if isinstance(error.reason, ssl.SSLCertVerificationError):
@@ -401,8 +410,16 @@ class VastClient:
         """
         try:
             payload = self.request("GET", f"/instances/{instance_id}/")
-        except VastError:
-            return None
+        except VastError as error:
+            # **Absent and unreachable are not the same answer.** Swallowing
+            # every failure here makes a transient API fault look exactly like
+            # an instance that no longer exists, and two callers act on that:
+            # ``destroy_and_verify`` would report a card destroyed while it is
+            # still billing, and ``wait_for_ssh`` would abandon a rental that is
+            # merely starting. Only a 404 means gone.
+            if error.status == 404:
+                return None
+            raise
         raw = payload.get("instances")
         if not raw:
             return None
@@ -445,8 +462,13 @@ class VastClient:
             with contextlib.suppress(VastError):
                 self.destroy(instance_id)
             time.sleep(pause)
-            if self.instance(instance_id) is None:
-                return True
+            try:
+                if self.instance(instance_id) is None:
+                    return True
+            except VastError:
+                # Unreachable is not gone. Try again rather than report a
+                # destruction that was never confirmed.
+                continue
         return False
 
 
