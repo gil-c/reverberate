@@ -361,10 +361,20 @@ def run_scene(run_dir: Path) -> RunRef:
     )
 
 
-#: Keys :func:`build_site` dereferences without a default. A report missing any
-#: of them cannot be drawn, so :func:`discover_runs` refuses it there rather
-#: than letting the builder raise halfway through the collection.
-REQUIRED_REPORT_KEYS = (
+#: Keys :func:`build_site` dereferences without a default **for a run of placed
+#: points**, which is the only shape it can draw today. A report missing any of
+#: them cannot be drawn, so :func:`discover_runs` refuses it there rather than
+#: letting the builder raise halfway through the collection.
+#:
+#: **This is per shape, and a second shape is coming.** The W10 branch teaches
+#: :func:`build_site` to draw a spatial run, which has no ``placement`` and
+#: should not be given one: it holds a listening point, an ambisonic expansion
+#: around it and a pair of ears per head and orientation, not a list of placed
+#: receivers. When that lands, this becomes one set among several and the
+#: choice is made by that branch's ``is_spatial``. It is left as a single tuple
+#: here rather than as a speculative dispatch on a function this branch cannot
+#: call, so the seam is named instead of guessed.
+POINT_RUN_REPORT_KEYS = (
     "run",
     "scene_sha256",
     "cache_key",
@@ -383,8 +393,8 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
 
     A run counts as rendered only if it has the plan that names the scene, the
     report the payload is built from, **and** every field that report is read
-    for. A half-finished run directory is skipped rather than offered and then
-    failing to open.
+    for, as listed in :data:`POINT_RUN_REPORT_KEYS`. A half-finished run
+    directory is skipped rather than offered and then failing to open.
 
     That last condition is not belt and braces. The runs directory is shared
     between sessions, and a report written for something other than a solve --
@@ -408,7 +418,7 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
             continue
         try:
             record = json.loads(report.read_text())
-            if any(key not in record for key in REQUIRED_REPORT_KEYS):
+            if any(key not in record for key in POINT_RUN_REPORT_KEYS):
                 continue
             found.append(run_scene(plan.parent))
         except (KeyError, OSError, json.JSONDecodeError):
