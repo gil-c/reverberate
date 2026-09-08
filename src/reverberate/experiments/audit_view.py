@@ -421,6 +421,12 @@ def build(
             continue
         started, spent = time.time(), time.process_time()
         subs, material, inert = _scan_room(cache_dir, mask, index, shape, ny, nz)
+        if material.size == 0:
+            # A grid voxelised for one room still lies under the whole scene's
+            # partition, and the rooms around it hold no nodes at all. Say so
+            # and move on rather than fail on an empty merge.
+            print(f"{room.name}: no boundary node in this grid, skipped")
+            continue
         room_of = partition.raster[subs[0], subs[2]]
         target = out / "voxels" / room.name.replace(" ", "_")
         fine = _write_tier(
