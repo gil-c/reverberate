@@ -11,6 +11,7 @@ Synthetic signals only, offline, well under a second.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +19,14 @@ import pytest
 
 from reverberate import metrics
 from reverberate.audio import (
+    DECIBELS_PER_NEPER,
+    Atmosphere,
     air_absorption_np_per_m,
     apply_air_absorption,
     convolve,
     integrate_and_lowcut,
     lowpass,
+    peak_gain,
     reduce_nodes,
     resample_to,
     write_wav,
@@ -234,3 +238,55 @@ def test_a_frame_that_cannot_overlap_add_is_refused() -> None:
 def test_a_one_dimensional_response_stays_one_dimensional() -> None:
     out = apply_air_absorption(np.zeros(512), 48000.0)
     assert out.ndim == 1
+
+
+def test_the_atmosphere_writes_itself_down_because_a_run_must_declare_it() -> None:
+    """A triple of loose floats does not satisfy the roadmap's requirement."""
+    record = Atmosphere(temperature_c=18.0, humidity_percent=35.0).record()
+    assert record["humidity_percent"] == 35.0
+    assert record["standard"] == "ISO 9613-1"
+    assert json.dumps(record)
+
+
+def test_humidity_changes_the_top_octave_by_the_factor_the_atmosphere_warns_about() -> None:
+    top = np.array([16000.0])
+    dry = Atmosphere(humidity_percent=30.0).attenuation_np_per_m(top)[0]
+    damp = Atmosphere(humidity_percent=80.0).attenuation_np_per_m(top)[0]
+    assert dry / damp == pytest.approx(1.85, abs=0.02)
+    assert dry * DECIBELS_PER_NEPER == pytest.approx(0.466, abs=0.002)
+    assert damp * DECIBELS_PER_NEPER == pytest.approx(0.252, abs=0.002)
+
+
+def test_the_coefficient_is_in_nepers_so_the_conversion_cannot_go_missing() -> None:
+    """Two correct implementations disagreed in the fifth digit on this rounding."""
+    assert pytest.approx(20.0 / np.log(10.0)) == DECIBELS_PER_NEPER
+    frequency = np.array([4000.0])
+    nepers = air_absorption_np_per_m(frequency)[0]
+    assert nepers * 8.686 == pytest.approx(0.0297, abs=5e-5)
+
+
+def test_one_gain_over_several_blocks_keeps_the_level_between_them() -> None:
+    """W30's defect: six receivers all written at 0.8913, distance inaudible."""
+    loud = np.zeros((2, 16))
+    loud[0, 1] = 1.0
+    quiet = np.zeros((2, 16))
+    quiet[0, 1] = 0.01
+    gain = peak_gain(loud, quiet)
+    assert np.max(np.abs(loud * gain)) / np.max(np.abs(quiet * gain)) == pytest.approx(100.0)
+    assert np.max(np.abs(loud * gain)) == pytest.approx(10.0 ** (-1.0 / 20.0))
+
+
+def test_peak_gain_survives_silence_and_empty_input() -> None:
+    assert peak_gain(np.zeros(8)) == 1.0
+    assert peak_gain() == 1.0
+
+
+def test_a_passed_gain_overrides_the_per_file_one(tmp_path: Path) -> None:
+    """What a caller writing a comparable set passes, so no file rescales itself."""
+    soundfile = pytest.importorskip("soundfile")
+    quiet = np.zeros((1, 32))
+    quiet[0, 3] = 0.01
+    used = write_wav(tmp_path / "q.wav", quiet, 48000.0, gain=0.5)
+    assert used == 0.5
+    samples, _ = soundfile.read(str(tmp_path / "q.wav"))
+    assert np.max(np.abs(samples)) == pytest.approx(0.005, abs=1e-6)

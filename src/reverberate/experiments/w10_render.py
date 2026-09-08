@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 
 from reverberate import audio, metrics
+from reverberate.audio import Atmosphere
 from reverberate.experiments.engine import write_record
 from reverberate.experiments.w20_render import dry_voice, publish
 from reverberate.response import Provenance
@@ -106,13 +107,12 @@ def pressures_of_run(
     comms_path: Path,
     lowcut_hz: float,
     delivery_rate_hz: float = DELIVERY_RATE_HZ,
-    air: dict[str, float] | None = None,
+    air: Atmosphere | None = None,
     sound_speed_m_s: float = 343.2,
 ) -> tuple[np.ndarray, float]:
     """One row per receiver at the delivery rate, air absorption applied or not.
 
-    ``air`` carries ``temperature_c`` and ``humidity_percent``; ``None`` skips
-    the filter and is then an omission the report has to name.
+    ``None`` skips the filter and is then an omission the report has to name.
     """
     reduced, differentiated = audio.read_engine_output(run_dir, comms_path)
     signals = audio.integrate_and_lowcut(
@@ -128,8 +128,9 @@ def pressures_of_run(
             signals,
             delivery_rate_hz,
             sound_speed_m_s=sound_speed_m_s,
-            temperature_c=air["temperature_c"],
-            humidity_percent=air["humidity_percent"],
+            temperature_c=air.temperature_c,
+            humidity_percent=air.humidity_percent,
+            pressure_kpa=air.pressure_kpa,
         )
     return signals, delivery_rate_hz
 
@@ -344,7 +345,7 @@ def room_report(
     run_dir: Path,
     settings: EncoderSettings,
     *,
-    air: dict[str, float] | None,
+    air: Atmosphere | None,
     lowcut_hz: float,
     yaws_deg: tuple[float, ...] = YAWS_DEG,
     filter_length: int = 512,
@@ -421,8 +422,17 @@ def room_report(
         "encoder": settings.record(),
         "array": plan["array"],
         "conditioning": plan["conditioning"],
-        "air_absorption": air
-        or {"applied": False, "why": "not requested; the treble of the tail is overstated"},
+        "air_absorption": (
+            {"applied": True, **air.record()}
+            if air is not None
+            else {
+                "applied": False,
+                "why": (
+                    "not requested, so the treble of the tail is overstated; at "
+                    "16 kHz that is 38 per cent of T60 on this room's own decay"
+                ),
+            }
+        ),
         "low_cut_hz": lowcut_hz,
         "direction_of_arrival": band_directions(ambisonic, reference),
         "reference_direction": [round(float(v), 5) for v in reference],
@@ -468,11 +478,7 @@ def write_audio(
         for head, angles in brirs.items()
         for yaw, response in angles.items()
     }
-    peak = max(
-        [float(np.max(np.abs(block))) for block in wet.values()]
-        + [float(np.max(np.abs(ambisonic.signals)))]
-    )
-    gain = 1.0 if peak == 0.0 else 10.0 ** (-1.0 / 20.0) / peak
+    gain = audio.peak_gain(*wet.values(), ambisonic.signals)
 
     written: list[dict[str, Any]] = []
     ambix, _ = write_ambix_wav(
@@ -525,7 +531,7 @@ def _room(args: argparse.Namespace) -> int:
     air = (
         None
         if args.no_air
-        else {"temperature_c": args.temperature, "humidity_percent": args.humidity}
+        else Atmosphere(temperature_c=args.temperature, humidity_percent=args.humidity)
     )
     rendered: dict[str, Any] = {}
     report = room_report(args.run, settings, air=air, lowcut_hz=args.low_cut, rendered=rendered)

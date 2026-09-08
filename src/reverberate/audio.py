@@ -53,9 +53,12 @@ from scipy.signal import bilinear_zpk, butter, fftconvolve, sosfilt, zpk2sos
 from reverberate.experiments.engine import sim_consts
 
 __all__ = [
+    "Atmosphere",
+    "DECIBELS_PER_NEPER",
     "Reduced",
     "air_absorption_np_per_m",
     "apply_air_absorption",
+    "peak_gain",
     "convolve",
     "integrate_and_lowcut",
     "lowpass",
@@ -189,25 +192,99 @@ def convolve(dry: np.ndarray, ir: np.ndarray) -> np.ndarray:
     return np.asarray(fftconvolve(dry, ir, mode="full"), dtype=float)
 
 
+def peak_gain(*blocks: np.ndarray, headroom_db: float = 1.0) -> float:
+    """One gain for every block that has to stay comparable, from their joint peak.
+
+    **The defect this exists to stop has already happened.** Roadmap W30
+    records that ``render_audio`` wrote one WAV per receiver and scaled each by
+    its own peak, so all six came back at 0.8913 and the distance between them
+    was inaudible; the module's own rule, one gain because the level between two
+    receivers is a measurement, was being applied per file in a run that writes
+    one file per receiver. That fix is described in the roadmap as done, and it
+    lived in a script that was never committed, so this function is the one the
+    roadmap already refers to.
+
+    It applies to more than receivers. Two ears of one head differ by their
+    interaural level difference, which is the cue the dataset exists to carry;
+    the channels of one ambisonic file differ by nothing but the direction. A
+    per file normalisation destroys both.
+    """
+    peaks = [float(np.max(np.abs(np.asarray(block)))) for block in blocks if np.size(block)]
+    peak = max(peaks) if peaks else 0.0
+    return 1.0 if peak == 0.0 else 10.0 ** (-headroom_db / 20.0) / peak
+
+
 def write_wav(
-    path: Path, signals: np.ndarray, sample_rate_hz: float, *, headroom_db: float = 1.0
+    path: Path,
+    signals: np.ndarray,
+    sample_rate_hz: float,
+    *,
+    headroom_db: float = 1.0,
+    gain: float | None = None,
 ) -> float:
     """Write a WAV and return the single gain applied to every channel.
 
     One gain for the whole file, returned rather than swallowed, so the
     relative level between channels survives and the absolute one is recorded
     instead of being quietly invented.
+
+    ``gain`` overrides that with one computed elsewhere, which is what a caller
+    writing several files that must stay comparable passes: see
+    :func:`peak_gain`. Left at ``None`` the file is scaled on its own peak,
+    which is right for a file that stands alone and wrong for one of a set.
     """
     import soundfile
 
     block = np.atleast_2d(signals)
-    peak = float(np.max(np.abs(block)))
-    gain = 1.0 if peak == 0.0 else 10.0 ** (-headroom_db / 20.0) / peak
+    gain = peak_gain(block, headroom_db=headroom_db) if gain is None else gain
     path.parent.mkdir(parents=True, exist_ok=True)
     soundfile.write(
         str(path), (block * gain).T, int(round(sample_rate_hz)), subtype="FLOAT", format="WAV"
     )
     return gain
+
+
+#: Decibels per neper, ``20 / ln 10``. Written out because rounding it to 8.686
+#: is the whole of the fifth-digit disagreement between two correct
+#: implementations of ISO 9613-1.
+DECIBELS_PER_NEPER = 8.685889638065035
+
+
+@dataclass(frozen=True)
+class Atmosphere:
+    """The air a response was computed in, as an object that can be written down.
+
+    **The roadmap requires this of every run and a triple of loose floats does
+    not satisfy it.** At 16 kHz the absorption coefficient runs from 0.252 dB/m
+    at 80 per cent relative humidity to 0.466 at 30, a factor of 1.85, so a run
+    that has not recorded its humidity has not recorded its own decay.
+    """
+
+    temperature_c: float = 20.0
+    humidity_percent: float = 50.0
+    pressure_kpa: float = 101.325
+
+    def attenuation_np_per_m(self, frequency_hz: np.ndarray) -> np.ndarray:
+        """This atmosphere's own absorption coefficient."""
+        return air_absorption_np_per_m(
+            frequency_hz,
+            temperature_c=self.temperature_c,
+            humidity_percent=self.humidity_percent,
+            pressure_kpa=self.pressure_kpa,
+        )
+
+    def record(self) -> dict[str, float | str]:
+        """What a ``report.json`` has to carry for the response to be readable."""
+        return {
+            "temperature_c": self.temperature_c,
+            "humidity_percent": self.humidity_percent,
+            "pressure_kpa": self.pressure_kpa,
+            "standard": "ISO 9613-1",
+            "note": (
+                "at 16 kHz the coefficient varies by a factor of 1.85 across "
+                "ordinary indoor humidity, so these are part of the result"
+            ),
+        }
 
 
 def air_absorption_np_per_m(
@@ -251,8 +328,12 @@ def air_absorption_np_per_m(
         0.01275 * np.exp(-2239.1 / temperature) / (oxygen + frequency**2 / oxygen)
         + 0.1068 * np.exp(-3352.0 / temperature) / (nitrogen + frequency**2 / nitrogen)
     )
-    decibels_per_metre = 8.686 * frequency**2 * (classical + relaxation)
-    return np.asarray(decibels_per_metre / 8.686, dtype=float)
+    # ISO 9613-1 writes the coefficient as ``8.686 f^2 (...)`` in dB/m, and that
+    # 8.686 is the decibel conversion, so the neper form is the bracket itself.
+    # Multiplying by it here and dividing again in the caller is where a factor
+    # goes missing, and where two independent implementations disagree in the
+    # fifth digit purely on which rounding of ``20 / ln 10`` each chose.
+    return np.asarray(frequency**2 * (classical + relaxation), dtype=float)
 
 
 def apply_air_absorption(

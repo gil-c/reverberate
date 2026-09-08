@@ -16,6 +16,7 @@ import h5py
 import numpy as np
 import pytest
 
+from reverberate.audio import Atmosphere
 from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
@@ -133,13 +134,14 @@ def test_the_report_reads_a_run_end_to_end_and_points_at_the_source(tmp_path: Pa
     report = room_report(
         run,
         EncoderSettings(order=3, fit_order=7, max_frequency_hz=4000.0),
-        air={"temperature_c": 20.0, "humidity_percent": 50.0},
+        air=Atmosphere(),
         lowcut_hz=40.0,
         yaws_deg=(0.0, 90.0),
         filter_length=256,
     )
     assert report["binaural"] is True
     assert report["air_absorption"]["humidity_percent"] == 50.0
+    assert report["air_absorption"]["standard"] == "ISO 9613-1"
     usable = [row for row in report["direction_of_arrival"] if row["usable"]]
     assert usable, "no band had enough cycles to place a direction"
     assert max(row["error_deg"] for row in usable) < 1.0

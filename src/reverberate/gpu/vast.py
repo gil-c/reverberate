@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -315,6 +316,27 @@ class VastClient:
         self._key = key
         self._timeout = timeout
 
+    @staticmethod
+    def _ssl_context() -> ssl.SSLContext:
+        """Verify against ``certifi`` when it is installed, the system store otherwise.
+
+        **The symptom this prevents looks like a network outage and is not one.**
+        The python.org framework build of Python on macOS ships no certificate
+        store of its own, so every call through ``urllib`` fails with
+        ``CERTIFICATE_VERIFY_FAILED, unable to get local issuer certificate``,
+        while the store client keeps working because ``boto3`` carries
+        ``certifi``. Two sessions of this project met it and one of them read it
+        as the API being unreachable.
+
+        Verification is never turned off. If ``certifi`` is absent the system
+        store is used, which is the standard behaviour.
+        """
+        try:
+            import certifi
+        except ImportError:  # pragma: no cover - certifi arrives with boto3
+            return ssl.create_default_context()
+        return ssl.create_default_context(cafile=certifi.where())
+
     def request(
         self,
         method: str,
@@ -330,13 +352,23 @@ class VastClient:
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+            context = self._ssl_context()
+            with urllib.request.urlopen(  # noqa: S310
+                request, timeout=self._timeout, context=context
+            ) as response:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as error:
             # The body can echo the request; never let it reach a log with the key in it.
             raise VastError(f"{method} {path} failed: HTTP {error.code}") from None
         except urllib.error.URLError as error:
-            raise VastError(f"{method} {path} failed: {error.reason}") from None
+            hint = ""
+            if isinstance(error.reason, ssl.SSLCertVerificationError):
+                hint = (
+                    ". This is a certificate store problem on this machine and not a "
+                    "network one; install certifi, or run "
+                    "'Install Certificates.command' from the Python framework"
+                )
+            raise VastError(f"{method} {path} failed: {error.reason}{hint}") from None
 
     def search(self, query: str, limit: int = 20) -> list[Offer]:
         """Offers matching ``query``, cheapest first.
