@@ -754,8 +754,11 @@ function spatialSection(data) {
         : `<p class="note">No air absorption: the treble of the tail is overstated.</p>`
     }
     ${
+      // A record, not a warning. Nothing here is published, and the question is
+      // settled when something is; styling it as an alarm put an amber banner
+      // on every listening session for a decision nobody is taking today.
       data.licence_conflict
-        ? `<p class="note">The measured head is ${escapeHtml(
+        ? `<p class="caption">The measured head is ${escapeHtml(
             data.licence_conflict.head_licence
           )} and this project's artefacts are ${escapeHtml(
             data.licence_conflict.project_licence
