@@ -577,6 +577,10 @@ def test_releasing_a_run_takes_its_surfaces_out_of_the_scene() -> None:
     body = page[release : page.index("async function loadApartment")]
     assert "scene.remove(groups.acoustic)" in body
     assert "groups.acoustic = null" in body
+    # A second group and a second removal. Absent on this branch, where
+    # buildRunGroup returns no markers, so the guard is false and the line does
+    # nothing; present so that a merge cannot drop it by taking one side whole.
+    assert "if (runView && runView.markers) scene.remove(runView.markers)" in body
 
 
 def test_one_walkable_outline_governs_every_mode() -> None:
