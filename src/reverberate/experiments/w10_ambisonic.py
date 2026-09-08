@@ -1,4 +1,4 @@
-"""W37: an ambisonic response of one room at 16 kHz, and the rehearsal before it.
+"""W10: an ambisonic response of one room at 16 kHz, and the rehearsal before it.
 
 The chain this drives is new from end to end -- a volumetric array of grid
 nodes, a per frequency regularised fit, a head, a decode -- and every one of

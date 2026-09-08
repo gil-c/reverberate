@@ -23,7 +23,7 @@ code rather than discipline:
 Usage::
 
     PYTHONPATH=src .venv/bin/python scripts/remote_solve.py \\
-        --run data/runs/w37_bedroom_16k --key <cache key> \\
+        --run data/runs/w10_bedroom_16k --key <cache key> \\
         --hours 4 --max-dph 0.70 --yes
 """
 

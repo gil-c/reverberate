@@ -16,7 +16,7 @@ import h5py
 import numpy as np
 import pytest
 
-from reverberate.experiments.w37_render import (
+from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
     decoders,
@@ -57,7 +57,7 @@ def a_solved_run(tmp_path: Path, *, samples: int = 2048) -> Path:
     centre = np.full(3, 100 * STEP)
     source = centre + np.array([1.5, 0.0, 0.0])
     design = design_array(centre, grid, fit_order=6, outer_radius_m=0.16)
-    run = tmp_path / "w37_test"
+    run = tmp_path / "w10_test"
     (run / "comms").mkdir(parents=True)
     (run / "source0").mkdir(parents=True)
     np.save(run / "array_positions.npy", design.positions)
@@ -193,7 +193,7 @@ def test_the_head_is_sampled_on_the_decoder_s_own_grid() -> None:
 
 
 def test_a_band_with_too_few_cycles_is_marked_unusable() -> None:
-    """Calibrated on W37's rehearsal: under a period the intensity vector reverses."""
+    """Calibrated on W10's rehearsal: under a period the intensity vector reverses."""
     order = 3
     signals = np.zeros((channel_count(order), 256))
     direction = directions(np.array(0.3), np.array(0.1))

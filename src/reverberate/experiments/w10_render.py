@@ -1,9 +1,9 @@
-"""From W37's solved field to an ambisonic response, two ears, and the numbers.
+"""From W10's solved field to an ambisonic response, two ears, and the numbers.
 
 The order of the chain is fixed and each step is here because leaving it out is
 a mistake this project has already made or has written down:
 
-1. **reduce**, one weight per receiver rather than eight, since W37's receivers
+1. **reduce**, one weight per receiver rather than eight, since W10's receivers
    are grid nodes;
 2. **integrate and low cut**, because the single precision engine differentiates
    its source and reading the output without undoing that gives the derivative
@@ -190,7 +190,7 @@ def band_directions(
         # comes back reversed. A reader must not have to know that to read the
         # table, so each row says whether it may be read.
         #
-        # The two thresholds are calibrated on W37's rehearsal rather than
+        # The two thresholds are calibrated on W10's rehearsal rather than
         # chosen: there, half a cycle gave a 180 degree error at a
         # concentration of 0.53, one cycle gave 0.07 degrees at 0.88, and
         # everything above gave better than 0.02 degrees at 0.99 or more.
@@ -341,8 +341,7 @@ def room_report(
         radii=np.linalg.norm(positions - centre, axis=1),
         shell=np.zeros(positions.shape[0], dtype=int),
         nominal_radii=(float(np.linalg.norm(positions - centre, axis=1).max()),),
-        grid_step_m=float(plan["conditioning"].get("grid_step_m", 0.0))
-        or float(plan["array"]["grid_step_m"]),
+        grid_step_m=float(plan["array"]["grid_step_m"]),
     )
     fmax = float(settings.max_frequency_hz or 16000.0)
     signals, rate = pressures_of_run(

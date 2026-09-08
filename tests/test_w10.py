@@ -1,6 +1,6 @@
-"""W37's own arithmetic, and the guards that stop money being spent on a defect.
+"""W10's own arithmetic, and the guards that stop money being spent on a defect.
 
-Nothing here runs a solver. What it checks is the part of W37 that is a
+Nothing here runs a solver. What it checks is the part of W10 that is a
 calculation: the rehearsal box's timings, which decide whether the window it
 solves contains a clean direct sound at all, and the clearance rule, which is
 the one PFFDTD does not make and which would otherwise return a plausible field
@@ -15,7 +15,7 @@ import h5py
 import numpy as np
 import pytest
 
-from reverberate.experiments.w37_ambisonic import (
+from reverberate.experiments.w10_ambisonic import (
     REHEARSAL,
     Rehearsal,
     array_at,
