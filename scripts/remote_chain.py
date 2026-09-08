@@ -210,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="keep each fetched grid local instead of pushing it to the object store",
     )
+    parser.add_argument(
+        "--nprocs",
+        type=int,
+        default=None,
+        help="worker processes for the voxeliser; unset lets it take every core, which "
+        "on a 32 vCPU box with 31 GB segfaulted the room at 8 kHz",
+    )
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     args = parser.parse_args(argv)
 
@@ -327,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
                 remote_dir=remote_dir,
                 timeout=args.hours * 3600,
                 fetch_entry=not args.payload,
+                nprocs=args.nprocs,
             )
             computed = True
             spent += result.total_s
