@@ -98,6 +98,19 @@ class EncoderSettings:
     def regularisation(self) -> float:
         return float(1.0 / (4.0 * (10.0 ** (self.gain_cap_db / 20.0)) ** 2))
 
+    def __post_init__(self) -> None:
+        # Reported here rather than deep in the solve, where it surfaces as a
+        # broadcast error between 49 and 64 columns and says nothing about what
+        # the caller did. Fitting below the order being reported asks for
+        # coefficients the fit never solved for.
+        if self.fit_order < self.order:
+            raise ValueError(
+                f"fit order {self.fit_order} is below the order being reported, "
+                f"{self.order}; the fit would not solve for the channels asked for"
+            )
+        if self.order < 0:
+            raise ValueError(f"order must be non negative, not {self.order}")
+
     @property
     def gate_kr(self) -> float:
         """The ``k r`` at which a shell starts being dropped.

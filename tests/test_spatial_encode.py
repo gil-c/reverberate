@@ -266,3 +266,17 @@ def test_a_pressure_block_of_the_wrong_shape_is_refused() -> None:
             array,
             sound_speed_m_s=SOUND_SPEED,
         )
+
+
+def test_fitting_below_the_reported_order_is_refused_at_the_settings() -> None:
+    """Otherwise it surfaces as a broadcast error between 49 and 64 columns.
+
+    Deep inside the solve, where the message says nothing about what the caller
+    did. Fitting below the order being reported asks for coefficients the fit
+    never solved for.
+    """
+    with pytest.raises(ValueError, match="below the order being reported"):
+        EncoderSettings(order=7, fit_order=6)
+    with pytest.raises(ValueError, match="non negative"):
+        EncoderSettings(order=-1, fit_order=3)
+    assert EncoderSettings(order=3, fit_order=3).gate_kr == -1.0

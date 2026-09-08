@@ -209,6 +209,32 @@ def array_at(
     return design, grid, clearance
 
 
+def _check_source_outside(design: ArrayDesign, source: np.ndarray, margin_m: float = 0.05) -> None:
+    """Refuse a source inside the array's own ball.
+
+    A second rule the clearance check does not cover, and a different one from
+    the boundary rule. The interior expansion
+    ``p = sum a_nm j_n(k r) Y_nm`` is a solution of the *homogeneous* Helmholtz
+    equation, so it describes the field only where there is no source. A source
+    inside the ball makes the model wrong rather than noisy, exactly as a
+    surface does, and the fit would return a plausible field that is not the one
+    in the room.
+
+    Not hypothetical: a source and a listener within 20 cm of each other is an
+    ordinary thing to sample in a small room, and nothing else in this chain
+    would notice.
+    """
+    distance = float(np.linalg.norm(np.asarray(source, dtype=float) - design.centre))
+    limit = float(design.radii.max()) + margin_m
+    if distance <= limit:
+        raise ValueError(
+            f"the source is {distance:.3f} m from the array's centre, inside its "
+            f"{limit:.3f} m ball. The interior expansion solves the homogeneous "
+            "Helmholtz equation and does not describe a region containing a "
+            "source; move the pair apart or shrink the array"
+        )
+
+
 def cost_record(grid_points: int, samples: int, receivers: int) -> dict[str, Any]:
     """What the run will cost, stated before it is started rather than after."""
     updates = float(grid_points) * float(samples)
@@ -340,6 +366,7 @@ def plan_room(
     design, grid, clearance = array_at(
         centre, entry_path, outer_radius_m=outer_radius_m, settings=settings
     )
+    _check_source_outside(design, source)
     constants = sim_consts(entry_path)
     samples = int(round(duration_s * constants.sample_rate))
     manifest = json.loads((entry_path / "manifest.json").read_text())

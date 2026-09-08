@@ -9,6 +9,7 @@ that is not the one in the room.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import h5py
@@ -21,6 +22,7 @@ from reverberate.experiments.w10_ambisonic import (
     array_at,
     cost_record,
     plan_record,
+    plan_room,
 )
 from reverberate.spatial.array import design_array
 from reverberate.spatial.encode import EncoderSettings
@@ -43,11 +45,17 @@ def write_entry(directory: Path, grid: Grid, boundary: np.ndarray) -> Path:
         handle.create_dataset("Ts", data=np.float64(grid.Ts))
         handle.create_dataset("l2", data=np.float64(grid.l2))
         handle.create_dataset("fcc_flag", data=np.int8(grid.fcc_flag))
+        # The plan reads the sample rate from here to turn a duration into
+        # steps, so a fixture without it is not a cache entry.
+        handle.create_dataset("SR", data=np.float64(1.0 / grid.Ts))
     with h5py.File(directory / "cart_grid.h5", "w") as handle:
         for name, values in (("xv", grid.xv), ("yv", grid.yv), ("zv", grid.zv)):
             handle.create_dataset(name, data=values)
     with h5py.File(directory / "vox_out.h5", "w") as handle:
         handle.create_dataset("bn_ixyz", data=np.sort(boundary))
+    (directory / "manifest.json").write_text(
+        json.dumps({"key": directory.name, "grid_points": 1000, "h_m": grid.h})
+    )
     return directory
 
 
@@ -90,7 +98,7 @@ def test_an_array_in_free_air_is_accepted_and_says_how_much_it_checked(
         centre,
         entry,
         outer_radius_m=0.05,
-        settings=EncoderSettings(fit_order=6),
+        settings=EncoderSettings(order=3, fit_order=6),
     )
     assert clearance["boundary_nodes_in_ball"] == 0
     assert clearance["ball_nodes"] > design.count
@@ -115,7 +123,7 @@ def test_a_surface_inside_the_ball_is_refused_even_though_no_receiver_touches_it
     assert not np.isin(intruder, [0]).any()
     entry = write_entry(tmp_path / "entry", grid, intruder)
     with pytest.raises(ValueError, match="boundary nodes lie inside"):
-        array_at(centre, entry, outer_radius_m=0.05, settings=EncoderSettings(fit_order=6))
+        array_at(centre, entry, outer_radius_m=0.05, settings=EncoderSettings(order=3, fit_order=6))
 
 
 def test_a_ball_reaching_the_edge_of_the_grid_is_refused(tmp_path: Path) -> None:
@@ -126,7 +134,7 @@ def test_a_ball_reaching_the_edge_of_the_grid_is_refused(tmp_path: Path) -> None
             np.full(3, 30 * 0.002),
             entry,
             outer_radius_m=0.05,
-            settings=EncoderSettings(fit_order=6),
+            settings=EncoderSettings(order=3, fit_order=6),
         )
 
 
@@ -144,3 +152,46 @@ def test_the_plan_records_what_the_array_supports_before_anything_is_solved() ->
     assert record["array"]["nodes"] == design.count
     assert record["encoder"]["gate_kr"] == 6.0
     assert record["conditioning"]["effective_order"] == [7, 7]
+
+
+def test_a_source_inside_the_array_is_refused(tmp_path: Path) -> None:
+    """The other rule the clearance check does not cover, and it is not hypothetical.
+
+    The interior expansion solves the *homogeneous* Helmholtz equation, so it
+    describes the field only where there is no source. A source inside the ball
+    makes the model wrong rather than noisy, exactly as a surface does, and a
+    source and a listener within 20 cm of each other is an ordinary thing to
+    sample in a small room.
+    """
+    grid = a_grid(400, 0.002)
+    centre = np.full(3, 200 * 0.002)
+    entry = write_entry(tmp_path / "entry", grid, np.array([0], dtype=np.int64))
+    settings = EncoderSettings(order=3, fit_order=6)
+    with pytest.raises(ValueError, match="inside its"):
+        plan_room(
+            tmp_path / "run",
+            entry,
+            settings,
+            centre=centre,
+            source=centre + np.array([0.08, 0.0, 0.0]),
+            duration_s=0.01,
+            outer_radius_m=0.05,
+        )
+
+
+def test_a_source_across_the_room_is_accepted(tmp_path: Path) -> None:
+    grid = a_grid(400, 0.002)
+    centre = np.full(3, 200 * 0.002)
+    entry = write_entry(tmp_path / "entry", grid, np.array([0], dtype=np.int64))
+    record = plan_room(
+        tmp_path / "run",
+        entry,
+        EncoderSettings(order=3, fit_order=6),
+        centre=centre,
+        source=centre + np.array([0.25, 0.0, 0.0]),
+        duration_s=0.01,
+        outer_radius_m=0.05,
+        extra_receivers=(),
+    )
+    assert record["clearance"]["boundary_nodes_in_ball"] == 0
+    assert record["cost"]["receivers"] > 0
