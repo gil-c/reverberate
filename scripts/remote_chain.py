@@ -211,6 +211,14 @@ def main(argv: list[str] | None = None) -> int:
         help="keep each fetched grid local instead of pushing it to the object store",
     )
     parser.add_argument(
+        "--min-ram-gb",
+        type=float,
+        default=0.0,
+        help="floor on the machine's RAM, above what the requirement model asks. The "
+        "model asked 16 GB for a 1 M triangle room at 8 kHz and a 31 GB box was "
+        "OOM killed at consolidate with 12 workers",
+    )
+    parser.add_argument(
         "--nprocs",
         type=int,
         default=None,
@@ -242,6 +250,17 @@ def main(argv: list[str] | None = None) -> int:
             one = one.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
         need = one if need is None else need.merge(one)
     assert need is not None
+    if args.min_ram_gb > need.ram_gb:
+        need = need.merge(
+            MachineNeed(
+                cores=need.cores,
+                ram_gb=args.min_ram_gb,
+                disk_gb=need.disk_gb,
+                why=f"a RAM floor of {args.min_ram_gb:.0f} GB asked on the command line",
+                needs_gpu=need.needs_gpu,
+                vram_gb=need.vram_gb,
+            )
+        )
 
     for fmax in bands:
         spec = specs[fmax][0]
