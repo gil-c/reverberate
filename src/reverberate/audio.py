@@ -409,14 +409,30 @@ def apply_air_absorption(
     | 512 | 0.003 | 0.004 | 0.011 | 0.30 | 1.1 |
     | 1024 | 0.015 | 0.041 | 0.003 | 0.095 | 0.018 |
 
-    **What the table measures is a leakage floor, and duration is only its
-    proxy.** The error appears where the signal at a frequency has fallen below
-    what leaks into that bin from the loud part of the spectrum, so what decides
-    it is the ratio between the two and not the clock. A delta and a pure tone
-    reach that regime quickly, because they leave nothing at the top of the
-    band; a room response does not, because its tail is broadband. Measured on a
-    decaying response with a direct sound, octave band energy at a 256 sample
-    frame against a 4096 one:
+    **What the frame buys is a dynamic range, not a length of time.** The error
+    appears where the signal at a frequency has fallen below what leaks into
+    that bin from the loud part of the spectrum, so what decides it is the ratio
+    between the two. Measured on a 16 kHz tone, which falls 125 dB per second to
+    air alone: every frame tracks the analytic decay exactly until it reaches
+    its own floor, and then flattens onto it.
+
+    | frame | leakage floor, below the tone's own start |
+    | --- | --- |
+    | 128 | -96 dB |
+    | 256 | -110 dB |
+    | 512 | -125 dB |
+    | 1024 | -140 dB |
+    | 2048 | -156 dB |
+    | 4096 | -171 dB |
+
+    **Doubling the frame buys about 15 dB of floor and nothing else.** Duration
+    only decides how long the signal takes to fall that far, which is why it
+    works as a rule of thumb and fails as an explanation.
+
+    A delta and a pure tone reach the floor quickly, because they leave nothing
+    at the top of the band; a room response does not, because its tail is
+    broadband. Measured on a decaying response with a direct sound, octave band
+    energy at a 256 sample frame against a 4096 one:
 
     | duration | 4 kHz | 8 kHz | 16 kHz |
     | --- | --- | --- | --- |
@@ -424,10 +440,11 @@ def apply_air_absorption(
     | 1.5 s | 0.017 | 0.066 | 0.107 |
     | 2.0 s | 0.020 | 0.059 | 0.096 |
 
-    In dB, and it does not grow with duration. So the table above is the worst
+    In dB, and it does not grow with duration. So the per bin table is the worst
     case of a probe rather than of a room, and the choice below is conservative
     on purpose: a longer frame costs a little arithmetic and protects the
-    synthetic signals this project also filters.
+    synthetic signals this project also filters, which are exactly the ones that
+    empty their top of band and reach the floor.
 
     ``None``, the default, takes the frame from the length of the signal it is
     given. A caller who passes one explicitly is trusted and not corrected.

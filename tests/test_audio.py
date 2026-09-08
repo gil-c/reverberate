@@ -369,3 +369,35 @@ def test_a_real_decaying_response_barely_notices_the_frame_length() -> None:
     ):
         difference = 10.0 * np.log10(np.sum(a**2) / np.sum(b**2))
         assert abs(difference) < 0.2
+
+
+def test_doubling_the_frame_buys_about_fifteen_decibels_of_floor() -> None:
+    """The limit is a dynamic range, not a length of time.
+
+    A 16 kHz tone falls 125 dB per second to air alone. Every frame follows that
+    exactly until it meets its own spectral leakage, then flattens onto it. What
+    a longer frame buys is a lower floor, and duration only decides how long the
+    signal takes to reach it.
+    """
+    rate = 48000.0
+    time = np.arange(int(3.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)[np.newaxis, :]
+    block = int(0.02 * rate)
+
+    def floor_db(frame: int) -> float:
+        filtered = apply_air_absorption(tone, rate, frame=frame)[0]
+        count = filtered.size // block
+        envelope = 20.0 * np.log10(
+            np.array(
+                [np.sqrt(np.mean(filtered[i * block : (i + 1) * block] ** 2)) for i in range(count)]
+            )
+            + 1e-300
+        )
+        settled = envelope[int(0.8 * count) : int(0.95 * count)].mean()
+        return float(settled - envelope[0])
+
+    floors = [floor_db(frame) for frame in (256, 512, 1024, 2048)]
+    steps = np.diff(floors)
+    assert np.all(steps < -12.0)
+    assert np.all(steps > -18.0)
+    assert floors[0] < -100.0
