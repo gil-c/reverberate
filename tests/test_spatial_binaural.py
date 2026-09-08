@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from reverberate.spatial.binaural import (
+    coherence_floor,
     covariance_correction,
     design_decoder,
     ild_db,
@@ -217,6 +218,23 @@ def test_a_head_sampled_off_the_decoder_s_grid_is_refused() -> None:
         design_decoder(head, order=3, sample_rate_hz=RATE, filter_length=256)
 
 
+def test_band_limiting_the_coherence_is_what_makes_it_test_the_claim() -> None:
+    """Two ears that share a low rumble and differ above it read as coherent broadband.
+
+    Which is correct, and says nothing about the roadmap's prediction, which is
+    about the octaves above 1 kHz. Only the band limited form tests it.
+    """
+    rng = np.random.default_rng(3)
+    samples = int(0.6 * RATE)
+    time = np.arange(samples) / RATE
+    rumble = np.sin(2.0 * np.pi * 120.0 * time) * 6.0
+    ears = np.stack([rumble + rng.standard_normal(samples), rumble + rng.standard_normal(samples)])
+    _, broadband = interaural_coherence(ears, RATE)
+    _, high = interaural_coherence(ears, RATE, band_hz=4000.0)
+    assert np.mean(broadband) > 0.9
+    assert np.mean(high) < 0.4
+
+
 def test_uncorrelated_ears_read_as_incoherent_and_a_shared_signal_as_coherent() -> None:
     rng = np.random.default_rng(1)
     shared = rng.standard_normal(4800)
@@ -287,3 +305,27 @@ class TestAMeasuredHead:
         """A measured set travels with its licence or it does not travel."""
         _, metadata = measured_head(self.a_file(tmp_path), 48000.0, 256)
         assert set(metadata) >= {"licence", "author", "organisation", "measurements"}
+
+
+def test_the_coherence_estimator_states_its_own_floor() -> None:
+    """The peak over lags of a finite window is positive when the truth is zero.
+
+    Quoting a coherence without that floor invites a reader to compare it with a
+    theoretical value it cannot reach. The zero lag form has no such bias, which
+    is why it is the one that tests the roadmap's prediction.
+    """
+    assert coherence_floor(RATE, band_hz=8000.0) > 0.15
+    assert coherence_floor(RATE, band_hz=250.0) > 0.5
+    assert abs(coherence_floor(RATE, band_hz=8000.0, lag="zero")) < 0.05
+    assert abs(coherence_floor(RATE, band_hz=250.0, lag="zero")) < 0.1
+    # A longer window lowers the floor, which is the other way to buy resolution.
+    assert coherence_floor(RATE, band_hz=8000.0, frame_s=0.4, hop_s=0.2) < coherence_floor(
+        RATE, band_hz=8000.0
+    )
+
+
+def test_a_shared_signal_reads_coherent_at_zero_lag_too() -> None:
+    rng = np.random.default_rng(7)
+    shared = rng.standard_normal(4800)
+    _, values = interaural_coherence(np.stack([shared, shared]), RATE, lag="zero")
+    assert np.all(values > 0.99)

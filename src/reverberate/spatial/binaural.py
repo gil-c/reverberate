@@ -39,7 +39,7 @@ rendering that does not say how it was decoded cannot be compared with another.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from scipy.signal import fftconvolve
@@ -49,8 +49,16 @@ from reverberate.spatial.encode import Ambisonic
 from reverberate.spatial.hrtf import HrtfSet
 from reverberate.spatial.sh import channel_count, real_sh, rotate_yaw
 
+#: Which coherence is meant. ``max`` is the interaural cross correlation
+#: coefficient, the peak over lags and the established perceptual measure;
+#: ``zero`` is the coherence at zero lag, which is the quantity the roadmap's
+#: diffuse field prediction is about. They are not the same number.
+Lag = Literal["max", "zero"]
+
 __all__ = [
     "BinauralDecoder",
+    "Lag",
+    "coherence_floor",
     "covariance_correction",
     "design_decoder",
     "ild_db",
@@ -270,7 +278,13 @@ def ild_db(brir: np.ndarray) -> float:
 
 
 def interaural_coherence(
-    brir: np.ndarray, sample_rate_hz: float, *, frame_s: float = 0.02, hop_s: float = 0.01
+    brir: np.ndarray,
+    sample_rate_hz: float,
+    *,
+    frame_s: float = 0.02,
+    hop_s: float = 0.01,
+    band_hz: float | None = None,
+    lag: Lag = "max",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Coherence between the ears against time, as ``(times, coherence)``.
 
@@ -279,8 +293,25 @@ def interaural_coherence(
     above, about 0.04 at 8 kHz, which is why channel independent noise is
     physically correct in a high frequency tail. A rendering whose tail stays
     coherent has not decoded a diffuse field.
+
+    **``band_hz`` is what makes it test that claim.** Measured broadband it does
+    not: a room response's energy is dominated by the octaves below 1 kHz, where
+    the two ears are genuinely coherent because the head is small against the
+    wavelength, so a broadband figure of 0.7 is correct and says nothing about
+    the prediction. The claim is about the octaves above.
+
+    **``lag`` decides which of two different quantities this is, and only one of
+    them tests the roadmap.** The peak over lags is heavily biased upwards on a
+    short window: on two genuinely independent ears, where the true value is
+    zero, it reads 0.59 at 250 Hz and 0.19 at 8 kHz over 20 ms frames. So a
+    measured 0.33 at 8 kHz is not eight times the roadmap's 0.04; it is a number
+    whose own floor is 0.19. Quote :func:`coherence_floor` beside it.
     """
     block = np.asarray(brir, dtype=float)
+    if band_hz is not None:
+        high = min(band_hz * np.sqrt(2.0), 0.49 * sample_rate_hz)
+        block = lowpass(block, sample_rate_hz, high)
+        block = block - lowpass(block, sample_rate_hz, band_hz / np.sqrt(2.0))
     frame = max(int(round(frame_s * sample_rate_hz)), 8)
     hop = max(int(round(hop_s * sample_rate_hz)), 1)
     times, values = [], []
@@ -289,7 +320,36 @@ def interaural_coherence(
         right = block[1, start : start + frame]
         norm = np.sqrt(np.sum(left**2) * np.sum(right**2))
         times.append((start + frame / 2.0) / sample_rate_hz)
-        values.append(
-            float(np.max(np.abs(fftconvolve(left, right[::-1]))) / norm) if norm > 0 else 0.0
-        )
+        if norm <= 0:
+            values.append(0.0)
+        elif lag == "zero":
+            values.append(float(np.sum(left * right) / norm))
+        else:
+            values.append(float(np.max(np.abs(fftconvolve(left, right[::-1]))) / norm))
     return np.asarray(times), np.asarray(values)
+
+
+def coherence_floor(
+    sample_rate_hz: float,
+    *,
+    frame_s: float = 0.02,
+    hop_s: float = 0.01,
+    band_hz: float | None = None,
+    lag: Lag = "max",
+    seconds: float = 1.0,
+    seed: int = 0,
+) -> float:
+    """What :func:`interaural_coherence` reads on ears that share nothing.
+
+    The true answer is zero and the measurement does not give it, because the
+    peak over lags of a finite correlation is positive by construction. Quoting
+    a coherence without this floor invites a reader to compare it against a
+    theoretical value it cannot reach: on 20 ms frames the floor is 0.59 at
+    250 Hz and 0.19 at 8 kHz.
+    """
+    rng = np.random.default_rng(seed)
+    ears = rng.standard_normal((2, int(seconds * sample_rate_hz)))
+    _, values = interaural_coherence(
+        ears, sample_rate_hz, frame_s=frame_s, hop_s=hop_s, band_hz=band_hz, lag=lag
+    )
+    return float(np.mean(values)) if values.size else 0.0

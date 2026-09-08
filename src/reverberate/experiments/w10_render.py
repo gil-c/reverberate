@@ -50,6 +50,7 @@ from reverberate.response import Provenance
 from reverberate.spatial.array import ArrayDesign
 from reverberate.spatial.binaural import (
     BinauralDecoder,
+    coherence_floor,
     design_decoder,
     ild_db,
     interaural_coherence,
@@ -270,19 +271,56 @@ def band_directions(
 
 
 def binaural_measures(
-    brir: np.ndarray, sample_rate_hz: float, source_azimuth_rad: float
+    brir: np.ndarray,
+    sample_rate_hz: float,
+    source_azimuth_rad: float,
+    *,
+    coherence_bands_hz: tuple[float, ...] = (250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0),
+    late_from_s: float = 0.05,
 ) -> dict[str, Any]:
-    """Interaural delay, level difference and coherence, beside what a sphere predicts."""
+    """Interaural delay, level difference and coherence, beside what a sphere predicts.
+
+    The coherence is measured per octave, because that is the only form in which
+    it tests the roadmap's own claim: a room response's energy sits in the
+    octaves below 1 kHz, where the ears are genuinely coherent because the head
+    is small against the wavelength, so a broadband figure describes those and
+    says nothing about the octaves the prediction is about.
+    """
+    per_band = []
+    for band in coherence_bands_hz:
+        row: dict[str, Any] = {"band_hz": int(band)}
+        for lag in ("max", "zero"):
+            times, coherence = interaural_coherence(brir, sample_rate_hz, band_hz=band, lag=lag)
+            late = times > (times[0] + late_from_s) if times.size else np.zeros(0, dtype=bool)
+            if not late.any():
+                break
+            row[f"{lag}_lag"] = round(float(np.mean(coherence[late])), 4)
+            # The floor of the estimator itself, on ears that share nothing.
+            # Without it a reader compares a measurement against a theoretical
+            # value it cannot reach: the peak over lags reads 0.19 at 8 kHz when
+            # the true answer is zero.
+            row[f"{lag}_lag_floor"] = round(
+                coherence_floor(sample_rate_hz, band_hz=band, lag=lag), 4
+            )
+        else:
+            per_band.append(row)
     times, coherence = interaural_coherence(brir, sample_rate_hz)
-    late = times > (times[0] + 0.05) if times.size else np.zeros(0, dtype=bool)
+    late = times > (times[0] + late_from_s) if times.size else np.zeros(0, dtype=bool)
     return {
         "itd_us": round(itd_s(brir, sample_rate_hz) * 1e6, 1),
         "woodworth_itd_us": round(float(woodworth_itd_s(np.array(source_azimuth_rad))) * 1e6, 1),
         "ild_db": round(ild_db(brir), 2),
-        "late_coherence": round(float(np.mean(coherence[late])), 4) if late.any() else None,
+        "late_coherence_broadband": (
+            round(float(np.mean(coherence[late])), 4) if late.any() else None
+        ),
+        "late_coherence_per_band": per_band,
         "late_coherence_note": (
             "roadmap 5.5 predicts a diffuse tail is nearly incoherent between "
-            "the ears above 1 kHz, about 0.04 at 8 kHz"
+            "the ears above 1 kHz, about 0.04 at 8 kHz. Only the zero lag rows "
+            "test that: the broadband figure is dominated by the octaves below "
+            "1 kHz where two ears are coherent because the head is small "
+            "against the wavelength, and the peak over lags is biased upwards "
+            "by its own finite window, which is what each floor states"
         ),
     }
 
