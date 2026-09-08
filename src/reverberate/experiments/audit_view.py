@@ -153,18 +153,18 @@ def membership_mask(partition: Partition, halo: int) -> np.ndarray:
     keeping every node inside the result.
 
     Packed as one integer per cell rather than one boolean raster per room:
-    thirteen rasters of the flat's 104 M cells is 1.25 GB and one ``uint16`` is
+    thirteen rasters of the flat's 104 M cells is 1.25 GB and one ``uint32`` is
     209 MB, and it costs one lookup per node instead of thirteen.
     """
     from scipy import ndimage
 
-    if len(partition.rooms) > 16:
-        raise ValueError(f"{len(partition.rooms)} rooms will not pack into a uint16 mask")
+    if len(partition.rooms) > 32:
+        raise ValueError(f"{len(partition.rooms)} rooms will not pack into a uint32 mask")
     cross = ndimage.generate_binary_structure(2, 1)
-    mask = np.zeros(partition.raster.shape, dtype=np.uint16)
+    mask = np.zeros(partition.raster.shape, dtype=np.uint32)
     for index in range(len(partition.rooms)):
         near = ndimage.binary_dilation(partition.raster == index, cross, iterations=halo)
-        mask |= near.astype(np.uint16) << np.uint16(index)
+        mask |= near.astype(np.uint32) << np.uint32(index)
     return mask
 
 
@@ -260,7 +260,7 @@ def _scan_room(
     alternative -- a per-room shard file written in one pass -- costs 18 GB of
     scratch and a resume protocol to save eight minutes over the whole build.
     """
-    bit = np.uint16(1) << np.uint16(room)
+    bit = np.uint32(1) << np.uint32(room)
     subs_out: list[list[np.ndarray]] = [[], [], []]
     material_out: list[np.ndarray] = []
     inert_out: list[np.ndarray] = []
