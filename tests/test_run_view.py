@@ -582,6 +582,25 @@ PAGE_MUST_HAVE = [
     ("setBusy(assemblyMessage);", "a mode switch keeps the build message up"),
     ('? "loading solver run…" : assemblyMessage', "the run's wait is named without losing it"),
     ('if (button.disabled) button.classList.remove("active");', "no highlight on a dead button"),
+    # What a listener does with a binaural render: walk to a place, then turn on
+    # the spot to hear the source move. Both gestures are on the arrows.
+    (
+        'if (pressed.has("KeyW") || pressed.has("ArrowUp")) push(forward, 1);',
+        "the arrows still walk",
+    ),
+    ('if (pressed.has("ArrowLeft")) yaw += TURN_SPEED * delta;', "left and right turn on the spot"),
+    (
+        "camera.fov = Math.min(BASE_FOV, Math.max(MIN_FOV, camera.fov * factor));",
+        "the wheel zooms in and never widens past the default",
+    ),
+    (
+        "onStand: (sample) => standAt(sample.receiver_index, sample.yaw_deg),",
+        "standing at the listener faces the way the sample was decoded",
+    ),
+    (
+        "panel.hidden = !runData;",
+        "the run panel stays on every mode, so a run can be heard from any of them",
+    ),
 ]
 PAGE_MUST_NOT_HAVE = [
     ("ResizeObserver", "measuring, resizing and remeasuring ran to 26 million pixels"),
