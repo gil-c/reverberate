@@ -24,6 +24,7 @@ from reverberate.air import (
     attenuation_db_per_m,
     gain,
 )
+from reverberate.metrics import octave_filter, rt60_per_band
 
 SOUND_SPEED = 343.2
 
@@ -119,23 +120,63 @@ def test_a_pure_tone_decays_at_exactly_the_analytic_rate(frequency: float) -> No
     assert measured == pytest.approx(analytic, rel=0.01)
 
 
-def test_a_shorter_frame_does_not_change_the_answer() -> None:
+def test_the_frame_does_not_move_the_quantities_a_run_reports() -> None:
     """What fixes the default frame length, rather than taste.
 
-    If halving the frame moved the result, the frame would be a model
-    parameter and would have to be declared per run. It does not: the two
-    agree far inside the 3.1 per cent seed-to-seed noise floor W3 measured.
+    A total energy check is too weak here: it is dominated by the low bands,
+    where the gain is almost one, so it would pass while the top of the band
+    was badly wrong. The quantities this project actually publishes are
+    per-octave, so those are what the frame must not move.
+
+    Written after the W10 branch measured its own frame drifting on a long
+    response. On a decay of the length this project simulates, the default and
+    a frame sixteen times longer agree far inside the 3.1 per cent noise floor.
     """
     rng = np.random.default_rng(20250101)
+    sample_rate = 48000
+    times = np.arange(int(1.0 * sample_rate)) / sample_rate
+    decay = rng.standard_normal(len(times)) * 10.0 ** (-60.0 * times / (20.0 * 0.29))
+
+    coarse = apply(decay, float(sample_rate), sound_speed_m_s=SOUND_SPEED, frame=256)
+    fine = apply(decay, float(sample_rate), sound_speed_m_s=SOUND_SPEED, frame=4096)
+
+    length = min(len(coarse), len(fine))
+    bands_coarse = octave_filter(coarse[:length], sample_rate)
+    bands_fine = octave_filter(fine[:length], sample_rate)
+    energy = 10.0 * np.log10((bands_coarse**2).sum(axis=1) / (bands_fine**2).sum(axis=1))
+    assert float(np.max(np.abs(energy))) < 0.2
+
+    decay_coarse = rt60_per_band(coarse[:length], sample_rate)
+    decay_fine = rt60_per_band(fine[:length], sample_rate)
+    usable = np.isfinite(decay_coarse) & np.isfinite(decay_fine)
+    assert float(np.max(np.abs(decay_coarse[usable] / decay_fine[usable] - 1.0))) < 0.02
+
+
+def test_the_default_frame_is_only_validated_to_about_one_second() -> None:
+    """The limit, stated as a test so it cannot quietly stop being true.
+
+    The gain steepens in frequency as time grows, so a short frame eventually
+    resolves it too coarsely and leakage from the strong bottom of the band
+    swamps the weak top. On a pure tone the default holds to 0.09 per cent at
+    1.0 s and drifts to about 3 per cent at 1.5 s, while a long frame holds
+    throughout. A caller working past a second passes a longer frame.
+    """
     sample_rate = 48000.0
-    noise = rng.standard_normal(int(0.3 * sample_rate))
+    analytic = -float(attenuation_db_per_m(16000.0, Atmosphere())) * SOUND_SPEED
 
-    coarse = apply(noise, sample_rate, sound_speed_m_s=SOUND_SPEED, frame=256)
-    fine = apply(noise, sample_rate, sound_speed_m_s=SOUND_SPEED, frame=128)
+    def slope(seconds: float, frame: int) -> float:
+        times = np.arange(int(seconds * sample_rate)) / sample_rate
+        tone = np.sin(2.0 * np.pi * 16000.0 * times)
+        out = apply(tone, sample_rate, sound_speed_m_s=SOUND_SPEED, frame=frame)
+        lo, hi = int(0.05 * sample_rate), int((seconds - 0.05) * sample_rate)
+        block = 480
+        usable = out[lo:hi][: ((hi - lo) // block) * block].reshape(-1, block)
+        decibels = 20.0 * np.log10(np.sqrt((usable**2).mean(axis=1)) + 1e-300)
+        return float(np.polyfit(np.arange(len(decibels)) * block / sample_rate, decibels, 1)[0])
 
-    energy_coarse = float((coarse**2).sum())
-    energy_fine = float((fine**2).sum())
-    assert energy_coarse == pytest.approx(energy_fine, rel=0.01)
+    assert abs(slope(1.0, 256) / analytic - 1.0) < 0.005
+    assert abs(slope(1.5, 256) / analytic - 1.0) > 0.01
+    assert abs(slope(1.5, 1024) / analytic - 1.0) < 0.005
 
 
 def test_the_filter_reconstructs_exactly_when_nothing_is_absorbed() -> None:

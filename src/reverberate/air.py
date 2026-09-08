@@ -216,8 +216,34 @@ def apply(
     ``frame`` trades the two errors against each other. At 256 samples and
     48 kHz a frame spans 5.3 ms, over which the 16 kHz gain moves by 0.7 dB,
     while the bin spacing is 187 Hz, which resolves ``m(f)`` everywhere it is
-    large. Halving it changes a measured band decay by well under the 3.1 per
-    cent seed-to-seed noise floor, which is the test that fixes the default.
+    large.
+
+    **The default is validated to about one second and drifts beyond it.** The
+    gain steepens in frequency as ``t`` grows -- at 1 s it falls 125 dB from
+    50 Hz to 16 kHz -- and a short frame eventually resolves that too coarsely,
+    so leakage from the strong bottom of the band swamps the weak top.
+    Measured on a pure tone against the analytic rate:
+
+    ======== ============ ============
+    tone     frame 256    frame 1024
+    ======== ============ ============
+    0.4 s    0.04 %       0.00 %
+    1.0 s    0.09 %       0.01 %
+    1.5 s    **3.08 %**   0.01 %
+    ======== ============ ============
+
+    **On real responses it does not bite, and that is measured rather than
+    hoped.** Against a 4096-sample frame, on ``w29_16k`` at 1.0 s and
+    ``w27_sealed`` at 1.5 s, six receivers each, the default moves per-octave
+    T30 by at most 0.37 per cent and per-octave energy by at most 0.104 dB.
+    The noise floor is 3.1 per cent. A real room response never reaches the
+    regime the 1.5 s tone shows, because its top band still holds content
+    where the tone has fallen 188 dB into the leakage floor.
+
+    So: keep the default for a response of about a second, and **pass a longer
+    frame for anything longer**. The W10 branch carries the general fix, a
+    ``frame_for(duration_s)`` that picks from a measured table, and it is
+    deliberately not duplicated here because this module is deleted on merge.
     """
     signals = np.atleast_2d(np.asarray(ir, dtype=float))
     if signals.ndim != 2:
