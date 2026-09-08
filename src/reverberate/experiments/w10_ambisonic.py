@@ -349,6 +349,8 @@ def plan_room(
         "scene_id": SCENE_ID,
         "room": ROOM,
         "cache_key": manifest["key"],
+        "cache_root": str(entry_path.parent),
+        "model_json": manifest.get("model_json"),
         "geometry_sha256": manifest.get("geometry_sha256"),
         "reference_run": "w29_16k",
         "reference_note": (

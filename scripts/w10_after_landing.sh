@@ -27,7 +27,7 @@ HEAD=$REVERBERATE_DATA/raw/hrtf/HRIR_L2702.sofa
 MEASURED=""
 [ -f "$HEAD" ] && MEASURED="--measured-head $HEAD"
 caffeinate -i .venv/bin/python -m reverberate.experiments.w10_render room \
-  --run "$NEW" --low-cut 39.551 --audio $MEASURED 2>&1 | tail -3
+  --run "$NEW" --audio $MEASURED 2>&1 | tail -3
 
 .venv/bin/python - <<'PY'
 import json, os

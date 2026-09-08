@@ -167,6 +167,42 @@ def test_skipping_air_absorption_is_recorded_as_an_omission(tmp_path: Path) -> N
     assert "overstated" in report["air_absorption"]["why"]
 
 
+def test_the_theory_is_absent_rather_than_invented_when_the_grid_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A run fetched onto another machine still gets a report.
+
+    The engine deletes the voxelisation from a run directory once it has
+    finished, so the surface and absorption the solver realised live only in the
+    cache entry. Without it there is no theory to quote, and quoting one from
+    the mesh instead would describe a room the solver never simulated.
+    """
+    run = a_solved_run(tmp_path, samples=1024)
+    report = room_report(
+        run,
+        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
+        air=None,
+        lowcut_hz=40.0,
+        yaws_deg=(0.0,),
+        filter_length=256,
+    )
+    assert report["room_geometry"] is None
+    assert report["theory"] is None
+
+
+def test_a_run_with_no_grid_and_no_low_cut_is_refused(tmp_path: Path) -> None:
+    """Rather than defaulting to 10 Hz, which W20 measured to be misleading."""
+    run = a_solved_run(tmp_path, samples=1024)
+    with pytest.raises(ValueError, match="first axial mode"):
+        room_report(
+            run,
+            EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
+            air=None,
+            yaws_deg=(0.0,),
+            filter_length=256,
+        )
+
+
 def test_the_report_is_json_and_carries_no_infinities(tmp_path: Path) -> None:
     """A metric that could not be measured is null, never a number that looks like one."""
     run = a_solved_run(tmp_path, samples=1024)
@@ -183,11 +219,20 @@ def test_the_report_is_json_and_carries_no_infinities(tmp_path: Path) -> None:
     assert "NaN" not in text
 
 
-def test_both_decoders_are_built_and_named(tmp_path: Path) -> None:
-    built = decoders(3, RATE, filter_length=256)
+def test_both_sphere_decoders_are_built_and_named() -> None:
+    built, heads = decoders(3, RATE, filter_length=256)
     assert built["sphere_magls"].cut_on_hz == 2000.0
     assert built["sphere_plain"].covariance_constrained is False
     assert "sphere" in built["sphere_magls"].head
+    assert set(heads) == {"sphere"}
+    assert "measured_magls" not in built
+
+
+def test_a_measured_head_is_never_the_default() -> None:
+    """It is a file to be fetched, whose conventions must be believed and whose
+    licence is not this project's. The sphere is the one with a closed form."""
+    _, heads = decoders(3, RATE, filter_length=256)
+    assert "measured" not in heads
 
 
 def test_the_head_is_sampled_on_the_decoder_s_own_grid() -> None:

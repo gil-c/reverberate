@@ -39,7 +39,13 @@ from reverberate import audio, metrics
 from reverberate.audio import Atmosphere
 from reverberate.experiments.engine import write_record
 from reverberate.experiments.w10_ambisonic import COMMS_NAME
-from reverberate.experiments.w20_render import dry_voice, publish
+from reverberate.experiments.w20_render import (
+    REALISED_ABSORPTION_FACTOR,
+    dry_voice,
+    publish,
+    room_geometry,
+    theory,
+)
 from reverberate.response import Provenance
 from reverberate.spatial.array import ArrayDesign
 from reverberate.spatial.binaural import (
@@ -73,6 +79,7 @@ from reverberate.spatial.validate import (
     energy_per_order,
 )
 from reverberate.store import digest_of_file, shared_store
+from reverberate.wave.voxelise import cache_root
 
 __all__ = [
     "DELIVERY_RATE_HZ",
@@ -279,6 +286,30 @@ def binaural_measures(
     }
 
 
+def _cache_entry(plan: dict[str, Any]) -> tuple[Path, Path] | None:
+    """The voxelisation this run read and the model it was built from.
+
+    The engine deletes ``vox_out.h5`` and ``sim_mats.h5`` from a run directory
+    once it is finished with them, so the surface and the absorption the solver
+    actually realised live in the cache entry and nowhere else. Absent is not an
+    error: a run fetched onto another machine gets a report without a theory
+    section rather than no report at all.
+
+    The root falls back to this machine's cache when the plan does not name one,
+    which is what a plan written before it recorded that looks like.
+    """
+    key = plan.get("cache_key")
+    if not key:
+        return None
+    root = Path(str(plan["cache_root"])) if plan.get("cache_root") else cache_root()
+    entry = root / str(key)
+    manifest = entry / "manifest.json"
+    if not (entry / "vox_out.h5").is_file() or not manifest.is_file():
+        return None
+    model = Path(str(json.loads(manifest.read_text()).get("model_json", "")))
+    return (entry, model) if model.is_file() else None
+
+
 def _licence_conflict(heads: dict[str, Any]) -> dict[str, Any] | None:
     """Whether anything decoded here may be published under this project's licence.
 
@@ -408,7 +439,7 @@ def room_report(
     settings: EncoderSettings,
     *,
     air: Atmosphere | None,
-    lowcut_hz: float,
+    lowcut_hz: float | None = None,
     yaws_deg: tuple[float, ...] = YAWS_DEG,
     filter_length: int = 512,
     measured_path: Path | None = None,
@@ -435,6 +466,32 @@ def room_report(
         grid_step_m=float(plan["array"]["grid_step_m"]),
     )
     fmax = float(settings.max_frequency_hz or 16000.0)
+    # Sabine and Eyring beside the measurement, from the solver's own boundary
+    # rather than from the mesh. A decay time with nothing to compare it against
+    # is a number and not a result, and the roadmap asks for both bounds.
+    room: dict[str, Any] | None = None
+    theory_record: dict[str, Any] | None = None
+    found = _cache_entry(plan)
+    if found is not None:
+        entry, model_json = found
+        geometry = room_geometry(entry, model_json, sound_speed_m_s=343.0)
+        room = geometry.record()
+        theory_record = theory(
+            geometry.volume_m3, geometry.surface_area_m2, geometry.mean_absorption
+        ).record()
+        if lowcut_hz is None:
+            # The room's own first axial mode. Nothing below it is a mode of
+            # this room, so nothing below it in the response is reverberation:
+            # on W20's first run 99.7 per cent of the energy in the last half
+            # second sat under it, where the fitted boundaries absorb almost
+            # nothing, and it dominated every decay measure taken from the tail.
+            lowcut_hz = geometry.first_axial_mode_hz
+    if lowcut_hz is None:
+        raise ValueError(
+            "no low cut given and the voxelisation is not on this machine to "
+            "derive one from; pass the room's first axial mode explicitly"
+        )
+
     signals, rate = pressures_of_run(
         run_dir / "source0",
         fmax_hz=fmax,
@@ -477,6 +534,15 @@ def room_report(
     return {
         "run": run_dir.name,
         "scene_id": plan.get("scene_id"),
+        "room_geometry": room,
+        "theory": theory_record,
+        "theory_note": (
+            "Sabine and Eyring on the surface and absorption the solver's own "
+            "boundary nodes realise, with W3's measured factor of "
+            f"{REALISED_ABSORPTION_FACTOR} applied. Both are diffuse field "
+            "statements and neither describes a band below the room's Schroeder "
+            "frequency"
+        ),
         "room": plan.get("room"),
         "cache_key": plan.get("cache_key"),
         "geometry_sha256": plan.get("geometry_sha256"),
@@ -699,7 +765,12 @@ def main(argv: list[str] | None = None) -> int:
     room.add_argument("--order", type=int, default=7)
     room.add_argument("--fit-order", type=int, default=10)
     room.add_argument("--fmax", type=float, default=16000.0)
-    room.add_argument("--low-cut", type=float, required=True, help="the room's first axial mode")
+    room.add_argument(
+        "--low-cut",
+        type=float,
+        default=None,
+        help="high pass in Hz; defaults to the room's own first axial mode",
+    )
     room.add_argument("--temperature", type=float, default=20.0)
     room.add_argument("--humidity", type=float, default=50.0)
     room.add_argument("--no-air", action="store_true", help="skip air absorption and say so")
