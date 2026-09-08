@@ -218,32 +218,43 @@ def apply(
     while the bin spacing is 187 Hz, which resolves ``m(f)`` everywhere it is
     large.
 
-    **The default is validated to about one second and drifts beyond it.** The
-    gain steepens in frequency as ``t`` grows -- at 1 s it falls 125 dB from
-    50 Hz to 16 kHz -- and a short frame eventually resolves that too coarsely,
-    so leakage from the strong bottom of the band swamps the weak top.
-    Measured on a pure tone against the analytic rate:
+    **What the frame sets is a dynamic range, not a time limit.** Every frame
+    tracks the analytic decay exactly until the signal reaches that frame's own
+    spectral leakage floor, and then flattens on it. Measured on a 16 kHz tone,
+    which falls 125 dB per second, edges excluded:
 
-    ======== ============ ============
-    tone     frame 256    frame 1024
-    ======== ============ ============
-    0.4 s    0.04 %       0.00 %
-    1.0 s    0.09 %       0.01 %
-    1.5 s    **3.08 %**   0.01 %
-    ======== ============ ============
+    ======== ================== ==========================
+    frame    exact down to      leakage floor
+    ======== ================== ==========================
+    128      -125 dB            about -148 dB
+    **256**  **-125 dB**        **about -161 dB**
+    512      -125 dB            about -183 dB
+    1024     -125 dB            about -213 dB
+    2048     -125 dB            about -231 dB
+    ======== ================== ==========================
 
-    **On real responses it does not bite, and that is measured rather than
-    hoped.** Against a 4096-sample frame, on ``w29_16k`` at 1.0 s and
-    ``w27_sealed`` at 1.5 s, six receivers each, the default moves per-octave
-    T30 by at most 0.37 per cent and per-octave energy by at most 0.104 dB.
-    The noise floor is 3.1 per cent. A real room response never reaches the
-    regime the 1.5 s tone shows, because its top band still holds content
-    where the tone has fallen 188 dB into the leakage floor.
+    Doubling the frame buys roughly 20 dB of floor and nothing else: the gain
+    itself is applied correctly at every duration, wherever there is signal.
 
-    So: keep the default for a response of about a second, and **pass a longer
-    frame for anything longer**. The W10 branch carries the general fix, a
-    ``frame_for(duration_s)`` that picks from a measured table, and it is
-    deliberately not duplicated here because this module is deleted on merge.
+    **Duration is only how long it takes to fall that far.** A 16 kHz tone
+    reaches the default's floor at about 1.3 s, which is why a naive slope
+    fitted over a longer record reads shallow. That is the fit meeting the
+    floor, not the filter mis-applying the gain, and restricting the fit to
+    where the tone is still above -100 dB gives 0.08 per cent at every duration
+    out to 2 s.
+
+    **A room response never gets there.** Its top band still holds content
+    where a tone has gone, because the tail is broadband. Measured against a
+    4096-sample frame, on ``w29_16k`` at 1.0 s and ``w27_sealed`` at 1.5 s, six
+    receivers each, the default moves per-octave T30 by at most 0.37 per cent
+    and per-octave energy by at most 0.104 dB, against a 3.1 per cent noise
+    floor.
+
+    So: the default suits any room response this project produces, and a caller
+    filtering a tone, an impulse or anything else that empties its top band
+    should raise the frame. The W10 branch carries a ``frame_for(duration_s)``
+    that picks conservatively from a measured table, deliberately not
+    duplicated here because this module is deleted on merge.
     """
     signals = np.atleast_2d(np.asarray(ir, dtype=float))
     if signals.ndim != 2:
