@@ -27,6 +27,23 @@ The coefficient is ISO 9613-1, the same formulation PFFDTD's own reference
 implementation uses. :func:`attenuation_db_per_m` reproduces the five figures
 the roadmap quotes at 50 per cent to four decimal places, and those five are
 tests rather than comments.
+
+**This module is a duplicate and is meant to be deleted.** The W10 branch
+implements the same standard in :mod:`reverberate.audio` as
+``air_absorption_np_per_m`` and ``apply_air_absorption``, written independently
+and at the same time. The two were cross-checked against each other and agree
+to **1.3e-5 relative** on the coefficient from 125 Hz to 16 kHz at 30, 50 and 80
+per cent relative humidity, and to 7e-6 on the energy of an absorbed decay,
+which is a real validation of both rather than a nuisance.
+
+``audio.py`` is the right home: it is where the "air absorption is not
+modelled" claim lived, and returning nepers per metre is what its consumer
+wants, since that is where the factor 8.686 cancels. **When W10 lands, this
+module goes and its callers import from :mod:`reverberate.audio`.** The one
+thing to carry across is :class:`Atmosphere`, because the roadmap requires
+humidity to be declared with every run and a triple of loose floats cannot be
+recorded into a ``report.json`` the way a frozen dataclass with ``record()``
+can. Neither branch should merge both.
 """
 
 from __future__ import annotations
