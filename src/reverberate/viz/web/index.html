@@ -701,8 +701,14 @@
         // would lose whatever they had walked over to look at.
         if (!panel.hidden) {
           // Redraw once the panel has its real width, otherwise every plot is
-          // sized from a hidden element and comes out a pixel wide.
-          requestAnimationFrame(() => runShow && runShow(0));
+          // sized from a hidden element and comes out a pixel wide. Redraw the
+          // sample the reader picked, not the first one: this is a change of
+          // representation of the same room, so it must not silently move them
+          // back to the ambisonic row while their ears are on a decode.
+          requestAnimationFrame(() => {
+            const pick = document.getElementById("run-pick");
+            if (runShow) runShow(pick ? Number(pick.value) : 0);
+          });
         }
         setBusy(assemblyMessage);
       }

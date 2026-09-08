@@ -568,7 +568,7 @@ PAGE_MUST_HAVE = [
     ("position: fixed; top: 0; right: 0; bottom: 0;", "panel overlays, never in the layout"),
     ("overflow-y: auto;", "the panel scrolls, the document does not"),
     ("renderer.setSize(innerWidth, innerHeight);", "sized from the window, so no resize loop"),
-    ("requestAnimationFrame(() => runShow && runShow(0));", "plots drawn once the panel is wide"),
+    ("if (runShow) runShow(pick ? Number(pick.value) : 0);", "plots drawn once the panel is wide"),
     ('if (mode === "acoustic" && !apartmentRuns.length) return;', "no run, nothing to draw"),
     ('const MODES = [...SCENE_MODES, "acoustic"];', "one selector governs every mode"),
     ('id="btn-acoustic"', "the run is reached from the acoustic button"),
@@ -604,6 +604,25 @@ def test_the_run_module_owns_the_panel_and_the_geometry() -> None:
 
     assert "renderRunPanel" in module
     assert "buildRunGroup" in module
+
+
+def test_the_panel_reads_the_measures_shape_the_sample_carries() -> None:
+    """Two shapes of measures reach the panel and only one has octave bands.
+
+    A binaural sample carries interaural measures. Reading ``bands_hz`` off it
+    threw inside the change handler, before the player was pointed at the new
+    file, so picking a decode left the previous response playing while the
+    page named the new one. The audio now moves first, and the table reads
+    whichever shape it was given.
+    """
+    module = _web("solver_mode.js")
+
+    assert "function measuresTable(m)" in module
+    assert "m.late_coherence_per_band" in module
+    body = module.split("function show(index)")[1]
+    assert body.index("wet.src") < body.index("measuresTable("), (
+        "the file the reader is about to hear is set before anything that can throw"
+    )
 
 
 class TestModelJsonResolution:

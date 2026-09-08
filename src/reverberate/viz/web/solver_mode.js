@@ -724,6 +724,73 @@ function spatialSection(data) {
       .join("<br>")}</p>`;
 }
 
+/** The per band table of whichever measures the selected sample carries.
+ *
+ * Two shapes reach this panel. A pressure response carries room measures per
+ * octave. A binaural response carries interaural ones, because RT60 of one ear
+ * says nothing the omnidirectional row has not already said, while the tail's
+ * coherence between the ears is the thing a decode can get wrong.
+ */
+function measuresTable(m) {
+  if (!m) return "";
+  if (m.bands_hz) {
+    return (
+      `<tr><th>band</th><th>RT60</th><th>EDT</th><th>C50</th><th>DRR</th></tr>` +
+      m.bands_hz
+        .map((band, i) => {
+          const out = m.in_band && !m.in_band[i] ? ' class="out"' : "";
+          const cell = (v, unit) => `<td${out}>${v === null ? "n/a" : v.toFixed(2) + unit}</td>`;
+          return (
+            `<tr><td${out}>${band} Hz${out ? " \u2717" : ""}</td>` +
+            cell(m.rt60_s[i], " s") +
+            cell(m.edt_s[i], " s") +
+            cell(m.c50_db[i], " dB") +
+            cell(m.drr_db[i], " dB") +
+            "</tr>"
+          );
+        })
+        .join("")
+    );
+  }
+  if (m.late_coherence_per_band) {
+    return (
+      `<tr><th>band</th><th>zero lag</th><th>floor</th><th>peak</th></tr>` +
+      m.late_coherence_per_band
+        .map(
+          (b) =>
+            `<tr><td>${b.band_hz} Hz</td><td>${b.zero_lag.toFixed(2)}</td>` +
+            `<td>${b.zero_lag_floor.toFixed(2)}</td>` +
+            `<td>${b.max_lag.toFixed(2)}</td></tr>`
+        )
+        .join("")
+    );
+  }
+  return "";
+}
+
+/** What the table under it means, for the shape of measures actually shown. */
+function measuresCaption(m, roomNote) {
+  if (!m) return "";
+  if (m.bands_hz) return roomNote || "";
+  if (m.late_coherence_per_band) {
+    const parts = [];
+    if (m.itd_us !== undefined) {
+      parts.push(
+        `direct sound: interaural time difference ${m.itd_us.toFixed(0)} \u00b5s ` +
+          `against Woodworth's ${m.woodworth_itd_us.toFixed(0)} \u00b5s, ` +
+          `level difference ${m.ild_db.toFixed(1)} dB.`
+      );
+    }
+    parts.push(
+      "Coherence of the late tail between the ears, per octave. Only the zero " +
+        "lag column tests the diffuse field prediction; the floor beside it is " +
+        "what this estimator reads on two independent signals."
+    );
+    return parts.join(" ");
+  }
+  return "";
+}
+
 export function renderRunPanel(element, data, { onSelect, onStand }) {
   const room = data.room;
   const theory = data.theory;
@@ -824,7 +891,7 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
 
     <h2>Per band</h2>
     <table id="run-bands"></table>
-    <p class="caption">${escapeHtml(data.band_note || "")}</p>
+    <p class="caption" id="run-bands-caption"></p>
 
     <h2>Listen</h2>
     <p class="caption">dry: ${escapeHtml(data.dry_voice?.member_name ?? "")},
@@ -893,24 +960,10 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     byId("run-wave-caption").textContent =
       `${sample.seconds.toFixed(2)} s at ${(sample.sample_rate_hz / 1000).toFixed(1)} kHz, ` +
       `peak ${sample.peak}`;
-    const m = sample.measures;
-    byId("run-bands").innerHTML = m
-      ? `<tr><th>band</th><th>RT60</th><th>EDT</th><th>C50</th><th>DRR</th></tr>` +
-        m.bands_hz
-          .map((band, i) => {
-            const out = m.in_band && !m.in_band[i] ? ' class="out"' : "";
-            const cell = (v, unit) => `<td${out}>${v === null ? "n/a" : v.toFixed(2) + unit}</td>`;
-            return (
-              `<tr><td${out}>${band} Hz${out ? " ✗" : ""}</td>` +
-              cell(m.rt60_s[i], " s") +
-              cell(m.edt_s[i], " s") +
-              cell(m.c50_db[i], " dB") +
-              cell(m.drr_db[i], " dB") +
-              "</tr>"
-            );
-          })
-          .join("")
-      : "";
+    // The audio is set before the plots. A binaural sample carries interaural
+    // measures and no room measures, and reading the room shape off it threw
+    // here, which left the player still pointed at the previously selected
+    // response: the panel said one thing and played another.
     if (sample.wet_audio) {
       wet.src = `${data.baseUrl}/${sample.wet_audio}`;
       wet.hidden = false;
@@ -918,6 +971,9 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
       wet.removeAttribute("src");
       wet.hidden = true;
     }
+    const m = sample.measures;
+    byId("run-bands").innerHTML = measuresTable(m);
+    byId("run-bands-caption").textContent = measuresCaption(m, data.band_note);
   }
 
   // A grid published without a solve renders none of the response panels, so
