@@ -404,6 +404,11 @@ def _spatial_rows(
             }
         )
 
+    # The row a reader should land on. A spatial run is listened to through its
+    # decode, so opening on the ambisonic channel put a reader one click away
+    # from the thing the run is for, on a row whose plots are the pressure at a
+    # point rather than what a head hears.
+    preferred = None
     for head, block in report["binaural_decodes"].items():
         path = run_dir / "responses" / f"binaural_{head}.sofa"
         if not path.is_file():
@@ -433,6 +438,10 @@ def _spatial_rows(
                     "note": block["decoder"].get("head"),
                 }
             )
+            if preferred is None and abs(yaw) < 1.0:
+                preferred = len(rows) - 1
+    if preferred is not None:
+        rows[preferred]["preferred"] = True
     return rows
 
 

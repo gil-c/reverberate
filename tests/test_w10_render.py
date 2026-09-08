@@ -22,6 +22,7 @@ from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
     centre_identity,
+    decoder_accuracy,
     decoders,
     room_report,
     sphere_head,
@@ -149,7 +150,10 @@ def test_the_report_reads_a_run_end_to_end_and_points_at_the_source(tmp_path: Pa
     assert max(row["error_deg"] for row in usable) < 1.0
     assert len(report["extra_receivers"]) == 1
     assert report["omnidirectional"]["rt60_s"]
-    assert set(report["binaural_decodes"]) == {"sphere_magls", "sphere_plain"}
+    # The plain truncation is a control, not a render: its measurement is in
+    # the report either way, and it is decoded only when asked for.
+    assert set(report["binaural_decodes"]) == {"sphere_magls"}
+    assert report["decoder_accuracy"]["per_band"]
     assert set(report["binaural_decodes"]["sphere_magls"]["measures"]) == {"yaw_0", "yaw_90"}
 
 
@@ -220,13 +224,42 @@ def test_the_report_is_json_and_carries_no_infinities(tmp_path: Path) -> None:
     assert "NaN" not in text
 
 
-def test_both_sphere_decoders_are_built_and_named() -> None:
+def test_the_sphere_is_decoded_through_magnitude_least_squares_and_nothing_else() -> None:
+    """The plain truncation is a knowingly worse decode and is not rendered.
+
+    It says what magnitude least squares buys, and `decoder_accuracy` says that
+    against a closed form without a room, so rendering it beside every run
+    added four files and four rows to a listening test for nothing.
+    """
     built, heads = decoders(3, RATE, filter_length=256)
+    assert set(built) == {"sphere_magls"}
     assert built["sphere_magls"].cut_on_hz == 2000.0
-    assert built["sphere_plain"].covariance_constrained is False
     assert "sphere" in built["sphere_magls"].head
     assert set(heads) == {"sphere"}
-    assert "measured_magls" not in built
+
+    asked, _ = decoders(3, RATE, filter_length=256, plain=True)
+    assert asked["sphere_plain"].covariance_constrained is False
+
+
+def test_the_control_says_what_magnitude_least_squares_buys() -> None:
+    """The claim that MagLS is the one to listen through has to be measurable.
+
+    Against a head with a closed form, over directions that fitted neither
+    decoder. Below the cut-on the two are the same decoder and must read the
+    same; above it the plain truncation loses level, and loses a different
+    amount in every direction, which is what moves a source's timbre as the
+    head turns.
+    """
+    control = decoder_accuracy(3, RATE, filter_length=256, directions=48)
+    rows = {row["band_hz"]: row for row in control["per_band"]}
+
+    low = rows[500]
+    assert low["plain_level_db"] == pytest.approx(low["magls_level_db"], abs=0.05)
+
+    high = rows[8000]
+    assert high["plain_level_db"] < high["magls_level_db"] - 3.0
+    assert high["plain_spread_db"] > high["magls_spread_db"]
+    assert abs(high["magls_level_db"]) < 1.5
 
 
 def test_a_measured_head_is_never_the_default() -> None:
@@ -322,7 +355,7 @@ def test_the_report_hands_back_what_it_rendered_so_nothing_is_encoded_twice(
     assert isinstance(rendered["ambisonic"], Ambisonic)
     brirs = rendered["brirs"]
     assert isinstance(brirs, dict)
-    assert set(brirs) == {"sphere_magls", "sphere_plain"}
+    assert set(brirs) == {"sphere_magls"}
     assert sorted(brirs["sphere_magls"]) == [0.0, 90.0]
 
 

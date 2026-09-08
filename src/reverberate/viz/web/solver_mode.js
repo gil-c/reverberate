@@ -1015,7 +1015,14 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
       const sample = data.samples[Number(pick.value)];
       if (sample) onStand?.(sample);
     });
-    show(0);
+    // Open on the row the payload marks, which for a spatial run is the first
+    // decode at yaw zero: that is what the run exists to be heard through.
+    const first = Math.max(
+      0,
+      data.samples.findIndex((sample) => sample.preferred)
+    );
+    pick.value = String(first);
+    show(first);
   }
   return show;
 }

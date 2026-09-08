@@ -72,7 +72,7 @@ from reverberate.spatial.hrtf import (
     sphere_hrtf,
     woodworth_itd_s,
 )
-from reverberate.spatial.sh import quadrature
+from reverberate.spatial.sh import quadrature, real_sh
 from reverberate.spatial.validate import (
     direct_arrival_sample,
     direction_of_arrival,
@@ -163,18 +163,25 @@ def decoders(
     filter_length: int = 512,
     magls_cut_on_hz: float = 2000.0,
     measured_path: Path | None = None,
+    plain: bool = False,
 ) -> tuple[dict[str, BinauralDecoder], dict[str, Any]]:
     """The decoders this run renders through, and what their heads are.
 
-    Two from the analytic sphere: the magnitude least squares one, which is what
-    the run is listened to through, and the plain least squares one, which is
-    kept because the difference between them is a measurement this run reports
-    rather than a setting it picks.
+    One head is rendered by default, the analytic sphere, through magnitude
+    least squares. A measured head joins it when ``measured_path`` names one.
+    The sphere is never dropped: it is the one with a closed form to be checked
+    against, where a measured set is a file that has to be fetched and whose
+    conventions have to be believed.
 
-    A third from a measured head when ``measured_path`` names one. It is not the
-    default and it never will be: the sphere is the one with a closed form to be
-    checked against, and a measured set is a file that has to be fetched, whose
-    conventions have to be believed, and whose licence is not this project's.
+    **The plain truncation is off by default, and that is not a shortcut.** It
+    is the control that says what magnitude least squares buys, and for a long
+    time this rendered it beside every run to keep that control honest. It does
+    not have to: the difference between the two decoders is a property of the
+    decoders against a head whose response is a closed form, not of any room, so
+    :func:`decoder_accuracy` measures it in seconds without a solve. Rendering a
+    knowingly worse decode through half a gigabyte of response added four files
+    and four rows to every listening test and told nobody anything the closed
+    form does not. ``plain=True`` brings it back for a listen.
     """
     heads: dict[str, Any] = {}
     head = sphere_head(sample_rate_hz, filter_length)
@@ -187,15 +194,16 @@ def decoders(
             filter_length=filter_length,
             magls_cut_on_hz=magls_cut_on_hz,
         ),
-        "sphere_plain": design_decoder(
+    }
+    if plain:
+        built["sphere_plain"] = design_decoder(
             head,
             order=order,
             sample_rate_hz=sample_rate_hz,
             filter_length=filter_length,
             magls_cut_on_hz=float("inf"),
             covariance_constraint=False,
-        ),
-    }
+        )
     if measured_path is not None:
         measured, metadata = measured_head(measured_path, sample_rate_hz, filter_length)
         heads["measured"] = {
@@ -217,6 +225,92 @@ def decoders(
             magls_cut_on_hz=magls_cut_on_hz,
         )
     return built, heads
+
+
+def decoder_accuracy(
+    order: int,
+    sample_rate_hz: float,
+    *,
+    filter_length: int = 512,
+    magls_cut_on_hz: float = 2000.0,
+    directions: int = 200,
+    bands_hz: tuple[float, ...] = (250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0),
+) -> dict[str, Any]:
+    """What magnitude least squares buys, against a head with a closed form.
+
+    This is the control for the decoder that ships, and it needs no room and no
+    solve: the reference is :func:`sphere_hrtf`, which is exact, and the test
+    directions are a Fibonacci sphere that was not used to fit either decoder.
+    For each direction the ambisonic coefficients of a plane wave are the real
+    spherical harmonics of that direction, so the decoded ear spectrum is the
+    decoder's filters weighted by them.
+
+    Reports, per octave, the mean level error in decibels and its spread across
+    directions. The spread is the half that matters as much as the mean: a
+    truncated decode does not lose the same level in every direction, so it
+    moves a source's timbre as the head turns.
+    """
+    frequency = np.fft.rfftfreq(filter_length, 1.0 / sample_rate_hz)
+    head = sphere_head(sample_rate_hz, filter_length)
+    fitted = {
+        "magls": design_decoder(
+            head,
+            order=order,
+            sample_rate_hz=sample_rate_hz,
+            filter_length=filter_length,
+            magls_cut_on_hz=magls_cut_on_hz,
+        ),
+        "plain": design_decoder(
+            head,
+            order=order,
+            sample_rate_hz=sample_rate_hz,
+            filter_length=filter_length,
+            magls_cut_on_hz=float("inf"),
+            covariance_constraint=False,
+        ),
+    }
+    index = np.arange(directions) + 0.5
+    polar = np.arccos(1.0 - 2.0 * index / directions)
+    azimuth = np.pi * (1.0 + 5.0**0.5) * index
+    unit = np.stack(
+        [np.cos(azimuth) * np.sin(polar), np.sin(azimuth) * np.sin(polar), np.cos(polar)], -1
+    )
+    truth = np.abs(sphere_hrtf(unit, frequency).responses)
+    basis = real_sh(order, unit)
+
+    rows: list[dict[str, Any]] = []
+    errors = {
+        name: 20.0
+        * np.log10(
+            np.abs(np.einsum("dc,ecf->edf", basis, np.fft.rfft(decoder.filters, axis=-1)))
+            / np.maximum(truth, 1e-12)
+        )
+        for name, decoder in fitted.items()
+    }
+    for centre in bands_hz:
+        band = (frequency >= centre / np.sqrt(2.0)) & (frequency < centre * np.sqrt(2.0))
+        if not band.any():
+            continue
+        row: dict[str, Any] = {"band_hz": int(centre)}
+        for name, error in errors.items():
+            inside = error[:, :, band]
+            row[f"{name}_level_db"] = round(float(np.mean(inside)), 2)
+            row[f"{name}_spread_db"] = round(float(np.std(inside)), 2)
+        rows.append(row)
+    return {
+        "what": (
+            "level error of an order "
+            f"{order} decode against the analytic head's own response, per octave, "
+            f"over {directions} directions that did not fit either decoder"
+        ),
+        "why": (
+            "the control for the decoder that ships. It is a property of the "
+            "decoders and of a head with a closed form, not of a room, so it "
+            "needs no solve and no rendered response to stand behind it"
+        ),
+        "magls_cut_on_hz": magls_cut_on_hz,
+        "per_band": rows,
+    }
 
 
 def band_directions(
@@ -565,6 +659,7 @@ def room_report(
     yaws_deg: tuple[float, ...] = YAWS_DEG,
     filter_length: int = 512,
     measured_path: Path | None = None,
+    plain_decode: bool = False,
     rendered: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Encode the room run, decode it through the heads, and measure all of it.
@@ -644,7 +739,11 @@ def room_report(
     identity = centre_identity(ambisonic, array_rows, design, max_frequency_hz=fmax)
 
     built, heads = decoders(
-        settings.order, rate, filter_length=filter_length, measured_path=measured_path
+        settings.order,
+        rate,
+        filter_length=filter_length,
+        measured_path=measured_path,
+        plain=plain_decode,
     )
     azimuth = float(np.arctan2(reference[1], reference[0]))
     binaural: dict[str, Any] = {}
@@ -721,6 +820,8 @@ def room_report(
             for index, row in enumerate(extra_rows)
         ],
         "binaural_decodes": binaural,
+        # The control for the decoder that ships, measured rather than rendered.
+        "decoder_accuracy": decoder_accuracy(settings.order, rate, filter_length=filter_length),
         "heads": heads,
         "licence_conflict": _licence_conflict(heads),
     }
@@ -805,6 +906,7 @@ def _room(args: argparse.Namespace) -> int:
         air=air,
         lowcut_hz=args.low_cut,
         measured_path=args.measured_head,
+        plain_decode=args.plain_decode,
         rendered=rendered,
     )
     ambisonic = rendered["ambisonic"]
@@ -907,6 +1009,14 @@ def main(argv: list[str] | None = None) -> int:
     room.add_argument("--humidity", type=float, default=50.0)
     room.add_argument("--no-air", action="store_true", help="skip air absorption and say so")
     room.add_argument("--audio", action="store_true", help="render the anechoic clip through it")
+    room.add_argument(
+        "--plain-decode",
+        action="store_true",
+        help=(
+            "also decode without magnitude least squares, to listen to what it "
+            "buys; the measurement of that is in the report either way"
+        ),
+    )
     room.add_argument("--publish", action="store_true", help="push the artefacts to the store")
     room.add_argument("--seed", type=int, default=20250101)
     room.add_argument(
