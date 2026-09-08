@@ -34,6 +34,45 @@ from reverberate.viz.run_view import (
 )
 
 
+def test_a_report_without_what_the_page_needs_is_skipped(tmp_path: Path) -> None:
+    """One malformed run must not take the whole viewer down with it.
+
+    The runs directory is shared between sessions, and a report written for a
+    cost study rather than a solve has a plan and a report and no placement.
+    Before this, such a directory raised KeyError inside the builder's loop and
+    every other run went with it.
+    """
+    from reverberate.viz.run_view import discover_runs
+
+    good = tmp_path / "solved"
+    good.mkdir()
+    (good / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (good / "report.json").write_text(
+        json.dumps(
+            {
+                "run": "solved",
+                "scene_sha256": "f" * 64,
+                "cache_key": "0" * 32,
+                "room": {},
+                "theory": {},
+                "placement": {"sources": [], "receivers": []},
+                "binaural_note": "",
+                "dry_voice": None,
+                "sources": [],
+                "model_json": "models/scene.json",
+            }
+        )
+    )
+
+    study = tmp_path / "cost_study"
+    study.mkdir()
+    (study / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (study / "report.json").write_text(json.dumps({"run": "cost_study", "windows": []}))
+
+    names = [run.name for run in discover_runs(tmp_path)]
+    assert names == ["solved"]
+
+
 def test_envelope_keeps_the_peak_a_stride_would_have_missed() -> None:
     """Decimating by sampling would draw a waveform quieter than it is."""
     signal = np.zeros(10_000)
@@ -530,10 +569,61 @@ def test_the_solver_button_is_released_before_the_apartment_is_fetched() -> None
     """
     page = _page()
 
-    release = page.index("releaseRun(sceneId);")
+    release = page.index("releaseRun(sceneId, wantedRun);")
     fetch = page.index("await fetch(`scenes/${sceneId}/manifest.json`)")
 
     assert release < fetch
+
+
+def test_the_selector_opens_the_run_it_names() -> None:
+    """It used to open whichever run of the apartment sorted last.
+
+    So choosing one run left the panel and the audio player on another while
+    the selector read the one that was asked for, with nothing on screen to say
+    so. For a listening test that is disqualifying: the listener cannot notice.
+    """
+    page = _page()
+
+    assert "releaseRun(sceneId, wanted = null)" in page
+    assert "apartmentRuns.findIndex((r) => r.name === wanted)" in page
+    assert "loadApartment(run ? run.scene_id : value, run ? run.name : null)" in page
+
+
+def test_the_server_may_mark_a_run_to_lead_with() -> None:
+    """A flag this branch does not set yet, kept so a merge is not a decision.
+
+    ``runs.json`` gains a ``lead`` flag on the W10 branch, written from its
+    ``--run NAME``. Without this lookup the fallback here would take the last
+    run of the apartment and that flag would be decorative. It is absent today,
+    so ``findIndex`` answers -1 and the fallback runs unchanged; what it buys
+    is that the merge inserts nothing.
+    """
+    page = _page()
+
+    assert "apartmentRuns.findIndex((r) => r.lead)" in page
+    # And what the reader just asked for still outranks it.
+    assert "const asked = wanted ?" in page
+    assert "asked >= 0 ? asked : lead >= 0 ? lead :" in page
+
+
+def test_releasing_a_run_takes_its_surfaces_out_of_the_scene() -> None:
+    """The other half of the same defect.
+
+    Nulling the payload but leaving the built group meant setMode found a group
+    already there and returned without rebuilding, so the selector moved and
+    the panel did not. The run picker's own handler had always removed it; the
+    scene selector's path had not.
+    """
+    page = _page()
+
+    release = page.index("function releaseRun(sceneId, wanted = null)")
+    body = page[release : page.index("async function loadApartment")]
+    assert "scene.remove(groups.acoustic)" in body
+    assert "groups.acoustic = null" in body
+    # A second group and a second removal. Absent on this branch, where
+    # buildRunGroup returns no markers, so the guard is false and the line does
+    # nothing; present so that a merge cannot drop it by taking one side whole.
+    assert "if (runView && runView.markers) scene.remove(runView.markers)" in body
 
 
 def test_one_walkable_outline_governs_every_mode() -> None:

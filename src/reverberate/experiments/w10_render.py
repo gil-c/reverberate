@@ -139,9 +139,7 @@ def pressures_of_run(
             signals,
             delivery_rate_hz,
             sound_speed_m_s=sound_speed_m_s,
-            temperature_c=air.temperature_c,
-            humidity_percent=air.humidity_percent,
-            pressure_kpa=air.pressure_kpa,
+            atmosphere=air,
         )
     return signals, delivery_rate_hz
 

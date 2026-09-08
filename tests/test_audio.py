@@ -472,3 +472,61 @@ def test_the_window_pair_is_worth_fifty_decibels_of_leakage() -> None:
     root = departure_db(overlap_add(np.sqrt(hann), np.sqrt(hann)))
     squared = departure_db(overlap_add(hann, hann))
     assert squared < root - 40.0
+
+
+# The figures below were written down in the roadmap before either
+# implementation of ISO 9613-1 existed, and they came across from the W37
+# branch's own test file when its duplicate of this module was deleted.
+
+
+def test_air_alone_gives_the_quoted_reverberation_time_at_16_khz() -> None:
+    """Roadmap W30: from air alone, T60 at 16 kHz is 0.48 s at 20 C and 50 per cent."""
+    coefficient = float(Atmosphere().attenuation_db_per_m(16000.0))
+    assert 60.0 / (coefficient * 343.2) == pytest.approx(0.48, abs=0.005)
+
+
+def test_the_43_db_per_500_ms_figure_is_the_humid_end_of_the_range() -> None:
+    """Section 4.1's "43 dB per 500 ms" is the 80 per cent figure, the mildest."""
+    humid = float(Atmosphere(humidity_percent=80.0).attenuation_db_per_m(16000.0))
+    assert humid * 343.2 * 0.5 == pytest.approx(43.0, abs=0.5)
+
+
+def test_zero_frequency_is_not_absorbed() -> None:
+    assert float(Atmosphere().attenuation_db_per_m(0.0)) == 0.0
+
+
+def test_the_decibel_and_neper_coefficients_are_one_number() -> None:
+    top = np.array([16000.0])
+    atmosphere = Atmosphere()
+    assert atmosphere.attenuation_db_per_m(top) == pytest.approx(
+        atmosphere.attenuation_np_per_m(top) * DECIBELS_PER_NEPER
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"humidity_percent": -1.0},
+        {"humidity_percent": 101.0},
+        {"pressure_kpa": 0.0},
+        {"temperature_c": -300.0},
+    ],
+)
+def test_an_impossible_atmosphere_is_refused(kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        Atmosphere(**kwargs)
+
+
+def test_absorption_never_adds_energy() -> None:
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal(4800)
+    absorbed = apply_air_absorption(noise, 48000.0, sound_speed_m_s=343.2)
+    assert float((absorbed**2).sum()) <= float((noise**2).sum())
+
+
+def test_receivers_are_absorbed_independently_and_identically() -> None:
+    rng = np.random.default_rng(4)
+    batch = rng.standard_normal((3, 2048))
+    together = apply_air_absorption(batch, 48000.0, sound_speed_m_s=343.2)
+    apart = np.stack([apply_air_absorption(row, 48000.0, sound_speed_m_s=343.2) for row in batch])
+    assert np.allclose(together, apart)
