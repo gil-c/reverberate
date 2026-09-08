@@ -859,12 +859,61 @@ class TestASpatialRun:
         # The yaw travels with the row, because standing at a sample without it
         # shows a room whose sources are on the other side from where they sound.
         assert [row["yaw_deg"] for row in rows] == pytest.approx([0.0, 90.0])
-        assert rows[0]["audio"] == "binaural_sphere_magls_yaw0.wav"
-        assert rows[1]["audio"] is None
+        # The path the panel loads, relative to the run, not a bare file name.
+        assert rows[0]["wet_audio"] == "audio/binaural_sphere_magls_yaw0.wav"
+        assert rows[1]["wet_audio"] is None
         assert rows[0]["measures"] == {"itd_us": 600.0}
+
+    def test_every_row_names_its_audio_the_way_the_panel_reads_it(self, tmp_path: Path) -> None:
+        """One row spelled it differently and the player came up silent.
+
+        The panel reads ``wet_audio``, and a path relative to the run rather
+        than a bare file name. A row that spells it ``audio`` renders its plots,
+        its measures and its label, and offers nothing to listen to, which looks
+        like a run with no audio rather than a typo.
+        """
+        sofar = pytest.importorskip("sofar")
+        responses = tmp_path / "responses"
+        responses.mkdir()
+        ambisonic = sofar.Sofa("SingleRoomSRIR")
+        ambisonic.Data_IR = np.zeros((1, 4, 32))
+        ambisonic.Data_SamplingRate = 48000.0
+        ambisonic.Data_Delay = np.zeros((1, 4))
+        ambisonic.ListenerPosition = np.zeros((1, 3))
+        ambisonic.ListenerView = np.array([[1.0, 0.0, 0.0]])
+        ambisonic.ListenerUp = np.array([[0.0, 0.0, 1.0]])
+        ambisonic.ReceiverPosition = np.zeros((4, 3, 1))
+        ambisonic.ReceiverView = np.tile(np.array([1.0, 0.0, 0.0]), (4, 1))[:, :, np.newaxis]
+        ambisonic.ReceiverUp = np.tile(np.array([0.0, 0.0, 1.0]), (4, 1))[:, :, np.newaxis]
+        ambisonic.ReceiverDescriptions = np.array([f"ACN {i}" for i in range(4)])
+        ambisonic.SourcePosition = np.zeros((1, 3))
+        ambisonic.EmitterPosition = np.zeros((1, 3, 1))
+        ambisonic.MeasurementDate = np.zeros(1)
+        sofar.write_sofa(str(responses / "ambisonic.sofa"), ambisonic)
+
+        rows = run_view._spatial_rows(tmp_path, self.a_report(), {"ambisonic_acn_sn3d.wav"})
+        assert rows, "the ambisonic response should give a row"
+        for row in rows:
+            assert "audio" not in row, f"{row['id']} spells its audio the old way"
+            assert "wet_audio" in row
+        assert rows[0]["wet_audio"] == "audio/ambisonic_acn_sn3d.wav"
 
     def test_a_run_with_no_responses_yields_no_rows_rather_than_empty_plots(
         self, tmp_path: Path
     ) -> None:
         pytest.importorskip("sofar")
         assert run_view._spatial_rows(tmp_path, self.a_report(), set()) == []
+
+
+def test_the_room_geometry_is_found_whichever_key_holds_it() -> None:
+    """Two report shapes put different things under ``room``.
+
+    A point run puts the geometry there. A spatial run puts the room's *name*
+    there and the geometry under ``room_geometry``. Choosing by truthiness
+    handed the panel the string "bedroom.001" and it asked it for a volume.
+    """
+    geometry = {"volume_m3": 38.1, "surface_area_m2": 132.9}
+    assert run_view._room_geometry({"room": geometry}) == geometry
+    assert run_view._room_geometry({"room": "bedroom.001", "room_geometry": geometry}) == geometry
+    assert run_view._room_geometry({"room": "bedroom.001"}) is None
+    assert run_view._room_geometry({}) is None

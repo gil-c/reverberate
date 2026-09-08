@@ -328,6 +328,21 @@ def _sample_rows(
     return rows
 
 
+def _room_geometry(report: dict[str, Any]) -> dict[str, Any] | None:
+    """The room as the solver's boundary realised it, whichever key holds it.
+
+    Two report shapes put different things under ``room``: a point run puts the
+    geometry there, a spatial run puts the room's name and the geometry under
+    ``room_geometry``. Choosing by truthiness handed the panel a string and it
+    asked the string for a volume.
+    """
+    for key in ("room_geometry", "room"):
+        value = report.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def is_spatial(report: dict[str, Any]) -> bool:
     """Whether this run is an ambisonic one rather than a set of point receivers.
 
@@ -371,8 +386,10 @@ def _spatial_rows(
                 "decay": decay_curve_points(signals[0], rate),
                 "spectrogram": spectrogram(signals[0], rate, max_hz=ceiling),
                 "measures": report.get("omnidirectional"),
-                "audio": (
-                    "ambisonic_acn_sn3d.wav" if "ambisonic_acn_sn3d.wav" in audio_names else None
+                "wet_audio": (
+                    "audio/ambisonic_acn_sn3d.wav"
+                    if "ambisonic_acn_sn3d.wav" in audio_names
+                    else None
                 ),
                 "note": "64 channels in ambiX; the plots are the W channel alone",
             }
@@ -403,7 +420,7 @@ def _spatial_rows(
                     "decay": decay_curve_points(left, rate),
                     "spectrogram": spectrogram(left, rate, max_hz=ceiling),
                     "measures": block["measures"].get(f"yaw_{int(round(yaw))}"),
-                    "audio": name if name in audio_names else None,
+                    "wet_audio": f"audio/{name}" if name in audio_names else None,
                     "note": block["decoder"].get("head"),
                 }
             )
@@ -686,7 +703,11 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         "heads": report.get("heads"),
         "licence_conflict": report.get("licence_conflict"),
         "air_absorption": report.get("air_absorption"),
-        "room": report.get("room") or report.get("room_geometry"),
+        # A spatial run's report uses "room" for the room's *name* and
+        # "room_geometry" for the boundary the solver realised; a point run uses
+        # "room" for the geometry itself. Picking by truthiness handed the
+        # panel the string "bedroom.001" and it asked it for a volume.
+        "room": _room_geometry(report),
         "theory": report["theory"],
         "theory_shell_only": report.get("theory_shell_only"),
         "theory_note": report.get("theory_note"),

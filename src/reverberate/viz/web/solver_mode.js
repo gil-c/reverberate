@@ -103,6 +103,14 @@ export function buildRunGroup(THREE, data) {
       new THREE.MeshBasicMaterial({ color: 0x8be9c0, wireframe: true, transparent: true, opacity: 0.35 }),
     );
     ball.position.copy(centre);
+    // Depth tested, unlike the point markers: it is a metre wide on screen when
+    // you stand next to it, and drawing it through the walls would put a green
+    // cage over the whole room. It also hides itself when the camera is inside
+    // it, which is exactly where the listener stands: from outside it says how
+    // much of the room the encoder looked at, and from inside it is in the way
+    // of the thing it describes.
+    ball.material.depthTest = true;
+    ball.userData.hideWithin = outer;
     markers.add(ball);
     for (const shell of array.shells || []) {
       const radius = Number(shell.nominal_radius_m);

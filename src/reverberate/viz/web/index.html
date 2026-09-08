@@ -776,6 +776,16 @@
           }
         }
         headLamp.position.copy(camera.position);
+        // The array's ball gets out of the way once the camera is inside it.
+        // Standing at the listening point is standing at its centre, and a
+        // wire sphere seen from within is a cage across the view rather than a
+        // measurement of anything.
+        if (runView && runView.markers) {
+          for (const marker of runView.markers.children) {
+            const within = marker.userData && marker.userData.hideWithin;
+            if (within) marker.visible = camera.position.distanceTo(marker.position) > within;
+          }
+        }
         // Checked every frame rather than on every step, because the camera
         // also moves by "stand at this receiver" and by a mode switch, and a
         // reader teleported into the kitchen must see the kitchen.
@@ -820,7 +830,11 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
-        runChoice = Math.max(0, apartmentRuns.length - 1);
+        // The run the server was told to open on, if it named one. Otherwise
+        // the last by directory name, which is stable and is rarely the one
+        // anyone wanted once an apartment has a dozen runs.
+        const lead = apartmentRuns.findIndex((r) => r.lead);
+        runChoice = lead >= 0 ? lead : Math.max(0, apartmentRuns.length - 1);
         const picker = document.getElementById("run-choice");
         picker.hidden = apartmentRuns.length < 2;
         picker.innerHTML = apartmentRuns

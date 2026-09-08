@@ -88,10 +88,12 @@ class SiteBuilder:
         first: str | None = None,
         runs_root: Path | None = None,
         rebuild: bool = False,
+        lead: str | None = None,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
         self.rebuild = rebuild
+        self.lead = lead
         self._lock = threading.Lock()
         self._built: dict[str, SceneEntry] = {}
         shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
@@ -114,6 +116,12 @@ class SiteBuilder:
                         "scene_id": r.scene_id,
                         "room": r.room,
                         "url": f"runs/{r.name}",
+                        # Which run the viewer opens on. Without it the page
+                        # takes the last by directory name, which is a stable
+                        # rule and not a useful one once an apartment has a
+                        # dozen runs: whoever started the server had a run in
+                        # mind and it is rarely the one sorting last.
+                        "lead": r.name == self.lead,
                     }
                     for r in self.runs
                 ]
@@ -214,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="directory of rendered solver runs, offered as a mode of their apartment",
     )
+    parser.add_argument(
+        "--run",
+        default=None,
+        help="open on this run rather than on whichever sorts last for the scene",
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
@@ -231,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.scene,
             arguments.runs,
             arguments.rebuild,
+            arguments.run,
         )
         if arguments.scene:
             builder.ensure(arguments.scene)
@@ -244,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.scene,
             arguments.runs,
             arguments.rebuild,
+            arguments.run,
         )
         if arguments.scene:
             builder.ensure(arguments.scene)
