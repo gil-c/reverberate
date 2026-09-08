@@ -35,11 +35,18 @@ from typing import Any
 import numpy as np
 
 from reverberate.air import Atmosphere, attenuation_db_per_m
-from reverberate.metrics import band_centres, octave_filter, rt60_per_band
+from reverberate.metrics import (
+    band_centres,
+    energy_decay_curve,
+    octave_filter,
+    rt60_per_band,
+)
 
 __all__ = [
     "DIFFUSE_COHERENCE_LIMIT_HZ",
     "Transposition",
+    "local_decay_s",
+    "window_for_level_s",
     "effective_mean_free_path_m",
     "eyring_t60_s",
     "mixing_time_s",
@@ -67,6 +74,122 @@ def mixing_time_s(volume_m3: float) -> float:
     if volume_m3 <= 0.0:
         raise ValueError(f"volume must be positive, got {volume_m3} m3")
     return float(np.sqrt(volume_m3) / 1000.0)
+
+
+def local_decay_s(
+    ir: np.ndarray,
+    sample_rate_hz: int,
+    window_s: float,
+    *,
+    fraction: float = 0.4,
+    block_s: float = 0.005,
+) -> np.ndarray:
+    """T60 per band, fitted on the last part of what was actually solved.
+
+    Roadmap 5.5 asks for the synthetic tail to be "calibrated band by band on
+    the last genuinely computed milliseconds". :func:`transpose` supplies a
+    decay averaged over the whole response, which is a different number, and
+    the difference grows with how deep the splice is.
+
+    **Measured, and it is why a deep splice needs this.** Splicing the mid band
+    at -30 dB with a globally fitted T30 made the assembled response decay
+    13 per cent fast at 2 kHz. A real decay is not one straight line: the slope
+    near -30 dB is not the slope of the -5 to -35 dB average, and the deeper the
+    splice the more they differ. A tail that continues the *local* slope joins
+    the curve it is actually continuing.
+
+    Fitted on the block level rather than on a Schroeder curve, because
+    backward integration of a truncated response collapses at its own end and
+    would bias the last fit downwards. Returns NaN for a band with too little
+    left to fit, which :func:`synthesise` reads as "do not invent this one" and
+    a caller can fall back on :func:`transpose` for.
+    """
+    signals = np.atleast_2d(np.asarray(ir, dtype=float))
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
+    window = int(round(window_s * sample_rate_hz))
+    block = max(1, int(round(block_s * sample_rate_hz)))
+    start = max(0, window - int(round(window * fraction)))
+    blocks = (window - start) // block
+    centres = band_centres(sample_rate_hz)
+    out = np.full(len(centres), np.nan)
+    if blocks < 4:
+        return out
+
+    times = (np.arange(blocks) * block + block / 2.0) / sample_rate_hz
+    for band in range(len(centres)):
+        slopes = []
+        for receiver in range(signals.shape[0]):
+            filtered = octave_filter(signals[receiver], sample_rate_hz)[band]
+            segment = filtered[start : start + blocks * block].reshape(blocks, block)
+            power = (segment**2).mean(axis=1)
+            if not np.all(power > 0.0):
+                continue
+            level = 10.0 * np.log10(power)
+            slope = float(np.polyfit(times, level, 1)[0])
+            if slope < -1e-6:
+                slopes.append(-60.0 / slope)
+        if slopes:
+            out[band] = float(np.median(slopes))
+    return out
+
+
+def window_for_level_s(
+    ir: np.ndarray,
+    sample_rate_hz: int,
+    level_db: float,
+    *,
+    bands_hz: tuple[float, float] | None = None,
+    floor_s: float = 0.010,
+) -> float:
+    """How long to solve for, to reach ``level_db`` in every band that matters.
+
+    Replaces a duration typed by an operator. ``duration`` reaches the solver as
+    ``Nt`` and nothing derived it, so a run was as long as somebody guessed.
+    This measures it instead, on the energy decay curve of a response of the
+    same room, and takes the **slowest** band the run contributes, because a
+    window that suits the top of a band cuts the bottom of it short.
+
+    **The rule scales itself, which is the point.** Air absorption steepens the
+    decay towards the top of the audible range, so one level gives a long
+    window low down and a short one high up. Measured on ``w29_16k`` with air,
+    a -30 dB window is 223 ms at 125 Hz, 124 ms at 2 kHz and 86 ms at 16 kHz.
+    It also reproduces the figure this project arrived at empirically: 60 ms
+    for the high band is about -18 dB.
+
+    ``bands_hz`` restricts the search to the octave centres a band run actually
+    contributes, as ``(low, high)`` inclusive. Passing ``None`` considers every
+    band, which is what a single broadband run wants.
+
+    Returns seconds, never less than ``floor_s``. A band whose decay never
+    reaches ``level_db`` inside the response contributes the whole response
+    rather than a NaN: the answer is then "at least this long", which is the
+    honest reading of a measurement that ran out of signal.
+    """
+    signals = np.atleast_2d(np.asarray(ir, dtype=float))
+    if level_db >= 0.0:
+        raise ValueError(f"level must be a decay in decibels below zero, got {level_db}")
+    centres = np.asarray(band_centres(sample_rate_hz), dtype=float)
+    if bands_hz is not None:
+        low, high = bands_hz
+        wanted = (centres >= low) & (centres <= high)
+    else:
+        wanted = np.ones(len(centres), dtype=bool)
+    if not wanted.any():
+        raise ValueError(f"no octave band of this rate lies in {bands_hz}")
+
+    longest = floor_s
+    for receiver in range(signals.shape[0]):
+        for band, keep in zip(
+            octave_filter(signals[receiver], sample_rate_hz), wanted, strict=True
+        ):
+            if not keep:
+                continue
+            curve = energy_decay_curve(band)
+            below = np.flatnonzero(curve <= level_db)
+            reached = below[0] / sample_rate_hz if len(below) else len(band) / sample_rate_hz
+            longest = max(longest, float(reached))
+    return longest
 
 
 def eyring_t60_s(

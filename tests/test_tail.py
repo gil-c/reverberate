@@ -21,10 +21,12 @@ from reverberate.metrics import band_centres, octave_filter, rt60_per_band
 from reverberate.tail import (
     effective_mean_free_path_m,
     eyring_t60_s,
+    local_decay_s,
     mixing_time_s,
     splice,
     synthesise,
     transpose,
+    window_for_level_s,
 )
 
 SOUND_SPEED = 343.2
@@ -337,3 +339,73 @@ def test_a_window_outside_the_reference_is_refused() -> None:
             np.full(len(band_centres(SAMPLE_RATE)), 0.3),
             rng=np.random.default_rng(1),
         )
+
+
+def test_the_window_rule_scales_itself_with_frequency() -> None:
+    """Air steepens the decay upward, so one level gives two windows.
+
+    The rule replaces a duration typed by an operator. What makes it worth
+    having is that it needs no per-band table: the same level asks for a long
+    window low down and a short one high up, because that is what the decay
+    does.
+    """
+    rng = np.random.default_rng(20250101)
+    samples = int(1.0 * SAMPLE_RATE)
+    times = np.arange(samples) / SAMPLE_RATE
+    # A slow low band and a fast high one, built by construction.
+    slow = octave_filter(rng.standard_normal(samples), SAMPLE_RATE)[2] * 10.0 ** (
+        -60.0 * times / (20.0 * 0.60)
+    )
+    fast = octave_filter(rng.standard_normal(samples), SAMPLE_RATE)[6] * 10.0 ** (
+        -60.0 * times / (20.0 * 0.15)
+    )
+    response = slow + fast
+
+    low_window = window_for_level_s(response, SAMPLE_RATE, -20.0, bands_hz=(500.0, 500.0))
+    high_window = window_for_level_s(response, SAMPLE_RATE, -20.0, bands_hz=(8000.0, 8000.0))
+
+    assert low_window > 2.0 * high_window
+    assert high_window == pytest.approx(0.15 / 3.0, rel=0.4)
+
+
+def test_a_deeper_level_asks_for_a_longer_window() -> None:
+    response = _decaying_noise(t60_s=0.3, seconds=1.0)
+    shallow = window_for_level_s(response, SAMPLE_RATE, -20.0)
+    deep = window_for_level_s(response, SAMPLE_RATE, -40.0)
+    assert deep > shallow
+
+
+def test_a_band_that_never_reaches_the_level_asks_for_everything() -> None:
+    """ "At least this long" is the honest answer, not NaN."""
+    response = _decaying_noise(t60_s=5.0, seconds=0.2)
+    window = window_for_level_s(response, SAMPLE_RATE, -60.0)
+    assert window == pytest.approx(0.2, rel=0.01)
+
+
+def test_a_positive_level_is_refused() -> None:
+    with pytest.raises(ValueError):
+        window_for_level_s(_decaying_noise(), SAMPLE_RATE, 10.0)
+
+
+def test_a_band_range_that_matches_nothing_is_refused() -> None:
+    with pytest.raises(ValueError, match="no octave band"):
+        window_for_level_s(_decaying_noise(), SAMPLE_RATE, -20.0, bands_hz=(20.0, 30.0))
+
+
+def test_the_local_decay_recovers_a_rate_it_was_given() -> None:
+    """Fitted on the block level, so a truncated response does not bias it."""
+    rng = np.random.default_rng(3)
+    samples = int(1.0 * SAMPLE_RATE)
+    times = np.arange(samples) / SAMPLE_RATE
+    response = rng.standard_normal(samples) * 10.0 ** (-60.0 * times / (20.0 * 0.40))
+
+    fitted = local_decay_s(response, SAMPLE_RATE, 0.5)
+
+    centres = band_centres(SAMPLE_RATE)
+    usable = [fitted[i] for i, c in enumerate(centres) if 250 <= c <= 8000]
+    assert np.nanmedian(usable) == pytest.approx(0.40, rel=0.2)
+
+
+def test_too_little_signal_to_fit_returns_nan_rather_than_a_guess() -> None:
+    fitted = local_decay_s(_decaying_noise(seconds=1.0), SAMPLE_RATE, 0.0005)
+    assert np.all(np.isnan(fitted))
