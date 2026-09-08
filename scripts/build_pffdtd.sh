@@ -27,9 +27,22 @@ PFFDTD_REPO="${PFFDTD_REPO:-https://github.com/bsxfun/pffdtd.git}"
 # re-running the B1 sweep, because the numbers in data/runs/b1_pffdtd_cost
 # describe this tree and no other.
 PFFDTD_COMMIT="${PFFDTD_COMMIT:-aa319f6c86517cb95aabfae8656277da62c3ead5}"
-# sm_89 is Ada (RTX 4090). Set CUDA_ARCH for other cards: 86 = Ampere/3090,
-# 90 = Hopper/H100.
-CUDA_ARCH="${CUDA_ARCH:-89}"
+# Read from the card rather than assumed. A binary built for the wrong
+# architecture does not fail to build and does not fail to start: it reads every
+# input, prints "Global memory allocation done", and then exits with CUDA error
+# 209, cudaErrorNoKernelImageForDevice, saying nothing. That cost a rented A100
+# an hour, on a build defaulting to sm_89 running on an sm_80 card, and the
+# roadmap's own W25 table already records the same defect being fixed once.
+#
+# The default is kept for a machine with no driver, where nothing will run the
+# GPU binaries anyway, and it is announced either way.
+if command -v nvidia-smi >/dev/null 2>&1; then
+  DETECTED="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | head -1 | tr -d ' .')"
+else
+  DETECTED=""
+fi
+CUDA_ARCH="${CUDA_ARCH:-${DETECTED:-89}}"
 
 INSTALL_DIR="${1:-/root/pffdtd}"
 VENV_DIR="${VENV_DIR:-$(dirname "${INSTALL_DIR}")/pffdtd-venv}"
@@ -49,6 +62,11 @@ fi
 git -C "${INSTALL_DIR}" fetch --quiet origin
 git -C "${INSTALL_DIR}" checkout --quiet "${PFFDTD_COMMIT}"
 
+if [ -n "${DETECTED}" ]; then
+  log "card reports compute capability sm_${DETECTED}"
+else
+  log "no nvidia-smi here, so the CUDA arch is not detected"
+fi
 log "Patch 1: CUDA arch sm_35 -> sm_${CUDA_ARCH}"
 sed -i "s/-arch=sm_[0-9]*/-arch=sm_${CUDA_ARCH}/g" "${INSTALL_DIR}/c_cuda/Makefile"
 

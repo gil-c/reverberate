@@ -282,6 +282,11 @@ def main(argv: list[str] | None = None) -> int:
             args.run / "source0" / "sim_outs.h5",
             double_precision=args.double,
             timeout=args.hours * 3600,
+            on_progress=lambda p: say(
+                f"  engine {p.percent if p.percent is not None else '?'}%"
+                f"{' running' if p.running else ' stopped'} "
+                f"{p.output_bytes / 1e9:.2f} GB written | {p.last_line[:90]}"
+            ),
         )
         retrieved = True
         (args.run / "source0" / "engine.log").write_text(result.log)

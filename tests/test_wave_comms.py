@@ -26,6 +26,7 @@ import pytest
 
 from reverberate import settings
 from reverberate.wave import comms as comms_module
+from reverberate.wave import remote as comms_remote
 from reverberate.wave.comms import (
     ENGINE_FILES,
     Grid,
@@ -557,3 +558,104 @@ def test_the_split_reproduces_sim_setup_bit_for_bit(
             assert set(expected.keys()) == set(got.keys()), name
             for key in expected:
                 assert np.array_equal(expected[key][...], got[key][...]), f"{name}:{key}"
+
+
+class TestDetachedEngine:
+    """The engine is launched detached and polled, never held on one ssh channel.
+
+    Three failures this shape exists to prevent, and all three have happened:
+    an A100 destroyed mid-solve because ``nohup &`` over ssh never returns; a
+    five hour run whose progress was only returned at the end; and an engine
+    that exits with its own message on stdout while the exception carries
+    stderr, so the caller is told the login banner and nothing else.
+    """
+
+    def test_the_launcher_detaches_every_descriptor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent: list[str] = []
+
+        def fake_run(argv: list[str], *, what: str, timeout: float | None = None) -> str:
+            sent.append(argv[-1])
+            return "1"
+
+        monkeypatch.setattr(comms_remote, "_run", fake_run)
+        comms_remote.start_engine(Machine(host="h", identity=None))
+        launched = " ".join(sent)
+        assert "setsid" in launched
+        assert "< /dev/null" in launched
+        assert "> " in launched and "2>&1" in launched
+        assert "fdtd_main_gpu_single.x" in launched
+
+    def test_progress_reads_the_percentage_the_engine_prints(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "1\n0\nRunning [42.3%] [02:51:07<06:44:12]\n",
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.running is True
+        assert progress.percent == pytest.approx(42.3)
+        assert progress.finished is False
+
+    def test_a_finished_run_is_no_process_and_an_output_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote, "_run", lambda argv, *, what, timeout=None: "0\n1200000000\ndone\n"
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.finished is True
+        assert progress.output_bytes == 1_200_000_000
+
+    def test_an_engine_that_dies_without_output_is_reported_with_its_own_last_words(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure that cost an hour of A100: CUDA error 209, said silently."""
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "0\n0\nGlobal memory allocation done\n",
+        )
+        with pytest.raises(RuntimeError, match="Global memory allocation done"):
+            comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0)
+
+    def test_the_latest_percentage_is_taken_and_not_the_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The engine overwrites one terminal line, so its log is carriage returns.
+
+        Deleting them joins the whole log into a single line, and a search then
+        returns its oldest percentage for ever, which reads exactly like a run
+        that has stalled at 2.9 per cent.
+        """
+        blob = "Running [2.9%][00:04:44<02:46:12] Running [61.4%][01:44:00<01:05:00]"
+        monkeypatch.setattr(
+            comms_remote, "_run", lambda argv, *, what, timeout=None: f"1\n0\n{blob}\n"
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.percent == pytest.approx(61.4)
+
+    def test_the_probe_translates_carriage_returns_rather_than_deleting_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: sent.append(argv[-1]) or "0\n1\nx\n",
+        )
+        comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert "tr " in sent[0]
+        assert "tr -d" not in sent[0]
+
+    def test_a_percentage_that_stops_moving_is_stalled_and_not_merely_slow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "1\n0\nRunning [11.0%] [00:10:00<01:00:00]\n",
+        )
+        with pytest.raises(RuntimeError, match="STALLED at 11.0"):
+            comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0, stall_polls=3)
