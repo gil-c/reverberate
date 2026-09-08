@@ -67,6 +67,40 @@ and at **-48 dB** with a margin of four orders. So the gate stops four orders
 below the fit, tapering over two, and the outer shells serve the bottom of the
 band while the inner cloud serves the top.
 
+## What the rehearsal settled, after this decision was taken
+
+The chain was run on a 1.2012 m box at the 16 kHz working point, sized so that
+all 1021 nodes hear the direct sound alone for 1.25 ms, in which the field is a
+free field monopole. On the laptop, 66 s of wall clock and 280 s of processor,
+no rental. Direction of arrival against the geometry, in degrees:
+
+| band | 1 kHz | 2 kHz | 4 kHz | 8 kHz | 16 kHz |
+| --- | --- | --- | --- | --- | --- |
+| omega / c | 0.070 | 0.017 | 0.000 | 0.001 | 0.016 |
+| the scheme's own wavenumber | 0.070 | 0.017 | 0.000 | 0.001 | 0.011 |
+
+**The dispersion correction was expected to matter here and does not.** One per
+cent of phase velocity error at 16 kHz is 0.5 rad across the 16 cm shell, which
+is why it was built. But the gate has already dropped that shell by then: at
+16 kHz only shells inside `k r = 6`, which is 20 mm, are admitted, and over
+20 mm the same error is 0.06 rad. The gate removes the dispersion problem as a
+side effect of removing the aliasing one. The correction is kept, because it
+costs nothing and the cancellation is a coincidence of this working point rather
+than a principle, and it is recorded as buying **0.005 degrees**.
+
+**The gate needed a guard it did not have.** Stating it as an offset below the
+fit order is right at a fit order of ten, and closes it on almost everything at
+a small one: at fit order five the gate sits at `k r = 1`, which at 16 kHz is a
+radius of 1.1 mm, under one grid cell. The fit is then set by its regularisation
+and not by the field, and the only symptom is a direction quietly drifting to
+7.7 degrees.
+
+The first guard tried was a floor at the output order, and it was wrong: it
+costs 22 dB at 8 kHz. **A gate below the output order is the premise of this
+decision** and must stay allowed. The real condition is on the number of
+receivers admitted against the number of unknowns, and it is now counted per
+frequency and reported.
+
 ## Why the receivers are nodes
 
 PFFDTD interpolates a receiver trilinearly from the eight nodes around it,
