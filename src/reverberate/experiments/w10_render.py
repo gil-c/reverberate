@@ -38,6 +38,7 @@ import numpy as np
 from reverberate import audio, metrics
 from reverberate.audio import Atmosphere
 from reverberate.experiments.engine import write_record
+from reverberate.experiments.w10_ambisonic import COMMS_NAME
 from reverberate.experiments.w20_render import dry_voice, publish
 from reverberate.response import Provenance
 from reverberate.spatial.array import ArrayDesign
@@ -291,7 +292,7 @@ def rehearsal_report(
     cut = int(rehearsal["first_reflection_sample"]) + window_pad
 
     reduced, differentiated = audio.read_engine_output(
-        run_dir / "source0", run_dir / "comms" / "source0.h5"
+        run_dir / "source0", run_dir / "comms" / COMMS_NAME
     )
     signals = audio.integrate_and_lowcut(
         reduced.signals, 1.0 / grid_rate, differentiated=differentiated, fcut=20.0
@@ -375,7 +376,7 @@ def room_report(
     signals, rate = pressures_of_run(
         run_dir / "source0",
         fmax_hz=fmax,
-        comms_path=run_dir / "comms" / "source0.h5",
+        comms_path=run_dir / "comms" / COMMS_NAME,
         lowcut_hz=lowcut_hz,
         air=air,
         sound_speed_m_s=float(plan["sound_speed_m_s"]),

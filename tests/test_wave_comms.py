@@ -640,11 +640,12 @@ class TestDetachedEngine:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sent: list[str] = []
-        monkeypatch.setattr(
-            comms_remote,
-            "_run",
-            lambda argv, *, what, timeout=None: sent.append(argv[-1]) or "0\n1\nx\n",
-        )
+
+        def record(argv: list[str], *, what: str, timeout: float | None = None) -> str:
+            sent.append(argv[-1])
+            return "0\n1\nx\n"
+
+        monkeypatch.setattr(comms_remote, "_run", record)
         comms_remote.engine_progress(Machine(host="h", identity=None))
         assert "tr " in sent[0]
         assert "tr -d" not in sent[0]

@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from reverberate.audio import Atmosphere
+from reverberate.experiments.w10_ambisonic import COMMS_NAME
 from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
@@ -119,7 +120,7 @@ def a_solved_run(tmp_path: Path, *, samples: int = 2048) -> Path:
 
     with h5py.File(run / "source0" / "sim_outs.h5", "w") as handle:
         handle.create_dataset("u_out", data=pressure)
-    with h5py.File(run / "comms" / "source0.h5", "w") as handle:
+    with h5py.File(run / "comms" / COMMS_NAME, "w") as handle:
         handle.create_dataset("out_alpha", data=np.ones((rows.shape[0], 1)))
         handle.create_dataset("diff", data=np.int8(0))
     with h5py.File(run / "source0" / "sim_consts.h5", "w") as handle:
@@ -240,7 +241,7 @@ def test_one_gain_covers_every_file_so_the_ears_stay_comparable(tmp_path: Path) 
     written = write_audio(ambisonic, brirs, np.array([1.0, 0.0, 0.0]), tmp_path / "audio")
     gains = {entry["write_gain"] for entry in written}
     assert len(gains) == 1
-    peaks = {entry["path"]: entry.get("peak") for entry in written if "peak" in entry}
+    peaks = {str(entry["path"]): float(entry["peak"]) for entry in written if "peak" in entry}
     assert peaks["binaural_sphere_yaw0.wav"] > 50.0 * peaks["binaural_sphere_yaw90.wav"]
 
 
@@ -273,5 +274,7 @@ def test_the_report_hands_back_what_it_rendered_so_nothing_is_encoded_twice(
         rendered=rendered,
     )
     assert isinstance(rendered["ambisonic"], Ambisonic)
-    assert set(rendered["brirs"]) == {"sphere_magls", "sphere_plain"}  # type: ignore[arg-type]
-    assert sorted(rendered["brirs"]["sphere_magls"]) == [0.0, 90.0]  # type: ignore[index]
+    brirs = rendered["brirs"]
+    assert isinstance(brirs, dict)
+    assert set(brirs) == {"sphere_magls", "sphere_plain"}
+    assert sorted(brirs["sphere_magls"]) == [0.0, 90.0]

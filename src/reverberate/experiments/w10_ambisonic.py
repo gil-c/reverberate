@@ -58,6 +58,7 @@ from reverberate.wave import Machine, SceneSpec, engine_inputs, voxelise, write_
 from reverberate.wave.comms import Grid, load_grid
 
 __all__ = [
+    "COMMS_NAME",
     "REHEARSAL",
     "Rehearsal",
     "array_at",
@@ -66,6 +67,13 @@ __all__ = [
     "plan_record",
     "main",
 ]
+
+#: What the comms file is called, everywhere. The engine opens its inputs by
+#: name from its working directory, and ``remote.upload`` refuses by name any
+#: file that is not one of the four it reads, so a comms file named for its
+#: source cannot be uploaded. Named once here because a writer and a reader that
+#: each spell it separately drift, which is how a rehearsal caught this one.
+COMMS_NAME = "comms_out.h5"
 
 #: The room the pipeline has already exported and voxelised at 16 kHz, on the
 #: geometry W25 fixed and W33 carved. Named here rather than passed from a
@@ -302,7 +310,7 @@ def run_rehearsal(
         design.positions,
         rehearsal.samples / constants.sample_rate,
         diff_source=not double_precision,
-        out_path=comms_dir / "source0.h5",
+        out_path=comms_dir / COMMS_NAME,
         interpolation="nearest",
     )
     solve = execute(
@@ -388,7 +396,7 @@ def prepare_room(out_dir: Path, entry_path: Path, *, double_precision: bool = Fa
         # that is not one of the four the engine reads, which is a rule worth
         # keeping: an unexpected file on a rented machine is a data policy
         # problem and not merely a slow upload. So the name is right here.
-        out_path=comms_dir / "comms_out.h5",
+        out_path=comms_dir / COMMS_NAME,
         interpolation="nearest",
     )
 
@@ -454,7 +462,7 @@ def _solve(args: argparse.Namespace) -> int:
         )
     )
     record = execute(
-        engine_inputs(entry, args.out / "comms" / "source0.h5"),
+        engine_inputs(entry, args.out / "comms" / COMMS_NAME),
         args.out / "source0",
         engine=args.engine,
         double_precision=args.double,
