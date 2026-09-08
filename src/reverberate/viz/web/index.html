@@ -751,8 +751,17 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
+        // Three sources, in this order. What the reader just asked for wins,
+        // because they asked for it. Failing that, the run the server marked
+        // as the one to lead with: `runs.json` carries a `lead` flag that the
+        // W10 branch's `--run NAME` sets, and dropping this lookup would make
+        // that flag decorative after a merge. It is absent on this branch, so
+        // findIndex answers -1 and the fallback runs; it costs nothing now and
+        // it means the merge is not a decision. Last of the apartment only
+        // when nothing at all has been said.
         const asked = wanted ? apartmentRuns.findIndex((r) => r.name === wanted) : -1;
-        runChoice = asked >= 0 ? asked : Math.max(0, apartmentRuns.length - 1);
+        const lead = asked >= 0 ? -1 : apartmentRuns.findIndex((r) => r.lead);
+        runChoice = asked >= 0 ? asked : lead >= 0 ? lead : Math.max(0, apartmentRuns.length - 1);
         const picker = document.getElementById("run-choice");
         picker.hidden = apartmentRuns.length < 2;
         picker.innerHTML = apartmentRuns

@@ -546,6 +546,23 @@ def test_the_selector_opens_the_run_it_names() -> None:
     assert "loadApartment(run ? run.scene_id : value, run ? run.name : null)" in page
 
 
+def test_the_server_may_mark_a_run_to_lead_with() -> None:
+    """A flag this branch does not set yet, kept so a merge is not a decision.
+
+    ``runs.json`` gains a ``lead`` flag on the W10 branch, written from its
+    ``--run NAME``. Without this lookup the fallback here would take the last
+    run of the apartment and that flag would be decorative. It is absent today,
+    so ``findIndex`` answers -1 and the fallback runs unchanged; what it buys
+    is that the merge inserts nothing.
+    """
+    page = _page()
+
+    assert "apartmentRuns.findIndex((r) => r.lead)" in page
+    # And what the reader just asked for still outranks it.
+    assert "const asked = wanted ?" in page
+    assert "asked >= 0 ? asked : lead >= 0 ? lead :" in page
+
+
 def test_releasing_a_run_takes_its_surfaces_out_of_the_scene() -> None:
     """The other half of the same defect.
 
