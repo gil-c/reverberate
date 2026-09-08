@@ -361,12 +361,38 @@ def run_scene(run_dir: Path) -> RunRef:
     )
 
 
+#: Keys :func:`build_site` dereferences without a default. A report missing any
+#: of them cannot be drawn, so :func:`discover_runs` refuses it there rather
+#: than letting the builder raise halfway through the collection.
+REQUIRED_REPORT_KEYS = (
+    "run",
+    "scene_sha256",
+    "cache_key",
+    "room",
+    "theory",
+    "placement",
+    "binaural_note",
+    "dry_voice",
+    "sources",
+    "model_json",
+)
+
+
 def discover_runs(runs_root: Path) -> list[RunRef]:
     """Every rendered run under ``runs_root``, newest name last.
 
-    A run counts as rendered only if it has both the plan that names the scene
-    and the report the payload is built from. A half-finished run directory is
-    skipped rather than offered and then failing to open.
+    A run counts as rendered only if it has the plan that names the scene, the
+    report the payload is built from, **and** every field that report is read
+    for. A half-finished run directory is skipped rather than offered and then
+    failing to open.
+
+    That last condition is not belt and braces. The runs directory is shared
+    between sessions, and a report written for something other than a solve --
+    a cost study, a domain census -- has a plan and a report and none of the
+    placement a page needs. Checking only that the two files exist let one such
+    directory raise ``KeyError`` inside the builder's loop and take down the
+    whole viewer, every other run with it. The promise in this docstring was
+    already the right one; it just was not kept.
     """
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
@@ -377,11 +403,15 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
         runs_root = runs_root.parent
     found: list[RunRef] = []
     for plan in sorted(runs_root.glob("*/plan.json")):
-        if not (plan.parent / "report.json").is_file():
+        report = plan.parent / "report.json"
+        if not report.is_file():
             continue
         try:
+            record = json.loads(report.read_text())
+            if any(key not in record for key in REQUIRED_REPORT_KEYS):
+                continue
             found.append(run_scene(plan.parent))
-        except (KeyError, json.JSONDecodeError):
+        except (KeyError, OSError, json.JSONDecodeError):
             continue
     return found
 

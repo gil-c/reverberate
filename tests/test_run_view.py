@@ -34,6 +34,45 @@ from reverberate.viz.run_view import (
 )
 
 
+def test_a_report_without_what_the_page_needs_is_skipped(tmp_path: Path) -> None:
+    """One malformed run must not take the whole viewer down with it.
+
+    The runs directory is shared between sessions, and a report written for a
+    cost study rather than a solve has a plan and a report and no placement.
+    Before this, such a directory raised KeyError inside the builder's loop and
+    every other run went with it.
+    """
+    from reverberate.viz.run_view import discover_runs
+
+    good = tmp_path / "solved"
+    good.mkdir()
+    (good / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (good / "report.json").write_text(
+        json.dumps(
+            {
+                "run": "solved",
+                "scene_sha256": "f" * 64,
+                "cache_key": "0" * 32,
+                "room": {},
+                "theory": {},
+                "placement": {"sources": [], "receivers": []},
+                "binaural_note": "",
+                "dry_voice": None,
+                "sources": [],
+                "model_json": "models/scene.json",
+            }
+        )
+    )
+
+    study = tmp_path / "cost_study"
+    study.mkdir()
+    (study / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (study / "report.json").write_text(json.dumps({"run": "cost_study", "windows": []}))
+
+    names = [run.name for run in discover_runs(tmp_path)]
+    assert names == ["solved"]
+
+
 def test_envelope_keeps_the_peak_a_stride_would_have_missed() -> None:
     """Decimating by sampling would draw a waveform quieter than it is."""
     signal = np.zeros(10_000)
