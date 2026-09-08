@@ -214,18 +214,29 @@ def engine_progress(
     # the whole log into one line and a search then returns its *oldest*
     # percentage for ever, which reads exactly like a stalled run. Translated to
     # newlines instead, and the last one taken.
+    # Each field carries its own tag. Some hosts print a login banner on
+    # stdout ("Welcome to vast.ai ... Have fun!"), and reading the fields by
+    # position then took the banner for the process count and the file size
+    # for the engine's last words: a finished solve was reported as an engine
+    # that exited without writing anything, twice, on the same card.
     probe = (
-        "printf '%s\\n' "
+        "printf 'PROCS=%s\\nBYTES=%s\\nLAST=%s\\n' "
         '"$(pgrep -c fdtd_main_gpu 2>/dev/null || echo 0)" '
         f'"$(stat -c%s {shlex.quote(output)} 2>/dev/null || echo 0)" '
         f"\"$(tail -c 20000 {shlex.quote(log)} 2>/dev/null | tr '\\r' '\\n' "
         '| grep -a "Running" | tail -1)"'
     )
     lines = _run(machine.ssh_command(probe), what="engine progress").splitlines()
-    body = [line for line in lines if line.strip()]
-    running = bool(body and body[0].strip().isdigit() and int(body[0].strip()) > 0)
-    output_bytes = int(body[1].strip()) if len(body) > 1 and body[1].strip().isdigit() else 0
-    last = body[2] if len(body) > 2 else ""
+    fields = {}
+    for line in lines:
+        tag, _, value = line.partition("=")
+        if tag in ("PROCS", "BYTES", "LAST") and tag not in fields:
+            fields[tag] = value.strip()
+    procs = fields.get("PROCS", "")
+    size = fields.get("BYTES", "")
+    running = procs.isdigit() and int(procs) > 0
+    output_bytes = int(size) if size.isdigit() else 0
+    last = fields.get("LAST", "")
     matches = PROGRESS.findall(last)
     found = matches[-1] if matches else None
     return EngineProgress(

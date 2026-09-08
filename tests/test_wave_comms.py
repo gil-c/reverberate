@@ -591,18 +591,43 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "1\n0\nRunning [42.3%] [02:51:07<06:44:12]\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=1\nBYTES=0\nLAST=Running [42.3%] [02:51:07<06:44:12]\n"
+            ),
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.running is True
         assert progress.percent == pytest.approx(42.3)
         assert progress.finished is False
 
+    def test_a_login_banner_on_stdout_does_not_shift_the_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Vast's hosts print "Welcome to vast.ai ... Have fun!" on stdout.
+
+        Read by position, the banner became the process count and the file
+        size became the engine's last words, so a finished 67 minute solve was
+        reported as an engine that had exited without writing anything.
+        """
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: (
+                "Welcome to vast.ai. If authentication fails, try again.\nHave fun!\n"
+                "PROCS=0\nBYTES=237919552\nLAST=Running [100.0%] [01:07:00<00:00:00]\n"
+            ),
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.finished is True
+        assert progress.output_bytes == 237919552
+
     def test_a_finished_run_is_no_process_and_an_output_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            comms_remote, "_run", lambda argv, *, what, timeout=None: "0\n1200000000\ndone\n"
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "PROCS=0\nBYTES=1200000000\nLAST=done\n",
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.finished is True
@@ -615,7 +640,9 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "0\n0\nGlobal memory allocation done\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=0\nBYTES=0\nLAST=Global memory allocation done\n"
+            ),
         )
         with pytest.raises(RuntimeError, match="Global memory allocation done"):
             comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0)
@@ -631,7 +658,9 @@ class TestDetachedEngine:
         """
         blob = "Running [2.9%][00:04:44<02:46:12] Running [61.4%][01:44:00<01:05:00]"
         monkeypatch.setattr(
-            comms_remote, "_run", lambda argv, *, what, timeout=None: f"1\n0\n{blob}\n"
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: f"PROCS=1\nBYTES=0\nLAST={blob}\n",
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.percent == pytest.approx(61.4)
@@ -643,7 +672,7 @@ class TestDetachedEngine:
 
         def record(argv: list[str], *, what: str, timeout: float | None = None) -> str:
             sent.append(argv[-1])
-            return "0\n1\nx\n"
+            return "PROCS=0\nBYTES=1\nLAST=x\n"
 
         monkeypatch.setattr(comms_remote, "_run", record)
         comms_remote.engine_progress(Machine(host="h", identity=None))
@@ -656,7 +685,9 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "1\n0\nRunning [11.0%] [00:10:00<01:00:00]\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=1\nBYTES=0\nLAST=Running [11.0%] [00:10:00<01:00:00]\n"
+            ),
         )
         with pytest.raises(RuntimeError, match="STALLED at 11.0"):
             comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0, stall_polls=3)
