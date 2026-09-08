@@ -727,7 +727,22 @@
       // room it was never simulated in. Doing it beforehand also makes the run
       // available immediately, which is correct: a run payload is published by
       // the solver and owes nothing to the HSSD assembly.
-      function releaseRun(sceneId) {
+      // `wanted` is the run the reader actually asked for. Without it this
+      // fell back to the last run of the apartment, so choosing one run in the
+      // selector opened another: the selector said w37_listen while the panel
+      // and the audio player were still on w37_three_band, with nothing on
+      // screen to say so. A page that names one rendering and plays another is
+      // the worst kind of defect for a listening test, because the listener
+      // has no way to notice.
+      function releaseRun(sceneId, wanted = null) {
+        // The built group goes with the payload. Nulling only the payload left
+        // the outgoing run's surfaces in the scene, and `setMode` then found a
+        // group already there and returned without rebuilding: the selector
+        // moved, `runChoice` moved, and the panel and the audio did not. The
+        // run picker's own handler had always done this; the scene selector's
+        // path did not, which is why one worked and the other did not.
+        if (groups.acoustic) scene.remove(groups.acoustic);
+        groups.acoustic = null;
         runData = runView = runShow = null;
         document.getElementById("run-panel").hidden = true;
         apartmentRuns = sceneId ? runsByScene.get(sceneId) || [] : [];
@@ -736,7 +751,8 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
-        runChoice = Math.max(0, apartmentRuns.length - 1);
+        const asked = wanted ? apartmentRuns.findIndex((r) => r.name === wanted) : -1;
+        runChoice = asked >= 0 ? asked : Math.max(0, apartmentRuns.length - 1);
         const picker = document.getElementById("run-choice");
         picker.hidden = apartmentRuns.length < 2;
         picker.innerHTML = apartmentRuns
@@ -750,12 +766,12 @@
         if (button.disabled) button.classList.remove("active");
       }
 
-      async function loadApartment(sceneId) {
+      async function loadApartment(sceneId, wantedRun = null) {
         assemblyMessage = "building apartment… (first load of a scene takes a while)";
         setBusy(assemblyMessage);
         // Nothing of the outgoing apartment may survive the wait, including the
         // mode buttons, which is why this runs before the fetch and not after.
-        releaseRun(sceneId);
+        releaseRun(sceneId, wantedRun);
         chosen = null;
         if (activeMode === "acoustic") activeMode = null;
         // The server assembles a scene on demand: 168 apartments could not be
@@ -830,10 +846,13 @@
         // Not awaited yet: assembling an apartment takes minutes on a first
         // visit, and the run is ready now. Opening it first is what makes the
         // simulated room the one entry that shows something immediately.
-        const assembling = loadApartment(run ? run.scene_id : value);
+        const assembling = loadApartment(run ? run.scene_id : value, run ? run.name : null);
         if (run) {
           await setMode("acoustic");
-          standAt(runData.samples[0]?.receiver_index ?? 0);
+          // Guarded: setMode can return without a payload when the run fails
+          // to load, and throwing here used to abandon the apartment assembly
+          // that is still in flight below.
+          if (runData) standAt(runData.samples[0]?.receiver_index ?? 0);
         }
         await assembling;
       }
