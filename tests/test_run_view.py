@@ -803,3 +803,68 @@ def test_a_store_that_will_not_answer_leaves_the_page_standing(
     payload = json.loads((tmp_path / "site" / "run.json").read_text())
     assert payload["audit"] is None
     assert "could not deliver the audit payload" in capsys.readouterr().out
+
+
+class TestASpatialRun:
+    """A spatial run and a point run write different artefacts, not one shape twice.
+
+    A point run has a placement, one response per receiver and one wet file per
+    pair. A spatial run has one listening point, one ambisonic response about it
+    and one pair of ears per head and per head orientation. Reshaping the second
+    into the first would put receivers on the page that the run never simulated.
+    """
+
+    def a_report(self) -> dict[str, Any]:
+        return {
+            "run": "w10_test",
+            "binaural_decodes": {
+                "sphere_magls": {
+                    "decoder": {"head": "rigid sphere"},
+                    "measures": {"yaw_0": {"itd_us": 600.0}, "yaw_90": {"itd_us": -150.0}},
+                }
+            },
+            "array": {"centre": [0.0, 1.2, 0.0], "outer_radius_m": 0.16, "shells": []},
+            "encoder": {"order": 7, "fit_order": 10, "max_frequency_hz": 16000.0},
+            "sample_rate_hz": 48000.0,
+        }
+
+    def test_a_spatial_report_is_recognised_by_what_it_holds(self) -> None:
+        assert run_view.is_spatial(self.a_report())
+        assert not run_view.is_spatial({"run": "w20", "placement": {}})
+
+    def test_its_rows_are_one_per_head_and_orientation(self, tmp_path: Path) -> None:
+        sofar = pytest.importorskip("sofar")
+        responses = tmp_path / "responses"
+        responses.mkdir()
+        sofa = sofar.Sofa("SingleRoomSRIR")
+        block = np.zeros((2, 2, 64))
+        block[:, 0, 10] = 1.0
+        sofa.Data_IR = block
+        sofa.Data_SamplingRate = 48000.0
+        sofa.Data_Delay = np.zeros((1, 2))
+        sofa.ListenerPosition = np.zeros((2, 3))
+        sofa.ListenerView = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        sofa.ListenerUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))
+        sofa.ReceiverPosition = np.zeros((2, 3, 1))
+        sofa.ReceiverView = np.tile(np.array([1.0, 0.0, 0.0]), (2, 1))[:, :, np.newaxis]
+        sofa.ReceiverUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))[:, :, np.newaxis]
+        sofa.ReceiverDescriptions = np.array(["left ear", "right ear"])
+        sofa.SourcePosition = np.zeros((2, 3))
+        sofa.EmitterPosition = np.zeros((1, 3, 1))
+        sofa.MeasurementDate = np.zeros(2)
+        sofar.write_sofa(str(responses / "binaural_sphere_magls.sofa"), sofa)
+
+        rows = run_view._spatial_rows(tmp_path, self.a_report(), {"binaural_sphere_magls_yaw0.wav"})
+        assert [row["id"] for row in rows] == ["sphere_magls_yaw0", "sphere_magls_yaw90"]
+        # The yaw travels with the row, because standing at a sample without it
+        # shows a room whose sources are on the other side from where they sound.
+        assert [row["yaw_deg"] for row in rows] == pytest.approx([0.0, 90.0])
+        assert rows[0]["audio"] == "binaural_sphere_magls_yaw0.wav"
+        assert rows[1]["audio"] is None
+        assert rows[0]["measures"] == {"itd_us": 600.0}
+
+    def test_a_run_with_no_responses_yields_no_rows_rather_than_empty_plots(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("sofar")
+        assert run_view._spatial_rows(tmp_path, self.a_report(), set()) == []

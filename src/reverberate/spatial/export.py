@@ -50,19 +50,32 @@ def to_ambix(ambisonic: Ambisonic) -> np.ndarray:
 
 
 def write_ambix_wav(
-    ambisonic: Ambisonic, path: Path, *, headroom_db: float = 1.0
+    ambisonic: Ambisonic,
+    path: Path,
+    *,
+    headroom_db: float = 1.0,
+    gain: float | None = None,
 ) -> tuple[Path, float]:
     """Write an ambiX WAV and return the path and the single gain applied.
 
-    One gain for every channel, as ``reverberate.audio.write_wav`` insists:
-    scaling channels separately would destroy the directional information,
-    which here is carried entirely by the ratios between them.
+    One gain for every channel: scaling channels separately would destroy the
+    directional information, which here is carried entirely by the ratios
+    between them.
+
+    ``gain`` is the gain a caller computed over a whole set of files that have
+    to stay comparable, and passing it is the only way to keep this file's level
+    against theirs. **Without it this function normalises**, and asking for zero
+    headroom does not disable that: it asks for a peak of exactly one, which is
+    a normalisation with no room left. That is how this file came out at full
+    scale beside binaural files at a fifth of it, while the report claimed one
+    shared gain for all of them.
     """
     import soundfile
 
     signals = to_ambix(ambisonic)
-    peak = float(np.max(np.abs(signals)))
-    gain = 1.0 if peak == 0.0 else 10.0 ** (-headroom_db / 20.0) / peak
+    if gain is None:
+        peak = float(np.max(np.abs(signals)))
+        gain = 1.0 if peak == 0.0 else 10.0 ** (-headroom_db / 20.0) / peak
     path.parent.mkdir(parents=True, exist_ok=True)
     soundfile.write(
         str(path),

@@ -599,9 +599,15 @@ def room_report(
     # is a number and not a result, and the roadmap asks for both bounds.
     room: dict[str, Any] | None = None
     theory_record: dict[str, Any] | None = None
+    model_path: str | None = None
     found = _cache_entry(plan)
     if found is not None:
         entry, model_json = found
+        # The viewer draws the exact surface list the solver was handed, which
+        # is roadmap constraint 9, so the report has to name it. The cache entry
+        # is where a run's model can still be found once the engine has deleted
+        # its copy of the grid.
+        model_path = str(model_json)
         geometry = room_geometry(entry, model_json, sound_speed_m_s=343.0)
         room = geometry.record()
         theory_record = theory(
@@ -663,6 +669,7 @@ def room_report(
     return {
         "run": run_dir.name,
         "scene_id": plan.get("scene_id"),
+        "model_json": model_path,
         "room_geometry": room,
         "theory": theory_record,
         "theory_note": (
@@ -744,16 +751,11 @@ def write_audio(
     gain = audio.peak_gain(*wet.values(), ambisonic.signals)
 
     written: list[dict[str, Any]] = []
-    ambix, _ = write_ambix_wav(
-        Ambisonic(
-            ambisonic.signals * gain,
-            ambisonic.sample_rate_hz,
-            ambisonic.order,
-            ambisonic.centre,
-        ),
-        out_dir / "ambisonic_acn_sn3d.wav",
-        headroom_db=0.0,
-    )
+    # The shared gain, handed over rather than left to be recomputed. Asking for
+    # zero headroom does not disable the normalisation, it asks for a peak of
+    # exactly one, which put this file at full scale beside binaural files at a
+    # fifth of it while the report claimed one gain for all of them.
+    ambix, _ = write_ambix_wav(ambisonic, out_dir / "ambisonic_acn_sn3d.wav", gain=gain)
     written.append({"path": ambix.name, "what": AMBIX_NOTE, "channels": ambisonic.signals.shape[0]})
     for name, block in wet.items():
         path = out_dir / f"binaural_{name}.wav"

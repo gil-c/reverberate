@@ -328,6 +328,88 @@ def _sample_rows(
     return rows
 
 
+def is_spatial(report: dict[str, Any]) -> bool:
+    """Whether this run is an ambisonic one rather than a set of point receivers.
+
+    The two produce different artefacts and neither is a special case of the
+    other: a point run writes one response per receiver and one wet file per
+    pair, a spatial run writes one ambisonic response about one listening point
+    and one pair of ears per head and head orientation.
+    """
+    return "binaural_decodes" in report
+
+
+def _spatial_rows(
+    run_dir: Path, report: dict[str, Any], audio_names: set[str]
+) -> list[dict[str, Any]]:
+    """One row per head and head orientation, plus the ambisonic response itself.
+
+    The plots come from the left ear of each binaural response, because that is
+    the signal the file plays; the ambisonic row plots its own W channel, which
+    is the pressure at the listening point.
+    """
+    import sofar
+
+    rate = float(report["sample_rate_hz"])
+    ceiling = float(report["encoder"].get("max_frequency_hz") or 16000.0) * 1.5
+    rows: list[dict[str, Any]] = []
+
+    ambisonic = run_dir / "responses" / "ambisonic.sofa"
+    if ambisonic.is_file():
+        signals = np.asarray(sofar.read_sofa(str(ambisonic)).Data_IR)[0]
+        rows.append(
+            {
+                "id": "ambisonic",
+                "label": "ambisonic, omnidirectional channel",
+                "source_index": 0,
+                "receiver_index": 0,
+                "yaw_deg": 0.0,
+                "sample_rate_hz": rate,
+                "seconds": round(signals.shape[1] / rate, 4),
+                "peak": round(float(np.max(np.abs(signals[0]))), 6),
+                "envelope": envelope(signals[0]),
+                "decay": decay_curve_points(signals[0], rate),
+                "spectrogram": spectrogram(signals[0], rate, max_hz=ceiling),
+                "measures": report.get("omnidirectional"),
+                "audio": (
+                    "ambisonic_acn_sn3d.wav" if "ambisonic_acn_sn3d.wav" in audio_names else None
+                ),
+                "note": "64 channels in ambiX; the plots are the W channel alone",
+            }
+        )
+
+    for head, block in report["binaural_decodes"].items():
+        path = run_dir / "responses" / f"binaural_{head}.sofa"
+        if not path.is_file():
+            continue
+        sofa = sofar.read_sofa(str(path))
+        responses = np.asarray(sofa.Data_IR)
+        views = np.asarray(sofa.ListenerView, dtype=float)
+        for index in range(responses.shape[0]):
+            yaw = float(np.degrees(np.arctan2(views[index][1], views[index][0])))
+            left = responses[index, 0]
+            name = f"binaural_{head}_yaw{int(round(yaw))}.wav"
+            rows.append(
+                {
+                    "id": f"{head}_yaw{int(round(yaw))}",
+                    "label": f"{head.replace('_', ' ')}, head at {yaw:+.0f} degrees",
+                    "source_index": 0,
+                    "receiver_index": 0,
+                    "yaw_deg": yaw,
+                    "sample_rate_hz": rate,
+                    "seconds": round(left.size / rate, 4),
+                    "peak": round(float(np.max(np.abs(responses[index]))), 6),
+                    "envelope": envelope(left),
+                    "decay": decay_curve_points(left, rate),
+                    "spectrogram": spectrogram(left, rate, max_hz=ceiling),
+                    "measures": block["measures"].get(f"yaw_{int(round(yaw))}"),
+                    "audio": name if name in audio_names else None,
+                    "note": block["decoder"].get("head"),
+                }
+            )
+    return rows
+
+
 @dataclass(frozen=True)
 class RunRef:
     """Where a rendered run is, and which apartment it belongs to."""
@@ -559,15 +641,52 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
 
     audit = _link_audit(run_dir, target, store)
     groups = surface_groups(model, model_materials(model_json), geometry=audit is None)
-    placement = report["placement"]
     scene = run_scene(run_dir)
+    spatial = is_spatial(report)
+    if spatial:
+        # A spatial run has one listening point rather than a placement, and its
+        # geometry lives in the plan beside the report. Read from there rather
+        # than reshaped into a placement it does not have: inventing one would
+        # put six receivers on the page that the run never simulated.
+        plan = json.loads((run_dir / "plan.json").read_text())
+        centre = list(report["array"]["centre"])
+        sources = [{"index": 0, "position": list(plan["source"]), "archetype": "source"}]
+        receivers = [{"index": 0, "position": centre, "archetype": "listening point"}]
+        receivers += [
+            {"index": index + 1, "position": list(position)}
+            for index, position in enumerate(plan.get("extra_receivers", []))
+        ]
+        samples = _spatial_rows(run_dir, report, audio_names)
+    else:
+        placement = report["placement"]
+        sources = [
+            {"index": index, "position": entry["position"], "archetype": entry.get("archetype")}
+            for index, entry in enumerate(placement["sources"])
+        ]
+        receivers = [
+            {"index": index, "position": entry["position"]}
+            for index, entry in enumerate(placement["receivers"])
+        ]
+        samples = _sample_rows(run_dir, report, audio_names)
+
     payload = {
         "run": report["run"],
         "scene_id": scene.scene_id,
         "room_name": scene.room,
-        "scene_sha256": report["scene_sha256"],
+        "scene_sha256": report.get("scene_sha256") or report.get("geometry_sha256", ""),
         "cache_key": report["cache_key"],
-        "room": report["room"],
+        "spatial": spatial,
+        # The ball the field was expanded about, so a reader can see what the
+        # encoder actually looked at rather than a point that stands for it.
+        "array": report.get("array"),
+        "encoder": report.get("encoder"),
+        "conditioning": report.get("conditioning"),
+        "centre_identity": report.get("centre_identity"),
+        "direction_of_arrival": report.get("direction_of_arrival"),
+        "heads": report.get("heads"),
+        "licence_conflict": report.get("licence_conflict"),
+        "air_absorption": report.get("air_absorption"),
+        "room": report.get("room") or report.get("room_geometry"),
         "theory": report["theory"],
         "theory_shell_only": report.get("theory_shell_only"),
         "theory_note": report.get("theory_note"),
@@ -583,20 +702,14 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         "voxels": None if audit else _write_voxels(report, target, store),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
-        "binaural_note": report["binaural_note"],
+        "binaural_note": report.get("binaural_note"),
         "omissions": report.get("omissions", []),
-        "dry_voice": report["dry_voice"],
+        "dry_voice": report.get("dry_voice"),
         "dry_audio": "audio/dry_voice.wav" if "dry_voice.wav" in audio_names else None,
         "groups": groups,
-        "sources": [
-            {"index": index, "position": entry["position"], "archetype": entry.get("archetype")}
-            for index, entry in enumerate(placement["sources"])
-        ],
-        "receivers": [
-            {"index": index, "position": entry["position"]}
-            for index, entry in enumerate(placement["receivers"])
-        ],
-        "samples": _sample_rows(run_dir, report, audio_names),
+        "sources": sources,
+        "receivers": receivers,
+        "samples": samples,
     }
     (target / "run.json").write_text(json.dumps(payload) + "\n")
     return RunView(

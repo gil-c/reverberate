@@ -209,3 +209,35 @@ def test_a_binaural_file_with_the_wrong_shape_is_refused(tmp_path: Path) -> None
             title="test",
             licence="l",
         )
+
+
+def test_the_ambix_writer_takes_a_gain_so_a_set_stays_comparable(tmp_path: Path) -> None:
+    """Zero headroom is not the same as no normalisation, and that cost a file.
+
+    Asking for zero headroom asks for a peak of exactly one, which is a
+    normalisation with no room left. It put the ambisonic file at full scale
+    beside binaural files at a fifth of it while the report claimed one shared
+    gain for all of them.
+    """
+    soundfile = pytest.importorskip("soundfile")
+    rng = np.random.default_rng(8)
+    quiet = Ambisonic(rng.standard_normal((4, 128)) * 0.01, RATE, 1, np.zeros(3))
+    path, used = write_ambix_wav(quiet, tmp_path / "q.wav", gain=2.0)
+    assert used == 2.0
+    samples, _ = soundfile.read(str(path))
+    assert np.max(np.abs(samples)) < 0.2
+
+    _, normalised = write_ambix_wav(quiet, tmp_path / "n.wav")
+    assert normalised > 10.0
+
+
+def test_zero_headroom_still_normalises_and_the_docstring_says_so() -> None:
+    """Kept as a test because it reads like a way to turn the gain off."""
+    rng = np.random.default_rng(9)
+    quiet = Ambisonic(rng.standard_normal((4, 64)) * 0.001, RATE, 1, np.zeros(3))
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        pytest.importorskip("soundfile")
+        _, gain = write_ambix_wav(quiet, Path(directory) / "z.wav", headroom_db=0.0)
+    assert gain > 100.0
