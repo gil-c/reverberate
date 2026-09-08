@@ -65,9 +65,15 @@ __all__ = ["VARIANTS", "build", "main"]
 
 #: What a listener is asked to compare.
 VARIANTS = (
-    ("solved", "all three bands solved to the end, nothing synthesised"),
-    ("economy", "low band whole, mid to -30 dB, high to -20 dB, tails synthesised"),
+    ("single band", "the 16 kHz solve alone, whole, air applied"),
+    ("solved", "three bands, all solved to the end, nothing synthesised"),
+    ("economy", "three bands, low whole, mid to -30 dB, high to -20 dB, tails synthesised"),
 )
+
+#: Octave bands both solves resolve cleanly, used to put them on one scale.
+#: Below the mid run's own low end and well under its fmax, so neither is
+#: calibrating on the skirt of its own low pass.
+CALIBRATION_HZ = (500.0, 2000.0)
 
 #: The levels the owner chose, per band.
 MID_LEVEL_DB = -30.0
@@ -209,8 +215,20 @@ def build(
     absorption = mean_absorption_of(report_source, len(band_centres(sample_rate)))
     split = band_split.split_filters(float(sample_rate), crossovers_hz)
 
-    # Solved: every band taken from its run untouched.
-    solved = band_split.recombine(mid_wet, mid_wet, high_wet, split)
+    # Two solves are not on one scale. PFFDTD's source pulse has the run's own
+    # fmax as its bandwidth, so its spectral density goes as 1/B and two runs
+    # differ by 20 log10 of the ratio of their fmax in every shared band:
+    # 12.04 dB between 4 and 16 kHz, predicted, 12.06 measured. Summing them
+    # raw put the bottom two bands sixteen times too loud in energy.
+    common = min(mid_wet.shape[1], high_wet.shape[1])
+    gain_mid = band_split.level_ratio(
+        mid_wet[:, :common], high_wet[:, :common], sample_rate, calibration_hz=CALIBRATION_HZ
+    )
+    predicted_gain = mid_response.provenance.fmax_hz / high_response.provenance.fmax_hz
+    gains = (gain_mid, gain_mid, 1.0)
+
+    # Solved: every band taken from its run untouched, on one scale.
+    solved = band_split.recombine(mid_wet, mid_wet, high_wet, split, gains=gains)
 
     # Economy: the low band is the same untouched run, the other two truncated.
     economy_mid, mid_window_s, mid_prediction = _economy_band(
@@ -237,9 +255,14 @@ def build(
         sound_speed_m_s=sound_speed,
         seed=seed + 1000,
     )
-    economy = band_split.recombine(mid_wet, economy_mid, economy_high, split)
+    economy = band_split.recombine(mid_wet, economy_mid, economy_high, split, gains=gains)
 
-    responses = [solved, economy]
+    # The single broadband solve, for the A/B the three-band page otherwise
+    # cannot offer: switching runs reloads the page and loses the comparison.
+    single = np.zeros_like(solved)
+    single[:, : high_wet.shape[1]] = high_wet
+
+    responses = [single, solved, economy]
 
     audio_dir = out / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -346,6 +369,20 @@ def build(
         "trick": TRICK,
         "atmosphere": atmosphere.record(),
         "split": split.record(),
+        "level_calibration": {
+            "gain_applied_to_mid_run": gain_mid,
+            "gain_db": float(20.0 * np.log10(gain_mid)),
+            "predicted_gain": predicted_gain,
+            "predicted_gain_db": float(20.0 * np.log10(predicted_gain)),
+            "calibration_bands_hz": list(CALIBRATION_HZ),
+            "why": (
+                "PFFDTD excites the grid with a band-limited impulse whose bandwidth is "
+                "the run's own fmax, so its spectral density goes as 1/B and two solves "
+                "of one room differ by 20 log10 of the ratio of their fmax in every band "
+                "they share. Without this the bottom two bands are sixteen times too "
+                "loud in energy, which a spectrogram shows at a glance."
+            ),
+        },
         "windows": {
             "low_s": mid_response.duration_s,
             "low_rule": "the whole decay, never truncated",
@@ -362,14 +399,18 @@ def build(
         },
         "transposition": {"mid": mid_prediction, "high": high_prediction},
         "decay_check": _decay_check(solved, economy, sample_rate),
+        "single_band_check": _decay_check(single, solved, sample_rate),
         "audio": written,
         "write_gain": gain,
         "placement": placement,
         "sources": sources,
         "band_note": (
-            f"Two assemblies of the same room, three bands each, crossovers at "
+            f"Three renderings of one room. Crossovers at "
             f"{low_hz:.0f} and {high_hz:.0f} Hz built by subtraction so they sum to a "
-            f"delayed impulse exactly. solved takes every band from its run untouched. "
+            f"delayed impulse exactly. single band is the 16 kHz solve alone, for "
+            f"comparison. solved takes every band from its run untouched, after the "
+            f"4 kHz run is scaled by {20 * np.log10(gain_mid):+.2f} dB to put the two "
+            f"solves on one scale. "
             f"economy keeps the low band whole, stops the mid band at {MID_LEVEL_DB:g} dB "
             f"({1000 * mid_window_s:.0f} ms) and the high band at {HIGH_LEVEL_DB:g} dB "
             f"({1000 * high_window_s:.0f} ms), and synthesises the rest. Both carry "

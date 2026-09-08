@@ -12,7 +12,12 @@ import numpy as np
 import pytest
 from scipy import signal
 
-from reverberate.bands import DEFAULT_CROSSOVERS_HZ, recombine, split_filters
+from reverberate.bands import (
+    DEFAULT_CROSSOVERS_HZ,
+    level_ratio,
+    recombine,
+    split_filters,
+)
 
 RATE = 48000.0
 
@@ -104,3 +109,57 @@ def test_the_record_says_how_the_bank_was_built() -> None:
     assert record["crossovers_hz"] == [1000.0, 4000.0]
     assert "sum to that impulse exactly" in record["construction"]
     assert record["group_delay_ms"] > 0.0
+
+
+def test_level_ratio_recovers_a_gain_it_was_given() -> None:
+    """Two solves are not on one scale, and this is how they are put on one."""
+    rng = np.random.default_rng(20250101)
+    reference = rng.standard_normal((3, 8000))
+    subject = reference * 0.25
+
+    ratio = level_ratio(subject, reference, 48000, calibration_hz=(500.0, 2000.0))
+
+    assert ratio == pytest.approx(4.0, rel=0.02)
+
+
+def test_the_gain_reaches_the_sum() -> None:
+    rng = np.random.default_rng(7)
+    split = split_filters(RATE)
+    signal_in = rng.standard_normal((1, 4000))
+
+    plain = recombine(signal_in, signal_in, signal_in, split)
+    halved = recombine(signal_in, signal_in, signal_in, split, gains=(0.5, 0.5, 0.5))
+
+    assert np.allclose(halved, 0.5 * plain, atol=1e-12)
+
+
+def test_a_gain_applies_only_to_its_own_band() -> None:
+    """Scaling the run that feeds the low band must not move the high one."""
+    rng = np.random.default_rng(11)
+    split = split_filters(RATE, (1000.0, 4000.0))
+    signal_in = rng.standard_normal((1, 8000))
+
+    plain = recombine(signal_in, signal_in, signal_in, split)
+    lifted = recombine(signal_in, signal_in, signal_in, split, gains=(2.0, 1.0, 1.0))
+
+    from reverberate.metrics import band_centres, octave_filter
+
+    centres = band_centres(48000)
+    before = octave_filter(plain[0], 48000)
+    after = octave_filter(lifted[0], 48000)
+    low = centres.index(250)
+    high = centres.index(8000)
+    assert (after[low] ** 2).sum() > 2.0 * (before[low] ** 2).sum()
+    assert (after[high] ** 2).sum() == pytest.approx((before[high] ** 2).sum(), rel=0.01)
+
+
+def test_calibration_bands_that_match_nothing_are_refused() -> None:
+    rng = np.random.default_rng(3)
+    block = rng.standard_normal((1, 2000))
+    with pytest.raises(ValueError, match="no octave band"):
+        level_ratio(block, block, 48000, calibration_hz=(20.0, 30.0))
+
+
+def test_mismatched_receiver_counts_cannot_be_calibrated() -> None:
+    with pytest.raises(ValueError, match="receiver counts"):
+        level_ratio(np.ones((2, 2000)), np.ones((3, 2000)), 48000, calibration_hz=(500.0, 2000.0))
