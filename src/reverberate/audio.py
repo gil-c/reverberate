@@ -341,9 +341,14 @@ def frame_for(duration_s: float) -> int:
     """The short time frame a response of this length needs, from measurement.
 
     The thresholds are the table in :func:`apply_air_absorption`, read at the
-    0.05 dB line: the shortest frame whose worst error stays under it over the
-    whole response. Longer responses need longer frames because the gain grows
+    0.05 dB line on its per bin probe: the shortest frame whose worst error
+    stays under it. Longer responses need longer frames because the gain grows
     steeper in frequency with time, not because they hold more samples.
+
+    Deliberately conservative. On a real decaying response even the shortest
+    frame here moves octave band energy by 0.13 dB at most, so this is chosen
+    for the probes and synthetic signals that do reach the leakage floor, and it
+    costs a room response nothing.
     """
     if duration_s <= 0.1:
         return 256
@@ -404,8 +409,28 @@ def apply_air_absorption(
     | 512 | 0.003 | 0.004 | 0.011 | 0.30 | 1.1 |
     | 1024 | 0.015 | 0.041 | 0.003 | 0.095 | 0.018 |
 
-    So ``None``, the default, takes the frame from the length of the signal it
-    is given. A caller who passes one explicitly is trusted and not corrected.
+    **What the table measures is a leakage floor, and duration is only its
+    proxy.** The error appears where the signal at a frequency has fallen below
+    what leaks into that bin from the loud part of the spectrum, so what decides
+    it is the ratio between the two and not the clock. A delta and a pure tone
+    reach that regime quickly, because they leave nothing at the top of the
+    band; a room response does not, because its tail is broadband. Measured on a
+    decaying response with a direct sound, octave band energy at a 256 sample
+    frame against a 4096 one:
+
+    | duration | 4 kHz | 8 kHz | 16 kHz |
+    | --- | --- | --- | --- |
+    | 0.5 s | 0.019 | 0.064 | 0.128 |
+    | 1.5 s | 0.017 | 0.066 | 0.107 |
+    | 2.0 s | 0.020 | 0.059 | 0.096 |
+
+    In dB, and it does not grow with duration. So the table above is the worst
+    case of a probe rather than of a room, and the choice below is conservative
+    on purpose: a longer frame costs a little arithmetic and protects the
+    synthetic signals this project also filters.
+
+    ``None``, the default, takes the frame from the length of the signal it is
+    given. A caller who passes one explicitly is trusted and not corrected.
 
     ``start_time_s`` is the propagation time of the response's first sample.
     Zero for a response the solver started at the source, which is every

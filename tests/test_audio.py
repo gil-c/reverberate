@@ -343,3 +343,29 @@ def test_reconstruction_is_the_summed_normalisation_and_not_the_window() -> None
     for frame in (128, 512, 2048):
         reconstructed = apply_air_absorption(signal, 48000.0, sound_speed_m_s=0.0, frame=frame)
         assert np.max(np.abs(reconstructed - signal)) < 1e-12
+
+
+def test_a_real_decaying_response_barely_notices_the_frame_length() -> None:
+    """The per bin worst case is not what a room measurement sees.
+
+    Confirmed independently by another session on `w29_16k` and `w27_sealed`,
+    where the shortest frame moved T30 per octave by 0.37 per cent against a
+    3.1 per cent noise floor. The regime that fails needs the signal at a
+    frequency to have fallen below the frame's own leakage, and a broadband
+    tail never gets there.
+    """
+    rate = 48000.0
+    rng = np.random.default_rng(0)
+    time = np.arange(int(1.5 * rate)) / rate
+    tail = rng.standard_normal(time.size) * np.exp(-3.0 * np.log(10.0) * time / 0.3)
+    tail[0] += 8.0
+    response = tail[np.newaxis, :]
+    short = apply_air_absorption(response, rate, frame=256)[0]
+    long = apply_air_absorption(response, rate, frame=4096)[0]
+    for a, b in zip(
+        metrics.octave_filter(short, int(rate)),
+        metrics.octave_filter(long, int(rate)),
+        strict=True,
+    ):
+        difference = 10.0 * np.log10(np.sum(a**2) / np.sum(b**2))
+        assert abs(difference) < 0.2
