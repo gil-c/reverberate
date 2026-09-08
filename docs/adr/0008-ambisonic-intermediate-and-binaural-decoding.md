@@ -164,10 +164,48 @@ be checked against Woodworth. A measured KU100 is supported through the same
 path for listening, and roadmap section 7.2's simulated heads are the eventual
 answer and a different item.
 
+## The measured head, and the licence it brings with it
+
+The sphere is the tested default because it is analytic. A measured head is the
+other half of the item, and it is a different kind of trust: a file to be
+fetched, whose conventions have to be believed rather than derived, and whose
+licence is not this project's.
+
+**The Neumann KU100 compilation** measured by Bernschütz at TH Köln, 2702
+directions on a Lebedev grid, 3.4 MB from sofacoustics.org, sha256 recorded in
+the report. Put on the decoder's own frequency grid by zero padding rather than
+truncating, because a measured response carries the propagation delay from the
+loudspeaker and cutting it takes the interaural delay with it. A file measured
+at another rate is refused rather than resampled, and one longer than the filter
+is refused rather than clipped.
+
+Against the sphere, on a plane wave from the left: 771 microseconds of
+interaural delay against the sphere's 687, and 12.5 dB of level difference
+against 11.7. A real head with pinnae and a torso presents a longer path around
+it than an 8.75 cm sphere, so that is the direction to expect and it is the only
+independent check a measured set admits, along with which ear is which.
+
+**Its licence does not compose with this project's, and that is reported rather
+than decided.** The KU100 is CC BY-SA 3.0. The room geometry is HSSD under
+CC BY-NC. A response decoded through both is a derivative of both, and share
+alike asks a derivative to carry the same licence while non commercial forbids
+exactly that.
+
+So the measured decode is written locally, for listening, and excluded from
+anything published; the report carries a `licence_conflict` field naming both
+licences; and the owner settles it. The sphere decode carries no such question
+and is published normally. This is roadmap section 16's open question, "the HSSD
+licence, CC BY-NC, before anything public facing", met at the first point where
+it actually binds.
+
 ## What was rejected
 
 **Trilinear receivers.** -1.2 dB at 16 kHz at mid cell, and eight times the
 output rows for the privilege.
+
+**A measured head as the default.** It cannot be checked against a closed form,
+so every convention in it is believed rather than derived, and it drags a
+licence into a dataset that already has one.
 
 **One array per band.** The shells are gated per frequency instead, which is
 the same idea without a seam at the crossover and without a second run.
