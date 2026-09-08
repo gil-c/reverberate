@@ -227,6 +227,9 @@ def assemble_run(
 ) -> dict[str, Any]:
     """Encode each band on its own array, assemble, decode, measure. Nothing is written."""
     plan = json.loads((out / "plan.json").read_text())
+    missing = [name for name in BANDS if name not in plan.get("bands", {})]
+    if missing:
+        raise KeyError(f"{out / 'plan.json'} plans no {missing} band; all three are needed")
     encoded: dict[str, EncodedRun] = {}
     for name in BANDS:
         band = plan["bands"][name]

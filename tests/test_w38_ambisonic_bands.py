@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -40,7 +41,7 @@ def _grid(step: float) -> Grid:
     )
 
 
-def _band_run(out: Path, name: str, centre: np.ndarray, source: np.ndarray) -> dict:
+def _band_run(out: Path, name: str, centre: np.ndarray, source: np.ndarray) -> dict[str, Any]:
     """One W10 room run on this band's own grid, holding a plane wave from the source."""
     step, fmax, seconds = STEPS[name], FMAX[name], SECONDS[name]
     design = design_array(
@@ -136,7 +137,7 @@ def test_three_grids_assemble_into_one_drawable_run_that_points_at_the_source(
     tmp_path: Path,
 ) -> None:
     out = a_three_band_run(tmp_path)
-    rendered: dict = {}
+    rendered: dict[str, Any] = {}
     report = assemble_run(
         out, air=None, order=3, fit_order=5, lowcut_hz=50.0, plain_decode=True, rendered=rendered
     )
@@ -168,12 +169,11 @@ def test_three_grids_assemble_into_one_drawable_run_that_points_at_the_source(
     assert max(row["error_deg"] for row in usable) < 15.0
 
 
-def test_a_run_missing_one_band_is_refused(tmp_path: Path) -> None:
-    out = a_three_band_run(tmp_path)
-    plan = json.loads((out / "plan.json").read_text())
-    del plan["bands"]["mid"]
-    (out / "plan.json").write_text(json.dumps(plan))
-    with pytest.raises(KeyError):
+def test_a_run_missing_one_band_is_refused_before_anything_is_encoded(tmp_path: Path) -> None:
+    out = tmp_path / "w38_short"
+    out.mkdir()
+    (out / "plan.json").write_text(json.dumps({"bands": {"low": {}, "high": {}}}))
+    with pytest.raises(KeyError, match="mid"):
         assemble_run(out, air=None, order=3, fit_order=5, lowcut_hz=50.0, plain_decode=True)
 
 
