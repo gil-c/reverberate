@@ -114,6 +114,15 @@
       const WALL_MARGIN = 0.22;
       const MAX_PITCH = Math.PI / 2 - 0.05;
       const LOOK_SENSITIVITY = 0.0032;
+      //: Radians per second when turning on the spot with the arrow keys. About
+      //: 100 degrees a second, so a quarter turn takes under a second and a
+      //: listener can face a source without letting go of the keyboard.
+      const TURN_SPEED = 1.75;
+      //: The widest the field of view ever gets. The wheel zooms in from here
+      //: and stops at this value going back out, so a reader cannot roll
+      //: themselves into a fish eye that misrepresents where anything is.
+      const BASE_FOV = 70;
+      const MIN_FOV = 12;
       const SCENE_MODES = ["colour", "label"];
       // The solver mode is listed with the others so the buttons stay one set,
       // but it is built from a run payload rather than from the HSSD assembly.
@@ -121,7 +130,7 @@
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x0d0f12);
-      const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+      const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0.05, 200);
       camera.rotation.order = "YXZ";
 
       const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -309,6 +318,20 @@
           surface.releasePointerCapture(event.pointerId);
         }
       };
+      // The wheel narrows the field of view and never widens it past where it
+      // started. Zooming out would be a different view of the room rather than
+      // a closer look at it, and a reader who has rolled out to a fish eye is
+      // being shown angles that are not the ones the run measured.
+      surface.addEventListener(
+        "wheel",
+        (event) => {
+          event.preventDefault();
+          const factor = Math.exp(event.deltaY * 0.0015);
+          camera.fov = Math.min(BASE_FOV, Math.max(MIN_FOV, camera.fov * factor));
+          camera.updateProjectionMatrix();
+        },
+        { passive: false },
+      );
       surface.addEventListener("pointerup", endDrag);
       surface.addEventListener("pointercancel", endDrag);
       surface.addEventListener("pointermove", (event) => {
@@ -372,9 +395,10 @@
         // is a change to the mode-switching flow this fix does not make.
         runData = data;
         runView = view;
+        if (view.markers) scene.add(view.markers);
         runShow = renderRunPanel(document.getElementById("run-panel"), data, {
           onSelect: (sample) => view.highlight(sample.source_index, sample.receiver_index),
-          onStand: (sample) => standAt(sample.receiver_index),
+          onStand: (sample) => standAt(sample.receiver_index, sample.yaw_deg),
         });
         // Voxels are what the acoustic mode is for, so they are the default and
         // the triangles are the alternative. The two are exclusive: they
@@ -513,8 +537,30 @@
         grid.say();
       }
 
-      function standAt(receiverIndex) {
+      /** Put the camera where a sample was heard from, facing the way it was decoded.
+       *
+       * The yaw matters and it is not decoration. A binaural render is made for
+       * one head orientation, so standing at the right point facing the wrong
+       * way shows a room whose sources are on the other side from where they
+       * sound. Two frames have to be chained and both signs are silent:
+       *
+       * - the scene is Y up and the ambisonic frame is x front, y left, z up,
+       *   related by (x, y, z) -> (x, -z, y), so ambisonic front is scene +x
+       *   and ambisonic left is scene -z;
+       * - the camera's own yaw t gives forward = (-sin t, 0, -cos t), so facing
+       *   scene +x is t = -pi/2 and facing scene -z is t = 0.
+       *
+       * A head turned left by psi therefore wants t = -pi/2 + psi. Checked
+       * against the run: the source is 75 degrees to the left, and at a head
+       * yaw of +90 the interaural delay reverses, which is what standing here
+       * and looking should show.
+       */
+      function standAt(receiverIndex, yawDeg) {
         if (!runView) return;
+        if (Number.isFinite(yawDeg)) {
+          yaw = -Math.PI / 2 + (yawDeg * Math.PI) / 180;
+          pitch = 0;
+        }
         const marker = runView.receivers[receiverIndex];
         if (marker) {
           // Put the head where the receiver was, so what is heard and what is
@@ -598,8 +644,30 @@
           .join("");
       }
 
+      /** Load the run's payload and put its markers in the scene, in any mode.
+       *
+       * Separate from ``buildAcousticMode`` because the two answer different
+       * questions. That builds the solver's surfaces, which belong to one mode.
+       * This puts the source, the listening point and the array's own ball in
+       * front of a reader who is listening, whichever mode they are looking at,
+       * and hands the panel its samples.
+       */
+      async function ensureRunLoaded() {
+        if (!apartmentRuns.length || runData) return;
+        const data = await loadRun(apartmentRuns[runChoice].url);
+        const view = buildRunGroup(THREE, data);
+        runData = data;
+        runView = view;
+        if (view.markers) scene.add(view.markers);
+        runShow = renderRunPanel(document.getElementById("run-panel"), data, {
+          onSelect: (sample) => view.highlight(sample.source_index, sample.receiver_index),
+          onStand: (sample) => standAt(sample.receiver_index, sample.yaw_deg),
+        });
+      }
+
       async function setMode(mode) {
         if (mode === "acoustic" && !apartmentRuns.length) return;
+        if (mode !== "acoustic") await ensureRunLoaded();
         // Record the deliberate choice before the first await, not after it.
         // Assigning it at the end let a cached assembly finish inside those
         // awaits, read `chosen` as still unset, and take the view back to
@@ -619,17 +687,28 @@
         scene.add(groups[mode]);
         fitSunTo(groups[mode]);
 
+        // The panel stays on every mode once a run has been loaded. Listening
+        // and looking are the same act here: a reader comparing two head
+        // orientations wants the colour view or the material labels in front of
+        // them while they do it, and hiding the audio on three modes out of
+        // four made the run something you could only hear from inside the grid.
         const panel = document.getElementById("run-panel");
-        panel.hidden = mode !== "acoustic";
+        panel.hidden = !runData;
         activeMode = mode;
         // The camera is deliberately left alone. All three modes draw the same
         // room in the same frame, so switching between them is a change of
         // representation and not a change of place; moving the viewer here
         // would lose whatever they had walked over to look at.
-        if (mode === "acoustic") {
+        if (!panel.hidden) {
           // Redraw once the panel has its real width, otherwise every plot is
-          // sized from a hidden element and comes out a pixel wide.
-          requestAnimationFrame(() => runShow && runShow(0));
+          // sized from a hidden element and comes out a pixel wide. Redraw the
+          // sample the reader picked, not the first one: this is a change of
+          // representation of the same room, so it must not silently move them
+          // back to the ambisonic row while their ears are on a decode.
+          requestAnimationFrame(() => {
+            const pick = document.getElementById("run-pick");
+            if (runShow) runShow(pick ? Number(pick.value) : 0);
+          });
         }
         setBusy(assemblyMessage);
       }
@@ -650,8 +729,12 @@
         runChoice = Number(event.target.value);
         if (groups.acoustic) scene.remove(groups.acoustic);
         groups.acoustic = null;
+        // The markers live outside the mode group now, so they have to be taken
+        // out by name or the previous run's source stays on screen beside the
+        // new one's.
+        if (runView && runView.markers) scene.remove(runView.markers);
         runData = runView = runShow = null;
-        await setMode("acoustic");
+        await setMode(activeMode || "acoustic");
       };
 
       for (const mode of MODES) {
@@ -676,10 +759,16 @@
           stepX += vector.x * distance * sign;
           stepZ += vector.z * distance * sign;
         };
+        // The arrows walk and turn; the letters strafe. Turning on the spot is
+        // what a listener does to hear a source move, and it is the gesture the
+        // binaural renders are made for, so it belongs on the keys nearest to
+        // hand. Strafing stays on A and D for anyone who wants it.
         if (pressed.has("KeyW") || pressed.has("ArrowUp")) push(forward, 1);
         if (pressed.has("KeyS") || pressed.has("ArrowDown")) push(forward, -1);
-        if (pressed.has("KeyD") || pressed.has("ArrowRight")) push(right, 1);
-        if (pressed.has("KeyA") || pressed.has("ArrowLeft")) push(right, -1);
+        if (pressed.has("KeyD")) push(right, 1);
+        if (pressed.has("KeyA")) push(right, -1);
+        if (pressed.has("ArrowLeft")) yaw += TURN_SPEED * delta;
+        if (pressed.has("ArrowRight")) yaw -= TURN_SPEED * delta;
 
         if (stepX !== 0 || stepZ !== 0) {
           const { x, z } = camera.position;
@@ -693,6 +782,16 @@
           }
         }
         headLamp.position.copy(camera.position);
+        // The array's ball gets out of the way once the camera is inside it.
+        // Standing at the listening point is standing at its centre, and a
+        // wire sphere seen from within is a cage across the view rather than a
+        // measurement of anything.
+        if (runView && runView.markers) {
+          for (const marker of runView.markers.children) {
+            const within = marker.userData && marker.userData.hideWithin;
+            if (within) marker.visible = camera.position.distanceTo(marker.position) > within;
+          }
+        }
         // Checked every frame rather than on every step, because the camera
         // also moves by "stand at this receiver" and by a mode switch, and a
         // reader teleported into the kitchen must see the kitchen.
@@ -728,6 +827,7 @@
       // available immediately, which is correct: a run payload is published by
       // the solver and owes nothing to the HSSD assembly.
       function releaseRun(sceneId) {
+        if (runView && runView.markers) scene.remove(runView.markers);
         runData = runView = runShow = null;
         document.getElementById("run-panel").hidden = true;
         apartmentRuns = sceneId ? runsByScene.get(sceneId) || [] : [];
@@ -736,7 +836,11 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
-        runChoice = Math.max(0, apartmentRuns.length - 1);
+        // The run the server was told to open on, if it named one. Otherwise
+        // the last by directory name, which is stable and is rarely the one
+        // anyone wanted once an apartment has a dozen runs.
+        const lead = apartmentRuns.findIndex((r) => r.lead);
+        runChoice = lead >= 0 ? lead : Math.max(0, apartmentRuns.length - 1);
         const picker = document.getElementById("run-choice");
         picker.hidden = apartmentRuns.length < 2;
         picker.innerHTML = apartmentRuns

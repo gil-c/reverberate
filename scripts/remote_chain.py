@@ -44,20 +44,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 from reverberate import auth
 from reverberate.experiments.run import build_materials
 from reverberate.gpu import vast
-from reverberate.wave.remote import Machine
 from reverberate.wave.remote_voxelise import (
-    MachineNeed,
     RetrievalFailed,
     build_payload_remote,
     grid_shape_of,
     nodes_from_shape,
     payload_need_for,
+    pick_offer,
     remote_disk_free_gb,
     voxelise_need,
     voxelise_remote,
@@ -67,73 +65,6 @@ from reverberate.wave.voxelise import SceneSpec
 #: A CUDA image because Vast's cheap boxes are GPU boxes and the build script
 #: compiles the engine too. The voxelise and payload stages never use the card.
 IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
-
-
-def account_identity(client: vast.VastClient) -> Path:
-    """The local private key whose public half Vast will install, or refuse.
-
-    Checked before renting. The alternative is what it cost to learn: an
-    instance comes up, ssh answers ``Permission denied (publickey)`` on every
-    poll for the full timeout, and the run tears down having done nothing.
-    """
-    registered = {
-        (key.get("public_key") or "").split()[1]
-        for key in client._request("GET", "/ssh/")
-        if len((key.get("public_key") or "").split()) > 1
-    }
-    if not registered:
-        raise SystemExit("the Vast account has no ssh key registered; add one in the console")
-    for public in sorted(Path.home().joinpath(".ssh").glob("*.pub")):
-        blob = public.read_text().split()
-        if len(blob) > 1 and blob[1] in registered:
-            private = public.with_suffix("")
-            if private.is_file():
-                return private
-    raise SystemExit(
-        "no private key here matches a key registered on the Vast account, so ssh into "
-        "the instance would be refused; nothing was rented"
-    )
-
-
-def pick_offer(client: vast.VastClient, need: MachineNeed, max_dph: float) -> vast.Offer:
-    """The cheapest offer that meets ``need``, or an explanation and no rental."""
-    query = vast.search_query(
-        gpu_name="",
-        min_disk_gb=int(need.disk_gb),
-        min_cpu_cores=need.cores,
-        min_reliability=0.99,
-    )
-    offers = client.search(query, limit=200)
-    affordable = [offer for offer in offers if offer.dph_total <= max_dph]
-    eligible = [offer for offer in affordable if not need.unmet(offer)]
-    if not eligible:
-        print(f"{len(offers)} offers matched the query, {len(affordable)} under {max_dph} USD/h")
-        for offer in affordable[:5]:
-            print(f"  {offer.id}: {', '.join(need.unmet(offer))}")
-        raise SystemExit(f"nothing meets: {need.why}")
-    return min(eligible, key=lambda offer: offer.dph_total)
-
-
-def wait_for_ssh(
-    client: vast.VastClient, instance_id: int, identity: Path, timeout: float = 900.0
-) -> Machine:
-    """Block until the instance answers a command, not merely until it exists."""
-    from reverberate.wave.remote import _run
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        instance = client.instance(instance_id)
-        if instance is None:
-            raise RuntimeError(f"instance {instance_id} vanished while starting")
-        if instance.ssh_host and instance.status == "running":
-            machine = Machine(host=instance.ssh_host, port=instance.ssh_port, identity=identity)
-            try:
-                _run(machine.ssh_command("true"), what="ssh probe", timeout=30)
-                return machine
-            except Exception:  # noqa: BLE001 - not up yet is the common case
-                pass
-        time.sleep(15)
-    raise TimeoutError(f"instance {instance_id} never answered on ssh")
 
 
 def spec_from(args: argparse.Namespace) -> tuple[SceneSpec, Path]:
@@ -198,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
 
     auth.inject([vast.API_KEY_ENV])
     client = vast.VastClient()
-    identity = account_identity(client)
+    identity = vast.account_identity(client)
     print(f"  ssh identity {identity}")
 
     offer = pick_offer(client, need, args.max_dph)
@@ -217,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     computed = False
     machine = None
     try:
-        machine = wait_for_ssh(client, rental.instance_id, identity)
+        machine = vast.wait_for_ssh(client, rental.instance_id, identity)
         print(f"ssh up at {machine.host}:{machine.port}")
         free = remote_disk_free_gb(machine)
         print(f"free disk {free:.0f} GB, need {need.disk_gb:.0f}")

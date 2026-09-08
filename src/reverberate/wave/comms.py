@@ -41,11 +41,14 @@ import numpy as np
 __all__ = [
     "ENGINE_FILES",
     "Grid",
+    "Interpolation",
     "SIGNAL_TYPES",
     "SignalType",
+    "engine_indices",
     "fold_fcc",
     "interp_weights",
     "load_grid",
+    "nearest_node",
     "source_signal",
     "transpose_order",
     "write_comms",
@@ -56,6 +59,19 @@ __all__ = [
 ENGINE_FILES = ("sim_consts.h5", "vox_out.h5", "comms_out.h5", "sim_mats.h5")
 
 SignalType = Literal["impulse", "hann10", "hann20", "dhann30", "hann5ms"]
+
+#: How a receiver reads the grid. ``trilinear`` is PFFDTD's own: eight nodes
+#: around the requested point, weights summing to one, and a reading that is
+#: exact only for a field linear across the cell. At the top of the band that
+#: is not the case: a wave at 10.5 points per wavelength read halfway between
+#: two nodes is attenuated by ``cos(kh / 2)``, 0.956 per axis, up to -1.2 dB
+#: in three. ``nearest`` moves the receiver to the closest node instead and
+#: reads it with a single weight of one, which has no such error, at the price
+#: of a position that is a node rather than the one asked for. The node's
+#: exact coordinate is returned, so a caller that needs the position uses the
+#: real one. One row per receiver instead of eight, so the engine output is
+#: eight times smaller too.
+Interpolation = Literal["trilinear", "nearest"]
 
 #: Source signals, spelled as PFFDTD's ``sim_comms`` spells them.
 SIGNAL_TYPES: tuple[str, ...] = ("impulse", "hann10", "hann20", "dhann30", "hann5ms")
@@ -176,6 +192,37 @@ def interp_weights(position: np.ndarray, grid: Grid) -> tuple[np.ndarray, np.nda
     return alpha8, ixyz8
 
 
+def nearest_node(position: np.ndarray, grid: Grid) -> tuple[np.ndarray, int]:
+    """The grid node closest to ``position``: its coordinate and its unrotated flat index.
+
+    On an FCC grid only nodes with an even index sum exist, so the closest of
+    the eight surrounding corners with that parity is taken.
+    """
+    position = np.asarray(position, dtype=np.float64)
+    if position.shape != (3,):
+        raise ValueError(f"expected one xyz point, got shape {position.shape}")
+    axes = [grid.xv, grid.yv, grid.zv]
+    nx, ny, nz = grid.shape
+    for j in range(3):
+        if position[j] < axes[j][0] or position[j] > axes[j][-1]:
+            raise ValueError(f"point {position.tolist()} is outside the grid on axis {j}")
+    lower = np.array(
+        [
+            min(int(np.searchsorted(axes[j], position[j], side="right")) - 1, len(axes[j]) - 2)
+            for j in range(3)
+        ],
+        dtype=np.int64,
+    )
+    lower = np.maximum(lower, 0)
+    corners = lower[None, :] + (-_CORNER_OFFSETS)  # the eight corners of the cell
+    if grid.fcc:
+        corners = corners[np.sum(corners, axis=1) % 2 == 0]
+    coordinates = np.stack([axes[j][corners[:, j]] for j in range(3)], axis=1)
+    best = int(np.argmin(np.linalg.norm(coordinates - position, axis=1)))
+    index = int(corners[best] @ np.array([nz * ny, nz, 1], dtype=np.int64))
+    return coordinates[best].copy(), index
+
+
 def source_signal(duration: float, ts: float, sig_type: SignalType = "impulse") -> np.ndarray:
     """The unscaled input signal, sample for sample as ``sim_comms`` builds it."""
     if sig_type not in SIGNAL_TYPES:
@@ -260,7 +307,7 @@ def fold_fcc(ixyz: np.ndarray, shape: tuple[int, int, int]) -> np.ndarray:
     return np.asarray(folded, dtype=np.int64)
 
 
-def _engine_indices(ixyz: np.ndarray, grid: Grid) -> np.ndarray:
+def engine_indices(ixyz: np.ndarray, grid: Grid) -> np.ndarray:
     """Take unrotated flat indices all the way into the engine's index space."""
     order = transpose_order(grid.shape)
     rotated = _reindex(np.atleast_1d(ixyz), grid.shape, order)
@@ -281,6 +328,7 @@ def write_comms(
     out_path: Path | str | None = None,
     compress: int | None = None,
     check_clashes: bool = True,
+    interpolation: Interpolation = "trilinear",
 ) -> Path:
     """Write a ``comms_out.h5`` for a cached voxelisation, and nothing else.
 
@@ -291,6 +339,11 @@ def write_comms(
 
     ``diff_source`` must match the engine precision, exactly as in a full
     ``sim_setup`` call: true for the single precision binaries, false for double.
+
+    ``interpolation`` chooses how each receiver reads the grid; see
+    :data:`Interpolation`. With ``nearest`` there is one output row per
+    receiver and ``out_alpha`` has one column, which
+    :func:`reverberate.audio.reduce_nodes` accepts as it stands.
     """
     data_dir = Path(data_dir)
     grid = load_grid(data_dir)
@@ -299,18 +352,26 @@ def write_comms(
         raise ValueError("at least one receiver is required")
 
     in_alpha, in_ixyz = interp_weights(np.asarray(source, dtype=np.float64), grid)
-    out_alpha = np.zeros((receivers.shape[0], 8), dtype=np.float64)
-    out_ixyz = np.zeros((receivers.shape[0], 8), dtype=np.int64)
-    for row, receiver in enumerate(receivers):
-        out_alpha[row], out_ixyz[row] = interp_weights(receiver, grid)
+    if interpolation == "trilinear":
+        out_alpha = np.zeros((receivers.shape[0], 8), dtype=np.float64)
+        out_ixyz = np.zeros((receivers.shape[0], 8), dtype=np.int64)
+        for row, receiver in enumerate(receivers):
+            out_alpha[row], out_ixyz[row] = interp_weights(receiver, grid)
+    elif interpolation == "nearest":
+        out_alpha = np.ones((receivers.shape[0], 1), dtype=np.float64)
+        out_ixyz = np.zeros((receivers.shape[0], 1), dtype=np.int64)
+        for row, receiver in enumerate(receivers):
+            _, out_ixyz[row, 0] = nearest_node(receiver, grid)
+    else:
+        raise ValueError(f"unknown interpolation {interpolation!r}")
 
     in_sigs = in_alpha[:, None] * source_signal(duration, grid.Ts, sig_type)[None, :]
     in_sigs *= (0.5 * grid.l2 / grid.h) if grid.fcc else (grid.l2 / grid.h)
     if diff_source:
         in_sigs = _differentiate(in_sigs, grid.Ts)
 
-    in_ixyz = _engine_indices(in_ixyz, grid)
-    out_ixyz = _engine_indices(out_ixyz.reshape(-1), grid)
+    in_ixyz = engine_indices(in_ixyz, grid)
+    out_ixyz = engine_indices(out_ixyz.reshape(-1), grid)
 
     if check_clashes:
         _check_for_clashes(data_dir, in_ixyz, out_ixyz)

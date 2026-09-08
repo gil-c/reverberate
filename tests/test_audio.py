@@ -11,15 +11,23 @@ Synthetic signals only, offline, well under a second.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from reverberate import metrics
 from reverberate.audio import (
+    DECIBELS_PER_NEPER,
+    Atmosphere,
+    air_absorption_np_per_m,
+    apply_air_absorption,
     convolve,
+    frame_for,
     integrate_and_lowcut,
     lowpass,
+    peak_gain,
     reduce_nodes,
     resample_to,
     write_wav,
@@ -172,3 +180,295 @@ def test_the_written_peak_leaves_the_asked_for_headroom(tmp_path: Path) -> None:
 def test_a_silent_signal_does_not_divide_by_zero(tmp_path: Path) -> None:
     pytest.importorskip("soundfile")
     assert write_wav(tmp_path / "silence.wav", np.zeros((2, 32)), 48_000.0) == 1.0
+
+
+def test_the_iso_coefficients_match_the_published_table() -> None:
+    """20 C and 50 per cent relative humidity, the figures the roadmap quotes."""
+    frequency = np.array([1000.0, 2000.0, 4000.0, 8000.0, 16000.0])
+    decibels = air_absorption_np_per_m(frequency) * 8.686
+    assert np.allclose(decibels, [0.0047, 0.0099, 0.0297, 0.1053, 0.3645], atol=5e-5)
+
+
+def test_humidity_moves_the_top_octave_by_a_factor_of_nearly_two() -> None:
+    """It is a declared parameter of a response, not a detail."""
+    top = np.array([16000.0])
+    dry = air_absorption_np_per_m(top, humidity_percent=30.0)[0]
+    damp = air_absorption_np_per_m(top, humidity_percent=80.0)[0]
+    assert dry / damp == pytest.approx(1.85, rel=0.05)
+
+
+def test_a_delayed_impulse_comes_back_with_exactly_its_own_air_gain() -> None:
+    """The claim the filter makes: a sample at t has travelled c t, so its gain is known."""
+    rate, samples, arrival = 48000.0, 32768, 0.05
+    impulse = np.zeros((1, samples))
+    impulse[0, int(arrival * rate)] = 1.0
+    filtered = apply_air_absorption(impulse, rate, sound_speed_m_s=343.0)
+    frequency = np.fft.rfftfreq(samples, 1.0 / rate)
+    expected = np.exp(-air_absorption_np_per_m(frequency) * 343.0 * arrival)
+    band = (frequency > 50.0) & (frequency < 20000.0)
+    error_db = 20.0 * np.log10(np.abs(np.fft.rfft(filtered[0])[band]) / expected[band])
+    assert np.max(np.abs(error_db)) < 0.1
+
+
+def test_air_absorption_reconstructs_exactly_when_there_is_nothing_to_absorb() -> None:
+    """The overlap add has to be transparent, or every response acquires a quiet gain."""
+    rng = np.random.default_rng(0)
+    signal = rng.standard_normal((2, 4096))
+    assert np.allclose(apply_air_absorption(signal, 48000.0, sound_speed_m_s=0.0), signal)
+
+
+def test_air_absorption_takes_the_expected_bite_out_of_a_measured_decay() -> None:
+    """W29's own 0.29 s decay loses 38 per cent of its 16 kHz T60 and none of its 500 Hz."""
+    rate = 48000.0
+    time = np.arange(int(0.6 * rate)) / rate
+    rng = np.random.default_rng(0)
+    tail = rng.standard_normal((1, time.size)) * np.exp(-3.0 * np.log(10.0) * time / 0.29)
+    before = metrics.rt60_per_band(tail[0], int(rate))
+    after = metrics.rt60_per_band(apply_air_absorption(tail, rate)[0], int(rate))
+    bands = metrics.band_centres(int(rate))
+    change = after / before - 1.0
+    assert change[bands.index(500)] == pytest.approx(0.0, abs=0.02)
+    assert change[bands.index(16000)] == pytest.approx(-0.377, abs=0.03)
+
+
+def test_a_frame_that_cannot_overlap_add_is_refused() -> None:
+    with pytest.raises(ValueError, match="multiple of 4"):
+        apply_air_absorption(np.zeros((1, 64)), 48000.0, frame=30)
+
+
+def test_a_one_dimensional_response_stays_one_dimensional() -> None:
+    out = apply_air_absorption(np.zeros(512), 48000.0)
+    assert out.ndim == 1
+
+
+def test_the_atmosphere_writes_itself_down_because_a_run_must_declare_it() -> None:
+    """A triple of loose floats does not satisfy the roadmap's requirement."""
+    record = Atmosphere(temperature_c=18.0, humidity_percent=35.0).record()
+    assert record["humidity_percent"] == 35.0
+    assert record["standard"] == "ISO 9613-1"
+    assert json.dumps(record)
+
+
+def test_humidity_changes_the_top_octave_by_the_factor_the_atmosphere_warns_about() -> None:
+    top = np.array([16000.0])
+    dry = Atmosphere(humidity_percent=30.0).attenuation_np_per_m(top)[0]
+    damp = Atmosphere(humidity_percent=80.0).attenuation_np_per_m(top)[0]
+    assert dry / damp == pytest.approx(1.85, abs=0.02)
+    assert dry * DECIBELS_PER_NEPER == pytest.approx(0.466, abs=0.002)
+    assert damp * DECIBELS_PER_NEPER == pytest.approx(0.252, abs=0.002)
+
+
+def test_the_coefficient_is_in_nepers_so_the_conversion_cannot_go_missing() -> None:
+    """Two correct implementations disagreed in the fifth digit on this rounding."""
+    assert pytest.approx(20.0 / np.log(10.0)) == DECIBELS_PER_NEPER
+    frequency = np.array([4000.0])
+    nepers = air_absorption_np_per_m(frequency)[0]
+    assert nepers * 8.686 == pytest.approx(0.0297, abs=5e-5)
+
+
+def test_one_gain_over_several_blocks_keeps_the_level_between_them() -> None:
+    """W30's defect: six receivers all written at 0.8913, distance inaudible."""
+    loud = np.zeros((2, 16))
+    loud[0, 1] = 1.0
+    quiet = np.zeros((2, 16))
+    quiet[0, 1] = 0.01
+    gain = peak_gain(loud, quiet)
+    assert np.max(np.abs(loud * gain)) / np.max(np.abs(quiet * gain)) == pytest.approx(100.0)
+    assert np.max(np.abs(loud * gain)) == pytest.approx(10.0 ** (-1.0 / 20.0))
+
+
+def test_peak_gain_survives_silence_and_empty_input() -> None:
+    assert peak_gain(np.zeros(8)) == 1.0
+    assert peak_gain() == 1.0
+
+
+def test_a_passed_gain_overrides_the_per_file_one(tmp_path: Path) -> None:
+    """What a caller writing a comparable set passes, so no file rescales itself."""
+    soundfile = pytest.importorskip("soundfile")
+    quiet = np.zeros((1, 32))
+    quiet[0, 3] = 0.01
+    used = write_wav(tmp_path / "q.wav", quiet, 48000.0, gain=0.5)
+    assert used == 0.5
+    samples, _ = soundfile.read(str(tmp_path / "q.wav"))
+    assert np.max(np.abs(samples)) == pytest.approx(0.005, abs=1e-6)
+
+
+@pytest.mark.parametrize(("duration", "arrival"), [(0.5, 0.45), (1.0, 0.9)])
+def test_a_long_response_keeps_its_air_gain_exact(duration: float, arrival: float) -> None:
+    """The defect a 50 ms test could not see, and which a 0.5 s room response has.
+
+    The gain ``exp(-m(f) c t)`` grows steeper in frequency as ``t`` does: at 1 s
+    it falls 125 dB across the band. A short frame resolves frequency too
+    coarsely for that, and leakage from the loud bottom swamps the quiet top. A
+    128 sample frame is 0.008 dB out at 50 ms and 0.79 dB out at 500 ms.
+    """
+    rate = 48000.0
+    samples = int(duration * rate)
+    impulse = np.zeros((1, samples))
+    impulse[0, int(arrival * rate)] = 1.0
+    filtered = apply_air_absorption(impulse, rate, sound_speed_m_s=343.0)
+    frequency = np.fft.rfftfreq(samples, 1.0 / rate)
+    expected = np.exp(-air_absorption_np_per_m(frequency) * 343.0 * arrival)
+    # Only where the answer is above the numerical floor: past 1 s the top of
+    # the band is genuinely gone, which is the physics rather than an error.
+    band = (frequency > 50.0) & (frequency < 16000.0) & (expected > 1e-6)
+    error = 20.0 * np.log10(np.abs(np.fft.rfft(filtered[0])[band]) / expected[band])
+    assert np.max(np.abs(error)) < 0.1
+
+
+def test_the_frame_grows_with_the_response_it_is_given() -> None:
+    assert frame_for(0.06) == 256
+    assert frame_for(0.5) == 512
+    assert frame_for(1.0) == 1024
+    assert frame_for(2.0) == 2048
+    assert frame_for(0.5) < frame_for(2.0)
+
+
+def test_a_frame_chosen_by_the_caller_is_not_corrected() -> None:
+    """Trusted, because a caller who states one has a reason this cannot know."""
+    signal = np.zeros((1, 4096))
+    signal[0, 100] = 1.0
+    assert apply_air_absorption(signal, 48000.0, frame=128).shape == signal.shape
+
+
+def test_reconstruction_is_the_summed_normalisation_and_not_the_window() -> None:
+    """Corrected after another session measured it: any window pair reconstructs.
+
+    The exactness comes from dividing by the summed product of the analysis and
+    synthesis windows. The square root Hann pair is kept because it splits the
+    modification evenly between the two, not because it is uniquely exact.
+    """
+    rng = np.random.default_rng(2)
+    signal = rng.standard_normal((1, 8192))
+    for frame in (128, 512, 2048):
+        reconstructed = apply_air_absorption(signal, 48000.0, sound_speed_m_s=0.0, frame=frame)
+        assert np.max(np.abs(reconstructed - signal)) < 1e-12
+
+
+def test_a_real_decaying_response_barely_notices_the_frame_length() -> None:
+    """The per bin worst case is not what a room measurement sees.
+
+    Confirmed independently by another session on `w29_16k` and `w27_sealed`,
+    where the shortest frame moved T30 per octave by 0.37 per cent against a
+    3.1 per cent noise floor. The regime that fails needs the signal at a
+    frequency to have fallen below the frame's own leakage, and a broadband
+    tail never gets there.
+    """
+    rate = 48000.0
+    rng = np.random.default_rng(0)
+    time = np.arange(int(1.5 * rate)) / rate
+    tail = rng.standard_normal(time.size) * np.exp(-3.0 * np.log(10.0) * time / 0.3)
+    tail[0] += 8.0
+    response = tail[np.newaxis, :]
+    short = apply_air_absorption(response, rate, frame=256)[0]
+    long = apply_air_absorption(response, rate, frame=4096)[0]
+    for a, b in zip(
+        metrics.octave_filter(short, int(rate)),
+        metrics.octave_filter(long, int(rate)),
+        strict=True,
+    ):
+        difference = 10.0 * np.log10(np.sum(a**2) / np.sum(b**2))
+        assert abs(difference) < 0.2
+
+
+def test_a_longer_frame_follows_the_analytic_decay_further_down() -> None:
+    """The well posed quantity, after a tail average turned out not to be one.
+
+    Once a 16 kHz tone is dead the block levels of the last half second span
+    tens of dB, so any single number drawn from that residue depends on how it
+    is averaged; two sessions of this project compared tail averages and
+    disagreed by 50 dB while both filters were right. What is well posed is
+    where the curve leaves the analytic line, which does not depend on anything
+    that happens after it.
+    """
+    rate = 48000.0
+    time = np.arange(int(4.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)[np.newaxis, :]
+    block = int(0.01 * rate)
+    slope = DECIBELS_PER_NEPER * air_absorption_np_per_m(np.array([16000.0]))[0] * 343.0
+
+    def departure_db(frame: int) -> float:
+        filtered = apply_air_absorption(tone, rate, frame=frame)[0]
+        count = filtered.size // block
+        envelope = 20.0 * np.log10(
+            np.array(
+                [np.sqrt(np.mean(filtered[i * block : (i + 1) * block] ** 2)) for i in range(count)]
+            )
+            + 1e-300
+        )
+        centres = (np.arange(count) + 0.5) * 0.01
+        kept = centres > 0.15
+        line = envelope[kept][0] - slope * (centres[kept] - centres[kept][0])
+        adrift = np.flatnonzero(envelope[kept] - line > 6.0)
+        return float(line[adrift[0]] - envelope[kept][0]) if adrift.size else float("-inf")
+
+    levels = [departure_db(frame) for frame in (256, 512, 1024, 2048)]
+    assert np.all(np.diff(levels) < -8.0)
+    assert levels[0] < -90.0
+
+
+def test_the_dead_tail_is_residue_and_not_a_floor() -> None:
+    """Why a tail average must not be quoted as a property of the filter."""
+    rate = 48000.0
+    time = np.arange(int(4.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)[np.newaxis, :]
+    block = int(0.01 * rate)
+    filtered = apply_air_absorption(tone, rate, frame=2048)[0]
+    tail = filtered[int(3.5 * rate) :]
+    count = tail.size // block
+    levels = 20.0 * np.log10(
+        np.array([np.sqrt(np.mean(tail[i * block : (i + 1) * block] ** 2)) for i in range(count)])
+        + 1e-300
+    )
+    assert levels.max() - levels.min() > 40.0
+
+
+def test_the_window_pair_is_worth_fifty_decibels_of_leakage() -> None:
+    """Why two correct implementations of this filter differed by 70 dB.
+
+    A Hann pair is a squared window, whose spectrum falls away far faster than a
+    cosine one, so it keeps leakage out of a weak bin much longer. Neither pair
+    is wrong. The square root pair is kept for splitting the modification evenly
+    between analysis and synthesis, and this test exists so that the price of
+    that choice stays a measured number rather than a forgotten one.
+    """
+    rate, frame = 48000.0, 256
+    time = np.arange(int(4.0 * rate)) / rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * time)
+    hann = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(frame) / frame)
+    attenuation = air_absorption_np_per_m(np.fft.rfftfreq(frame, 1.0 / rate))
+    slope = DECIBELS_PER_NEPER * air_absorption_np_per_m(np.array([16000.0]))[0] * 343.0
+
+    def overlap_add(analysis: np.ndarray, synthesis: np.ndarray) -> np.ndarray:
+        hop = frame // 4
+        padded = np.zeros(tone.size + 2 * frame)
+        padded[frame : frame + tone.size] = tone
+        out = np.zeros_like(padded)
+        weight = np.zeros_like(padded)
+        for start in range(0, padded.size - frame + 1, hop):
+            centre = (start + frame / 2.0 - frame) / rate
+            gain = np.exp(-attenuation * 343.0 * max(centre, 0.0))
+            spectrum = np.fft.rfft(padded[start : start + frame] * analysis)
+            out[start : start + frame] += np.fft.irfft(spectrum * gain, n=frame) * synthesis
+            weight[start : start + frame] += analysis * synthesis
+        inside = slice(frame, frame + tone.size)
+        return out[inside] / weight[inside]
+
+    def departure_db(signal: np.ndarray) -> float:
+        block = int(0.01 * rate)
+        count = signal.size // block
+        envelope = 20.0 * np.log10(
+            np.array(
+                [np.sqrt(np.mean(signal[i * block : (i + 1) * block] ** 2)) for i in range(count)]
+            )
+            + 1e-300
+        )
+        centres = (np.arange(count) + 0.5) * 0.01
+        kept = centres > 0.15
+        line = envelope[kept][0] - slope * (centres[kept] - centres[kept][0])
+        adrift = np.flatnonzero(envelope[kept] - line > 6.0)
+        return float(line[adrift[0]] - envelope[kept][0]) if adrift.size else float("-inf")
+
+    root = departure_db(overlap_add(np.sqrt(hann), np.sqrt(hann)))
+    squared = departure_db(overlap_add(hann, hann))
+    assert squared < root - 40.0

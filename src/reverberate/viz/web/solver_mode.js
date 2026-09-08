@@ -64,24 +64,73 @@ export function buildRunGroup(THREE, data) {
   const SOURCE = 0xff6b4a;
   const RECEIVER = 0x4ac1ff;
   const PICKED = 0xffe066;
+  // The markers live in their own group, not in the surfaces one. They belong
+  // to every mode: a reader listening to two head orientations in the colour
+  // view needs to see where the source and the listening point are, and a run
+  // whose geometry is only visible from inside the acoustic mode is one that
+  // can be heard but not placed.
+  const markers = new THREE.Group();
   const marker = (position, colour, isSource) => {
     const geometry = isSource
       ? new THREE.SphereGeometry(radius, 20, 14)
       : new THREE.BoxGeometry(radius * 1.6, radius * 1.6, radius * 1.6);
     const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: colour }));
     mesh.position.fromArray(position);
-    group.add(mesh);
+    // Drawn through whatever is in front of them: the point of a marker is to
+    // say where something is, and a source behind a wardrobe is still where the
+    // sound came from.
+    mesh.material.depthTest = false;
+    mesh.renderOrder = 3;
+    markers.add(mesh);
     return mesh;
   };
   const sources = data.sources.map((s) => marker(s.position, SOURCE, true));
   const receivers = data.receivers.map((r) => marker(r.position, RECEIVER, false));
+
+  // The ball the field was expanded about, drawn at its own radius. A spatial
+  // run is about one point, and a point on the screen says nothing about how
+  // much of the room the encoder actually looked at: 16 cm of it, which is a
+  // head's width and is the reason the interior expansion is valid at all. The
+  // outer shell is drawn as a wire sphere and the inner ones as rings, so the
+  // shells that carry the top of the band are visible as well as the one that
+  // carries the bottom.
+  const array = data.array || null;
+  if (array && array.centre) {
+    const centre = new THREE.Vector3().fromArray(array.centre);
+    const outer = Number(array.outer_radius_m) || 0.16;
+    const ball = new THREE.Mesh(
+      new THREE.SphereGeometry(outer, 32, 20),
+      new THREE.MeshBasicMaterial({ color: 0x8be9c0, wireframe: true, transparent: true, opacity: 0.35 }),
+    );
+    ball.position.copy(centre);
+    // Depth tested, unlike the point markers: it is a metre wide on screen when
+    // you stand next to it, and drawing it through the walls would put a green
+    // cage over the whole room. It also hides itself when the camera is inside
+    // it, which is exactly where the listener stands: from outside it says how
+    // much of the room the encoder looked at, and from inside it is in the way
+    // of the thing it describes.
+    ball.material.depthTest = true;
+    ball.userData.hideWithin = outer;
+    markers.add(ball);
+    for (const shell of array.shells || []) {
+      const radius = Number(shell.nominal_radius_m);
+      if (!(radius > 0) || radius >= outer) continue;
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(radius, Math.max(radius * 0.012, 0.0015), 8, 48),
+        new THREE.MeshBasicMaterial({ color: 0x8be9c0, transparent: true, opacity: 0.5 }),
+      );
+      ring.position.copy(centre);
+      ring.rotation.x = Math.PI / 2;
+      markers.add(ring);
+    }
+  }
 
   const highlight = (sourceIndex, receiverIndex) => {
     sources.forEach((m, i) => m.material.color.setHex(i === sourceIndex ? PICKED : SOURCE));
     receivers.forEach((m, i) => m.material.color.setHex(i === receiverIndex ? PICKED : RECEIVER));
   };
 
-  return { group, highlight, bounds, receivers, sources, surfaces };
+  return { group, markers, highlight, bounds, receivers, sources, surfaces };
 }
 
 // ------------------------------------------------------------------- plots
@@ -165,6 +214,35 @@ function drawSpectrogram(canvas, spec) {
   buffer.getContext("2d").putImageData(image, 0, 0);
   c.imageSmoothingEnabled = true;
   c.drawImage(buffer, 0, 0, w, h);
+
+  // The frequency axis, drawn on the picture. Without it a reader can see that
+  // the energy sits low and cannot say how low, which is the difference
+  // between "the band stops at 4 kHz" and "the band runs to 16 kHz and the top
+  // of it decays in 30 ms". The band limit is drawn as a line of its own,
+  // because everything above it is the encoder's own zero and not the room's
+  // silence.
+  const top = spec.max_hz || 0;
+  if (!top) return;
+  const y = (hz) => h - (hz / top) * h;
+  c.font = "10px system-ui";
+  c.textBaseline = "middle";
+  for (const hz of [4000, 8000, 16000]) {
+    if (hz > top) continue;
+    const line = y(hz);
+    c.strokeStyle = "#ffffff55";
+    c.setLineDash(hz === (spec.band_limit_hz || 0) ? [] : [3, 4]);
+    c.beginPath();
+    c.moveTo(0, line);
+    c.lineTo(w, line);
+    c.stroke();
+    c.setLineDash([]);
+    const label = `${hz / 1000} kHz`;
+    c.fillStyle = "#00000099";
+    const width = c.measureText(label).width + 6;
+    c.fillRect(2, line - 7, width, 14);
+    c.fillStyle = "#e6e9ee";
+    c.fillText(label, 5, line);
+  }
 }
 
 // ------------------------------------------------------------------- panel
@@ -568,6 +646,180 @@ function sealedSection(sealed) {
     }`;
 }
 
+/** What a spatial run measured, which a point run has no equivalent of.
+ *
+ * Four things, and each is here because it can fail silently. The array says
+ * how much of the room the encoder looked at. The centre identity is exact by
+ * construction, so any number in it but zero is a defect. The direction of
+ * arrival is the only check that would catch a mirrored frame. And the
+ * effective order says where the expansion stops describing the field, which
+ * is not the order that was asked for.
+ */
+function spatialSection(data) {
+  if (!data.spatial) return "";
+  const array = data.array || {};
+  const identity = data.centre_identity;
+  const doa = (data.direction_of_arrival || []).filter((row) => row.usable);
+  const orders = data.conditioning || {};
+  const air = data.air_absorption || {};
+  const heads = data.heads || {};
+
+  const identityRows = !identity
+    ? ""
+    : identity.per_band
+        .map(
+          (row) =>
+            `<tr><td>${row.band_hz} Hz</td><td>${row.residual_db.toFixed(1)} dB</td>` +
+            `<td class="${row.whole_band_fitted === false ? "out" : ""}">${(
+              100 * row.share_of_energy
+            ).toFixed(1)} %${row.whole_band_fitted === false ? " ¹" : ""}</td></tr>`
+        )
+        .join("");
+
+  const orderRows = (orders.frequency_hz || [])
+    .map(
+      (hz, i) => `<tr><td>${Math.round(hz)} Hz</td><td>${orders.effective_order[i]}</td></tr>`
+    )
+    .join("");
+
+  return `
+    <h2>The array the field was expanded about</h2>
+    <table>
+      <tr><td>nodes</td><td>${array.nodes ?? "?"}</td></tr>
+      <tr><td>outer radius</td><td>${array.outer_radius_m ?? "?"} m</td></tr>
+      <tr><td>shells</td><td>${(array.shells || []).length}</td></tr>
+      <tr><td>order out / fitted</td><td>${data.encoder?.order ?? "?"} / ${
+        data.encoder?.fit_order ?? "?"
+      }</td></tr>
+    </table>
+    <p class="caption">Drawn in the room as a wire ball with its shells. Every
+    receiver is a grid node, so there is no interpolation error; the radii are
+    the nodes' own, not the nominal ones.</p>
+
+    ${
+      identity
+        ? `<h2>The check that costs nothing</h2>
+           <table><tr><th>band</th><th>residual</th><th>energy</th></tr>${identityRows}</table>
+           <p class="caption">The omnidirectional channel against the pressure
+           measured at the array's centre node. At zero radius every radial term
+           but the first vanishes, so these are the same signal by construction
+           and any residual is the fit's own error. ¹ marks a band the encoder's
+           limit cuts through.</p>`
+        : ""
+    }
+
+    ${
+      doa.length
+        ? `<h2>Direction of arrival, against the geometry</h2>
+           <table><tr><th>band</th><th>error</th></tr>${doa
+             .map((row) => `<tr><td>${row.band_hz} Hz</td><td>${row.error_deg.toFixed(2)}°</td></tr>`)
+             .join("")}</table>
+           <p class="caption">The only measurement here that would catch a
+           mirrored frame or an inverted odd order: both leave every level
+           untouched.</p>`
+        : ""
+    }
+
+    ${
+      orderRows
+        ? `<h2>Effective order</h2>
+           <table><tr><th>frequency</th><th>order</th></tr>${orderRows}</table>
+           <p class="caption">Measured on the array rather than assumed from the
+           order that was asked for. Below 500 Hz the high orders are physically
+           absent, which is the wavelength and not a defect.</p>`
+        : ""
+    }
+
+    ${
+      air.applied
+        ? `<p class="caption">Air absorption applied, ${escapeHtml(
+            air.standard || ""
+          )}, ${air.temperature_c} °C and ${air.humidity_percent} % relative humidity.
+           Both are part of the result: at 16 kHz the coefficient varies by 1.85
+           across ordinary indoor humidity.</p>`
+        : `<p class="note">No air absorption: the treble of the tail is overstated.</p>`
+    }
+    ${
+      data.licence_conflict
+        ? `<p class="note">The measured head is ${escapeHtml(
+            data.licence_conflict.head_licence
+          )} and this project's artefacts are ${escapeHtml(
+            data.licence_conflict.project_licence
+          )}. ${escapeHtml(data.licence_conflict.so)}</p>`
+        : ""
+    }
+    <p class="caption">${Object.entries(heads)
+      .map(([name, head]) => `${escapeHtml(name)}: ${escapeHtml(head.description || "")}`)
+      .join("<br>")}</p>`;
+}
+
+/** The per band table of whichever measures the selected sample carries.
+ *
+ * Two shapes reach this panel. A pressure response carries room measures per
+ * octave. A binaural response carries interaural ones, because RT60 of one ear
+ * says nothing the omnidirectional row has not already said, while the tail's
+ * coherence between the ears is the thing a decode can get wrong.
+ */
+function measuresTable(m) {
+  if (!m) return "";
+  if (m.bands_hz) {
+    return (
+      `<tr><th>band</th><th>RT60</th><th>EDT</th><th>C50</th><th>DRR</th></tr>` +
+      m.bands_hz
+        .map((band, i) => {
+          const out = m.in_band && !m.in_band[i] ? ' class="out"' : "";
+          const cell = (v, unit) => `<td${out}>${v === null ? "n/a" : v.toFixed(2) + unit}</td>`;
+          return (
+            `<tr><td${out}>${band} Hz${out ? " \u2717" : ""}</td>` +
+            cell(m.rt60_s[i], " s") +
+            cell(m.edt_s[i], " s") +
+            cell(m.c50_db[i], " dB") +
+            cell(m.drr_db[i], " dB") +
+            "</tr>"
+          );
+        })
+        .join("")
+    );
+  }
+  if (m.late_coherence_per_band) {
+    return (
+      `<tr><th>band</th><th>zero lag</th><th>floor</th><th>peak</th></tr>` +
+      m.late_coherence_per_band
+        .map(
+          (b) =>
+            `<tr><td>${b.band_hz} Hz</td><td>${b.zero_lag.toFixed(2)}</td>` +
+            `<td>${b.zero_lag_floor.toFixed(2)}</td>` +
+            `<td>${b.max_lag.toFixed(2)}</td></tr>`
+        )
+        .join("")
+    );
+  }
+  return "";
+}
+
+/** What the table under it means, for the shape of measures actually shown. */
+function measuresCaption(m, roomNote) {
+  if (!m) return "";
+  if (m.bands_hz) return roomNote || "";
+  if (m.late_coherence_per_band) {
+    const parts = [];
+    if (m.itd_us !== undefined) {
+      parts.push(
+        `direct sound: interaural time difference ${m.itd_us.toFixed(0)} \u00b5s ` +
+          `against Woodworth's ${m.woodworth_itd_us.toFixed(0)} \u00b5s, ` +
+          `level difference ${m.ild_db.toFixed(1)} dB.`
+      );
+    }
+    parts.push(
+      "Coherence of the late tail between the ears, per octave. Only the zero " +
+        "lag column tests the diffuse field prediction; the floor beside it is " +
+        "what this estimator reads on two independent signals."
+    );
+    return parts.join(" ");
+  }
+  return "";
+}
+
 export function renderRunPanel(element, data, { onSelect, onStand }) {
   const room = data.room;
   const theory = data.theory;
@@ -647,7 +899,11 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <select id="run-pick">${data.samples
       .map((s, i) => `<option value="${i}">${escapeHtml(s.label)}</option>`)
       .join("")}</select>
-    <button id="run-stand" style="margin-top:6px">Stand at this receiver</button>
+    <button id="run-stand" style="margin-top:6px">${
+      data.spatial
+        ? "Stand where this was heard, facing the way it was decoded"
+        : "Stand at this receiver"
+    }</button>
 
     <h2>Impulse response</h2>
     <canvas class="plot" id="run-wave"></canvas>
@@ -664,7 +920,7 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
 
     <h2>Per band</h2>
     <table id="run-bands"></table>
-    <p class="caption">${escapeHtml(data.band_note || "")}</p>
+    <p class="caption" id="run-bands-caption"></p>
 
     <h2>Listen</h2>
     <p class="caption">dry: ${escapeHtml(data.dry_voice?.member_name ?? "")},
@@ -674,8 +930,13 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     <audio id="run-wet" controls preload="none"></audio>`
     }
 
-    <h2>What this is not</h2>
-    <p class="note">${escapeHtml(data.binaural_note)}</p>
+    ${spatialSection(data)}
+
+    ${
+      data.binaural_note
+        ? `<h2>What this is not</h2><p class="note">${escapeHtml(data.binaural_note)}</p>`
+        : ""
+    }
     <ul class="caption">${(data.omissions || [])
       .map((o) => `<li>${escapeHtml(o)}</li>`)
       .join("")}</ul>
@@ -728,24 +989,10 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
     byId("run-wave-caption").textContent =
       `${sample.seconds.toFixed(2)} s at ${(sample.sample_rate_hz / 1000).toFixed(1)} kHz, ` +
       `peak ${sample.peak}`;
-    const m = sample.measures;
-    byId("run-bands").innerHTML = m
-      ? `<tr><th>band</th><th>RT60</th><th>EDT</th><th>C50</th><th>DRR</th></tr>` +
-        m.bands_hz
-          .map((band, i) => {
-            const out = m.in_band && !m.in_band[i] ? ' class="out"' : "";
-            const cell = (v, unit) => `<td${out}>${v === null ? "n/a" : v.toFixed(2) + unit}</td>`;
-            return (
-              `<tr><td${out}>${band} Hz${out ? " ✗" : ""}</td>` +
-              cell(m.rt60_s[i], " s") +
-              cell(m.edt_s[i], " s") +
-              cell(m.c50_db[i], " dB") +
-              cell(m.drr_db[i], " dB") +
-              "</tr>"
-            );
-          })
-          .join("")
-      : "";
+    // The audio is set before the plots. A binaural sample carries interaural
+    // measures and no room measures, and reading the room shape off it threw
+    // here, which left the player still pointed at the previously selected
+    // response: the panel said one thing and played another.
     if (sample.wet_audio) {
       wet.src = `${data.baseUrl}/${sample.wet_audio}`;
       wet.hidden = false;
@@ -753,6 +1000,9 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
       wet.removeAttribute("src");
       wet.hidden = true;
     }
+    const m = sample.measures;
+    byId("run-bands").innerHTML = measuresTable(m);
+    byId("run-bands-caption").textContent = measuresCaption(m, data.band_note);
   }
 
   // A grid published without a solve renders none of the response panels, so
@@ -765,7 +1015,14 @@ export function renderRunPanel(element, data, { onSelect, onStand }) {
       const sample = data.samples[Number(pick.value)];
       if (sample) onStand?.(sample);
     });
-    show(0);
+    // Open on the row the payload marks, which for a spatial run is the first
+    // decode at yaw zero: that is what the run exists to be heard through.
+    const first = Math.max(
+      0,
+      data.samples.findIndex((sample) => sample.preferred)
+    );
+    pick.value = String(first);
+    show(first);
   }
   return show;
 }

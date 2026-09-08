@@ -477,6 +477,49 @@ def test_discovery_of_a_missing_directory_is_empty_rather_than_an_error() -> Non
     assert run_view.discover_runs(Path("/nonexistent/runs")) == []
 
 
+def test_discovery_refuses_a_report_that_is_not_a_run_at_all(tmp_path: Path) -> None:
+    """A cost study has a plan and a report and none of the placement a page reads.
+
+    One of those in the shared runs directory raised inside the builder's loop
+    and took every other run off the page with it.
+    """
+    root = tmp_path / "runs"
+    _write_run(root / "complete")
+    (root / "complete" / "run").rename(root / "complete_run")
+    census = root / "census"
+    census.mkdir(parents=True)
+    (census / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (census / "report.json").write_text(json.dumps({"run": "census", "domains": 4}))
+
+    assert [r.name for r in run_view.discover_runs(root)] == ["complete_run"]
+
+
+def test_a_spatial_report_is_drawable_although_it_has_no_placement() -> None:
+    """The two shapes are checked against their own keys, not one against the other.
+
+    A spatial run holds a listening point and an ambisonic expansion about it.
+    Measuring it by the point run's keys would drop it out of the viewer with
+    no message, which is the quiet form of the crash the guard exists to stop.
+    """
+    spatial = {
+        "run": "w10",
+        "cache_key": "abc",
+        "room": "bedroom.001",
+        "theory": {},
+        "model_json": "models/bedroom.json",
+        "array": {"centre": [0.0, 1.2, 0.0]},
+        "encoder": {"order": 7},
+        "binaural_decodes": {},
+        "sample_rate_hz": 48000.0,
+    }
+
+    assert run_view.report_is_drawable(spatial)
+    assert not any(key in spatial for key in ("placement", "sources", "scene_sha256"))
+    # A spatial run still has to hold what its own page reads.
+    without_encoder = {key: value for key, value in spatial.items() if key != "encoder"}
+    assert not run_view.report_is_drawable(without_encoder)
+
+
 def test_the_solver_button_is_released_before_the_apartment_is_fetched() -> None:
     """Assembly takes seconds, and a stale button offers the wrong room.
 
@@ -568,7 +611,7 @@ PAGE_MUST_HAVE = [
     ("position: fixed; top: 0; right: 0; bottom: 0;", "panel overlays, never in the layout"),
     ("overflow-y: auto;", "the panel scrolls, the document does not"),
     ("renderer.setSize(innerWidth, innerHeight);", "sized from the window, so no resize loop"),
-    ("requestAnimationFrame(() => runShow && runShow(0));", "plots drawn once the panel is wide"),
+    ("if (runShow) runShow(pick ? Number(pick.value) : 0);", "plots drawn once the panel is wide"),
     ('if (mode === "acoustic" && !apartmentRuns.length) return;', "no run, nothing to draw"),
     ('const MODES = [...SCENE_MODES, "acoustic"];', "one selector governs every mode"),
     ('id="btn-acoustic"', "the run is reached from the acoustic button"),
@@ -582,6 +625,25 @@ PAGE_MUST_HAVE = [
     ("setBusy(assemblyMessage);", "a mode switch keeps the build message up"),
     ('? "loading solver run…" : assemblyMessage', "the run's wait is named without losing it"),
     ('if (button.disabled) button.classList.remove("active");', "no highlight on a dead button"),
+    # What a listener does with a binaural render: walk to a place, then turn on
+    # the spot to hear the source move. Both gestures are on the arrows.
+    (
+        'if (pressed.has("KeyW") || pressed.has("ArrowUp")) push(forward, 1);',
+        "the arrows still walk",
+    ),
+    ('if (pressed.has("ArrowLeft")) yaw += TURN_SPEED * delta;', "left and right turn on the spot"),
+    (
+        "camera.fov = Math.min(BASE_FOV, Math.max(MIN_FOV, camera.fov * factor));",
+        "the wheel zooms in and never widens past the default",
+    ),
+    (
+        "onStand: (sample) => standAt(sample.receiver_index, sample.yaw_deg),",
+        "standing at the listener faces the way the sample was decoded",
+    ),
+    (
+        "panel.hidden = !runData;",
+        "the run panel stays on every mode, so a run can be heard from any of them",
+    ),
 ]
 PAGE_MUST_NOT_HAVE = [
     ("ResizeObserver", "measuring, resizing and remeasuring ran to 26 million pixels"),
@@ -604,6 +666,25 @@ def test_the_run_module_owns_the_panel_and_the_geometry() -> None:
 
     assert "renderRunPanel" in module
     assert "buildRunGroup" in module
+
+
+def test_the_panel_reads_the_measures_shape_the_sample_carries() -> None:
+    """Two shapes of measures reach the panel and only one has octave bands.
+
+    A binaural sample carries interaural measures. Reading ``bands_hz`` off it
+    threw inside the change handler, before the player was pointed at the new
+    file, so picking a decode left the previous response playing while the
+    page named the new one. The audio now moves first, and the table reads
+    whichever shape it was given.
+    """
+    module = _web("solver_mode.js")
+
+    assert "function measuresTable(m)" in module
+    assert "m.late_coherence_per_band" in module
+    body = module.split("function show(index)")[1]
+    assert body.index("wet.src") < body.index("measuresTable("), (
+        "the file the reader is about to hear is set before anything that can throw"
+    )
 
 
 class TestModelJsonResolution:
@@ -803,3 +884,117 @@ def test_a_store_that_will_not_answer_leaves_the_page_standing(
     payload = json.loads((tmp_path / "site" / "run.json").read_text())
     assert payload["audit"] is None
     assert "could not deliver the audit payload" in capsys.readouterr().out
+
+
+class TestASpatialRun:
+    """A spatial run and a point run write different artefacts, not one shape twice.
+
+    A point run has a placement, one response per receiver and one wet file per
+    pair. A spatial run has one listening point, one ambisonic response about it
+    and one pair of ears per head and per head orientation. Reshaping the second
+    into the first would put receivers on the page that the run never simulated.
+    """
+
+    def a_report(self) -> dict[str, Any]:
+        return {
+            "run": "w10_test",
+            "binaural_decodes": {
+                "sphere_magls": {
+                    "decoder": {"head": "rigid sphere"},
+                    "measures": {"yaw_0": {"itd_us": 600.0}, "yaw_90": {"itd_us": -150.0}},
+                }
+            },
+            "array": {"centre": [0.0, 1.2, 0.0], "outer_radius_m": 0.16, "shells": []},
+            "encoder": {"order": 7, "fit_order": 10, "max_frequency_hz": 16000.0},
+            "sample_rate_hz": 48000.0,
+        }
+
+    def test_a_spatial_report_is_recognised_by_what_it_holds(self) -> None:
+        assert run_view.is_spatial(self.a_report())
+        assert not run_view.is_spatial({"run": "w20", "placement": {}})
+
+    def test_its_rows_are_one_per_head_and_orientation(self, tmp_path: Path) -> None:
+        sofar = pytest.importorskip("sofar")
+        responses = tmp_path / "responses"
+        responses.mkdir()
+        sofa = sofar.Sofa("SingleRoomSRIR")
+        block = np.zeros((2, 2, 64))
+        block[:, 0, 10] = 1.0
+        sofa.Data_IR = block
+        sofa.Data_SamplingRate = 48000.0
+        sofa.Data_Delay = np.zeros((1, 2))
+        sofa.ListenerPosition = np.zeros((2, 3))
+        sofa.ListenerView = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        sofa.ListenerUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))
+        sofa.ReceiverPosition = np.zeros((2, 3, 1))
+        sofa.ReceiverView = np.tile(np.array([1.0, 0.0, 0.0]), (2, 1))[:, :, np.newaxis]
+        sofa.ReceiverUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))[:, :, np.newaxis]
+        sofa.ReceiverDescriptions = np.array(["left ear", "right ear"])
+        sofa.SourcePosition = np.zeros((2, 3))
+        sofa.EmitterPosition = np.zeros((1, 3, 1))
+        sofa.MeasurementDate = np.zeros(2)
+        sofar.write_sofa(str(responses / "binaural_sphere_magls.sofa"), sofa)
+
+        rows = run_view._spatial_rows(tmp_path, self.a_report(), {"binaural_sphere_magls_yaw0.wav"})
+        assert [row["id"] for row in rows] == ["sphere_magls_yaw0", "sphere_magls_yaw90"]
+        # The yaw travels with the row, because standing at a sample without it
+        # shows a room whose sources are on the other side from where they sound.
+        assert [row["yaw_deg"] for row in rows] == pytest.approx([0.0, 90.0])
+        # The path the panel loads, relative to the run, not a bare file name.
+        assert rows[0]["wet_audio"] == "audio/binaural_sphere_magls_yaw0.wav"
+        assert rows[1]["wet_audio"] is None
+        assert rows[0]["measures"] == {"itd_us": 600.0}
+
+    def test_every_row_names_its_audio_the_way_the_panel_reads_it(self, tmp_path: Path) -> None:
+        """One row spelled it differently and the player came up silent.
+
+        The panel reads ``wet_audio``, and a path relative to the run rather
+        than a bare file name. A row that spells it ``audio`` renders its plots,
+        its measures and its label, and offers nothing to listen to, which looks
+        like a run with no audio rather than a typo.
+        """
+        sofar = pytest.importorskip("sofar")
+        responses = tmp_path / "responses"
+        responses.mkdir()
+        ambisonic = sofar.Sofa("SingleRoomSRIR")
+        ambisonic.Data_IR = np.zeros((1, 4, 32))
+        ambisonic.Data_SamplingRate = 48000.0
+        ambisonic.Data_Delay = np.zeros((1, 4))
+        ambisonic.ListenerPosition = np.zeros((1, 3))
+        ambisonic.ListenerView = np.array([[1.0, 0.0, 0.0]])
+        ambisonic.ListenerUp = np.array([[0.0, 0.0, 1.0]])
+        ambisonic.ReceiverPosition = np.zeros((4, 3, 1))
+        ambisonic.ReceiverView = np.tile(np.array([1.0, 0.0, 0.0]), (4, 1))[:, :, np.newaxis]
+        ambisonic.ReceiverUp = np.tile(np.array([0.0, 0.0, 1.0]), (4, 1))[:, :, np.newaxis]
+        ambisonic.ReceiverDescriptions = np.array([f"ACN {i}" for i in range(4)])
+        ambisonic.SourcePosition = np.zeros((1, 3))
+        ambisonic.EmitterPosition = np.zeros((1, 3, 1))
+        ambisonic.MeasurementDate = np.zeros(1)
+        sofar.write_sofa(str(responses / "ambisonic.sofa"), ambisonic)
+
+        rows = run_view._spatial_rows(tmp_path, self.a_report(), {"ambisonic_acn_sn3d.wav"})
+        assert rows, "the ambisonic response should give a row"
+        for row in rows:
+            assert "audio" not in row, f"{row['id']} spells its audio the old way"
+            assert "wet_audio" in row
+        assert rows[0]["wet_audio"] == "audio/ambisonic_acn_sn3d.wav"
+
+    def test_a_run_with_no_responses_yields_no_rows_rather_than_empty_plots(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("sofar")
+        assert run_view._spatial_rows(tmp_path, self.a_report(), set()) == []
+
+
+def test_the_room_geometry_is_found_whichever_key_holds_it() -> None:
+    """Two report shapes put different things under ``room``.
+
+    A point run puts the geometry there. A spatial run puts the room's *name*
+    there and the geometry under ``room_geometry``. Choosing by truthiness
+    handed the panel the string "bedroom.001" and it asked it for a volume.
+    """
+    geometry = {"volume_m3": 38.1, "surface_area_m2": 132.9}
+    assert run_view._room_geometry({"room": geometry}) == geometry
+    assert run_view._room_geometry({"room": "bedroom.001", "room_geometry": geometry}) == geometry
+    assert run_view._room_geometry({"room": "bedroom.001"}) is None
+    assert run_view._room_geometry({}) is None

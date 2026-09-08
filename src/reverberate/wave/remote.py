@@ -21,16 +21,29 @@ instance offers without any agent installed on it.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reverberate.wave.comms import ENGINE_FILES
 
-__all__ = ["Machine", "SolveResult", "fetch", "run_engine", "solve", "upload"]
+__all__ = [
+    "EngineProgress",
+    "Machine",
+    "SolveResult",
+    "engine_log",
+    "engine_progress",
+    "fetch",
+    "solve",
+    "start_engine",
+    "upload",
+    "watch_engine",
+]
 
 #: Where the engine's data directory lives on the rented machine.
 DEFAULT_REMOTE_DIR = "/root/run"
@@ -125,19 +138,170 @@ def upload(machine: Machine, files: list[Path], remote_dir: str = DEFAULT_REMOTE
     return sum(f.stat().st_size for f in files)
 
 
-def run_engine(
+def start_engine(
+    machine: Machine,
+    remote_dir: str = DEFAULT_REMOTE_DIR,
+    *,
+    pffdtd_dir: str = DEFAULT_PFFDTD_DIR,
+    double_precision: bool = False,
+    log_name: str = "engine.log",
+) -> str:
+    """Launch the engine detached, into a log, and return at once.
+
+    **Not a refinement.** W25 destroyed an A100 mid-solve because ``nohup &``
+    over ssh never returns: ssh holds the channel until every process closes
+    stdout. W35 recorded the same shape of failure again, "a two hour job tied
+    to one ssh connection". A synchronous run also hides the engine's own words:
+    the command redirects stderr into stdout, so a non-zero exit is raised
+    carrying nothing but the host's login banner.
+
+    So the engine is launched under ``setsid`` with all three descriptors
+    detached, its output goes to a file, and the caller polls
+    :func:`engine_progress`. The launch is verified by the log moving, never by
+    this call's return.
+    """
+    precision = "double" if double_precision else "single"
+    binary = f"{pffdtd_dir}/c_cuda/fdtd_main_gpu_{precision}.x"
+    script = f"{remote_dir}/launch_engine.sh"
+    body = f"#!/bin/bash\ncd {shlex.quote(remote_dir)}\nexec {shlex.quote(binary)}\n"
+    _run(
+        machine.ssh_command(
+            f"mkdir -p {shlex.quote(remote_dir)} && "
+            f"cat > {shlex.quote(script)} <<'REVERBERATE_EOF'\n{body}REVERBERATE_EOF\n"
+            f"chmod +x {shlex.quote(script)}"
+        ),
+        what="write launcher",
+    )
+    _run(
+        machine.ssh_command(
+            f"cd {shlex.quote(remote_dir)} && rm -f {shlex.quote(log_name)} && "
+            f"setsid nohup {shlex.quote(script)} > {shlex.quote(log_name)} "
+            "2>&1 < /dev/null & sleep 2; pgrep -c fdtd_main_gpu"
+        ),
+        what="start engine",
+    )
+    return script
+
+
+#: PFFDTD prints this every time step. A percentage that stops moving is a
+#: stalled run, which is a different thing from a slow one and is worth saying.
+PROGRESS = re.compile(r"Running \[\s*([0-9.]+)%\]")
+
+
+@dataclass(frozen=True)
+class EngineProgress:
+    """Where a detached engine has got to, read from its own log."""
+
+    running: bool
+    percent: float | None
+    last_line: str
+    output_bytes: int
+
+    @property
+    def finished(self) -> bool:
+        """No process, and an output file with something in it."""
+        return not self.running and self.output_bytes > 0
+
+
+def engine_progress(
+    machine: Machine, remote_dir: str = DEFAULT_REMOTE_DIR, *, log_name: str = "engine.log"
+) -> EngineProgress:
+    """Poll a detached engine: is it alive, how far in, and has it written anything."""
+    log = f"{remote_dir}/{log_name}"
+    output = f"{remote_dir}/sim_outs.h5"
+    # The engine separates its progress lines with carriage returns, so that a
+    # terminal overwrites one line rather than scrolling. Deleting them joins
+    # the whole log into one line and a search then returns its *oldest*
+    # percentage for ever, which reads exactly like a stalled run. Translated to
+    # newlines instead, and the last one taken.
+    probe = (
+        "printf '%s\\n' "
+        '"$(pgrep -c fdtd_main_gpu 2>/dev/null || echo 0)" '
+        f'"$(stat -c%s {shlex.quote(output)} 2>/dev/null || echo 0)" '
+        f"\"$(tail -c 20000 {shlex.quote(log)} 2>/dev/null | tr '\\r' '\\n' "
+        '| grep -a "Running" | tail -1)"'
+    )
+    lines = _run(machine.ssh_command(probe), what="engine progress").splitlines()
+    body = [line for line in lines if line.strip()]
+    running = bool(body and body[0].strip().isdigit() and int(body[0].strip()) > 0)
+    output_bytes = int(body[1].strip()) if len(body) > 1 and body[1].strip().isdigit() else 0
+    last = body[2] if len(body) > 2 else ""
+    matches = PROGRESS.findall(last)
+    found = matches[-1] if matches else None
+    return EngineProgress(
+        running=running,
+        percent=float(found) if found is not None else None,
+        last_line=last,
+        output_bytes=output_bytes,
+    )
+
+
+def engine_log(
+    machine: Machine, remote_dir: str = DEFAULT_REMOTE_DIR, *, log_name: str = "engine.log"
+) -> str:
+    """The whole of a detached engine's log."""
+    return _run(
+        machine.ssh_command(f"cat {shlex.quote(remote_dir)}/{shlex.quote(log_name)}"),
+        what="engine log",
+    )
+
+
+def watch_engine(
     machine: Machine,
     remote_dir: str = DEFAULT_REMOTE_DIR,
     *,
     pffdtd_dir: str = DEFAULT_PFFDTD_DIR,
     double_precision: bool = False,
     timeout: float | None = None,
+    poll_s: float = 120.0,
+    stall_polls: int = 10,
+    on_progress: Callable[[EngineProgress], None] | None = None,
 ) -> str:
-    """Run the CUDA binary in ``remote_dir`` and return its log."""
-    precision = "double" if double_precision else "single"
-    binary = f"{pffdtd_dir}/c_cuda/fdtd_main_gpu_{precision}.x"
-    remote = f"cd {shlex.quote(remote_dir)} && {shlex.quote(binary)} 2>&1"
-    return _run(machine.ssh_command(remote), what="engine", timeout=timeout)
+    """Start the engine detached and follow it to the end, returning its whole log.
+
+    Three failures this shape prevents, each of which has happened:
+
+    - a run tied to one ssh channel, which dies with the connection and takes
+      the solve with it;
+    - a percentage nobody sees, which is what a five hour run looks like from
+      outside when its progress is only returned at the end;
+    - an engine that exits saying nothing, whose message is on stdout while the
+      exception carries stderr, so the caller is told only the login banner.
+
+    A percentage that has not moved for ``stall_polls`` polls is reported as
+    stalled, which is a different thing from slow and worth saying.
+    """
+    start_engine(machine, remote_dir, pffdtd_dir=pffdtd_dir, double_precision=double_precision)
+    deadline = None if timeout is None else time.time() + timeout
+    last_percent, unchanged = None, 0
+    while True:
+        progress = engine_progress(machine, remote_dir)
+        if on_progress is not None:
+            on_progress(progress)
+        if progress.finished:
+            return engine_log(machine, remote_dir)
+        if not progress.running:
+            raise RuntimeError(
+                "the engine exited without writing sim_outs.h5. Its own last "
+                f"words were: {progress.last_line!r}. The whole log is at "
+                f"{remote_dir}/engine.log on the machine."
+            )
+        if progress.percent is not None and progress.percent == last_percent:
+            unchanged += 1
+            if unchanged >= stall_polls:
+                raise RuntimeError(
+                    f"STALLED at {progress.percent}% for {unchanged} polls of "
+                    f"{poll_s:g} s; the engine is alive and not advancing"
+                )
+        else:
+            unchanged = 0
+        last_percent = progress.percent
+        if deadline is not None and time.time() > deadline:
+            raise TimeoutError(
+                f"the engine passed its {timeout:g} s budget at "
+                f"{progress.percent if progress.percent is not None else 'an unknown'}%"
+            )
+        time.sleep(poll_s)
 
 
 def fetch(machine: Machine, destination: Path, remote_dir: str = DEFAULT_REMOTE_DIR) -> Path:
@@ -162,6 +326,7 @@ def solve(
     pffdtd_dir: str = DEFAULT_PFFDTD_DIR,
     double_precision: bool = False,
     timeout: float | None = None,
+    on_progress: Callable[[EngineProgress], None] | None = None,
 ) -> SolveResult:
     """Upload, run, retrieve, in that order, timing each.
 
@@ -174,12 +339,13 @@ def solve(
     upload_s = time.time() - started
 
     started = time.time()
-    log = run_engine(
+    log = watch_engine(
         machine,
         remote_dir,
         pffdtd_dir=pffdtd_dir,
         double_precision=double_precision,
         timeout=timeout,
+        on_progress=on_progress,
     )
     engine_s = time.time() - started
 

@@ -26,11 +26,13 @@ import pytest
 
 from reverberate import settings
 from reverberate.wave import comms as comms_module
+from reverberate.wave import remote as comms_remote
 from reverberate.wave.comms import (
     ENGINE_FILES,
     Grid,
     fold_fcc,
     interp_weights,
+    nearest_node,
     source_signal,
     transpose_order,
     write_comms,
@@ -190,6 +192,59 @@ class TestWriteComms:
             # out_alpha is in the caller's receiver order, not the sorted one:
             # the engine applies out_reorder to the signals, not to the weights.
             assert np.allclose(handle["out_alpha"][...].sum(axis=1), 1.0)
+
+    def test_a_nearest_node_receiver_has_one_weight_of_one(self, tmp_path: Path) -> None:
+        """Snapped to a node, so no interpolation error and one row per receiver."""
+        directory = write_grid(tmp_path / "entry", make_grid())
+        receivers = np.array([[0.31, 0.42, 0.19], [0.2, 0.6, 0.1]])
+        out = write_comms(
+            directory,
+            np.array([0.2, 0.3, 0.1]),
+            receivers,
+            0.005,
+            out_path=tmp_path / "comms_out.h5",
+            interpolation="nearest",
+        )
+        with h5py.File(out, "r") as handle:
+            assert handle["out_alpha"].shape == (2, 1)
+            assert np.array_equal(handle["out_alpha"][...], np.ones((2, 1)))
+            assert handle["Nr"][()] == 2
+
+    def test_the_nearest_node_is_the_nearest_node(self) -> None:
+        grid = make_grid()
+        coordinate, index = nearest_node(np.array([0.31, 0.42, 0.19]), grid)
+        assert np.allclose(coordinate, [0.3, 0.4, 0.2])
+        nx, ny, nz = grid.shape
+        assert index == 3 * nz * ny + 4 * nz + 2
+        # A point already on a node keeps it.
+        assert np.allclose(nearest_node(np.array([0.2, 0.5, 0.1]), grid)[0], [0.2, 0.5, 0.1])
+
+    def test_the_nearest_node_stays_on_the_fcc_subgrid(self) -> None:
+        """Only nodes of even index sum exist on FCC, so an odd corner is not a node."""
+        grid = make_grid(fcc_flag=1)
+        nx, ny, nz = grid.shape
+        for point in ([0.31, 0.42, 0.19], [0.11, 0.13, 0.09], [0.25, 0.25, 0.25]):
+            _, index = nearest_node(np.array(point), grid)
+            iz = index % nz
+            iy = (index - iz) // nz % ny
+            ix = ((index - iz) // nz - iy) // ny
+            assert (ix + iy + iz) % 2 == 0
+
+    def test_a_point_outside_the_grid_has_no_nearest_node(self) -> None:
+        with pytest.raises(ValueError, match="outside the grid"):
+            nearest_node(np.array([0.2, 0.3, 9.0]), make_grid())
+
+    def test_an_unknown_interpolation_is_refused(self, tmp_path: Path) -> None:
+        directory = write_grid(tmp_path / "entry", make_grid())
+        with pytest.raises(ValueError, match="unknown interpolation"):
+            write_comms(
+                directory,
+                np.array([0.2, 0.3, 0.1]),
+                np.array([[0.3, 0.4, 0.2]]),
+                0.005,
+                out_path=tmp_path / "comms_out.h5",
+                interpolation="quadratic",  # type: ignore[arg-type]
+            )
 
     def test_it_needs_a_receiver(self, tmp_path: Path) -> None:
         directory = write_grid(tmp_path / "entry", make_grid())
@@ -503,3 +558,105 @@ def test_the_split_reproduces_sim_setup_bit_for_bit(
             assert set(expected.keys()) == set(got.keys()), name
             for key in expected:
                 assert np.array_equal(expected[key][...], got[key][...]), f"{name}:{key}"
+
+
+class TestDetachedEngine:
+    """The engine is launched detached and polled, never held on one ssh channel.
+
+    Three failures this shape exists to prevent, and all three have happened:
+    an A100 destroyed mid-solve because ``nohup &`` over ssh never returns; a
+    five hour run whose progress was only returned at the end; and an engine
+    that exits with its own message on stdout while the exception carries
+    stderr, so the caller is told the login banner and nothing else.
+    """
+
+    def test_the_launcher_detaches_every_descriptor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent: list[str] = []
+
+        def fake_run(argv: list[str], *, what: str, timeout: float | None = None) -> str:
+            sent.append(argv[-1])
+            return "1"
+
+        monkeypatch.setattr(comms_remote, "_run", fake_run)
+        comms_remote.start_engine(Machine(host="h", identity=None))
+        launched = " ".join(sent)
+        assert "setsid" in launched
+        assert "< /dev/null" in launched
+        assert "> " in launched and "2>&1" in launched
+        assert "fdtd_main_gpu_single.x" in launched
+
+    def test_progress_reads_the_percentage_the_engine_prints(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "1\n0\nRunning [42.3%] [02:51:07<06:44:12]\n",
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.running is True
+        assert progress.percent == pytest.approx(42.3)
+        assert progress.finished is False
+
+    def test_a_finished_run_is_no_process_and_an_output_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote, "_run", lambda argv, *, what, timeout=None: "0\n1200000000\ndone\n"
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.finished is True
+        assert progress.output_bytes == 1_200_000_000
+
+    def test_an_engine_that_dies_without_output_is_reported_with_its_own_last_words(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure that cost an hour of A100: CUDA error 209, said silently."""
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "0\n0\nGlobal memory allocation done\n",
+        )
+        with pytest.raises(RuntimeError, match="Global memory allocation done"):
+            comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0)
+
+    def test_the_latest_percentage_is_taken_and_not_the_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The engine overwrites one terminal line, so its log is carriage returns.
+
+        Deleting them joins the whole log into a single line, and a search then
+        returns its oldest percentage for ever, which reads exactly like a run
+        that has stalled at 2.9 per cent.
+        """
+        blob = "Running [2.9%][00:04:44<02:46:12] Running [61.4%][01:44:00<01:05:00]"
+        monkeypatch.setattr(
+            comms_remote, "_run", lambda argv, *, what, timeout=None: f"1\n0\n{blob}\n"
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.percent == pytest.approx(61.4)
+
+    def test_the_probe_translates_carriage_returns_rather_than_deleting_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[str] = []
+
+        def record(argv: list[str], *, what: str, timeout: float | None = None) -> str:
+            sent.append(argv[-1])
+            return "0\n1\nx\n"
+
+        monkeypatch.setattr(comms_remote, "_run", record)
+        comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert "tr " in sent[0]
+        assert "tr -d" not in sent[0]
+
+    def test_a_percentage_that_stops_moving_is_stalled_and_not_merely_slow(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "1\n0\nRunning [11.0%] [00:10:00<01:00:00]\n",
+        )
+        with pytest.raises(RuntimeError, match="STALLED at 11.0"):
+            comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0, stall_polls=3)

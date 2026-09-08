@@ -402,3 +402,56 @@ class TestInstanceDiagnostics:
             {"id": 7, "actual_status": "running", "dph_total": 1.0, "gpu_name": "x"}
         )
         assert instance.status_msg == ""
+
+
+class TestAbsentIsNotUnreachable:
+    """A card that does not exist and an API that will not answer are different.
+
+    Both come back through the same call, and two callers act on the answer:
+    ``destroy_and_verify`` would report a card destroyed while it is still
+    billing, and ``wait_for_ssh`` would abandon a rental that is merely
+    starting. Only a 404 means gone.
+    """
+
+    def test_a_missing_instance_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = vast.VastClient(api_key="k")
+
+        def refuse(*_: object, **__: object) -> Any:
+            raise vast.VastError("GET failed: HTTP 404", 404)
+
+        monkeypatch.setattr(client, "request", refuse)
+        assert client.instance(7) is None
+
+    def test_an_unreachable_api_is_raised_and_not_reported_as_gone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = vast.VastClient(api_key="k")
+
+        def refuse(*_: object, **__: object) -> Any:
+            raise vast.VastError("GET failed: HTTP 503", 503)
+
+        monkeypatch.setattr(client, "request", refuse)
+        with pytest.raises(vast.VastError, match="503"):
+            client.instance(7)
+
+    def test_a_destruction_that_could_not_be_confirmed_is_not_claimed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = vast.VastClient(api_key="k")
+        monkeypatch.setattr(client, "destroy", lambda instance_id: None)
+
+        def unreachable(instance_id: int) -> Any:
+            raise vast.VastError("GET failed: HTTP 500", 500)
+
+        monkeypatch.setattr(client, "instance", unreachable)
+        assert client.destroy_and_verify(9, attempts=2, pause=0.0) is False
+
+    def test_the_error_carries_the_status_it_was_given(self) -> None:
+        assert vast.VastError("boom", 410).status == 410
+        assert vast.VastError("boom").status is None
+
+    def test_the_listing_asks_for_the_version_that_still_serves_it(self) -> None:
+        """The v0 form of the listing answers HTTP 410, so v1 is named explicitly."""
+        import inspect
+
+        assert 'api_version="v1"' in inspect.getsource(vast.VastClient.instances)
