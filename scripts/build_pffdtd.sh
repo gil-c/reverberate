@@ -70,6 +70,15 @@ fi
 log "Patch 1: CUDA arch sm_35 -> sm_${CUDA_ARCH}"
 sed -i "s/-arch=sm_[0-9]*/-arch=sm_${CUDA_ARCH}/g" "${INSTALL_DIR}/c_cuda/Makefile"
 
+# Patch 6: the engine caps the material count at a compile time constant and
+# aborts on load past it: `Assertion Nm<=MNm failed` on the whole storey of
+# 102344403, which reaches the solver with 69 labels against MNm 64. The
+# header itself says "change as necessary". 128 covers every scene exported so
+# far and costs a few kilobytes of static arrays.
+log "Patch 6: MNm 64 -> 128 materials"
+sed -i "s/#define MNm 64 /#define MNm 128 /" "${INSTALL_DIR}/c_cuda/fdtd_data.h"
+grep -q "#define MNm 128" "${INSTALL_DIR}/c_cuda/fdtd_data.h" || { echo "Patch 6 did not apply"; exit 1; }
+
 
 log "Python environment"
 python3 -m venv "${VENV_DIR}"
