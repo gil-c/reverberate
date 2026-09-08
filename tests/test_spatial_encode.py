@@ -192,6 +192,37 @@ def test_encoding_a_time_signal_gives_the_channels_and_the_length_back() -> None
     assert np.all(np.isfinite(ambisonic.signals))
 
 
+def test_the_filter_does_not_wrap_its_own_pre_ring_onto_the_end_of_the_record() -> None:
+    """One transform of a whole record convolves circularly, and that lands badly.
+
+    The encoder is a filter with an almost symmetric impulse response, so half
+    of what it puts around an event comes *before* it. Taken over the whole
+    record at once, that half comes out at the **end** instead: the rendered
+    bedroom carried the direct sound's pre-ring in its last 20 ms at about
+    -33 dB of the whole response, which held the Schroeder curve flat for the
+    entire tail and sounded like a faint copy half a second late.
+    """
+    array = an_array()
+    samples = 2048
+    pressure = np.zeros((array.count, samples))
+    pressure[:, 0] = 1.0
+
+    signals = encode(
+        pressure,
+        48000.0,
+        array,
+        sound_speed_m_s=SOUND_SPEED,
+        settings=EncoderSettings(order=3, fit_order=5),
+    ).signals[0]
+
+    eighth = samples // 8
+    head = float(signals[:eighth] @ signals[:eighth])
+    tail = float(signals[-eighth:] @ signals[-eighth:])
+    # Circularly, the last eighth mirrors the first and reads within a few dB
+    # of it. It has to be far below instead.
+    assert 10.0 * np.log10(tail / head) < -30.0
+
+
 def test_bins_above_the_band_limit_are_left_at_zero() -> None:
     array = an_array()
     frequency = np.array([1000.0, 20000.0])

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import numpy as np
+from scipy.fft import next_fast_len
 from scipy.special import roots_legendre, spherical_jn
 
 from reverberate.spatial.array import ArrayDesign
@@ -382,8 +383,30 @@ def encode(
             f"pressure {pressure.shape} does not match the array's {design.count} receivers"
         )
     samples = pressure.shape[1]
-    spectrum = np.fft.rfft(pressure, axis=-1)
-    frequency = np.fft.rfftfreq(samples, 1.0 / sample_rate_hz)
+    # **The record is padded before the transform, and cut back after it.**
+    # The encoder is a filter: per bin it applies a gain that varies with
+    # frequency, so it has an impulse response, and that response is close to
+    # symmetric because the regularised inverse has little phase. Transforming
+    # the whole record once and inverting it convolves that response
+    # *circularly*, which sends everything the filter puts **before** an event
+    # to the **end** of the record instead of before its start.
+    #
+    # Measured on a delta at the first sample, order 7 fitted at 10: the last
+    # eighth of the record came back at -3.1 dB of the total, a mirror image of
+    # the first eighth, and moving the delta moved the pair with it. In the
+    # rendered bedroom that put the direct sound's pre-ring in the last 20 ms
+    # at about -33 dB of the whole response, which is a burst of energy where a
+    # room has none. It held the broadband Schroeder curve flat at -33 dB for
+    # the whole tail, so no decay time could be read from it, and it is audible
+    # as a faint copy of the whole signal half a second late.
+    #
+    # Padding to twice the length is the plain fix: the wrapped part lands in
+    # the pad and the pad is discarded. The same measurement then reads -42 dB
+    # in the last eighth and falls monotonically, which is the filter's own
+    # decay rather than a reflection of its head.
+    length = int(next_fast_len(2 * samples))
+    spectrum = np.fft.rfft(pressure, n=length, axis=-1)
+    frequency = np.fft.rfftfreq(length, 1.0 / sample_rate_hz)
     coefficients = encode_spectrum(
         spectrum,
         frequency,
@@ -392,7 +415,7 @@ def encode(
         settings=settings,
         chunk=chunk,
     )
-    signals = np.fft.irfft(coefficients.T, n=samples, axis=-1)
+    signals = np.fft.irfft(coefficients.T, n=length, axis=-1)[..., :samples]
     return Ambisonic(
         signals=np.asarray(signals, dtype=float),
         sample_rate_hz=float(sample_rate_hz),
