@@ -477,6 +477,49 @@ def test_discovery_of_a_missing_directory_is_empty_rather_than_an_error() -> Non
     assert run_view.discover_runs(Path("/nonexistent/runs")) == []
 
 
+def test_discovery_refuses_a_report_that_is_not_a_run_at_all(tmp_path: Path) -> None:
+    """A cost study has a plan and a report and none of the placement a page reads.
+
+    One of those in the shared runs directory raised inside the builder's loop
+    and took every other run off the page with it.
+    """
+    root = tmp_path / "runs"
+    _write_run(root / "complete")
+    (root / "complete" / "run").rename(root / "complete_run")
+    census = root / "census"
+    census.mkdir(parents=True)
+    (census / "plan.json").write_text(json.dumps({"scene_id": "102344022", "room": "bedroom.001"}))
+    (census / "report.json").write_text(json.dumps({"run": "census", "domains": 4}))
+
+    assert [r.name for r in run_view.discover_runs(root)] == ["complete_run"]
+
+
+def test_a_spatial_report_is_drawable_although_it_has_no_placement() -> None:
+    """The two shapes are checked against their own keys, not one against the other.
+
+    A spatial run holds a listening point and an ambisonic expansion about it.
+    Measuring it by the point run's keys would drop it out of the viewer with
+    no message, which is the quiet form of the crash the guard exists to stop.
+    """
+    spatial = {
+        "run": "w10",
+        "cache_key": "abc",
+        "room": "bedroom.001",
+        "theory": {},
+        "model_json": "models/bedroom.json",
+        "array": {"centre": [0.0, 1.2, 0.0]},
+        "encoder": {"order": 7},
+        "binaural_decodes": {},
+        "sample_rate_hz": 48000.0,
+    }
+
+    assert run_view.report_is_drawable(spatial)
+    assert not any(key in spatial for key in ("placement", "sources", "scene_sha256"))
+    # A spatial run still has to hold what its own page reads.
+    without_encoder = {key: value for key, value in spatial.items() if key != "encoder"}
+    assert not run_view.report_is_drawable(without_encoder)
+
+
 def test_the_solver_button_is_released_before_the_apartment_is_fetched() -> None:
     """Assembly takes seconds, and a stale button offers the wrong room.
 

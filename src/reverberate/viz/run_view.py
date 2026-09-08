@@ -343,7 +343,7 @@ def _room_geometry(report: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def is_spatial(report: dict[str, Any]) -> bool:
+def is_spatial(report: Mapping[str, Any]) -> bool:
     """Whether this run is an ambisonic one rather than a set of point receivers.
 
     The two produce different artefacts and neither is a special case of the
@@ -453,12 +453,68 @@ def run_scene(run_dir: Path) -> RunRef:
     )
 
 
+#: Keys :func:`build_site` dereferences without a default **for a run of placed
+#: points**. A report missing any of them cannot be drawn, so
+#: :func:`discover_runs` refuses it there rather than letting the builder raise
+#: halfway through the collection and take every other run down with it.
+POINT_RUN_REPORT_KEYS = (
+    "run",
+    "scene_sha256",
+    "cache_key",
+    "room",
+    "theory",
+    "placement",
+    "binaural_note",
+    "dry_voice",
+    "sources",
+    "model_json",
+)
+
+#: The same list for a **spatial** run, which is a different shape and not a
+#: shorter version of the one above. It has one listening point, an ambisonic
+#: expansion about it and a pair of ears per head and orientation, so it holds
+#: no ``placement``, no ``sources`` and no ``scene_sha256``, and inventing them
+#: would put receivers on the page that the run never simulated. Checking it
+#: against the point keys would drop a good run out of the viewer without a
+#: word, which is the quiet version of the crash the guard exists to stop.
+SPATIAL_RUN_REPORT_KEYS = (
+    "run",
+    "cache_key",
+    "room",
+    "theory",
+    "model_json",
+    "array",
+    "encoder",
+    "binaural_decodes",
+    "sample_rate_hz",
+)
+
+
+def report_is_drawable(record: Mapping[str, Any]) -> bool:
+    """Whether a report holds every key **its own shape** is read for.
+
+    The shape is decided by :func:`is_spatial`, which reads what the report
+    holds rather than what the run was called.
+    """
+    keys = SPATIAL_RUN_REPORT_KEYS if is_spatial(record) else POINT_RUN_REPORT_KEYS
+    return all(key in record for key in keys)
+
+
 def discover_runs(runs_root: Path) -> list[RunRef]:
     """Every rendered run under ``runs_root``, newest name last.
 
-    A run counts as rendered only if it has both the plan that names the scene
-    and the report the payload is built from. A half-finished run directory is
-    skipped rather than offered and then failing to open.
+    A run counts as rendered only if it has the plan that names the scene, the
+    report the payload is built from, **and** every field that report is read
+    for, as listed in :data:`POINT_RUN_REPORT_KEYS` or, for the other shape,
+    :data:`SPATIAL_RUN_REPORT_KEYS`. A half-finished run directory is skipped
+    rather than offered and then failing to open.
+
+    That last condition is not belt and braces. The runs directory is shared
+    between sessions, and a report written for something other than a solve, a
+    cost study or a domain census, has a plan and a report and none of the
+    placement a page needs. Checking only that the two files exist let one such
+    directory raise ``KeyError`` inside the builder's loop and take down the
+    whole viewer, every other run with it.
     """
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
@@ -469,11 +525,14 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
         runs_root = runs_root.parent
     found: list[RunRef] = []
     for plan in sorted(runs_root.glob("*/plan.json")):
-        if not (plan.parent / "report.json").is_file():
+        report = plan.parent / "report.json"
+        if not report.is_file():
             continue
         try:
+            if not report_is_drawable(json.loads(report.read_text())):
+                continue
             found.append(run_scene(plan.parent))
-        except (KeyError, json.JSONDecodeError):
+        except (KeyError, OSError, json.JSONDecodeError):
             continue
     return found
 
