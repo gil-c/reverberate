@@ -164,6 +164,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--double", action="store_true")
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     parser.add_argument(
+        "--keep",
+        action="store_true",
+        help=(
+            "leave the instance up after a successful solve, for the next band to attach "
+            "to with --instance; the watchdog still destroys it at the deadline"
+        ),
+    )
+    parser.add_argument(
         "--instance",
         type=int,
         default=None,
@@ -318,8 +326,15 @@ def main(argv: list[str] | None = None) -> int:
         say(f"solved in {result.engine_s / 3600:.2f} h, fetched in {result.fetch_s:.0f} s")
     finally:
         if retrieved:
-            say("tearing down, the artefact is home")
-            vast.teardown(client, instance_id)
+            if args.keep:
+                say(
+                    f"KEEPING instance {instance_id} up as asked: attach the next band with "
+                    f"--instance {instance_id}, and the watchdog ends it at the "
+                    f"{args.hours:g} h deadline regardless"
+                )
+            else:
+                say("tearing down, the artefact is home")
+                vast.teardown(client, instance_id)
         else:
             say(
                 f"NOT tearing down instance {instance_id}: the artefact is not home. "
