@@ -526,10 +526,40 @@ def test_the_solver_button_is_released_before_the_apartment_is_fetched() -> None
     """
     page = _page()
 
-    release = page.index("releaseRun(sceneId);")
+    release = page.index("releaseRun(sceneId, wantedRun);")
     fetch = page.index("await fetch(`scenes/${sceneId}/manifest.json`)")
 
     assert release < fetch
+
+
+def test_the_selector_opens_the_run_it_names() -> None:
+    """It used to open whichever run of the apartment sorted last.
+
+    So choosing one run left the panel and the audio player on another while
+    the selector read the one that was asked for, with nothing on screen to say
+    so. For a listening test that is disqualifying: the listener cannot notice.
+    """
+    page = _page()
+
+    assert "releaseRun(sceneId, wanted = null)" in page
+    assert "apartmentRuns.findIndex((r) => r.name === wanted)" in page
+    assert "loadApartment(run ? run.scene_id : value, run ? run.name : null)" in page
+
+
+def test_releasing_a_run_takes_its_surfaces_out_of_the_scene() -> None:
+    """The other half of the same defect.
+
+    Nulling the payload but leaving the built group meant setMode found a group
+    already there and returned without rebuilding, so the selector moved and
+    the panel did not. The run picker's own handler had always removed it; the
+    scene selector's path had not.
+    """
+    page = _page()
+
+    release = page.index("function releaseRun(sceneId, wanted = null)")
+    body = page[release : page.index("async function loadApartment")]
+    assert "scene.remove(groups.acoustic)" in body
+    assert "groups.acoustic = null" in body
 
 
 def test_one_walkable_outline_governs_every_mode() -> None:
