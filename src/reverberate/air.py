@@ -28,22 +28,25 @@ implementation uses. :func:`attenuation_db_per_m` reproduces the five figures
 the roadmap quotes at 50 per cent to four decimal places, and those five are
 tests rather than comments.
 
-**This module is a duplicate and is meant to be deleted.** The W10 branch
+**This module is a duplicate and is meant to be deleted whole.** The W10 branch
 implements the same standard in :mod:`reverberate.audio` as
 ``air_absorption_np_per_m`` and ``apply_air_absorption``, written independently
-and at the same time. The two were cross-checked against each other and agree
-to **1.3e-5 relative** on the coefficient from 125 Hz to 16 kHz at 30, 50 and 80
-per cent relative humidity, and to 7e-6 on the energy of an absorbed decay,
-which is a real validation of both rather than a nuisance.
+and at the same time.
+
+**Cross-checked twice, and the second time they agree exactly.** A first
+comparison put them 1.27e-5 apart, which turned out to be the truncation in
+ISO's own 8.686 against the exact ``20 / ln 10``. With that removed at the
+source, converting their nepers with 8.686 reproduces this module's decibels to
+**2.2e-16**, from 125 Hz to 16 kHz at 30, 50 and 80 per cent relative humidity.
+Two people wrote the standard separately and landed on the same floating-point
+number. The applied *filter* still differs by 7e-6 in energy, which is the
+short-time transform and not the physics: root-Hann against Hann.
 
 ``audio.py`` is the right home: it is where the "air absorption is not
-modelled" claim lived, and returning nepers per metre is what its consumer
-wants, since that is where the factor 8.686 cancels. **When W10 lands, this
-module goes and its callers import from :mod:`reverberate.audio`.** The one
-thing to carry across is :class:`Atmosphere`, because the roadmap requires
-humidity to be declared with every run and a triple of loose floats cannot be
-recorded into a ``report.json`` the way a frozen dataclass with ``record()``
-can. Neither branch should merge both.
+modelled" claim lived, and nepers per metre is what its consumer wants.
+:class:`Atmosphere` has already been carried across, so **nothing here needs
+saving. When W10 lands, delete this module and import from
+:mod:`reverberate.audio`.** Neither branch should merge both.
 """
 
 from __future__ import annotations

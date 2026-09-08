@@ -23,8 +23,13 @@ between in one page:
 measurement here, and normalising each file to its own peak would make the
 truncated variant as loud as the reference and destroy the only comparison the
 page exists to make. Roadmap W30 records this defect being found and fixed for
-``w29_16k``, but the fix lived in a script that was never committed and
-``audio.peak_gain`` does not exist, so the gain is computed here.
+``w29_16k``, but the fix lived in a script that was never committed, so the
+gain is computed here.
+
+**:func:`shared_gain` is temporary.** ``audio.peak_gain`` now exists on the W10
+branch with the same contract, and ``write_wav`` there takes a ``gain=`` so a
+caller writing a comparable set can stop any file renormalising itself. When
+W10 lands, delete :func:`shared_gain` and call ``audio.peak_gain``.
 
 Usage::
 
