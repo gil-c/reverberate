@@ -214,6 +214,35 @@ function drawSpectrogram(canvas, spec) {
   buffer.getContext("2d").putImageData(image, 0, 0);
   c.imageSmoothingEnabled = true;
   c.drawImage(buffer, 0, 0, w, h);
+
+  // The frequency axis, drawn on the picture. Without it a reader can see that
+  // the energy sits low and cannot say how low, which is the difference
+  // between "the band stops at 4 kHz" and "the band runs to 16 kHz and the top
+  // of it decays in 30 ms". The band limit is drawn as a line of its own,
+  // because everything above it is the encoder's own zero and not the room's
+  // silence.
+  const top = spec.max_hz || 0;
+  if (!top) return;
+  const y = (hz) => h - (hz / top) * h;
+  c.font = "10px system-ui";
+  c.textBaseline = "middle";
+  for (const hz of [4000, 8000, 16000]) {
+    if (hz > top) continue;
+    const line = y(hz);
+    c.strokeStyle = "#ffffff55";
+    c.setLineDash(hz === (spec.band_limit_hz || 0) ? [] : [3, 4]);
+    c.beginPath();
+    c.moveTo(0, line);
+    c.lineTo(w, line);
+    c.stroke();
+    c.setLineDash([]);
+    const label = `${hz / 1000} kHz`;
+    c.fillStyle = "#00000099";
+    const width = c.measureText(label).width + 6;
+    c.fillRect(2, line - 7, width, 14);
+    c.fillStyle = "#e6e9ee";
+    c.fillText(label, 5, line);
+  }
 }
 
 // ------------------------------------------------------------------- panel

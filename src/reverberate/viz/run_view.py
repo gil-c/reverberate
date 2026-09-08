@@ -122,6 +122,7 @@ def spectrogram(
     bins: int = SPECTROGRAM_BINS,
     frames: int = SPECTROGRAM_FRAMES,
     max_hz: float | None = None,
+    band_limit_hz: float | None = None,
 ) -> dict[str, Any]:
     """A short time Fourier magnitude, in decibels, quantised to bytes.
 
@@ -171,6 +172,9 @@ def spectrogram(
         "bins": bins,
         "frames": frames,
         "max_hz": round(bins * nyquist / rows, 1),
+        # What the solver ran to, so the page can draw the line above which
+        # every value is the encoder's own zero rather than a quiet room.
+        "band_limit_hz": round(float(band_limit_hz), 1) if band_limit_hz else None,
         "seconds": round(signal.size / float(sample_rate_hz), 4),
         "range_db": SPECTROGRAM_RANGE_DB,
         "data": base64.b64encode(data.tobytes()).decode("ascii"),
@@ -366,7 +370,12 @@ def _spatial_rows(
     import sofar
 
     rate = float(report["sample_rate_hz"])
-    ceiling = float(report["encoder"].get("max_frequency_hz") or 16000.0) * 1.5
+    limit = float(report["encoder"].get("max_frequency_hz") or 16000.0)
+    # A little above the band the solver ran, not half as much again: at 16 kHz
+    # a ceiling of 24 kHz is the delivery Nyquist and spends a third of the
+    # picture drawing an empty band, which reads as a response that stops well
+    # below where it does.
+    ceiling = limit * 1.15
     rows: list[dict[str, Any]] = []
 
     ambisonic = run_dir / "responses" / "ambisonic.sofa"
@@ -384,7 +393,7 @@ def _spatial_rows(
                 "peak": round(float(np.max(np.abs(signals[0]))), 6),
                 "envelope": envelope(signals[0]),
                 "decay": decay_curve_points(signals[0], rate),
-                "spectrogram": spectrogram(signals[0], rate, max_hz=ceiling),
+                "spectrogram": spectrogram(signals[0], rate, max_hz=ceiling, band_limit_hz=limit),
                 "measures": report.get("omnidirectional"),
                 "wet_audio": (
                     "audio/ambisonic_acn_sn3d.wav"
@@ -418,7 +427,7 @@ def _spatial_rows(
                     "peak": round(float(np.max(np.abs(responses[index]))), 6),
                     "envelope": envelope(left),
                     "decay": decay_curve_points(left, rate),
-                    "spectrogram": spectrogram(left, rate, max_hz=ceiling),
+                    "spectrogram": spectrogram(left, rate, max_hz=ceiling, band_limit_hz=limit),
                     "measures": block["measures"].get(f"yaw_{int(round(yaw))}"),
                     "wet_audio": f"audio/{name}" if name in audio_names else None,
                     "note": block["decoder"].get("head"),
