@@ -186,26 +186,48 @@ def test_the_gain_is_exact_wherever_there_is_signal_at_any_duration() -> None:
         assert abs(slope / analytic - 1.0) < 0.005, seconds
 
 
-def test_a_longer_frame_buys_dynamic_range_and_nothing_else() -> None:
-    """What the frame is actually for, measured rather than assumed.
+def _departure_db(frame: int, margin_db: float = 6.0, seconds: float = 3.0) -> float:
+    """Analytic level past which the curve never returns within ``margin_db``.
 
-    Every frame follows the analytic line to -125 dB and then flattens on its
-    own leakage floor. Doubling the frame lowers that floor by roughly 20 dB.
-    A room response never reaches it, because its top band still holds content
-    where a tone has gone.
+    Well posed, unlike a "floor": once the tone has died the block level
+    fluctuates over more than a hundred decibels, so any average of the tail
+    depends on how it is averaged. Where the curve *leaves* the line does not.
     """
+    sample_rate, block = 48000.0, 480
     analytic = -float(attenuation_db_per_m(16000.0, Atmosphere())) * SOUND_SPEED
-    block_s = 480 / 48000.0
-    floors = {}
-    for frame in (256, 1024):
-        level = _tone_level_db(2.5, frame)
-        axis = np.arange(len(level)) * block_s
-        # Both must be exact while the tone is well above any floor.
-        early = np.abs(axis - 0.8).argmin()
-        assert abs(level[early] - analytic * axis[early]) < 6.0, frame
-        floors[frame] = float(level.min())
+    times = np.arange(int(seconds * sample_rate)) / sample_rate
+    tone = np.sin(2.0 * np.pi * 16000.0 * times)
+    out = apply(tone, sample_rate, sound_speed_m_s=SOUND_SPEED, frame=frame)
+    keep = out[int(0.15 * sample_rate) : int((seconds - 0.15) * sample_rate)]
+    usable = keep[: (len(keep) // block) * block].reshape(-1, block)
+    level = 20.0 * np.log10(np.sqrt((usable**2).mean(axis=1)) + 1e-300)
+    axis = 0.15 + np.arange(len(level)) * block / sample_rate
+    level = level - level[0] + analytic * axis[0]
+    ideal = analytic * axis
+    above = level - ideal > margin_db
+    for index in range(len(above)):
+        if above[index:].all():
+            return float(ideal[index])
+    return float("-inf")
 
-    assert floors[1024] < floors[256] - 20.0
+
+def test_a_longer_frame_holds_the_line_further_down() -> None:
+    """What the frame is for, stated as the property that is well posed.
+
+    Deliberately not an assertion about decibels per doubling. That step is not
+    constant here, 15 then 20 then 30 then 19 then 1 as the transform's own
+    arithmetic takes over near -240 dB, and the W10 branch measures a steady
+    15 dB on a different statistic. The disagreement is in what is averaged
+    after the tone dies, so neither session publishes a constant. What both
+    measure, and what a caller needs, is that a longer frame departs later.
+    """
+    departures = {frame: _departure_db(frame) for frame in (256, 512, 1024)}
+
+    assert departures[512] < departures[256]
+    assert departures[1024] < departures[512]
+    # The default is exact far below anything a room response reaches: its top
+    # band would have to fall 170 dB, and w29_16k's falls about 30.
+    assert departures[256] < -150.0
 
 
 def test_absorption_never_adds_energy() -> None:

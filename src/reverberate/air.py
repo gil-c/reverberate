@@ -219,29 +219,38 @@ def apply(
     large.
 
     **What the frame sets is a dynamic range, not a time limit.** Every frame
-    tracks the analytic decay exactly until the signal reaches that frame's own
-    spectral leakage floor, and then flattens on it. Measured on a 16 kHz tone,
-    which falls 125 dB per second, edges excluded:
+    tracks the analytic decay exactly until the signal gets faint enough that
+    spectral leakage from the loud part of the spectrum reaches it, and past
+    that point the output is numerical residue rather than a filtered tone.
+    Measured on a 16 kHz tone, which falls 125 dB per second: the analytic
+    level past which the curve never comes back within 6 dB of the line.
 
-    ======== ================== ==========================
-    frame    exact down to      leakage floor
-    ======== ================== ==========================
-    128      -125 dB            about -148 dB
-    **256**  **-125 dB**        **about -161 dB**
-    512      -125 dB            about -183 dB
-    1024     -125 dB            about -213 dB
-    2048     -125 dB            about -231 dB
-    ======== ================== ==========================
+    ======== ====================
+    frame    exact down to
+    ======== ====================
+    128      -155 dB
+    **256**  **-170 dB**
+    512      -190 dB
+    1024     -220 dB
+    2048     -239 dB
+    4096     -240 dB
+    ======== ====================
 
-    Doubling the frame buys roughly 20 dB of floor and nothing else: the gain
-    itself is applied correctly at every duration, wherever there is signal.
+    **The step per doubling is not a constant and is not settled.** It reads
+    15, 20, 30, 19 then 1 dB here, saturating near -240 dB where the transform's
+    own arithmetic takes over from leakage. The W10 branch measures a steady
+    15 dB per doubling on a different statistic, the mean of the tail. The
+    disagreement is in what is being averaged once the tone has died, not in
+    the filter: after departure the block level fluctuates over more than a
+    hundred decibels, so any single "floor" number depends on the averaging.
+    Neither session should publish a constant, and neither does.
 
     **Duration is only how long it takes to fall that far.** A 16 kHz tone
-    reaches the default's floor at about 1.3 s, which is why a naive slope
-    fitted over a longer record reads shallow. That is the fit meeting the
-    floor, not the filter mis-applying the gain, and restricting the fit to
-    where the tone is still above -100 dB gives 0.08 per cent at every duration
-    out to 2 s.
+    reaches the default's departure level at about 1.35 s, which is why a naive
+    slope fitted over a longer record reads shallow. That is the fit meeting
+    the residue, not the filter mis-applying the gain, and restricting the fit
+    to where the tone is still above -100 dB gives 0.08 per cent at every
+    duration out to 2 s.
 
     **A room response never gets there.** Its top band still holds content
     where a tone has gone, because the tail is broadband. Measured against a
