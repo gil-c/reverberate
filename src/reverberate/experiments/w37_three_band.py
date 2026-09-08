@@ -225,6 +225,19 @@ def build(
         mid_wet[:, :common], high_wet[:, :common], sample_rate, calibration_hz=CALIBRATION_HZ
     )
     predicted_gain = mid_response.provenance.fmax_hz / high_response.provenance.fmax_hz
+    # The prediction is the cheapest test that two runs are comparable at all,
+    # so it is checked rather than merely recorded. A pair that disagrees here
+    # is a pair that must not be summed: the level defect this guards against
+    # was 12 dB and showed only on a spectrogram.
+    measured_db = 20.0 * float(np.log10(gain_mid))
+    predicted_db = 20.0 * float(np.log10(predicted_gain))
+    if abs(measured_db - predicted_db) > 3.0:
+        raise ValueError(
+            f"the two solves differ by {measured_db:+.2f} dB on the calibration bands "
+            f"but their source bandwidths predict {predicted_db:+.2f} dB. They are not "
+            "the same room under the same excitation, or one of them is not what its "
+            "provenance says, and summing them would put a band at the wrong level."
+        )
     gains = (gain_mid, gain_mid, 1.0)
 
     # Solved: every band taken from its run untouched, on one scale.
