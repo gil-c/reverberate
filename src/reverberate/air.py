@@ -236,14 +236,35 @@ def apply(
     4096     -240 dB
     ======== ====================
 
-    **The step per doubling is not a constant and is not settled.** It reads
-    15, 20, 30, 19 then 1 dB here, saturating near -240 dB where the transform's
-    own arithmetic takes over from leakage. The W10 branch measures a steady
-    15 dB per doubling on a different statistic, the mean of the tail. The
-    disagreement is in what is being averaged once the tone has died, not in
-    the filter: after departure the block level fluctuates over more than a
-    hundred decibels, so any single "floor" number depends on the averaging.
-    Neither session should publish a constant, and neither does.
+    **The step per doubling is not a constant.** It reads 15, 20, 30, 19 then
+    1 dB here, saturating near -240 dB where the transform's own arithmetic
+    takes over from leakage.
+
+    **The W10 branch measures the same definition about 50 to 70 dB higher, and
+    the cause is the window scheme rather than the measurement.** Reimplementing
+    the overlap-add by hand, same gain surface and same three-quarter overlap,
+    only the window pair changing, at a 256-sample frame:
+
+    ===================================== ==============
+    analysis and synthesis pair           departure
+    ===================================== ==============
+    root-Hann both sides, W10's scheme    -119 dB
+    Hann analysis, no synthesis window    -124 dB
+    **Hann both sides, which is scipy's** **-170 dB**
+    ===================================== ==============
+
+    The hand-rolled Hann-twice reproduces :func:`scipy.signal.istft` to the
+    decimal at every frame, so this is what ``apply`` uses: an effective Hann
+    squared, which rolls off far faster in frequency than a cosine window and
+    therefore keeps leakage out of a faint bin much longer. The advantage grows
+    with the frame, 45 dB at 128 and 70 dB at 1024.
+
+    **This does not make either scheme wrong.** Splitting the modification
+    evenly between analysis and synthesis, which is what the root pair buys, is
+    a real property that this one does not have; both are exact wherever there
+    is signal; and no room response comes within seventy decibels of either
+    limit. It is recorded because two docstrings in one repository otherwise
+    carry numbers that differ by 70 dB with no reason attached.
 
     **Duration is only how long it takes to fall that far.** A 16 kHz tone
     reaches the default's departure level at about 1.35 s, which is why a naive
