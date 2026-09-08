@@ -49,6 +49,7 @@ __all__ = [
     "HrtfSet",
     "ear_directions",
     "load_hrir_sofa",
+    "measured_head",
     "project",
     "sphere_hrtf",
     "sphere_hrtf_sh",
@@ -223,6 +224,49 @@ def project(hrtf: HrtfSet, order: int, *, regularisation: float = 1e-8) -> np.nd
     normal = basis.T @ basis + regularisation * np.eye(channel_count(order))
     inverse = np.linalg.solve(normal, basis.T)
     return np.asarray(np.einsum("cq,eqf->ecf", inverse, hrtf.responses), dtype=complex)
+
+
+def measured_head(
+    path: Path | str, sample_rate_hz: float, filter_length: int
+) -> tuple[HrtfSet, dict[str, Any]]:
+    """A measured head from a SOFA file, on a decoder's own frequency grid.
+
+    The impulse responses are zero padded to ``filter_length`` and transformed,
+    which puts them on ``rfftfreq(filter_length, 1 / sample_rate_hz)`` exactly.
+    Padding rather than truncating: a measured response carries the propagation
+    delay from the loudspeaker to the head, and cutting it would take the
+    interaural delay with it.
+
+    Returns the head and what the file says about itself. **The second is not
+    optional.** A measured set travels with its licence and its attribution or
+    it does not travel, and the licence of a head is not the licence of the room
+    it is decoded into.
+    """
+    responses, unit_vectors, rate, metadata = load_hrir_sofa(path)
+    if not np.isclose(rate, sample_rate_hz):
+        raise ValueError(
+            f"{path} was measured at {rate} Hz and the decoder works at "
+            f"{sample_rate_hz} Hz; resample the file rather than the decoder"
+        )
+    if responses.shape[2] > filter_length:
+        raise ValueError(
+            f"{path} holds {responses.shape[2]} taps, longer than the "
+            f"{filter_length} tap decoder; a longer filter would keep them all"
+        )
+    spectra = np.fft.rfft(responses, n=filter_length, axis=-1)
+    return (
+        HrtfSet(
+            responses=np.asarray(spectra, dtype=complex),
+            unit_vectors=unit_vectors,
+            frequency_hz=np.fft.rfftfreq(filter_length, 1.0 / sample_rate_hz),
+            description=(
+                f"measured: {metadata.get('listener') or Path(path).stem}, "
+                f"{metadata.get('organisation') or 'unknown source'}, "
+                f"{responses.shape[1]} directions"
+            ),
+        ),
+        metadata,
+    )
 
 
 def load_hrir_sofa(path: Path | str) -> tuple[np.ndarray, np.ndarray, float, dict[str, Any]]:

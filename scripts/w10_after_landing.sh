@@ -23,8 +23,11 @@ fi
 if [ -d "$OLD" ] && [ ! -d "$NEW" ]; then mv "$OLD" "$NEW"; echo "renamed to $(basename $NEW)"; fi
 
 echo "rendering, encoding and decoding"
+HEAD=$REVERBERATE_DATA/raw/hrtf/HRIR_L2702.sofa
+MEASURED=""
+[ -f "$HEAD" ] && MEASURED="--measured-head $HEAD"
 caffeinate -i .venv/bin/python -m reverberate.experiments.w10_render room \
-  --run "$NEW" --low-cut 39.551 --audio 2>&1 | tail -3
+  --run "$NEW" --low-cut 39.551 --audio $MEASURED 2>&1 | tail -3
 
 .venv/bin/python - <<'PY'
 import json, os
@@ -45,5 +48,11 @@ for head, block in r["binaural_decodes"].items():
           f"late coherence {row['late_coherence']}")
 print("artefacts:", r.get("artefacts"))
 print("audio:", [a["path"] for a in r.get("audio", [])])
+conflict = r.get("licence_conflict")
+if conflict:
+    print("\nLICENCE, for the owner to settle:", conflict["head_licence"],
+          "against", conflict["project_licence"])
+    print(" ", conflict["what"])
+    print(" ", conflict["so"])
 PY
 echo "done. Publish with: --publish, and add the REGISTRY.md row."

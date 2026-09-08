@@ -61,6 +61,7 @@ from reverberate.spatial.hrtf import (
     HEAD_RADIUS_M,
     HrtfSet,
     ear_directions,
+    measured_head,
     sphere_hrtf,
     woodworth_itd_s,
 )
@@ -71,7 +72,7 @@ from reverberate.spatial.validate import (
     direction_to_scene_point,
     energy_per_order,
 )
-from reverberate.store import shared_store
+from reverberate.store import digest_of_file, shared_store
 
 __all__ = [
     "DELIVERY_RATE_HZ",
@@ -152,15 +153,24 @@ def decoders(
     *,
     filter_length: int = 512,
     magls_cut_on_hz: float = 2000.0,
-) -> dict[str, BinauralDecoder]:
-    """The decoders this run renders through, keyed by the name they are filed under.
+    measured_path: Path | None = None,
+) -> tuple[dict[str, BinauralDecoder], dict[str, Any]]:
+    """The decoders this run renders through, and what their heads are.
 
-    Both the plain least squares and the magnitude one, because the difference
-    between them is a measurement this run reports rather than a setting it
-    picks.
+    Two from the analytic sphere: the magnitude least squares one, which is what
+    the run is listened to through, and the plain least squares one, which is
+    kept because the difference between them is a measurement this run reports
+    rather than a setting it picks.
+
+    A third from a measured head when ``measured_path`` names one. It is not the
+    default and it never will be: the sphere is the one with a closed form to be
+    checked against, and a measured set is a file that has to be fetched, whose
+    conventions have to be believed, and whose licence is not this project's.
     """
+    heads: dict[str, Any] = {}
     head = sphere_head(sample_rate_hz, filter_length)
-    return {
+    heads["sphere"] = {"description": head.description, "licence": None}
+    built = {
         "sphere_magls": design_decoder(
             head,
             order=order,
@@ -177,6 +187,27 @@ def decoders(
             covariance_constraint=False,
         ),
     }
+    if measured_path is not None:
+        measured, metadata = measured_head(measured_path, sample_rate_hz, filter_length)
+        heads["measured"] = {
+            "description": measured.description,
+            "file": Path(measured_path).name,
+            "sha256": digest_of_file(Path(measured_path)),
+            **{k: v for k, v in metadata.items() if k in ("licence", "author", "organisation")},
+            "note": (
+                "a measured head carries its own licence, which is not this "
+                "project's; see the report's licence_conflict field before "
+                "publishing anything decoded through it"
+            ),
+        }
+        built["measured_magls"] = design_decoder(
+            measured,
+            order=order,
+            sample_rate_hz=sample_rate_hz,
+            filter_length=filter_length,
+            magls_cut_on_hz=magls_cut_on_hz,
+        )
+    return built, heads
 
 
 def band_directions(
@@ -244,6 +275,36 @@ def binaural_measures(
         "late_coherence_note": (
             "roadmap 5.5 predicts a diffuse tail is nearly incoherent between "
             "the ears above 1 kHz, about 0.04 at 8 kHz"
+        ),
+    }
+
+
+def _licence_conflict(heads: dict[str, Any]) -> dict[str, Any] | None:
+    """Whether anything decoded here may be published under this project's licence.
+
+    **Not a decision this module takes.** The room's geometry comes from HSSD
+    under CC BY-NC, and a measured head may carry a share alike term, which asks
+    a derivative to be licensed the same way while the non commercial term
+    forbids exactly that. A response decoded through both is a derivative of
+    both. The conflict is reported and the owner settles it; the sphere decode
+    has no such question and can always be published.
+    """
+    measured = heads.get("measured")
+    if measured is None:
+        return None
+    licence = str(measured.get("licence", ""))
+    if "SA" not in licence.upper().replace("-", " ").split() and "BY-SA" not in licence.upper():
+        return None
+    return {
+        "head_licence": licence,
+        "project_licence": LICENCE,
+        "what": (
+            "a share alike head decoded into non commercial geometry is a "
+            "derivative of two licences that do not compose"
+        ),
+        "so": (
+            "the measured decode is written locally for listening and is not "
+            "published; the sphere decode carries no such question"
         ),
     }
 
@@ -350,6 +411,7 @@ def room_report(
     lowcut_hz: float,
     yaws_deg: tuple[float, ...] = YAWS_DEG,
     filter_length: int = 512,
+    measured_path: Path | None = None,
     rendered: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Encode the room run, decode it through the heads, and measure all of it.
@@ -389,7 +451,9 @@ def room_report(
     reference = direction_to_scene_point(ambisonic, source)
     times, order_energy = energy_per_order(ambisonic)
 
-    built = decoders(settings.order, rate, filter_length=filter_length)
+    built, heads = decoders(
+        settings.order, rate, filter_length=filter_length, measured_path=measured_path
+    )
     azimuth = float(np.arctan2(reference[1], reference[0]))
     binaural: dict[str, Any] = {}
     responses: dict[str, dict[float, np.ndarray]] = {}
@@ -454,6 +518,8 @@ def room_report(
             for index, row in enumerate(extra_rows)
         ],
         "binaural_decodes": binaural,
+        "heads": heads,
+        "licence_conflict": _licence_conflict(heads),
     }
 
 
@@ -535,7 +601,14 @@ def _room(args: argparse.Namespace) -> int:
         else Atmosphere(temperature_c=args.temperature, humidity_percent=args.humidity)
     )
     rendered: dict[str, Any] = {}
-    report = room_report(args.run, settings, air=air, lowcut_hz=args.low_cut, rendered=rendered)
+    report = room_report(
+        args.run,
+        settings,
+        air=air,
+        lowcut_hz=args.low_cut,
+        measured_path=args.measured_head,
+        rendered=rendered,
+    )
     ambisonic = rendered["ambisonic"]
     provenance = Provenance(
         scene_sha256=str(rendered["plan"].get("geometry_sha256") or ""),
@@ -600,6 +673,12 @@ def _room(args: argparse.Namespace) -> int:
             raise SystemExit("no store credentials, so nothing can be published")
         files = [*artefacts, args.run / "report.json", args.run / "plan.json"]
         files += sorted((args.run / "audio").glob("*.wav"))
+        conflict = report.get("licence_conflict")
+        if conflict:
+            # Written locally for listening, kept out of the store. Publishing
+            # is what a licence governs, and this one is not ours to resolve.
+            files = [path for path in files if "measured" not in path.name]
+            print(f"not publishing the measured decode: {conflict['what']}")
         report["published"] = publish(store, args.run.name, files)
         write_record(args.run, "report.json", report)
     return 0
@@ -627,6 +706,12 @@ def main(argv: list[str] | None = None) -> int:
     room.add_argument("--audio", action="store_true", help="render the anechoic clip through it")
     room.add_argument("--publish", action="store_true", help="push the artefacts to the store")
     room.add_argument("--seed", type=int, default=20250101)
+    room.add_argument(
+        "--measured-head",
+        type=Path,
+        default=None,
+        help="a SimpleFreeFieldHRIR file to decode through as well as the sphere",
+    )
     room.set_defaults(func=_room)
 
     args = parser.parse_args(argv)

@@ -11,6 +11,8 @@ Synthetic, offline, a few seconds.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -28,6 +30,7 @@ from reverberate.spatial.hrtf import (
     HEAD_RADIUS_M,
     HrtfSet,
     ear_directions,
+    measured_head,
     project,
     sphere_hrtf,
     sphere_hrtf_sh,
@@ -226,3 +229,61 @@ def test_uncorrelated_ears_read_as_incoherent_and_a_shared_signal_as_coherent() 
 def test_the_head_radius_and_ear_angle_are_the_documented_ones() -> None:
     assert pytest.approx(0.0875) == HEAD_RADIUS_M
     assert pytest.approx(100.0) == EAR_AZIMUTH_DEG
+
+
+class TestAMeasuredHead:
+    """A head from a file, which is a different kind of trust from a formula.
+
+    The sphere is checked against its own closed form. A measured set can only
+    be checked for the conventions it claims: that its ears are the way round it
+    says, that its grid covers the sphere, and that it lands on the decoder's own
+    frequency grid rather than near it.
+    """
+
+    def a_file(self, tmp_path: Path) -> Path:
+        sofar = pytest.importorskip("sofar")
+        sofa = sofar.Sofa("SimpleFreeFieldHRIR")
+        grid, _ = quadrature(14)
+        azimuth = np.degrees(np.arctan2(grid[:, 1], grid[:, 0])) % 360.0
+        elevation = np.degrees(np.arcsin(np.clip(grid[:, 2], -1.0, 1.0)))
+        count = grid.shape[0]
+        # A delay that is longer at the far ear, so the file has a real
+        # interaural difference to be recovered rather than a symmetric one.
+        responses = np.zeros((count, 2, 64))
+        for index, direction in enumerate(grid):
+            for ear, side in enumerate((1.0, -1.0)):
+                responses[index, ear, 20 - int(round(6 * side * direction[1]))] = 1.0
+        sofa.Data_IR = responses
+        sofa.Data_SamplingRate = 48000.0
+        sofa.Data_Delay = np.zeros((1, 2))
+        sofa.SourcePosition = np.stack([azimuth, elevation, np.ones(count)], axis=1)
+        sofa.GLOBAL_ListenerShortName = "test"
+        path = tmp_path / "head.sofa"
+        sofar.write_sofa(str(path), sofa)
+        return path
+
+    def test_it_lands_on_the_decoder_s_own_frequency_grid(self, tmp_path: Path) -> None:
+        head, _ = measured_head(self.a_file(tmp_path), 48000.0, 256)
+        assert np.allclose(head.frequency_hz, np.fft.rfftfreq(256, 1.0 / 48000.0))
+        design_decoder(head, order=3, sample_rate_hz=48000.0, filter_length=256)
+
+    def test_its_left_ear_is_the_left_one(self, tmp_path: Path) -> None:
+        """The check that a file's conventions match this project's."""
+        head, _ = measured_head(self.a_file(tmp_path), 48000.0, 256)
+        decoder = design_decoder(head, order=3, sample_rate_hz=48000.0, filter_length=256)
+        rendered = render(a_plane_wave(3, 90.0), decoder)
+        assert itd_s(rendered, RATE) > 0.0
+
+    def test_a_file_measured_at_another_rate_is_refused(self, tmp_path: Path) -> None:
+        """Resample the file, never the decoder."""
+        with pytest.raises(ValueError, match="resample the file"):
+            measured_head(self.a_file(tmp_path), 44100.0, 256)
+
+    def test_a_head_longer_than_the_filter_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="longer than"):
+            measured_head(self.a_file(tmp_path), 48000.0, 32)
+
+    def test_it_carries_the_licence_it_was_given(self, tmp_path: Path) -> None:
+        """A measured set travels with its licence or it does not travel."""
+        _, metadata = measured_head(self.a_file(tmp_path), 48000.0, 256)
+        assert set(metadata) >= {"licence", "author", "organisation", "measurements"}
