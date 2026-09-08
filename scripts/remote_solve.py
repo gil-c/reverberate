@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -298,6 +299,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         retrieved = True
         (args.run / "source0" / "engine.log").write_text(result.log)
+        # The render reads the sample rate from the constants beside the
+        # output, as a local run leaves them; a fetched run had none and the
+        # first assembly of three fetched bands stopped on the missing file.
+        shutil.copy2(entry.path / "sim_consts.h5", args.run / "source0" / "sim_consts.h5")
         write_record(
             args.run,
             "solve.json",
