@@ -71,6 +71,9 @@ class ArrayDesign:
     shell: np.ndarray
     nominal_radii: tuple[float, ...]
     grid_step_m: float
+    #: The listening position that was asked for. ``centre`` is the grid node
+    #: nearest it, which is what the field is actually expanded about.
+    requested_centre: np.ndarray | None = None
 
     @property
     def count(self) -> int:
@@ -92,8 +95,19 @@ class ArrayDesign:
                     "radius_max_m": round(float(on_shell.max()), 5),
                 }
             )
+        offset = (
+            None
+            if self.requested_centre is None
+            else round(float(np.linalg.norm(self.centre - self.requested_centre)), 6)
+        )
         return {
             "centre": [round(float(v), 5) for v in self.centre],
+            "requested_centre": (
+                None
+                if self.requested_centre is None
+                else [round(float(v), 5) for v in self.requested_centre]
+            ),
+            "centre_offset_m": offset,
             "nodes": self.count,
             "grid_step_m": self.grid_step_m,
             "outer_radius_m": round(float(self.radii.max()), 5),
@@ -174,7 +188,16 @@ def design_array(
         raise ValueError(f"{len(radii_m)} radii but {len(counts)} counts")
 
     seen: dict[int, tuple[np.ndarray, int]] = {}
+    # **The expansion centre is a node, not the point that was asked for.** The
+    # requested centre is a listening position and lands wherever it lands; the
+    # node nearest it is up to half a cell diagonal away, 1.8 mm at the 16 kHz
+    # step. Expanding about the node instead makes the centre receiver's radius
+    # exactly zero, which turns the W channel into the pressure measured there
+    # rather than something 18 dB away from it, and gives the whole encode a
+    # free exact check. The offset is recorded, not swallowed.
+    requested = centre
     centre_position, centre_index = nearest_node(centre, grid)
+    centre = centre_position
     seen[centre_index] = (centre_position, 0)
     for shell, (radius, count) in enumerate(zip(radii_m, counts, strict=True)):
         for direction in fibonacci_directions(count):
@@ -194,6 +217,7 @@ def design_array(
         shell=shells,
         nominal_radii=tuple(float(r) for r in radii_m),
         grid_step_m=float(grid.h),
+        requested_centre=np.asarray(requested, dtype=float),
     )
 
 

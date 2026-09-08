@@ -85,6 +85,7 @@ __all__ = [
     "DELIVERY_RATE_HZ",
     "YAWS_DEG",
     "band_directions",
+    "centre_identity",
     "binaural_measures",
     "decoders",
     "pressures_of_run",
@@ -310,6 +311,71 @@ def _cache_entry(plan: dict[str, Any]) -> tuple[Path, Path] | None:
     return (entry, model) if model.is_file() else None
 
 
+def centre_identity(
+    ambisonic: Ambisonic, array_rows: np.ndarray, design: ArrayDesign
+) -> dict[str, Any] | None:
+    """Check the encoded W channel against the pressure actually measured at the centre.
+
+    **This is an identity, not an approximation.** At the expansion centre every
+    radial term but the first vanishes, ``j_n(0) = 0`` for ``n > 0`` and
+    ``j_0(0) = 1``, and ``Y_00 = 1``, so the field there is exactly ``a_00``.
+    The plane wave convention divides by ``i^0``, which is one, so the W channel
+    equals the pressure at the centre at every frequency.
+
+    That makes it the one check on the real data that costs nothing and needs no
+    reference run: a scaling error, a lost normalisation or a wrong plane wave
+    convention all move it, and nothing else in this report would notice. It is
+    available whenever the array holds its own centre node, which
+    :func:`reverberate.spatial.array.design_array` always includes.
+    """
+    at_centre = np.flatnonzero(design.radii == 0.0)
+    if at_centre.size != 1:
+        return None
+    measured = array_rows[int(at_centre[0])]
+    encoded = ambisonic.signals[0]
+    length = min(measured.size, encoded.size)
+    spectrum_measured = np.fft.rfft(measured[:length])
+    spectrum_encoded = np.fft.rfft(encoded[:length])
+    frequency = np.fft.rfftfreq(length, 1.0 / ambisonic.sample_rate_hz)
+
+    # **Per band, never as one number.** Ninety six per cent of a room
+    # response's energy sits below 1 kHz, so a broadband residual is a
+    # measurement of the bottom octave and hides whatever the top one is doing.
+    # W29's own lesson, in the roadmap's words: a scalar hid a 29 per cent
+    # omission behind a 5 per cent agreement.
+    rows = []
+    for centre_hz in (125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0):
+        band = (frequency >= centre_hz / np.sqrt(2.0)) & (frequency < centre_hz * np.sqrt(2.0))
+        reference = float(np.linalg.norm(spectrum_measured[band]))
+        if not band.any() or reference == 0.0:
+            continue
+        residual = float(np.linalg.norm(spectrum_encoded[band] - spectrum_measured[band]))
+        rows.append(
+            {
+                "band_hz": int(centre_hz),
+                "residual_db": round(20.0 * np.log10(max(residual / reference, 1e-300)), 2),
+                "share_of_energy": round(
+                    float(
+                        reference**2 / max(float(np.linalg.norm(spectrum_measured)) ** 2, 1e-300)
+                    ),
+                    5,
+                ),
+            }
+        )
+    if not rows:
+        return None
+    return {
+        "what": "the W channel against the pressure measured at the array's centre node",
+        "why_exact": (
+            "at the centre every radial term but the first vanishes, so the "
+            "field there is exactly a_00, and the plane wave convention divides "
+            "it by one; this is an identity and not an approximation"
+        ),
+        "per_band": rows,
+        "worst_db": max(row["residual_db"] for row in rows),
+    }
+
+
 def _licence_conflict(heads: dict[str, Any]) -> dict[str, Any] | None:
     """Whether anything decoded here may be published under this project's licence.
 
@@ -453,7 +519,12 @@ def room_report(
     """
     plan = json.loads((run_dir / "plan.json").read_text())
     positions = np.load(run_dir / "array_positions.npy")
-    centre = np.asarray(plan["centre"], dtype=float)
+    requested = np.asarray(plan["centre"], dtype=float)
+    # The field is expanded about the grid node, not about the point that was
+    # asked for. They differ by up to half a cell diagonal, and expanding about
+    # the request would put the centre receiver at a non zero radius and cost
+    # the exact identity between the W channel and the pressure measured there.
+    centre = positions[int(np.argmin(np.linalg.norm(positions - requested, axis=1)))]
     source = np.asarray(plan["source"], dtype=float)
     extras = np.asarray(plan["extra_receivers"], dtype=float).reshape(-1, 3)
     design = ArrayDesign(
@@ -464,6 +535,7 @@ def room_report(
         shell=np.zeros(positions.shape[0], dtype=int),
         nominal_radii=(float(np.linalg.norm(positions - centre, axis=1).max()),),
         grid_step_m=float(plan["array"]["grid_step_m"]),
+        requested_centre=requested,
     )
     fmax = float(settings.max_frequency_hz or 16000.0)
     # Sabine and Eyring beside the measurement, from the solver's own boundary
@@ -507,6 +579,7 @@ def room_report(
     )
     reference = direction_to_scene_point(ambisonic, source)
     times, order_energy = energy_per_order(ambisonic)
+    identity = centre_identity(ambisonic, array_rows, design)
 
     built, heads = decoders(
         settings.order, rate, filter_length=filter_length, measured_path=measured_path
@@ -565,6 +638,7 @@ def room_report(
             }
         ),
         "low_cut_hz": lowcut_hz,
+        "centre_identity": identity,
         "direction_of_arrival": band_directions(ambisonic, reference),
         "reference_direction": [round(float(v), 5) for v in reference],
         "order_energy": {

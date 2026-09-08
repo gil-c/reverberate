@@ -21,13 +21,14 @@ from reverberate.experiments.w10_ambisonic import COMMS_NAME
 from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
+    centre_identity,
     decoders,
     room_report,
     sphere_head,
     write_audio,
 )
-from reverberate.spatial.array import design_array
-from reverberate.spatial.encode import Ambisonic, EncoderSettings
+from reverberate.spatial.array import ArrayDesign, design_array
+from reverberate.spatial.encode import Ambisonic, EncoderSettings, encode
 from reverberate.spatial.sh import channel_count, directions, real_sh
 from reverberate.wave.comms import Grid
 
@@ -323,3 +324,65 @@ def test_the_report_hands_back_what_it_rendered_so_nothing_is_encoded_twice(
     assert isinstance(brirs, dict)
     assert set(brirs) == {"sphere_magls", "sphere_plain"}
     assert sorted(brirs["sphere_magls"]) == [0.0, 90.0]
+
+
+def test_the_centre_identity_holds_on_a_field_the_expansion_describes() -> None:
+    """The one check on real data that costs nothing and needs no reference run.
+
+    At the expansion centre every radial term but the first vanishes, so the
+    field there is exactly ``a_00``, and the plane wave convention divides it by
+    one. A scaling error, a lost normalisation or a wrong plane wave convention
+    all move it, and nothing else in the report would notice.
+    """
+    grid = a_grid()
+    centre = np.full(3, 100 * STEP)
+    design = design_array(centre, grid, fit_order=6, outer_radius_m=0.16)
+    assert np.count_nonzero(design.radii == 0.0) == 1
+
+    # A monopole well outside the array, sampled exactly, which is a field the
+    # interior expansion describes to within its own truncation.
+    rate, samples = 48000.0, 2048
+    frequency = np.fft.rfftfreq(samples, 1.0 / rate)
+    source = centre + np.array([1.5, 0.0, 0.0])
+    from reverberate.spatial.sh import scene_to_ambisonic
+
+    offsets = scene_to_ambisonic(design.offsets)
+    distance = np.linalg.norm(offsets - scene_to_ambisonic((source - centre)[None, :])[0], axis=1)
+    wavenumber = 2.0 * np.pi * frequency / SOUND_SPEED
+    field = np.exp(-1j * wavenumber[None, :] * distance[:, None]) / (
+        4.0 * np.pi * distance[:, None]
+    )
+    pressure = np.fft.irfft(field, n=samples, axis=-1)
+
+    ambisonic = encode(
+        pressure,
+        rate,
+        design,
+        sound_speed_m_s=SOUND_SPEED,
+        settings=EncoderSettings(order=3, fit_order=6, dispersion="ideal"),
+    )
+    identity = centre_identity(ambisonic, pressure, design)
+    assert identity is not None
+    audible = [row for row in identity["per_band"] if row["share_of_energy"] > 0.01]
+    assert audible
+    assert max(row["residual_db"] for row in audible) < -25.0
+
+
+def test_the_centre_identity_is_absent_without_a_centre_node() -> None:
+    """Reported as missing rather than computed from the nearest thing to hand."""
+    grid = a_grid()
+    centre = np.full(3, 100 * STEP)
+    design = design_array(centre, grid, fit_order=6, outer_radius_m=0.16)
+    moved = ArrayDesign(
+        centre=design.centre + np.array([0.01, 0.0, 0.0]),
+        positions=design.positions,
+        offsets=design.positions - (design.centre + np.array([0.01, 0.0, 0.0])),
+        radii=np.linalg.norm(
+            design.positions - (design.centre + np.array([0.01, 0.0, 0.0])), axis=1
+        ),
+        shell=design.shell,
+        nominal_radii=design.nominal_radii,
+        grid_step_m=design.grid_step_m,
+    )
+    ambisonic = Ambisonic(np.zeros((16, 64)), 48000.0, 3, moved.centre)
+    assert centre_identity(ambisonic, np.zeros((moved.count, 64)), moved) is None
