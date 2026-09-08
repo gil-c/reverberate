@@ -138,6 +138,52 @@ def test_a_shorter_frame_does_not_change_the_answer() -> None:
     assert energy_coarse == pytest.approx(energy_fine, rel=0.01)
 
 
+def test_the_filter_reconstructs_exactly_when_nothing_is_absorbed() -> None:
+    """The property an overlap-add filter has to have before it is trusted.
+
+    At a sound speed of nothing the gain surface is all ones, so the transform
+    must return the signal it was given. If it did not, every absorbed response
+    would carry a ripple across the overlap that no amount of correct physics
+    would remove. Measured here at 1e-14, which is float64 rounding.
+
+    Written after the W10 branch raised the question against its own root-Hann
+    pair. Hann analysis with a three-quarter overlap and a weighted overlap-add
+    synthesis satisfies the same constraint, and that is worth a test rather
+    than an assumption.
+    """
+    rng = np.random.default_rng(20250101)
+    sample_rate = 48000.0
+    signal = rng.standard_normal(int(0.5 * sample_rate))
+
+    restored = apply(signal, sample_rate, sound_speed_m_s=1e-12)
+
+    length = min(len(signal), len(restored))
+    error = np.abs(signal[:length] - restored[:length])
+    assert float(error.max()) < 1e-10
+
+
+def test_the_filter_adds_no_ripple_across_the_overlap() -> None:
+    """The failure a single reconstruction error would hide.
+
+    A window pair that does not sum to a constant gives a gain that breathes
+    with the hop rather than a uniform one, which shows up as block-to-block
+    level wobble long before it shows up in a total.
+    """
+    rng = np.random.default_rng(11)
+    sample_rate = 48000.0
+    signal = rng.standard_normal(int(0.4 * sample_rate))
+
+    restored = apply(signal, sample_rate, sound_speed_m_s=1e-12)
+
+    length = min(len(signal), len(restored))
+    block = int(0.010 * sample_rate)
+    blocks = length // block
+    before = (signal[: blocks * block].reshape(-1, block) ** 2).sum(axis=1)
+    after = (restored[: blocks * block].reshape(-1, block) ** 2).sum(axis=1)
+    gain_db = 10.0 * np.log10(after[1:-1] / before[1:-1])
+    assert float(np.max(np.abs(gain_db))) < 0.01
+
+
 def test_absorption_never_adds_energy() -> None:
     rng = np.random.default_rng(7)
     sample_rate = 48000.0
