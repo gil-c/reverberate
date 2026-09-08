@@ -22,6 +22,7 @@ from reverberate.experiments.w10_render import (
     decoders,
     room_report,
     sphere_head,
+    write_audio,
 )
 from reverberate.spatial.array import design_array
 from reverberate.spatial.encode import Ambisonic, EncoderSettings
@@ -217,3 +218,58 @@ def test_the_binaural_measures_report_the_delay_beside_what_a_sphere_predicts() 
     assert measures["itd_us"] == pytest.approx(30 / rate * 1e6, abs=25.0)
     assert measures["woodworth_itd_us"] > 500.0
     assert measures["ild_db"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_one_gain_covers_every_file_so_the_ears_stay_comparable(tmp_path: Path) -> None:
+    """A gain per file would make a shadowed ear as loud as a near one.
+
+    Interaural level difference is the cue this dataset exists to carry, and
+    within one ambisonic file the direction is nothing but the ratios between
+    the channels. So the peak is taken over everything written together.
+    """
+    pytest.importorskip("soundfile")
+    rng = np.random.default_rng(5)
+    ambisonic = Ambisonic(rng.standard_normal((16, 512)) * 0.1, RATE, 3, np.zeros(3))
+    quiet = np.zeros((2, 256))
+    quiet[0, 10] = 0.01
+    loud = np.zeros((2, 256))
+    loud[0, 10] = 1.0
+    brirs = {"sphere": {0.0: loud, 90.0: quiet}}
+    written = write_audio(ambisonic, brirs, np.array([1.0, 0.0, 0.0]), tmp_path / "audio")
+    gains = {entry["write_gain"] for entry in written}
+    assert len(gains) == 1
+    peaks = {entry["path"]: entry.get("peak") for entry in written if "peak" in entry}
+    assert peaks["binaural_sphere_yaw0.wav"] > 50.0 * peaks["binaural_sphere_yaw90.wav"]
+
+
+def test_the_ambisonic_wav_is_written_beside_the_ears(tmp_path: Path) -> None:
+    soundfile = pytest.importorskip("soundfile")
+    rng = np.random.default_rng(6)
+    ambisonic = Ambisonic(rng.standard_normal((16, 256)) * 0.1, RATE, 3, np.zeros(3))
+    brir = np.zeros((2, 128))
+    brir[:, 5] = 0.5
+    written = write_audio(ambisonic, {"sphere": {0.0: brir}}, np.array([1.0]), tmp_path / "a")
+    names = [entry["path"] for entry in written]
+    assert "ambisonic_acn_sn3d.wav" in names
+    samples, rate = soundfile.read(str(tmp_path / "a" / "ambisonic_acn_sn3d.wav"))
+    assert samples.shape[1] == 16
+    assert rate == int(RATE)
+
+
+def test_the_report_hands_back_what_it_rendered_so_nothing_is_encoded_twice(
+    tmp_path: Path,
+) -> None:
+    run = a_solved_run(tmp_path, samples=1024)
+    rendered: dict[str, object] = {}
+    room_report(
+        run,
+        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
+        air=None,
+        lowcut_hz=40.0,
+        yaws_deg=(0.0, 90.0),
+        filter_length=256,
+        rendered=rendered,
+    )
+    assert isinstance(rendered["ambisonic"], Ambisonic)
+    assert set(rendered["brirs"]) == {"sphere_magls", "sphere_plain"}  # type: ignore[arg-type]
+    assert sorted(rendered["brirs"]["sphere_magls"]) == [0.0, 90.0]  # type: ignore[index]

@@ -37,6 +37,8 @@ import numpy as np
 
 from reverberate import audio, metrics
 from reverberate.experiments.engine import write_record
+from reverberate.experiments.w20_render import dry_voice, publish
+from reverberate.response import Provenance
 from reverberate.spatial.array import ArrayDesign
 from reverberate.spatial.binaural import (
     BinauralDecoder,
@@ -47,7 +49,19 @@ from reverberate.spatial.binaural import (
     render,
 )
 from reverberate.spatial.encode import Ambisonic, EncoderSettings, encode
-from reverberate.spatial.hrtf import HrtfSet, sphere_hrtf, woodworth_itd_s
+from reverberate.spatial.export import (
+    AMBIX_NOTE,
+    write_ambisonic_sofa,
+    write_ambix_wav,
+    write_brir_sofa,
+)
+from reverberate.spatial.hrtf import (
+    HEAD_RADIUS_M,
+    HrtfSet,
+    ear_directions,
+    sphere_hrtf,
+    woodworth_itd_s,
+)
 from reverberate.spatial.sh import quadrature
 from reverberate.spatial.validate import (
     direct_arrival_sample,
@@ -55,6 +69,7 @@ from reverberate.spatial.validate import (
     direction_to_scene_point,
     energy_per_order,
 )
+from reverberate.store import shared_store
 
 __all__ = [
     "DELIVERY_RATE_HZ",
@@ -64,10 +79,16 @@ __all__ = [
     "decoders",
     "pressures_of_run",
     "sphere_head",
+    "write_audio",
     "main",
 ]
 
 DELIVERY_RATE_HZ = 48000.0
+
+#: What the artefacts are licensed as. HSSD is CC BY-NC, so anything derived
+#: from its geometry inherits the non-commercial term, and so does the EARS
+#: speech the audio is convolved with.
+LICENCE = "CC BY-NC 4.0"
 
 #: Head orientations rendered. Not a sweep: four angles a listener can check by
 #: ear, and enough to show that the rotation is the exact one it claims to be.
@@ -327,8 +348,14 @@ def room_report(
     lowcut_hz: float,
     yaws_deg: tuple[float, ...] = YAWS_DEG,
     filter_length: int = 512,
+    rendered: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Encode the room run, decode it through the heads, and measure all of it."""
+    """Encode the room run, decode it through the heads, and measure all of it.
+
+    ``rendered`` is filled in with the encoded response and the decoded ear
+    signals when a mapping is passed, so a caller that wants to write audio or
+    artefacts does not have to encode a second time. Nothing is written here.
+    """
     plan = json.loads((run_dir / "plan.json").read_text())
     positions = np.load(run_dir / "array_positions.npy")
     centre = np.asarray(plan["centre"], dtype=float)
@@ -361,14 +388,25 @@ def room_report(
     times, order_energy = energy_per_order(ambisonic)
 
     built = decoders(settings.order, rate, filter_length=filter_length)
-    azimuth = float(np.arctan2(*direction_to_scene_point(ambisonic, source)[[1, 0]][::-1]))
+    azimuth = float(np.arctan2(reference[1], reference[0]))
     binaural: dict[str, Any] = {}
+    responses: dict[str, dict[float, np.ndarray]] = {}
     for name, decoder in built.items():
         rows = {}
+        responses[name] = {}
         for yaw in yaws_deg:
+            # The listener turns left by yaw, so the field turns right by it.
             brir = render(ambisonic, decoder, field_yaw_rad=np.radians(-yaw))
+            responses[name][yaw] = brir
             rows[f"yaw_{int(yaw)}"] = binaural_measures(brir, rate, azimuth - np.radians(yaw))
         binaural[name] = {"decoder": decoder.record(), "measures": rows}
+
+    if rendered is not None:
+        rendered["ambisonic"] = ambisonic
+        rendered["brirs"] = responses
+        rendered["source"] = source
+        rendered["centre"] = centre
+        rendered["plan"] = plan
 
     return {
         "run": run_dir.name,
@@ -408,6 +446,70 @@ def room_report(
     }
 
 
+def write_audio(
+    ambisonic: Ambisonic,
+    brirs: dict[str, dict[float, np.ndarray]],
+    dry: np.ndarray,
+    out_dir: Path,
+) -> list[dict[str, Any]]:
+    """The ambisonic WAV, and the anechoic clip through every head and every yaw.
+
+    **One gain over every file written here, and that is the point.** Level is a
+    measurement. A gain per file would make a shadowed ear as loud as a near one
+    and destroy the interaural level difference, which is the cue this dataset
+    exists to carry; within a single ambisonic file it would destroy the
+    direction itself, which is nothing but the ratios between the channels. So
+    the peak is taken over everything and the same gain is handed to each write,
+    recorded beside the realised peak of each file.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wet = {
+        f"{head}_yaw{int(yaw)}": np.stack([audio.convolve(dry, response[ear]) for ear in range(2)])
+        for head, angles in brirs.items()
+        for yaw, response in angles.items()
+    }
+    peak = max(
+        [float(np.max(np.abs(block))) for block in wet.values()]
+        + [float(np.max(np.abs(ambisonic.signals)))]
+    )
+    gain = 1.0 if peak == 0.0 else 10.0 ** (-1.0 / 20.0) / peak
+
+    written: list[dict[str, Any]] = []
+    ambix, _ = write_ambix_wav(
+        Ambisonic(
+            ambisonic.signals * gain,
+            ambisonic.sample_rate_hz,
+            ambisonic.order,
+            ambisonic.centre,
+        ),
+        out_dir / "ambisonic_acn_sn3d.wav",
+        headroom_db=0.0,
+    )
+    written.append({"path": ambix.name, "what": AMBIX_NOTE, "channels": ambisonic.signals.shape[0]})
+    for name, block in wet.items():
+        path = out_dir / f"binaural_{name}.wav"
+        import soundfile
+
+        soundfile.write(
+            str(path),
+            (block * gain).T,
+            int(round(ambisonic.sample_rate_hz)),
+            subtype="FLOAT",
+            format="WAV",
+        )
+        written.append(
+            {
+                "path": path.name,
+                "what": "two ears, the anechoic clip through this head at this yaw",
+                "peak": round(float(np.max(np.abs(block * gain))), 5),
+                "seconds": round(block.shape[1] / ambisonic.sample_rate_hz, 3),
+            }
+        )
+    for entry in written:
+        entry["write_gain"] = gain
+    return written
+
+
 def _rehearsal(args: argparse.Namespace) -> int:
     settings = EncoderSettings(
         order=args.order, fit_order=args.fit_order, max_frequency_hz=args.fmax
@@ -425,11 +527,74 @@ def _room(args: argparse.Namespace) -> int:
         if args.no_air
         else {"temperature_c": args.temperature, "humidity_percent": args.humidity}
     )
-    write_record(
-        args.run,
-        "report.json",
-        room_report(args.run, settings, air=air, lowcut_hz=args.low_cut),
+    rendered: dict[str, Any] = {}
+    report = room_report(args.run, settings, air=air, lowcut_hz=args.low_cut, rendered=rendered)
+    ambisonic = rendered["ambisonic"]
+    provenance = Provenance(
+        scene_sha256=str(rendered["plan"].get("geometry_sha256") or ""),
+        mats_hash=str(rendered["plan"].get("cache_key") or ""),
+        engine="cuda",
+        band="high",
+        fmax_hz=float(args.fmax),
+        grid_step_m=float(rendered["plan"]["array"]["grid_step_m"]),
+        points_per_wavelength=10.5,
+        sound_speed_m_s=float(rendered["plan"]["sound_speed_m_s"]),
+        seed=0,
+        run_id=args.run.name,
+        notes=(
+            "ambisonic order "
+            f"{settings.order}, N3D, ACN, about one point; the effective order "
+            "per frequency is in report.json and is lower below 1 kHz"
+        ),
     )
+    artefacts = [
+        write_ambisonic_sofa(
+            ambisonic,
+            args.run / "responses" / "ambisonic.sofa",
+            source_position=rendered["source"],
+            provenance=provenance,
+            title=f"{args.run.name}: ambisonic room impulse response",
+            licence=LICENCE,
+        )
+    ]
+    ears = ear_directions()
+    for head, angles in rendered["brirs"].items():
+        yaws = sorted(angles)
+        artefacts.append(
+            write_brir_sofa(
+                np.stack([angles[yaw] for yaw in yaws]),
+                np.asarray(yaws, dtype=float),
+                args.run / "responses" / f"binaural_{head}.sofa",
+                sample_rate_hz=ambisonic.sample_rate_hz,
+                listener_position=rendered["centre"],
+                source_position=rendered["source"],
+                ear_positions=HEAD_RADIUS_M * ears,
+                provenance=provenance,
+                title=f"{args.run.name}: binaural room impulse responses, {head}",
+                licence=LICENCE,
+            )
+        )
+    report["artefacts"] = [path.name for path in artefacts]
+
+    if args.audio:
+        store = shared_store()
+        if store is None:
+            print("no store credentials, so no anechoic clip and no audio")
+        else:
+            dry, dry_record = dry_voice(store, args.seed)
+            report["dry_voice"] = dry_record
+            report["audio"] = write_audio(ambisonic, rendered["brirs"], dry, args.run / "audio")
+            audio.write_wav(args.run / "audio" / "dry_voice.wav", dry, ambisonic.sample_rate_hz)
+    write_record(args.run, "report.json", report)
+
+    if args.publish:
+        store = shared_store()
+        if store is None:
+            raise SystemExit("no store credentials, so nothing can be published")
+        files = [*artefacts, args.run / "report.json", args.run / "plan.json"]
+        files += sorted((args.run / "audio").glob("*.wav"))
+        report["published"] = publish(store, args.run.name, files)
+        write_record(args.run, "report.json", report)
     return 0
 
 
@@ -452,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
     room.add_argument("--temperature", type=float, default=20.0)
     room.add_argument("--humidity", type=float, default=50.0)
     room.add_argument("--no-air", action="store_true", help="skip air absorption and say so")
+    room.add_argument("--audio", action="store_true", help="render the anechoic clip through it")
+    room.add_argument("--publish", action="store_true", help="push the artefacts to the store")
+    room.add_argument("--seed", type=int, default=20250101)
     room.set_defaults(func=_room)
 
     args = parser.parse_args(argv)
