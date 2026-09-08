@@ -550,13 +550,27 @@ function sealedSection(sealed) {
     )
     .join("");
   const unclosed = sealed.unclosed_bodies || [];
+  // The list is truncated at a litre, so its length is not the count. A carve
+  // on a 2 mm cell makes thousands of closed leaves and every one is an
+  // interior; the record carries the true count beside the rows.
+  const total = sealed.interior_count ?? (sealed.interiors || []).length;
+  const omitted = sealed.interiors_omitted;
   return `
     <h2>Sealed air</h2>
     <p class="caption">There is no air inside a solid object, so the solver is
     made to carry none there. Left coupled it is a cavity with rigid walls and no
     absorption at all, and it rings: that is what put 3.6 s of decay into the
     125 Hz band of an earlier run. Total ${sealed.sealed_volume_m3.toFixed(3)} m³
-    in ${(sealed.interiors || []).length} closed bodies.</p>
+    in ${total} closed bodies.</p>
+    ${
+      omitted && omitted.count
+        ? `<p class="caption">${omitted.count} of them are smaller than
+           ${(omitted.below_m3 * 1000).toFixed(0)} litre and hold
+           ${(omitted.volume_m3 * 1000).toFixed(1)} litres between them, so they
+           are counted here rather than listed: a cavity that size would have
+           rung above 1 kHz, where it holds no energy worth naming.</p>`
+        : ""
+    }
     <table><tr><th>body</th><th>volume</th><th>would have rung at</th></tr>${rows}</table>
     ${
       unclosed.length

@@ -8,6 +8,8 @@ an object is closed and air that is sealed because something went wrong.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pyroomacoustics as pra
 import pytest
 import trimesh
@@ -84,3 +86,49 @@ class TestSealedRegions:
 
         assert volumes == sorted(volumes, reverse=True)
         assert record["sealed_volume_m3"] == pytest.approx(1.001, abs=1e-6)
+
+
+def test_one_object_of_many_slivers_is_reported_as_one_object() -> None:
+    """The page prints a count of this list in a sentence about objects.
+
+    A carve on a 2 mm cell splits a christmas tree into thousands of closed
+    twigs and a few thousand slivers under four faces, and one name per
+    unjudged body made the viewer say "32 300 bodies are not closed" where the
+    honest figure was 195 objects.
+    """
+    from reverberate.geometry.sealed import SealedReport
+
+    report = SealedReport(unclosed=["christmas_tree_38"] * 2808 + ["decoration_3"] * 1749)
+    record = report.record()
+    assert record["unclosed_bodies"] == ["christmas_tree_38", "decoration_3"]
+    assert record["unclosed_body_counts"] == {"christmas_tree_38": 2808, "decoration_3": 1749}
+    assert "4557 bodies not closed over 2 objects" in report.summary()
+
+
+def test_the_record_lists_the_cavities_that_matter_and_counts_the_rest() -> None:
+    """The record is embedded in the run page and the page shows eight rows.
+
+    A carve on a 2 mm cell splits a plant into thousands of closed leaves and
+    every one is an interior: measured on this flat, 11 278 regions of which
+    10 899 are under a tenth of a litre and hold 24.6 litres between them. The
+    list took the report from 0.18 MB to 2.54 MB, so what is dropped has to be
+    counted rather than merely absent.
+    """
+    from reverberate.geometry.sealed import REPORT_MIN_VOLUME_M3, SealedRegion, SealedReport
+
+    big = SealedRegion(owner="wardrobe_1", volume_m3=0.9, extent_m=2.0, centroid=(0, 0, 0))
+    crumbs = [
+        SealedRegion(owner=f"plant_{n}", volume_m3=1e-5, extent_m=0.02, centroid=(0, 0, 0))
+        for n in range(500)
+    ]
+    record = SealedReport(interiors=[*crumbs, big]).record()
+    listed = cast(list[dict[str, Any]], record["interiors"])
+    omitted = cast(dict[str, Any], record["interiors_omitted"])
+
+    assert [row["owner"] for row in listed] == ["wardrobe_1"]
+    assert record["interior_count"] == 501
+    assert omitted["count"] == 500
+    assert omitted["volume_m3"] == round(500 * 1e-5, 6)
+    assert omitted["below_m3"] == REPORT_MIN_VOLUME_M3
+    # The total is the total, whatever the list holds.
+    assert record["sealed_volume_m3"] == round(0.9 + 500 * 1e-5, 6)
