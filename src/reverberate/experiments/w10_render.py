@@ -312,7 +312,11 @@ def _cache_entry(plan: dict[str, Any]) -> tuple[Path, Path] | None:
 
 
 def centre_identity(
-    ambisonic: Ambisonic, array_rows: np.ndarray, design: ArrayDesign
+    ambisonic: Ambisonic,
+    array_rows: np.ndarray,
+    design: ArrayDesign,
+    *,
+    max_frequency_hz: float | None = None,
 ) -> dict[str, Any] | None:
     """Check the encoded W channel against the pressure actually measured at the centre.
 
@@ -343,9 +347,15 @@ def centre_identity(
     # measurement of the bottom octave and hides whatever the top one is doing.
     # W29's own lesson, in the roadmap's words: a scalar hid a 29 per cent
     # omission behind a 5 per cent agreement.
+    # Compared only where the encoder fitted. Above its band limit the encoded
+    # signal is zero by construction and the measured one is not, so including
+    # that region measures the band limit and not the fit: on this run it turned
+    # -48 dB into -9 over an octave carrying 2.5 per cent of the energy.
+    limit = float(max_frequency_hz) if max_frequency_hz else float(frequency[-1])
     rows = []
     for centre_hz in (125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0):
-        band = (frequency >= centre_hz / np.sqrt(2.0)) & (frequency < centre_hz * np.sqrt(2.0))
+        low, high = centre_hz / np.sqrt(2.0), centre_hz * np.sqrt(2.0)
+        band = (frequency >= low) & (frequency < min(high, limit))
         reference = float(np.linalg.norm(spectrum_measured[band]))
         if not band.any() or reference == 0.0:
             continue
@@ -360,6 +370,7 @@ def centre_identity(
                     ),
                     5,
                 ),
+                "whole_band_fitted": bool(high <= limit),
             }
         )
     if not rows:
@@ -410,7 +421,14 @@ def _octave_rows(signal: np.ndarray, sample_rate_hz: float, fmax_hz: float) -> d
     band = metrics.measure(signal, int(sample_rate_hz))
     return {
         "bands_hz": [int(v) for v in band.bands],
-        "in_band": [float(v) <= fmax_hz for v in band.bands],
+        # **The whole band, not its centre.** An octave centred on 16 kHz runs
+        # to 22.6 kHz, which the encoder zeroes, and that part carries 2.5 per
+        # cent of a real response's energy: enough to turn a T30 of 0.22 s into
+        # one of 0.98 s. Testing the centre marks such a band as measured when
+        # three quarters of an octave of it is not.
+        # bool(), because numpy 2's own boolean is not JSON serialisable and a
+        # report that cannot be written is worse than one that is wrong.
+        "in_band": [bool(float(v) * float(np.sqrt(2.0)) <= fmax_hz) for v in band.bands],
         "rt60_s": [_finite(v) for v in band.rt60],
         "edt_s": [_finite(v) for v in band.edt],
         "c50_db": [_finite(v) for v in band.c50],
@@ -579,7 +597,7 @@ def room_report(
     )
     reference = direction_to_scene_point(ambisonic, source)
     times, order_energy = energy_per_order(ambisonic)
-    identity = centre_identity(ambisonic, array_rows, design)
+    identity = centre_identity(ambisonic, array_rows, design, max_frequency_hz=fmax)
 
     built, heads = decoders(
         settings.order, rate, filter_length=filter_length, measured_path=measured_path
