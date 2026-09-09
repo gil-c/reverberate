@@ -18,6 +18,10 @@ URLS = ("https://dev-common.local", "https://reverberate.local")
 
 _cache: dict[str, str] | None = None
 
+#: Set in the environment once every secret has been injected, so a child
+#: process asking for "everything" does not go back to a locked store.
+INJECTED_MARK = "REVERBERATE_SECRETS_INJECTED"
+
 
 def _running_in_ci() -> bool:
     return bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
@@ -38,9 +42,20 @@ def inject(names: list[str] | None = None) -> int:
     """
     if _running_in_ci():
         return 0
+    # Secrets already in the environment satisfy the request without a trip
+    # to KeePassXC, whose database locks itself after a few minutes: a chain
+    # of rental, solve and render that injects once at its start and is then
+    # refused halfway through has happened three times in one afternoon. The
+    # marker says a full injection has been done in this process tree.
+    if names is not None and all(name in os.environ for name in names):
+        return 0
+    if names is None and os.environ.get(INJECTED_MARK):
+        return 0
     secrets = _fetch()
     items = secrets.items() if names is None else ((n, secrets[n]) for n in names if n in secrets)
     added = 0
+    if names is None:
+        os.environ[INJECTED_MARK] = "1"
     for name, value in items:
         if name not in os.environ:
             os.environ[name] = value
