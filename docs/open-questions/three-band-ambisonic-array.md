@@ -2,13 +2,14 @@
 
 Date: 2026-09-08
 
-Status: open. Written at the merge of the W10 (ambisonic) and W37 (solver
-economy) branches, deliberately not solved there. It is a physics question,
-not a merge conflict, and it is handed to a session of its own.
+Status: resolved on 2026-09-09, see the last section. Written at the merge of
+the W10 (ambisonic) and W37 (solver economy) branches, deliberately not solved
+there. It is a physics question, not a merge conflict, and it was handed to a
+session of its own.
 
 ## What each branch assumes
 
-**W37, `reverberate.bands` and `experiments.w37_three_band`.** Roadmap
+**W37, `reverberate.bands` (its three-band experiment script has since been removed).** Roadmap
 section 4.2: three solves on three grids. Whole apartment at the bottom with
 the full decay, whole apartment in the middle with a long window, one room at
 the top with a short one. Grid steps at 10.5 points per wavelength:
@@ -86,7 +87,7 @@ the outer 16 cm shell does the work.
    grids, and nobody has counted it.
 
 7. **The domain and window tricks see a ball, not a point.** The
-   source-receiver ellipsoid (`experiments.w37_ellipsoid`) puts a focus on the
+   source-receiver ellipsoid (W37's culling experiment, since removed) puts a focus on the
    receiver. With an array the receiver is a ball of radius 16 cm, so the
    exactness window shrinks by `r / c`, about 0.47 ms, and the high band
    domain must contain the whole ball inside the room's real walls. Small, but
@@ -122,3 +123,18 @@ the outer 16 cm shell does the work.
   minutes on the laptop.
 
 Nothing here spends GPU time until the last item, and it may not need to.
+
+## Resolution, 2026-09-09
+
+The three solves are assembled in the spherical harmonic domain, not on one
+grid. Each band is encoded on its own node-snapped array (`spatial.array`, the
+outer radius grows with the cell so the array exists on every grid), then
+`spatial.bands` levels the bands on `W`, seams them at 0.8 of each lower
+solve's `fmax`, continues the high band with the mid band's own reflections,
+takes each band's decay from the solve that can measure it, draws one diffuse
+tail per channel, and writes the octaves above the top solve from the ones
+below (`extend_spectrum`, validated on a real 16 kHz response by
+`experiments.w39_spectral_extension`). `experiments.w38_ambisonic_bands` is the
+runner; `data/runs/w39_living_8k` is the first room through it, and its
+registry rows carry the measurements. Points 1 to 8 above are answered there:
+the arrays differ per grid and the report's `centre_offsets` says by how much.

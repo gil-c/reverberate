@@ -50,7 +50,6 @@ from reverberate.experiments.w10_render import (
     finish_run,
     spatial_report,
 )
-from reverberate.experiments.w37_window import mean_absorption_of
 from reverberate.metrics import band_centres
 from reverberate.spatial.bands import (
     BandSolve,
@@ -63,6 +62,7 @@ from reverberate.spatial.bands import (
     level_gain,
 )
 from reverberate.spatial.encode import Ambisonic, EncoderSettings
+from reverberate.tail import mean_absorption_of
 from reverberate.wave import Machine, engine_inputs
 
 __all__ = ["BANDS", "assemble_run", "main", "outer_radius_for", "plan_bands", "prepare_bands"]

@@ -51,12 +51,11 @@ from reverberate.experiments.w10_render import (
     decoders,
     encode_run,
 )
-from reverberate.experiments.w37_window import mean_absorption_of
 from reverberate.spatial.bands import extend_spectrum
 from reverberate.spatial.binaural import render
 from reverberate.spatial.encode import Ambisonic, EncoderSettings
 from reverberate.spatial.validate import direction_to_scene_point
-from reverberate.tail import transpose
+from reverberate.tail import mean_absorption_of, transpose
 
 __all__ = ["compare", "main", "validate"]
 
