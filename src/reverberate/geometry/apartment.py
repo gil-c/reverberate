@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import trimesh
@@ -29,6 +30,9 @@ from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion, load_regions
+
+if TYPE_CHECKING:
+    from reverberate.geometry.rooms import RoomPartition
 
 #: Height above a floor at which the stage is sectioned to find its walls.
 #: Doors reach the floor, so a doorway is a gap at this height, while window
@@ -55,8 +59,11 @@ STOREY_TOLERANCE = 0.1
 #: Region labels that are not interior air. A garden inside a sealed acoustic
 #: volume ruins both the volume and the RT60 it implies, so these are left out
 #: of the simulated shell by default. `balcony` is included here for the same
-#: reason; `garage` is not, since it is enclosed even when it is unheated.
-OUTDOOR_LABELS = frozenset({"outdoor", "balcony"})
+#: reason, and so is `porch/terrace/deck/driveway`: 71 regions of the dataset
+#: carry it, and on `102344403` the drive opens onto the garage through 8.64 m
+#: of doorway, so without it a 110 m2 outdoor slab joins the interior. `garage`
+#: is not here, since it is enclosed even when it is unheated.
+OUTDOOR_LABELS = frozenset({"outdoor", "balcony", "porch/terrace/deck/driveway"})
 
 #: Tolerance used to clean the walkable outline before it is extruded. The
 #: union of rooms and doorways leaves slivers and near-duplicate vertices
@@ -76,6 +83,11 @@ class Storey:
     walkable: Polygon | MultiPolygon
     rooms: list[RoomRegion]
     doorways: int
+    #: The same regions grouped into the rooms a person would name, by the four
+    #: rules of :mod:`reverberate.geometry.rooms`. This is what a run means when
+    #: it asks for a room: `living room` on `102344403` is 126 m2 of open space,
+    #: not the 81 m2 slice the dataset labels with that name.
+    everyday: tuple[RoomPartition, ...] = ()
 
     @property
     def polygons(self) -> list[Polygon]:
@@ -85,7 +97,8 @@ class Storey:
 
     def summary(self) -> str:
         return (
-            f"storey at {self.floor_height:.1f} m: {len(self.rooms)} rooms, "
+            f"storey at {self.floor_height:.1f} m: {len(self.everyday)} rooms "
+            f"from {len(self.rooms)} regions, "
             f"{self.doorways} doorways, {len(self.polygons)} connected part(s), "
             f"{self.walkable.area:.0f} m2"
         )
@@ -159,7 +172,18 @@ def clean_outline(walkable: Polygon | MultiPolygon) -> Polygon | MultiPolygon:
     return cleaned
 
 
-def build_storey(regions: list[RoomRegion], stage: trimesh.Trimesh) -> Storey:
+def build_storey(
+    regions: list[RoomRegion],
+    stage: trimesh.Trimesh,
+    outdoor: list[RoomRegion] | None = None,
+) -> Storey:
+    """One walkable level, and the rooms its regions really make up.
+
+    ``outdoor`` is the level's own gardens, balconies and drives. They shape no
+    part of the walkable volume, but they are needed to group it: a balcony
+    store belongs with the balcony, and with the balcony withheld it has nothing
+    to belong to and is left standing as a 1.1 m2 room of its own.
+    """
     rooms = [region.polygon_xz.buffer(0) for region in regions]
     floor_height = float(np.mean([region.floor_height for region in regions]))
     walls = wall_footprint(stage, floor_height + WALL_SECTION_HEIGHT)
@@ -170,12 +194,19 @@ def build_storey(regions: list[RoomRegion], stage: trimesh.Trimesh) -> Storey:
     walkable = unary_union([*rooms, *doorways])
     walkable = clean_outline(walkable)
     ceiling = floor_height + float(np.mean([r.extrusion_height for r in regions]))
+    # Imported here rather than at the top: rooms.py reads this module's wall
+    # section and outdoor labels, so the two would import each other.
+    from reverberate.geometry.rooms import everyday_rooms
+
     return Storey(
         floor_height=floor_height,
         ceiling_height=ceiling,
         walkable=walkable,
         rooms=regions,
         doorways=len(doorways),
+        everyday=tuple(
+            room for room in everyday_rooms([*regions, *(outdoor or [])], walls) if not room.outdoor
+        ),
     )
 
 
@@ -238,12 +269,24 @@ def build_apartment(hssd_root: Path, scene_id: str, include_outdoor: bool = Fals
     Turn it on to *look* at the outside, not to simulate it.
     """
     regions = load_regions(hssd_root / "semantics" / "scenes" / f"{scene_id}.semantic_config.json")
+    outdoor = [] if include_outdoor else [r for r in regions if r.label in OUTDOOR_LABELS]
     if not include_outdoor:
         regions = [region for region in regions if region.label not in OUTDOOR_LABELS]
     if not regions:
         return []
     stage = load_stage(hssd_root, scene_id)
-    storeys = [build_storey(group, stage) for group in group_by_storey(regions).values()]
+    storeys = [
+        build_storey(
+            group,
+            stage,
+            outdoor=[
+                region
+                for region in outdoor
+                if abs(region.floor_height - height) <= STOREY_TOLERANCE
+            ],
+        )
+        for height, group in group_by_storey(regions).items()
+    ]
     return sorted(storeys, key=lambda storey: -storey.walkable.area)
 
 

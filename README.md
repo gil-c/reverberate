@@ -38,8 +38,19 @@ this one's dataset.
 ## How it works
 
 A room is represented by its 3D mesh and by the acoustic properties of each of
-its surfaces, walls, floor and furniture. Rooms are extruded from their authored
-floor polygons so they are watertight by construction, furniture reaches the
+its surfaces, walls, floor and furniture.
+
+**A room is not a room annotation.** The source dataset labels floor polygons
+without saying whether a wall stands between two of them, so it cuts one
+continuous body of air into several "rooms": in one scene the polygon it calls
+the living room is 81 m2 of a space that runs on into the kitchen through an
+opening 6.97 m wide. This project reads the walls out of the architecture mesh
+and joins polygons back together wherever no wall separates them, so a room is
+the volume a person standing in it would call one room -- 126 m2 in that case,
+against 81. See `docs/adr/0010-a-room-is-not-a-region.md`.
+
+Rooms are extruded from those floor polygons so they are watertight by
+construction, furniture reaches the
 solver as the exact boolean union of the convex bodies its collider ships as,
 and each surface carries an absorption curve per octave band together with a
 transmission coefficient. The union removes the faces buried between adjacent

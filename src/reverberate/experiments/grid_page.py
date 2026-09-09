@@ -15,7 +15,7 @@ sections that need responses come out empty rather than invented, and
 Usage::
 
     python -m reverberate.experiments.grid_page \\
-        --models data/runs/w32_carved/models --scene bedroom_only \\
+        --models data/runs/w32_carved/models --scene room_only \\
         --cache-key 78bca376... --out data/runs/w32_bedroom_16k
 
 Then start the viewer as usual and pick the run:
@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from reverberate.experiments.run import entry_from_key
+from reverberate.experiments.scene_export import ROOM_SCENE
 from reverberate.experiments.w20_render import room_geometry, theory
 from reverberate.wave.voxelise import cache_root
 
@@ -97,7 +98,7 @@ def build(
         "model_json": str(model_json),
         "room": geometry.record(),
         "theory": prediction.record(),
-        "sealed": manifest.get("sealed" if scene_name.startswith("bedroom") else "sealed_full"),
+        "sealed": manifest.get("sealed" if scene_name == ROOM_SCENE else "sealed_full"),
         "placement": placement,
         # The measured sources, as opposed to the placed ones. Empty for the
         # same reason: there is nothing measured on this grid.

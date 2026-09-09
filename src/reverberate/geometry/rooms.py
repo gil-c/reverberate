@@ -1,19 +1,23 @@
-"""Which room each grid node belongs to, in the everyday sense of the word.
+"""Which room each point of a scene belongs to, in the everyday sense.
 
-The audit view has to draw one room at the grid's own step and its neighbours
-coarser, so it needs to say which node is in which room. HSSD does not: its
-`SemanticRegion` list splits a bedroom from the wardrobe it opens into, and the
-scene this project uses has **seven** such closets among nineteen interior
-regions. A wardrobe is part of the room a person stands in, so the everyday
-room is a region plus the closets that open into it.
+HSSD's `region_annotations` are floor polygons with a label, and nothing in them
+says whether a wall stands between two neighbours, so the dataset cuts one
+continuous body of air into several "rooms". On `102344403` the `living room` it
+names is 81 m2 of a space that runs on into a 26.7 m2 `kitchen` through an
+opening 6.97 m wide, and simulating that region alone seals a rigid wall across
+it. Four rules put the air back together:
 
-**The closet is assigned by the doorway it opens through, not by the wall it
-shares.** W34 measured both criteria on this scene and they disagree on five of
-seven, because a closet typically shares almost exactly as much boundary with
-the room behind it as with the room it opens into: 2.10 m against 2.10 m. The
-gap in the wall is the thing that decides it physically, and
-:func:`~reverberate.geometry.apartment.find_doorways` already reads those gaps
-out of the stage mesh rather than inventing them.
+1. the passage must be wider than a door, :data:`DOOR_MAX_M`;
+2. a wall separates whatever the hole in it, so the shared boundary must carry
+   less than :data:`WALL_MAX_M` of wall;
+3. a hallway counts as a door, and is then attached to the largest room it
+   opens onto;
+4. nothing under :data:`MIN_ROOM_M2` is a room.
+
+**Both thresholds are read off measurements, not chosen**, and the reasoning
+behind every one of these -- and what they replace -- is
+`docs/adr/0010-a-room-is-not-a-region.md`. Read it before changing a number
+here. `scripts/room_openings.py` is how they were measured.
 
 **The partition is two dimensional, because rooms are prisms.** A region is a
 floor polygon extruded to the ceiling, so a node's room depends on its x and z
@@ -31,8 +35,10 @@ owner would silently vanish from every tier of the picture.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import shapely
@@ -42,35 +48,257 @@ from shapely.ops import unary_union
 from reverberate.geometry.apartment import (
     OUTDOOR_LABELS,
     WALL_SECTION_HEIGHT,
+    clean_outline,
     find_doorways,
     load_stage,
+    wall_footprint,
 )
 from reverberate.geometry.hssd_room import RoomRegion, load_regions
 
 __all__ = [
-    "MIN_ROOM_AREA",
+    "DOOR_MAX_M",
+    "MIN_ROOM_M2",
+    "WALL_MAX_M",
+    "Boundary",
     "Partition",
     "RoomPartition",
-    "merge_closets",
+    "everyday_rooms",
     "partition_of_scene",
+    "room_holding",
+    "rooms_of_scene",
+    "shared_boundaries",
 ]
 
-#: A region smaller than this is an alcove of a room rather than a room. The
-#: seven closets of scene 102344022 run from 0.56 to 2.92 m2 and the smallest
-#: thing anyone would call a room is the 4.67 m2 toilet, so the boundary is
-#: wide rather than delicate.
-MIN_ROOM_AREA = 4.0
+#: Widest gap a single door leaf can fill. A passage wider than this has no
+#: door in it. Set from the empty band between the measured 0.96 m and 1.33 m.
+DOOR_MAX_M = 1.10
+
+#: Wall a shared boundary may carry and still dissolve. Set from the empty band
+#: between the measured 0.79 m and 1.35 m.
+WALL_MAX_M = 1.05
+
+#: Floor area under which a region is not a room but part of the next one. A
+#: decision, not a measurement: 2 m2 of air has no acoustic life of its own.
+MIN_ROOM_M2 = 2.0
+
+#: Circulation. Separates the rooms it serves, then joins the largest of them.
+#: An entrance hall is circulation on the same terms as a corridor, and the
+#: dataset uses both labels: 162 regions are `hallway`, 58 are the other.
+HALLWAY_LABELS = frozenset({"hallway", "entryway/foyer/lobby"})
+
+#: A run of open boundary shorter than this is noise from the section rather
+#: than a passage.
+MIN_GAP_M = 0.25
+
+#: How far a region's outline reaches across the wall band to meet its
+#: neighbour's. Must exceed the thickest partition; measured, gaps start at
+#: 0.15 m.
+BOUNDARY_REACH_M = 0.16
+
+
+@dataclass(frozen=True)
+class Boundary:
+    """What two neighbouring regions share, and how much of it stands open."""
+
+    contact_m: float
+    open_m: float
+    #: The widest single run of opening, which is what a door has to fill.
+    widest_m: float
+
+    @property
+    def walled_m(self) -> float:
+        return self.contact_m - self.open_m
+
+    @property
+    def dissolves(self) -> bool:
+        """One room, by rules 1 and 2."""
+        return self.widest_m > DOOR_MAX_M and self.walled_m < WALL_MAX_M
+
+
+def shared_boundaries(
+    polygons: list[Polygon], walls: Polygon | MultiPolygon
+) -> dict[tuple[int, int], Boundary]:
+    """Every pair of regions that touch, with the opening the walls leave.
+
+    The wall band is read from the same horizontal section of the stage that
+    :func:`~reverberate.geometry.apartment.find_doorways` uses, so a doorway is
+    measured rather than invented.
+    """
+    found: dict[tuple[int, int], Boundary] = {}
+    for i in range(len(polygons)):
+        for j in range(i + 1, len(polygons)):
+            # ``boundary`` rather than ``exterior``: two scenes of the 168 have a
+            # region whose authored loop self-intersects, so cleaning it returns
+            # a MultiPolygon, which has no exterior ring. Regions carry no holes,
+            # so for every other one the two are the same line.
+            line = polygons[i].boundary.intersection(polygons[j].buffer(BOUNDARY_REACH_M))
+            if line.length < 0.3:
+                continue
+            free = line.difference(walls)
+            parts = free.geoms if hasattr(free, "geoms") else [free]
+            runs = [part.length for part in parts if part.length > MIN_GAP_M]
+            found[i, j] = Boundary(
+                contact_m=float(line.length),
+                open_m=float(sum(runs)),
+                widest_m=float(max(runs, default=0.0)),
+            )
+    return found
+
+
+def everyday_rooms(regions: list[RoomRegion], walls: Polygon | MultiPolygon) -> list[RoomPartition]:
+    """Group regions into the rooms a person standing in them would name.
+
+    Outdoor regions are grouped too, and never merge into a room, so a caller
+    that wants only the inside can drop the rooms whose ``outdoor`` is set. Pass
+    them in rather than filtering first: a balcony store belongs with the
+    balcony, and without the balcony there is nothing for it to belong to.
+    """
+    polygons = [region.polygon_xz.buffer(0) for region in regions]
+    labels = [region.label for region in regions]
+    outdoors = [label in OUTDOOR_LABELS for label in labels]
+    shared = shared_boundaries(polygons, walls)
+
+    parent = list(range(len(regions)))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        parent[find(a)] = find(b)
+
+    for (i, j), boundary in shared.items():
+        if outdoors[i] or outdoors[j]:
+            continue
+        if labels[i] in HALLWAY_LABELS or labels[j] in HALLWAY_LABELS:
+            continue
+        if boundary.dissolves:
+            union(i, j)
+
+    def group_area(i: int) -> float:
+        return float(sum(polygons[k].area for k in range(len(regions)) if find(k) == find(i)))
+
+    def attach(
+        i: int,
+        prefer: Callable[[int, Boundary], tuple[Any, ...]],
+        *,
+        outdoor_ok: bool,
+    ) -> None:
+        """Join ``i`` to the neighbour it opens onto that ``prefer`` ranks highest."""
+        best, key = None, None
+        for j in range(len(regions)):
+            if j == i or find(j) == find(i):
+                continue
+            if outdoors[j] and not outdoor_ok:
+                continue
+            boundary = shared.get((min(i, j), max(i, j)))
+            if boundary is None or boundary.widest_m <= 0.0:
+                continue
+            rank = prefer(j, boundary)
+            if key is None or rank > key:
+                best, key = j, rank
+        if best is not None:
+            union(i, best)
+
+    # Rule 3. Attached only once the rooms are formed, which is what stops a
+    # corridor carrying a merge from one of its ends to the other.
+    for i, label in enumerate(labels):
+        if label in HALLWAY_LABELS and not outdoors[i]:
+            attach(
+                i,
+                lambda j, boundary: (labels[j] not in HALLWAY_LABELS, group_area(j)),
+                outdoor_ok=False,
+            )
+
+    # Rule 4. Indoors for preference: a balcony store that opens only onto the
+    # balcony belongs outdoors, not through a solid wall into a bedroom.
+    for i in sorted(range(len(regions)), key=lambda k: polygons[k].area):
+        if outdoors[i] or group_area(i) >= MIN_ROOM_M2:
+            continue
+        attach(
+            i,
+            lambda j, boundary: (not outdoors[j], boundary.widest_m, boundary.contact_m),
+            outdoor_ok=True,
+        )
+
+    grouped: dict[int, list[int]] = {}
+    for i in range(len(regions)):
+        grouped.setdefault(find(i), []).append(i)
+
+    rooms = []
+    for members in grouped.values():
+        members.sort(key=lambda k: -polygons[k].area)
+        rooms.append(
+            RoomPartition(
+                name="-".join(regions[k].name for k in members),
+                label=labels[members[0]],
+                polygon=_joined(polygons, members, walls),
+                regions=tuple(regions[k].name for k in members),
+                outdoor=any(outdoors[k] for k in members),
+            )
+        )
+    return sorted(rooms, key=lambda room: -room.area_m2)
+
+
+def _joined(
+    polygons: list[Polygon], members: list[int], walls: Polygon | MultiPolygon
+) -> Polygon | MultiPolygon:
+    """One shape for a room, its own passages included.
+
+    HSSD's regions do not tile: neighbours are held 0.15 m apart by the wall
+    band, so a plain union of the parts of a room comes back disconnected --
+    three pieces for the 126 m2 of `102344403`, which is not a volume anything
+    can be simulated in. The gap is closed the way
+    :func:`~reverberate.geometry.apartment.build_storey` closes it for a whole
+    storey, by adding back the pieces of that band the walls leave open. The
+    outer boundary therefore stays the authored polygons plus real doorways,
+    never a dilated silhouette no wall corresponds to.
+    """
+    parts = [polygons[k] for k in members]
+    shape = unary_union([*parts, *find_doorways(parts, walls)]).buffer(0)
+    return clean_outline(shape)
+
+
+def rooms_of_scene(hssd_root: Path, scene_id: str) -> list[RoomPartition]:
+    """The everyday rooms of a whole scene, outdoor ones included."""
+    regions = load_regions(
+        Path(hssd_root) / "semantics" / "scenes" / f"{scene_id}.semantic_config.json"
+    )
+    if not regions:
+        raise ValueError(f"{scene_id} has no annotated regions")
+    stage = load_stage(Path(hssd_root), scene_id)
+    floor = float(np.mean([region.floor_height for region in regions]))
+    return everyday_rooms(regions, wall_footprint(stage, floor + WALL_SECTION_HEIGHT))
+
+
+def room_holding(rooms: list[RoomPartition], name: str) -> RoomPartition:
+    """The room known by ``name``, or the one that folded that region in.
+
+    A run asks for `living room` and gets the whole open space it belongs to.
+    Naming a region that is no longer a room of its own is the ordinary case,
+    not an error: that is the point of the partition.
+    """
+    for room in rooms:
+        if room.name == name or name in room.regions:
+            return room
+    known = ", ".join(sorted(r.name for r in rooms))
+    raise ValueError(f"no room named {name!r}; this scene has {known}")
 
 
 @dataclass(frozen=True)
 class RoomPartition:
-    """One everyday room: a region, plus the alcoves that open into it."""
+    """One everyday room: the regions that make it up, joined into one shape."""
 
     name: str
     label: str
     polygon: Polygon | MultiPolygon
-    #: The region names folded in, the room's own first.
+    #: The region names folded in, the largest first.
     regions: tuple[str, ...]
+    #: Not interior air, so not a room to simulate. Kept rather than dropped so
+    #: a caller can say what it left out instead of quietly losing it.
+    outdoor: bool = False
 
     @property
     def area_m2(self) -> float:
@@ -89,50 +317,6 @@ class Partition:
     #: with a grid of a different step.
     xv: np.ndarray
     zv: np.ndarray
-
-
-def merge_closets(regions: list[RoomRegion], doorways: list[Polygon]) -> list[RoomPartition]:
-    """Fold every region under :data:`MIN_ROOM_AREA` into the room it opens into.
-
-    A closet is joined to the largest room reachable through a doorway that
-    touches it. When no doorway touches it -- an alcove with no gap in the
-    section, which happens where the opening is above the section height -- it
-    falls back to the room it shares the most boundary with, and that fallback
-    is the criterion W34 measured as ambiguous, so it is used only when the
-    reliable one has nothing to say.
-    """
-    shapes = {region.name: region.polygon_xz.buffer(0) for region in regions}
-    rooms = [region for region in regions if shapes[region.name].area >= MIN_ROOM_AREA]
-    closets = [region for region in regions if shapes[region.name].area < MIN_ROOM_AREA]
-    joined: dict[str, list[str]] = {region.name: [] for region in rooms}
-
-    for closet in closets:
-        shape = shapes[closet.name]
-        reachable: set[str] = set()
-        for doorway in doorways:
-            if not doorway.intersects(shape):
-                continue
-            reachable |= {room.name for room in rooms if doorway.intersects(shapes[room.name])}
-        if reachable:
-            host = max(reachable, key=lambda name: shapes[name].area)
-        else:
-            # No gap in the section reaches this one. Shared boundary is the
-            # only thing left, and it is the criterion that disagrees.
-            host = max(
-                (room.name for room in rooms),
-                key=lambda name: shape.buffer(0.15).intersection(shapes[name]).area,
-            )
-        joined[host].append(closet.name)
-
-    return [
-        RoomPartition(
-            name=room.name,
-            label=room.label,
-            polygon=unary_union([shapes[room.name], *(shapes[n] for n in joined[room.name])]),
-            regions=(room.name, *joined[room.name]),
-        )
-        for room in rooms
-    ]
 
 
 def _rasterise(rooms: list[RoomPartition], xv: np.ndarray, zv: np.ndarray) -> np.ndarray:
@@ -187,22 +371,9 @@ def partition_of_scene(hssd_root: Path, scene_id: str, xv: np.ndarray, zv: np.nd
     lines up with the voxelisation cell for cell and a node's room is a lookup
     rather than a search.
     """
-    regions = [
-        region
-        for region in load_regions(
-            Path(hssd_root) / "semantics" / "scenes" / f"{scene_id}.semantic_config.json"
-        )
-        if region.label not in OUTDOOR_LABELS
-    ]
-    if not regions:
+    rooms = [room for room in rooms_of_scene(hssd_root, scene_id) if not room.outdoor]
+    if not rooms:
         raise ValueError(f"{scene_id} has no interior regions to partition")
-    stage = load_stage(Path(hssd_root), scene_id)
-    floor = float(np.mean([region.floor_height for region in regions]))
-    from reverberate.geometry.apartment import wall_footprint
-
-    walls = wall_footprint(stage, floor + WALL_SECTION_HEIGHT)
-    doorways = find_doorways([region.polygon_xz.buffer(0) for region in regions], walls)
-    rooms = merge_closets(regions, doorways)
     raster = _fill_unclaimed(_rasterise(rooms, np.asarray(xv), np.asarray(zv)))
     if int(raster.min()) < 0:
         raise AssertionError("the room partition left cells with no owner")

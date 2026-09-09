@@ -9,27 +9,16 @@ an interpretation checkable, not a claim about how the room really looks.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import trimesh
 
-from reverberate.geometry.hssd_room import (
-    FurnitureInstance,
-    RoomRegion,
-    load_object_instances,
-    load_regions,
-    match_instances_to_regions,
-)
-from reverberate.viz.label_palette import SHELL_LABEL_COLOURS, SHELL_RENDER_COLOURS, rgba
+from reverberate.viz.label_palette import SHELL_LABEL_COLOURS, SHELL_RENDER_COLOURS
 
 __all__ = [
     "SHELL_LABEL_COLOURS",
     "SHELL_RENDER_COLOURS",
     "VERTICAL_NORMAL_THRESHOLD",
     "absorption_colour",
-    "select_region",
-    "shell_mesh",
     "shell_surface_labels",
 ]
 
@@ -64,39 +53,3 @@ def shell_surface_labels(shell: trimesh.Trimesh) -> np.ndarray:
     labels[vertical > VERTICAL_NORMAL_THRESHOLD] = "ceiling"
     labels[vertical < -VERTICAL_NORMAL_THRESHOLD] = "floor"
     return labels
-
-
-def shell_mesh(region: RoomRegion, colours: dict[str, tuple[int, int, int]]) -> trimesh.Trimesh:
-    """The room shell, each face coloured by whether it is floor, wall or ceiling.
-
-    Faces keep their outward normals, so the viewer must render the shell
-    double sided: standing inside the room means looking at the *back* of every
-    surface, and single sided rendering would leave the room apparently open to
-    the void.
-    """
-    shell = region.extrude()
-    labels = shell_surface_labels(shell)
-    face_colours = np.zeros((len(shell.faces), 4), dtype=np.uint8)
-    for surface, colour in colours.items():
-        face_colours[labels == surface] = rgba(colour)
-    shell.visual = trimesh.visual.ColorVisuals(shell, face_colors=face_colours)
-    return shell
-
-
-def select_region(
-    hssd_root: Path, scene_id: str, region_name: str | None
-) -> tuple[RoomRegion, list[FurnitureInstance]]:
-    """Pick a region by name, or the busiest one, with its matched furniture."""
-    regions = load_regions(hssd_root / "semantics" / "scenes" / f"{scene_id}.semantic_config.json")
-    instances = load_object_instances(hssd_root / "scenes" / f"{scene_id}.scene_instance.json")
-    assignment = match_instances_to_regions(regions, instances)
-
-    if region_name is None:
-        index = max(range(len(regions)), key=lambda i: len(assignment[i]))
-    else:
-        matching = [i for i, region in enumerate(regions) if region.name == region_name]
-        if not matching:
-            available = ", ".join(region.name for region in regions)
-            raise SystemExit(f"no region named {region_name!r}; available: {available}")
-        index = matching[0]
-    return regions[index], assignment[index]

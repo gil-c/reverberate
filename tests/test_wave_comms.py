@@ -420,7 +420,7 @@ def test_the_split_reproduces_sim_setup_bit_for_bit(
         pytest.skip("the B0 models are not on this machine")
     monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
 
-    scene_file = models / "bedroom_only.json"
+    scene_file = models / "room_only.json"
     model = json.loads(scene_file.read_text())
     manifest = json.loads((models / "manifest.json").read_text())
     labels = sorted(model["mats_hash"])
