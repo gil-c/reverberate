@@ -165,6 +165,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--double", action="store_true")
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     parser.add_argument(
+        "--exclude-gpu",
+        nargs="*",
+        default=["RTX 50", "RTX PRO", "B200", "B100"],
+        help="card families never rented: the build image is CUDA 12.4 and its nvcc does "
+        "not compile Blackwell (sm_120), so a rental there fails at the build and pays "
+        "for nothing. Pass an empty list once the image is 12.8 or later",
+    )
+    parser.add_argument(
         "--keep",
         action="store_true",
         help=(
@@ -226,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
             limit=200,
         )
         ranked = rank_offers(
-            [candidate for candidate in offers if candidate.dph_total <= args.max_dph],
+            [
+                candidate
+                for candidate in offers
+                if candidate.dph_total <= args.max_dph
+                and not any(name.lower() in candidate.gpu_name.lower() for name in args.exclude_gpu)
+            ],
             need,
             anchor_hours,
             args.hours,
