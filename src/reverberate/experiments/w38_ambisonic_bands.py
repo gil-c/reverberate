@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+from reverberate import metrics
 from reverberate.audio import Atmosphere
 from reverberate.experiments.engine import write_record
 from reverberate.experiments.run import entry_from_key, sound_speed
@@ -61,7 +62,7 @@ from reverberate.spatial.bands import (
     extend_spectrum,
     level_gain,
 )
-from reverberate.spatial.encode import EncoderSettings
+from reverberate.spatial.encode import Ambisonic, EncoderSettings
 from reverberate.wave import Machine, engine_inputs
 
 __all__ = ["BANDS", "assemble_run", "main", "outer_radius_for", "plan_bands", "prepare_bands"]
@@ -222,6 +223,35 @@ def _absorption(encoded: EncodedRun, bands: int) -> tuple[np.ndarray, str]:
     return np.full(bands, 0.2), "assumed flat 0.2, because the voxelisation is not on this machine"
 
 
+def _axial_modes(plan: dict[str, Any], assembled: Ambisonic) -> dict[str, Any] | None:
+    """The floor to ceiling comb of the assembled W, sized on the storey's height.
+
+    The height comes from the low band's grid manifest, the whole storey's
+    extent in the up axis; the listener's height above the floor from the
+    plan. A run whose cache entry is not on this machine gets ``None``, not a
+    guess.
+    """
+    low = plan.get("bands", {}).get("low", {})
+    entry = Path(plan.get("cache_root", "")) / str(low.get("cache_key", ""))
+    manifest_path = entry / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text())
+    bmin, bmax = manifest.get("bmin"), manifest.get("bmax")
+    if not bmin or not bmax:
+        return None
+    height = float(bmax[1]) - float(bmin[1])
+    centre = plan.get("centre")
+    receiver = None if centre is None else float(centre[1]) - float(bmin[1])
+    return metrics.axial_modes(
+        assembled.signals[0],
+        int(round(assembled.sample_rate_hz)),
+        height_m=height,
+        sound_speed_m_s=float(plan.get("sound_speed_m_s", 343.2)),
+        receiver_height_m=receiver,
+    )
+
+
 def assemble_run(
     out: Path,
     *,
@@ -322,6 +352,7 @@ def assemble_run(
     schroeder_hz = 2000.0 * np.sqrt(t60_low / volume) if volume > 0 and t60_low > 0 else None
     extra = {
         "spectral_extension": extension,
+        "axial_modes": _axial_modes(plan, assembled),
         "decay": decay_record,
         "below_schroeder": {
             "schroeder_hz": None if schroeder_hz is None else round(float(schroeder_hz), 1),

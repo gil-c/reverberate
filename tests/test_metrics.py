@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from reverberate import metrics
 from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.metrics import (
     EARLY_WINDOW,
@@ -216,3 +217,35 @@ def test_band_labels_follow_the_filter_bank_and_not_the_material_bands() -> None
     # summary() zips bands against rt60 with strict=True, so a mislabelled
     # band count raises here rather than printing a wrong table.
     assert "16000 Hz" in metrics.summary()
+
+
+def test_a_floor_to_ceiling_comb_is_found_with_its_spacing_and_its_node() -> None:
+    fs = 16000
+    t = np.arange(int(1.2 * fs)) / fs
+    height = 3.63
+    spacing = 343.2 / (2 * height)
+    rng = np.random.default_rng(3)
+    # A diffuse tail that decays in 0.5 s, and axial lines that ring for 1.2 s.
+    rir = rng.standard_normal(t.size) * 10 ** (-3 * t / 0.5)
+    for n in range(10, 20):
+        if n == 14:
+            continue
+        rir += 0.3 * np.cos(2 * np.pi * n * spacing * t) * 10 ** (-3 * t / 1.2)
+    found = metrics.axial_modes(rir, fs, height_m=height * 1.03, receiver_height_m=1.17)
+    assert found["found"] and found["flutter"]
+    assert abs(found["spacing_hz"] - spacing) < 0.5
+    assert abs(found["height_from_spacing_m"] - height) < 0.05
+    by_n = {row["n"]: row for row in found["lines"]}
+    assert by_n[15]["prominence_db"] > 8
+    assert by_n[14]["prominence_db"] < by_n[15]["prominence_db"] - 6
+    assert by_n[14]["at_pressure_node"] and not by_n[15]["at_pressure_node"]
+    assert found["contrast_db"] > 6
+
+
+def test_no_comb_is_reported_on_a_plain_diffuse_tail() -> None:
+    fs = 16000
+    t = np.arange(int(1.2 * fs)) / fs
+    rir = np.random.default_rng(5).standard_normal(t.size) * 10 ** (-3 * t / 0.5)
+    found = metrics.axial_modes(rir, fs, height_m=3.0)
+    assert found["found"] and not found["flutter"]
+    assert abs(found["contrast_db"]) < 2
