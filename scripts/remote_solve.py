@@ -274,13 +274,37 @@ def main(argv: list[str] | None = None) -> int:
         say("\nnothing rented: pass --yes once the figures above are approved")
         return 0
 
+    machine = None
     if args.instance is None:
         assert offer is not None
-        rental = vast.rent(
-            client, offer, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
-        )
-        instance_id = rental.instance_id
-        say(f"rented {instance_id}, watchdog pid {rental.watchdog_pid}")
+        # Down the list until one rents *and answers*. An offer is an
+        # advertisement: two rentals in a row on one Quebec host came up with
+        # "failed to create task for container" and never answered ssh, and a
+        # driver that rents its single best offer and waits fifteen minutes
+        # pays for that host twice. The chain learnt this first (W35).
+        for candidate, candidate_hours, _, _ in ranked[:5]:
+            if candidate_hours is not None and candidate_hours > args.hours:
+                continue
+            try:
+                rental = vast.rent(
+                    client, candidate, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
+                )
+            except vast.VastError as refusal:
+                say(f"  {candidate.id} would not rent ({refusal}); trying the next")
+                continue
+            instance_id = rental.instance_id
+            say(f"rented {instance_id} on {candidate.describe()}")
+            say(f"  watchdog pid {rental.watchdog_pid}")
+            try:
+                machine = vast.wait_for_ssh(client, instance_id, identity, timeout=420.0)
+            except (TimeoutError, vast.VastError) as silence:
+                say(f"  {instance_id} never answered ({silence}); destroying it, trying the next")
+                vast.teardown(client, instance_id)
+                continue
+            offer = candidate
+            break
+        if machine is None:
+            raise SystemExit("no offer that met the requirement produced a machine that answered")
     else:
         instance_id = int(args.instance)
         existing = client.instance(instance_id)
@@ -292,9 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             f"up {existing.uptime_hours():.2f} h. Its own watchdog still holds the deadline; "
             "no second rental and no second ledger row"
         )
+        machine = vast.wait_for_ssh(client, instance_id, identity)
     retrieved = False
     try:
-        machine = vast.wait_for_ssh(client, instance_id, identity)
         say(f"ssh up at {machine.host}:{machine.port}")
         built = provision(machine, Path("scripts/build_pffdtd.sh"))
         say(f"engine built in {built / 60:.1f} min")
