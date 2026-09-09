@@ -211,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         help="keep each fetched grid local instead of pushing it to the object store",
     )
     parser.add_argument(
+        "--no-seal-pockets",
+        action="store_true",
+        help="skip the grid census that seals every air component smaller than a room "
+        "(reverberate.wave.pockets); on by default because a 0.49 m closet interior "
+        "the mesh census had not closed rang at 700 Hz for a whole response",
+    )
+    parser.add_argument(
         "--min-ram-gb",
         type=float,
         default=0.0,
@@ -359,6 +366,14 @@ def main(argv: list[str] | None = None) -> int:
             spent += result.total_s
             print(result.summary())
             print(json.dumps(result.report, indent=2)[:900])
+            if not args.payload and not args.no_seal_pockets:
+                # Every air component smaller than a room, sealed on the grid
+                # before the entry is installed and published, so that what
+                # the cache holds is what the solver should read.
+                from reverberate.wave.pockets import seal_in_place
+
+                result.report["pockets"] = seal_in_place(out / "vox_out.h5")
+                print(json.dumps(result.report["pockets"], indent=1)[:600])
 
             if args.payload:
                 print("building the payload on the machine that just made the grid")
