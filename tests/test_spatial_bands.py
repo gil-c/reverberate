@@ -427,3 +427,11 @@ def test_a_given_decay_overrides_the_local_fit() -> None:
     assert record["decay_given"] is True
     assert not any(record["from_local_fit"])
     assert record["tail_t60_s"] == [0.2] * 8
+
+
+def test_the_seams_sit_under_the_solves_own_edges_by_default() -> None:
+    low, mid, high = _three(_truth())
+    _, record = assemble(low, mid, high)
+    assert record["split"]["crossovers_hz"] == [800.0, 3200.0]
+    _, explicit = assemble(low, mid, high, crossovers_hz=(1000.0, 4000.0))
+    assert explicit["split"]["crossovers_hz"] == [1000.0, 4000.0]

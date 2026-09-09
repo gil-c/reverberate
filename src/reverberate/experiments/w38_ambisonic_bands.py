@@ -317,9 +317,21 @@ def assemble_run(
         )
         extension["validated_by"] = "w39_extension_check"
 
+    volume = float((encoded["high"].room or {}).get("volume_m3") or 0.0)
+    t60_low = float(decay[0]) if np.isfinite(decay[0]) else float("nan")
+    schroeder_hz = 2000.0 * np.sqrt(t60_low / volume) if volume > 0 and t60_low > 0 else None
     extra = {
         "spectral_extension": extension,
         "decay": decay_record,
+        "below_schroeder": {
+            "schroeder_hz": None if schroeder_hz is None else round(float(schroeder_hz), 1),
+            "note": (
+                "under the Schroeder frequency the modes are sparse, Sabine and Eyring do "
+                "not apply, and the damping of each mode comes from the boundary model "
+                "alone, whose octaves under 125 Hz are a construction family rule and not "
+                "a measurement; nothing validates that decay against a measured room"
+            ),
+        },
         "continuation": continuation,
         "kind": plan["kind"],
         "trick": plan["trick"],

@@ -263,3 +263,71 @@ def layer_model_fit(measured: np.ndarray) -> LayerModelFit:
                 best = fitted
     assert best is not None
     return best
+
+
+#: Construction families for the octaves under 125 Hz, by keyword in the label.
+#: The catalogue stops at 125 Hz on the way down as it does at 4 kHz on the way
+#: up, and repeating the 125 Hz value there is wrong in a known direction for
+#: two of the three families. Measured tables (Vorlaender, Auralization, 2008,
+#: appendix; Cox and D'Antonio, Acoustic Absorbers and Diffusers, 3rd ed.,
+#: chapter 5) put light panels on studs, glazing and suspended timber floors at
+#: 0.25 to 0.35 around 63 Hz, where the panel resonance sits, above their
+#: 125 Hz value; thin porous layers fall towards zero as the wavelength outgrows
+#: their thickness, roughly halving per octave; massive walls stay flat and
+#: low. Objects that are none of these hold their 125 Hz value, as before.
+LOW_BAND_FAMILIES: dict[str, tuple[str, ...]] = {
+    "panel": (
+        "shell",
+        "wall",
+        "ceiling",
+        "floor",
+        "window",
+        "glass",
+        "door",
+        "plaster",
+        "mirror",
+        "panel",
+    ),
+    "massive": ("fireplace", "concrete", "tile", "ceramic", "stone", "brick", "basin", "bathtub"),
+    "porous": (
+        "carpet",
+        "rug",
+        "curtain",
+        "seat",
+        "couch",
+        "sofa",
+        "chair",
+        "bed",
+        "mattress",
+        "pillow",
+        "cushion",
+        "blanket",
+        "towel",
+        "plush",
+        "cloth",
+        "plant",
+    ),
+}
+
+#: Floors a panel family reaches at 63, 31.5 and 16 Hz, when its 125 Hz value
+#: sits under them. A stated judgement, not a measurement.
+PANEL_LOW_FLOORS = (0.30, 0.25, 0.20)
+
+
+def low_band_family(label: str) -> str:
+    """Which rule the octaves under 125 Hz follow for this label."""
+    name = label.lower()
+    for family, keywords in LOW_BAND_FAMILIES.items():
+        if any(keyword in name for keyword in keywords):
+            return family
+    return "hold"
+
+
+def extend_low_bands(label: str, alpha_125: float) -> tuple[float, float, float]:
+    """Absorption at 63, 31.5 and 16 Hz from the 125 Hz value and the label's family."""
+    family = low_band_family(label)
+    if family == "panel":
+        return tuple(float(max(alpha_125, floor)) for floor in PANEL_LOW_FLOORS)  # type: ignore[return-value]
+    if family == "porous":
+        return (0.5 * alpha_125, 0.25 * alpha_125, 0.125 * alpha_125)
+    return (alpha_125, alpha_125, alpha_125)

@@ -53,6 +53,7 @@ from reverberate.geometry.hssd_room import load_object_instances
 from reverberate.geometry.orientation import BOTH
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.geometry.sim_geometry import instances_in_room, simulation_geometry
+from reverberate.materials.extrapolation import extend_low_bands, low_band_family
 
 __all__ = [
     "C_AIR",
@@ -246,10 +247,13 @@ def material_table(assignments: list[MeshMaterialAssignment]) -> dict[str, list[
     """Per label Sabine absorption on PFFDTD's 11 octave bands, 16 Hz to 16 kHz.
 
     The project's materials carry pyroomacoustics' bands, which start at 125 Hz
-    and stop at 4 or 8 kHz. The bands below the first and above the last are
-    filled by holding the end value, which is what the absorption tables
-    themselves do. Labels shared by several meshes are averaged by area, so a
-    label's coefficient is the one its surface actually presents.
+    and stop at 4 or 8 kHz. Above the last the end value is held, which is what
+    the absorption tables themselves do. **Below 125 Hz the label's construction
+    family decides**, :func:`reverberate.materials.extrapolation.extend_low_bands`:
+    holding 125 Hz there left an 81 m2 living room ringing at 40 Hz for the whole
+    response, since nothing in the shell absorbed the modes the catalogue never
+    measured. Labels shared by several meshes are averaged by area, so a label's
+    coefficient is the one its surface actually presents.
     """
     weighted: dict[str, list[tuple[float, np.ndarray]]] = {}
     for assignment in assignments:
@@ -266,8 +270,15 @@ def material_table(assignments: list[MeshMaterialAssignment]) -> dict[str, list[
         stack = np.vstack([c for _, c in parts])
         total = areas.sum()
         mean = stack.mean(axis=0) if total <= 0 else (areas[:, None] * stack).sum(axis=0) / total
+        low = np.flatnonzero(BANDS < 125.0)
+        mean[low] = list(reversed(extend_low_bands(label, float(mean[BANDS == 125.0][0]))))
         table[label] = [round(float(v), 5) for v in np.clip(mean, 0.001, 0.999)]
     return table
+
+
+def material_families(table: dict[str, list[float]]) -> dict[str, str]:
+    """The low band family each label followed, for the manifest to carry."""
+    return {label: low_band_family(label) for label in sorted(table)}
 
 
 def write(
@@ -369,6 +380,9 @@ def export(
         "c_air": C_AIR,
         "max_edge_m": max_edge_m,
         "materials": material_table([*full_assignments, *room_assignments]),
+        "material_families": material_families(
+            material_table([*full_assignments, *room_assignments])
+        ),
         "source": [float(v) for v in src],
         "receiver": [float(v) for v in rec],
         "direct_path_m": direct,

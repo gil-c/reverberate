@@ -58,6 +58,7 @@ from reverberate.spatial.sh import channel_count
 from reverberate.tail import local_decay_s, synthesise, transpose
 
 __all__ = [
+    "CROSSOVER_OF_FMAX",
     "BandSolve",
     "assemble",
     "calibration_bands_hz",
@@ -69,6 +70,11 @@ __all__ = [
     "level_gain",
     "pad_order",
 ]
+
+
+#: Where a seam sits, as a fraction of the lower solve's ``fmax``: 12 points per
+#: wavelength rather than the 10.5 of the edge itself.
+CROSSOVER_OF_FMAX = 0.8
 
 
 @dataclass(frozen=True)
@@ -306,10 +312,17 @@ def assemble(
     mid: BandSolve,
     high: BandSolve,
     *,
-    crossovers_hz: tuple[float, float] = band_split.DEFAULT_CROSSOVERS_HZ,
+    crossovers_hz: tuple[float, float] | None = None,
     taps: int = band_split.TAPS,
 ) -> tuple[Ambisonic, dict[str, Any]]:
     """One ambisonic response from three, each band-limited to its own solve.
+
+    ``crossovers_hz`` defaults to :data:`CROSSOVER_OF_FMAX` times the lower
+    solve's ``fmax`` at each seam. A crossover *on* a solve's own edge lets the
+    edge through at -6 dB, and the edge is where the scheme's group velocity
+    goes to zero at 10.5 points per wavelength: on the 81 m2 living room the
+    1 kHz solve left a line at exactly 1000 Hz that never decayed and owned the
+    late response between 300 Hz and 3 kHz.
 
     The high band is the reference scale, the mid is levelled on it and the low
     on the mid, so a level defect between two solves is caught where it is
@@ -327,6 +340,8 @@ def assemble(
     rate = int(round(high.ambisonic.sample_rate_hz))
     if not low.fmax_hz < mid.fmax_hz < high.fmax_hz:
         raise ValueError("the bands must be given lowest first, by their fmax")
+    if crossovers_hz is None:
+        crossovers_hz = (CROSSOVER_OF_FMAX * low.fmax_hz, CROSSOVER_OF_FMAX * mid.fmax_hz)
     if not low.fmax_hz >= crossovers_hz[0] and mid.fmax_hz >= crossovers_hz[1]:
         raise ValueError(
             f"a solve stops under the crossover it is meant to carry: fmax "
