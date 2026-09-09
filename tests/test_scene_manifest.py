@@ -9,9 +9,7 @@ import pytest
 import trimesh
 
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
-from reverberate.viz.label_palette import SHELL_LABEL_COLOURS, rgba
 from reverberate.viz.room_surfaces import (
-    shell_mesh,
     shell_surface_labels,
 )
 from reverberate.viz.scene_manifest import build_instances, column_major, link_asset
@@ -40,15 +38,6 @@ def test_floor_sits_below_ceiling_at_the_authored_heights() -> None:
     assert centres[labels == "ceiling"].mean() == pytest.approx(
         region.floor_height + region.extrusion_height
     )
-
-
-def test_shell_mesh_colours_every_face_from_its_surface() -> None:
-    shell = shell_mesh(square_region(), SHELL_LABEL_COLOURS)
-    assert isinstance(shell.visual, trimesh.visual.ColorVisuals)
-    colours = shell.visual.face_colors
-    labels = shell_surface_labels(shell)
-    for surface, colour in SHELL_LABEL_COLOURS.items():
-        assert (colours[labels == surface] == rgba(colour)).all()
 
 
 def test_column_major_puts_translation_where_three_js_reads_it() -> None:

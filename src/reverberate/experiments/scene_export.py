@@ -281,6 +281,14 @@ def material_families(table: dict[str, list[float]]) -> dict[str, str]:
     return {label: low_band_family(label) for label in sorted(table)}
 
 
+#: The two scenes every export writes. They are constants because a consumer
+#: has to be able to tell one from the other: `grid_page` chose the room's
+#: sealed-volume census by ``scene_name.startswith("bedroom")``, which was
+#: silently wrong the moment the room stopped being a bedroom.
+ROOM_SCENE = "room_only"
+FULL_SCENE = "apartment_full"
+
+
 def write(
     name: str,
     assignments: list[MeshMaterialAssignment],
@@ -347,9 +355,14 @@ def export(
     # this replaces dropped every picture on the bedroom's own walls, because an
     # asset's origin sits in the wall band where no room polygon contains it.
     room_storey = isolated_storey(storey, room_name)
+    room = room_storey.everyday[0]
     in_room = instances_in_room(hssd_root, room_storey, instances)
     room_assignments, room_summary = simulation_geometry(hssd_root, room_storey, in_room, seed=seed)
     src, rec = source_receiver(room_assignments)
+    print(
+        f"{scene_id}/{room_name} (room only): {room.area_m2:.1f} m2 from "
+        f"{len(room.regions)} region(s), {', '.join(room.regions)}"
+    )
     print(f"{scene_id}/{room_name} (room only): {room_summary.summary()}")
 
     # The whole storey, which is the reference the truncations are judged against.
@@ -366,8 +379,8 @@ def export(
     print(f"direct path {direct:.3f} m, {1000.0 * direct / C_AIR:.2f} ms")
 
     scenes = [
-        write("apartment_full", full_assignments, src, rec, out_dir, None),
-        write("bedroom_only", room_assignments, src, rec, out_dir, None),
+        write(FULL_SCENE, full_assignments, src, rec, out_dir, None),
+        write(ROOM_SCENE, room_assignments, src, rec, out_dir, None),
     ]
     for cut in cuts_m:
         trimmed = truncate(full_assignments, src, rec, cut)
@@ -376,6 +389,11 @@ def export(
     manifest = {
         "scene_id": scene_id,
         "room": room_name,
+        # The regions the room is actually made of. `room` above is what was
+        # asked for; this is what was simulated, and on an open plan the two
+        # differ. See reverberate.geometry.rooms.
+        "room_regions": list(room.regions),
+        "room_area_m2": round(room.area_m2, 3),
         "seed": seed,
         "c_air": C_AIR,
         "max_edge_m": max_edge_m,

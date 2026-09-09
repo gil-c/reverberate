@@ -41,7 +41,7 @@ class _Theory:
 def models(tmp_path: Path) -> Path:
     directory = tmp_path / "models"
     directory.mkdir()
-    (directory / "bedroom_only.json").write_text(json.dumps({"mats_hash": {}}))
+    (directory / "room_only.json").write_text(json.dumps({"mats_hash": {}}))
     (directory / "manifest.json").write_text(
         json.dumps(
             {
@@ -49,14 +49,14 @@ def models(tmp_path: Path) -> Path:
                 "room": "bedroom.001",
                 "sealed": {"sealed_volume_m3": 3.3},
                 "sealed_full": {"sealed_volume_m3": 41.5},
-                "scenes": [{"name": "bedroom_only", "file": "bedroom_only.json"}],
+                "scenes": [{"name": "room_only", "file": "room_only.json"}],
             }
         )
     )
     return directory
 
 
-def _build(models: Path, out: Path, scene: str = "bedroom_only") -> dict[str, Any]:
+def _build(models: Path, out: Path, scene: str = "room_only") -> dict[str, Any]:
     entry = _Entry(out / "cache", {"fmax": 4000.0, "h_m": 0.00817, "boundary_nodes": 3861276})
     with (
         mock.patch.object(grid_page, "entry_from_key", lambda key: entry),

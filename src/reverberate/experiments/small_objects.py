@@ -54,10 +54,16 @@ from shapely.geometry import MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 
 from reverberate.acoustics import OCTAVE_BANDS
-from reverberate.geometry.apartment import Storey, build_apartment, instances_on_storey
+from reverberate.geometry.apartment import (
+    Storey,
+    build_apartment,
+    clean_outline,
+    instances_on_storey,
+)
 from reverberate.geometry.hssd_room import load_object_instances
 from reverberate.geometry.placement import footprint_of
 from reverberate.geometry.pra_room import MeshMaterialAssignment, PairResponse, simulate_pairs
+from reverberate.geometry.rooms import room_holding
 from reverberate.geometry.sim_geometry import MIN_WALL_DISTANCE, room_of, simulation_geometry
 from reverberate.metrics import JND_C50_DB, JND_DRR_DB, JND_RT60_RELATIVE
 
@@ -74,17 +80,23 @@ def isolated_storey(storey: Storey, room_name: str) -> Storey:
     Reuses the production shell and material path rather than building a
     special test geometry: the room is the same extruded polygon, with the same
     floor/wall/ceiling split, that the apartment would have given it.
+
+    **The room is the everyday one, not the dataset's region of that name.**
+    ``room_name`` may name either; both resolve to the whole volume a person
+    standing there would call one room, by the rules in
+    :mod:`reverberate.geometry.rooms`. Extruding the named region alone is what
+    sealed a rigid wall across the 6.87 m opening between `102344403`'s
+    `living room` and its kitchen, and shrank a 126 m2 room to 81 m2.
     """
-    rooms = [room for room in storey.rooms if room.name == room_name]
-    if not rooms:
-        raise ValueError(f"no room named {room_name!r} on this storey")
-    room = rooms[0]
+    room = room_holding(list(storey.everyday), room_name)
+    folded = [region for region in storey.rooms if region.name in room.regions]
     return Storey(
         floor_height=storey.floor_height,
         ceiling_height=storey.ceiling_height,
-        walkable=room.polygon_xz.buffer(0),
-        rooms=rooms,
+        walkable=clean_outline(room.polygon),
+        rooms=folded,
         doorways=0,
+        everyday=(room,),
     )
 
 
