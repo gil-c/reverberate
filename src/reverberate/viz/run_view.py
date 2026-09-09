@@ -316,7 +316,14 @@ def _sample_rows(
             rows.append(
                 {
                     "id": f"s{index}r{receiver}",
-                    "label": f"source {index} to receiver {receiver}",
+                    # A run may name its sources, and one that compares two
+                    # renderings of the same room must: "source 1 to receiver
+                    # 0" does not say which of them a listener is hearing.
+                    "label": (
+                        f"{entry['label']}, receiver {receiver}"
+                        if entry.get("label")
+                        else f"source {index} to receiver {receiver}"
+                    ),
                     "source_index": index,
                     "receiver_index": receiver,
                     "sample_rate_hz": rate,

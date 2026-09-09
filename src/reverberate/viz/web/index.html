@@ -826,7 +826,27 @@
       // room it was never simulated in. Doing it beforehand also makes the run
       // available immediately, which is correct: a run payload is published by
       // the solver and owes nothing to the HSSD assembly.
-      function releaseRun(sceneId) {
+      // `wanted` is the run the reader actually asked for. Without it this
+      // fell back to the last run of the apartment, so choosing one run in the
+      // selector opened another: the selector said w37_listen while the panel
+      // and the audio player were still on w37_three_band, with nothing on
+      // screen to say so. A page that names one rendering and plays another is
+      // the worst kind of defect for a listening test, because the listener
+      // has no way to notice.
+      function releaseRun(sceneId, wanted = null) {
+        // The built group goes with the payload. Nulling only the payload left
+        // the outgoing run's surfaces in the scene, and `setMode` then found a
+        // group already there and returned without rebuilding: the selector
+        // moved, `runChoice` moved, and the panel and the audio did not. The
+        // run picker's own handler had always done this; the scene selector's
+        // path did not, which is why one worked and the other did not.
+        if (groups.acoustic) scene.remove(groups.acoustic);
+        groups.acoustic = null;
+        // The markers are a second group and a second removal. `buildRunGroup`
+        // lifts the source, the listening point and the array sphere out of
+        // the surfaces so they can show in all three views, and leaving them
+        // behind would draw the outgoing run's source over the incoming one
+        // with nothing to say so.
         if (runView && runView.markers) scene.remove(runView.markers);
         runData = runView = runShow = null;
         document.getElementById("run-panel").hidden = true;
@@ -836,11 +856,14 @@
         button.title = apartmentRuns.length
           ? `solver run: ${apartmentRuns.map((r) => r.name).join(", ")}`
           : "no solver run has been rendered for this apartment";
-        // The run the server was told to open on, if it named one. Otherwise
-        // the last by directory name, which is stable and is rarely the one
-        // anyone wanted once an apartment has a dozen runs.
-        const lead = apartmentRuns.findIndex((r) => r.lead);
-        runChoice = lead >= 0 ? lead : Math.max(0, apartmentRuns.length - 1);
+        // Three sources, in this order. What the reader just asked for wins,
+        // because they asked for it. Failing that, the run the server marked
+        // as the one to lead with: `runs.json` carries a `lead` flag that
+        // `--run NAME` sets. Last of the apartment only when nothing at all
+        // has been said.
+        const asked = wanted ? apartmentRuns.findIndex((r) => r.name === wanted) : -1;
+        const lead = asked >= 0 ? -1 : apartmentRuns.findIndex((r) => r.lead);
+        runChoice = asked >= 0 ? asked : lead >= 0 ? lead : Math.max(0, apartmentRuns.length - 1);
         const picker = document.getElementById("run-choice");
         picker.hidden = apartmentRuns.length < 2;
         picker.innerHTML = apartmentRuns
@@ -854,12 +877,12 @@
         if (button.disabled) button.classList.remove("active");
       }
 
-      async function loadApartment(sceneId) {
+      async function loadApartment(sceneId, wantedRun = null) {
         assemblyMessage = "building apartment… (first load of a scene takes a while)";
         setBusy(assemblyMessage);
         // Nothing of the outgoing apartment may survive the wait, including the
         // mode buttons, which is why this runs before the fetch and not after.
-        releaseRun(sceneId);
+        releaseRun(sceneId, wantedRun);
         chosen = null;
         if (activeMode === "acoustic") activeMode = null;
         // The server assembles a scene on demand: 168 apartments could not be
@@ -919,7 +942,10 @@
         // leads because a room with a run is the only place all three modes
         // have something to show.
         select.innerHTML = [
-          ...runs.map((r) => `<option value="run:${r.name}">${r.scene_id} · ${r.room} · simulated</option>`),
+          // The run's own name is on the option because it is the only part
+          // that differs: twelve runs of one flat all read "102344022 ·
+          // bedroom.001 · simulated", and a reader cannot pick one from that.
+          ...runs.map((r) => `<option value="run:${r.name}">${r.name} · ${r.scene_id} · ${r.room}</option>`),
           ...apartments.map((a) => `<option value="${a.id}">${a.label}</option>`),
         ].join("");
         select.onchange = () => openSelection(select.value);
@@ -931,10 +957,13 @@
         // Not awaited yet: assembling an apartment takes minutes on a first
         // visit, and the run is ready now. Opening it first is what makes the
         // simulated room the one entry that shows something immediately.
-        const assembling = loadApartment(run ? run.scene_id : value);
+        const assembling = loadApartment(run ? run.scene_id : value, run ? run.name : null);
         if (run) {
           await setMode("acoustic");
-          standAt(runData.samples[0]?.receiver_index ?? 0);
+          // Guarded: setMode can return without a payload when the run fails
+          // to load, and throwing here used to abandon the apartment assembly
+          // that is still in flight below.
+          if (runData) standAt(runData.samples[0]?.receiver_index ?? 0);
         }
         await assembling;
       }

@@ -265,6 +265,16 @@ class Atmosphere:
     humidity_percent: float = 50.0
     pressure_kpa: float = 101.325
 
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.humidity_percent <= 100.0:
+            raise ValueError(
+                f"relative humidity must be a percentage in [0, 100], got {self.humidity_percent}"
+            )
+        if self.pressure_kpa <= 0.0:
+            raise ValueError(f"pressure must be positive, got {self.pressure_kpa} kPa")
+        if self.temperature_c <= -273.15:
+            raise ValueError(f"temperature must be above absolute zero, got {self.temperature_c} C")
+
     def attenuation_np_per_m(self, frequency_hz: np.ndarray) -> np.ndarray:
         """This atmosphere's own absorption coefficient."""
         return air_absorption_np_per_m(
@@ -273,6 +283,15 @@ class Atmosphere:
             humidity_percent=self.humidity_percent,
             pressure_kpa=self.pressure_kpa,
         )
+
+    def attenuation_db_per_m(self, frequency_hz: float | np.ndarray) -> np.ndarray:
+        """The same coefficient in decibels per metre, the unit the standard tabulates.
+
+        Scalar or array in, array out, so a caller can broadcast it against a
+        band axis without special-casing one frequency.
+        """
+        freq = np.asarray(frequency_hz, dtype=float)
+        return np.asarray(self.attenuation_np_per_m(freq) * DECIBELS_PER_NEPER, dtype=float)
 
     def record(self) -> dict[str, float | str]:
         """What a ``report.json`` has to carry for the response to be readable."""
@@ -364,13 +383,15 @@ def apply_air_absorption(
     sample_rate_hz: float,
     *,
     sound_speed_m_s: float = 343.0,
-    temperature_c: float = 20.0,
-    humidity_percent: float = 50.0,
-    pressure_kpa: float = 101.325,
+    atmosphere: Atmosphere | None = None,
     start_time_s: float = 0.0,
     frame: int | None = None,
 ) -> np.ndarray:
     """Apply atmospheric absorption to an impulse response, in place of a solver term.
+
+    ``atmosphere`` is the air the response is claimed to have crossed; ``None``
+    is :class:`Atmosphere`'s own default, 20 C and 50 per cent, which a run
+    still has to write down through :meth:`Atmosphere.record`.
 
     **This is exact rather than a concession, and the reason is the geometry of
     an impulse response.** Every sample arriving at time ``t`` has travelled
@@ -506,12 +527,7 @@ def apply_air_absorption(
     overlap = np.zeros(padded.shape[1])
 
     frequency = np.fft.rfftfreq(frame, 1.0 / sample_rate_hz)
-    attenuation = air_absorption_np_per_m(
-        frequency,
-        temperature_c=temperature_c,
-        humidity_percent=humidity_percent,
-        pressure_kpa=pressure_kpa,
-    )
+    attenuation = (atmosphere or Atmosphere()).attenuation_np_per_m(frequency)
     for start in range(0, padded.shape[1] - frame + 1, hop):
         centre = (start + frame / 2.0 - frame) / sample_rate_hz + start_time_s
         gain = np.exp(-attenuation * sound_speed_m_s * max(centre, 0.0))
