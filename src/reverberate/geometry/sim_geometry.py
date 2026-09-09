@@ -40,7 +40,7 @@ from reverberate.geometry.carve import CarveReport, CarveResult, carve_collider
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
-from reverberate.geometry.orientation import BOTH, orient_for_air
+from reverberate.geometry.orientation import BOTH, is_closed, orient_for_air
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.geometry.sealed import SealedReport, sealed_regions
 from reverberate.viz.room_surfaces import shell_surface_labels
@@ -128,10 +128,13 @@ def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
     Returns the original mesh unchanged, and False, when the boolean engine
     cannot do it, or when it returns something that is not actually one sealed
     solid: an obstacle with its buried faces is still better than no obstacle,
-    and the caller reports the count rather than hiding it. Watertightness is
-    checked here rather than assumed, because "conserves volume to the digit"
-    is a claim about a *closed* solid, and a union that comes back open has not
-    earned it.
+    and the caller reports the count rather than hiding it. Closure is checked
+    here rather than assumed, because "conserves volume to the digit" is a
+    claim about a *closed* solid, and a union that comes back open has not
+    earned it. Closure by
+    :func:`~reverberate.geometry.orientation.is_closed`, which is the claim
+    being made; ``trimesh``'s ``is_watertight`` would add edge-manifoldness on
+    top of it and discard unions that are sealed.
     """
     if mesh.body_count <= 1:
         return mesh, True
@@ -141,7 +144,7 @@ def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
         return mesh, False
     if not isinstance(united, trimesh.Trimesh) or len(united.faces) == 0:
         return mesh, False
-    if not united.is_watertight:
+    if not is_closed(united):
         return mesh, False
     return united, True
 

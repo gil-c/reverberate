@@ -43,32 +43,97 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import time
 from pathlib import Path
 
 from reverberate import auth
 from reverberate.experiments.run import build_materials
 from reverberate.gpu import vast
+from reverberate.wave.remote import _run
 from reverberate.wave.remote_voxelise import (
+    REMOTE_WORK,
+    MachineLost,
+    MachineNeed,
     RetrievalFailed,
     build_payload_remote,
     grid_shape_of,
+    install_entry,
     nodes_from_shape,
     payload_need_for,
-    pick_offer,
     remote_disk_free_gb,
     voxelise_need,
     voxelise_remote,
 )
-from reverberate.wave.voxelise import SceneSpec
+from reverberate.wave.voxelise import SceneSpec, nh_for
 
 #: A CUDA image because Vast's cheap boxes are GPU boxes and the build script
 #: compiles the engine too. The voxelise and payload stages never use the card.
 IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
 
+#: Gigabytes of the reserved disk that are gone before the job sees any of it:
+#: the image, the layers the build unpacks, PFFDTD's checkout and its venv.
+#: Measured on the 2026-09-07 rental -- 402 GB advertised, 367 reserved, **385
+#: free** -- so an offer advertising exactly what the guard needs does not have
+#: it. Named because the alternative is a three hour band that dies on
+#: PFFDTD's disk prompt, which does not read as "out of space", it reads as a
+#: hang.
+IMAGE_DISK_GB = 25.0
 
-def spec_from(args: argparse.Namespace) -> tuple[SceneSpec, Path]:
-    """The scene, and the model file it names."""
+
+def pick_offers(
+    client: vast.VastClient, need: MachineNeed, max_dph: float, min_cpu_ghz: float = 0.0
+) -> list[vast.Offer]:
+    """Every offer that meets ``need``, cheapest first, or an explanation and none.
+
+    A *list*, because an offer is an advertisement and not a promise: the
+    cheapest one that fits answered ``HTTP 400`` to two rentals in a row while
+    its advertised disk quietly fell from 632 GB to 609, and a function that
+    returns one offer sends the caller back to the same dead host every time.
+
+    ``min_cpu_ghz`` is the one filter a CPU-bound stage wants and the one that
+    was missing. W35 measured 192 vCPU voxelising at the same speed as ten, and
+    on 2026-09-07 a 48 vCPU box at 3.0 GHz took about twice the laptop's time on
+    this flat at 4 kHz -- while a 16 core part at 4.8 GHz was on offer for the
+    same money. Cheapest-that-fits is the right rule only once the fit includes
+    the thing being bought.
+    """
+    query = vast.search_query(
+        gpu_name="",
+        min_disk_gb=int(need.disk_gb + IMAGE_DISK_GB),
+        min_cpu_cores=need.cores,
+        min_reliability=0.99,
+        min_cpu_ghz=min_cpu_ghz,
+    )
+    offers = client.search(query, limit=200)
+    affordable = [offer for offer in offers if offer.dph_total <= max_dph]
+    eligible = [
+        offer
+        for offer in affordable
+        if not need.unmet(offer) and offer.disk_gb >= need.disk_gb + IMAGE_DISK_GB
+    ]
+    if not eligible:
+        print(f"{len(offers)} offers matched the query, {len(affordable)} under {max_dph} USD/h")
+        for offer in affordable[:5]:
+            problems = need.unmet(offer)
+            if offer.disk_gb < need.disk_gb + IMAGE_DISK_GB:
+                problems.append(
+                    f"{offer.disk_gb:.0f} GB disk advertised, needs "
+                    f"{need.disk_gb + IMAGE_DISK_GB:.0f} with the image's share"
+                )
+            print(f"  {offer.id}: {', '.join(problems)}")
+        raise SystemExit(f"nothing meets: {need.why}")
+    return sorted(eligible, key=lambda offer: offer.dph_total)
+
+
+def spec_from(args: argparse.Namespace, fmax: float) -> tuple[SceneSpec, Path, int]:
+    """The scene at one band, the model file it names, and its triangle count.
+
+    The triangle count comes back because the memory requirement needs it and
+    the manifest already carries it: the alternative is parsing a 233 MB model
+    a second time to learn something the exporter wrote down.
+    """
     manifest = json.loads((args.models / "manifest.json").read_text())
     scene = {entry["name"]: entry for entry in manifest["scenes"]}[args.scene]
     model_json = (args.models / scene["file"]).resolve()
@@ -80,12 +145,17 @@ def spec_from(args: argparse.Namespace) -> tuple[SceneSpec, Path]:
             model_json=model_json,
             mat_folder=mat_folder,
             mat_files=mat_files,
-            fmax=args.fmax,
+            fmax=fmax,
             ppw=10.5,
             slabs=args.slabs,
-            nh=args.nh,
+            # A cell count only holds at one band, so it is derived from the
+            # grid unless the caller insists. 40 cells is 8.2 cm at 16 kHz and
+            # 1.31 m at 1 kHz, and the second of those does not finish; see
+            # reverberate.wave.voxelise.VOXEL_BUDGET.
+            nh=args.nh if args.nh else nh_for(grid_shape_of(model_json, fmax, 10.5)),
         ),
         model_json,
+        int(scene["triangles"]),
     )
 
 
@@ -93,11 +163,27 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", type=Path, required=True)
     parser.add_argument("--scene", required=True)
-    parser.add_argument("--fmax", type=float, required=True)
+    parser.add_argument(
+        "--fmax",
+        type=float,
+        nargs="+",
+        required=True,
+        help="one or more bands, computed in ascending order on ONE rental. The machine "
+        "is sized for the largest, so the cheap bands ride along on a box that had to "
+        "be rented for the expensive one anyway, and each grid is installed into the "
+        "local cache under its own key",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--hours", type=float, required=True, help="hard deadline")
     parser.add_argument("--slabs", type=int, default=1)
-    parser.add_argument("--nh", type=int, default=None)
+    parser.add_argument(
+        "--nh",
+        type=int,
+        default=None,
+        help="voxel side in grid steps. Left unset it is derived per band from "
+        "reverberate.wave.voxelise.VOXEL_BUDGET, which is the only form that "
+        "survives changing fmax",
+    )
     parser.add_argument(
         "--viewer-cubes",
         type=int,
@@ -111,19 +197,48 @@ def main(argv: list[str] | None = None) -> int:
         "only that, leaving the grid where it was made",
     )
     parser.add_argument("--max-dph", type=float, default=0.40)
+    parser.add_argument(
+        "--min-cpu-ghz",
+        type=float,
+        default=4.0,
+        help="floor on the advertised core clock. Voxelisation is CPU bound and "
+        "92 per cent parallel, so past about forty cores the serial floor "
+        "dominates and only the clock is left to buy",
+    )
+    parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="keep each fetched grid local instead of pushing it to the object store",
+    )
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     args = parser.parse_args(argv)
 
-    spec, model_json = spec_from(args)
-    need = voxelise_need(model_json, args.fmax, slabs=args.slabs)
-    if args.payload:
-        # One rental does both, so it has to satisfy both: the voxeliser wants
-        # cores and disk, the payload build wants memory, and neither is the
-        # other's constraint.
-        shape = grid_shape_of(model_json, args.fmax, 10.5)
-        need = need.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
+    # Ascending, so a mistake in the arithmetic shows up on a one minute grid
+    # rather than after three hours of the expensive one.
+    bands = sorted(dict.fromkeys(args.fmax))
+    specs = {fmax: spec_from(args, fmax) for fmax in bands}
+    model_json = specs[bands[0]][1]
 
-    print(f"{args.scene} at {args.fmax:g} Hz, key {spec.key}")
+    triangles = specs[bands[0]][2]
+    need = None
+    for fmax in bands:
+        nh = args.nh if args.nh else nh_for(grid_shape_of(model_json, fmax, 10.5))
+        shape = grid_shape_of(model_json, fmax, 10.5)
+        lattice = 1
+        for size in shape:
+            lattice *= -(-size // nh)
+        one = voxelise_need(model_json, fmax, slabs=args.slabs, triangles=triangles, voxels=lattice)
+        if args.payload:
+            # One rental does both, so it has to satisfy both: the voxeliser
+            # wants cores and disk, the payload build wants memory, and neither
+            # is the other's constraint.
+            one = one.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
+        need = one if need is None else need.merge(one)
+    assert need is not None
+
+    for fmax in bands:
+        spec = specs[fmax][0]
+        print(f"{args.scene} at {fmax:g} Hz, key {spec.key}, nh {spec.nh}")
     print(f"  needs {need.cores} vCPU, {need.ram_gb:.0f} GB RAM, {need.disk_gb:.0f} GB disk")
     print(f"  because {need.why}")
 
@@ -132,9 +247,11 @@ def main(argv: list[str] | None = None) -> int:
     identity = vast.account_identity(client)
     print(f"  ssh identity {identity}")
 
-    offer = pick_offer(client, need, args.max_dph)
+    candidates = pick_offers(client, need, args.max_dph, args.min_cpu_ghz)
+    offer = candidates[0]
     budget = vast.estimate_cost_usd(offer.dph_total, args.hours)
     print(f"\n{offer.describe()}")
+    print(f"  {len(candidates)} offers meet the requirement; this is the cheapest")
     print(f"  cap {args.hours:g} h -> at most {budget:.2f} USD at the offer's rate")
     print("  the bill will be higher: Vast adds the disk you reserve, about 0.05 USD/h per")
     print(f"  200 GB, so {int(need.disk_gb)} GB is roughly +{need.disk_gb * 0.000265:.3f} USD/h")
@@ -143,12 +260,47 @@ def main(argv: list[str] | None = None) -> int:
         print("\nnothing rented: pass --yes to spend")
         return 0
 
-    rental = vast.rent(client, offer, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20)
-    print(f"\nrented {rental.instance_id}, watchdog pid {rental.watchdog_pid}")
-    computed = False
+    store = None
+    if not args.no_publish:
+        from reverberate.store import shared_store
+
+        store = shared_store()
+        if store is None:
+            print("no store credentials here, so the grids stay on this machine")
+
+    # Down the list until one actually rents. Nothing has been created yet, so
+    # a refusal here costs nothing but the round trip.
+    # Down the list until one rents *and answers*. An offer is an
+    # advertisement: 45591732 refused two rentals with HTTP 400 and then, when
+    # it finally accepted one, never answered ssh at all -- three quarters of
+    # an hour of wall clock for a host that was never going to work. Renting
+    # and reaching are one step here because failing either means the same
+    # thing: try the next machine, not give up on the band.
+    rental = None
     machine = None
+    for candidate in candidates[:8]:
+        try:
+            attempt = vast.rent(
+                client, candidate, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
+            )
+        except vast.VastError as refusal:
+            print(f"  {candidate.id} would not rent ({refusal}); trying the next")
+            continue
+        print(f"\nrented {attempt.instance_id} on {candidate.describe()}")
+        print(f"watchdog pid {attempt.watchdog_pid}")
+        try:
+            machine = vast.wait_for_ssh(client, attempt.instance_id, identity, timeout=420.0)
+        except (TimeoutError, vast.VastError) as silence:
+            print(f"  {attempt.instance_id} never answered ({silence}); destroying it")
+            vast.teardown(client, attempt.instance_id)
+            continue
+        rental, offer = attempt, candidate
+        break
+    if rental is None or machine is None:
+        raise SystemExit("no offer that met the requirement produced a machine that answered")
+
+    computed = False
     try:
-        machine = vast.wait_for_ssh(client, rental.instance_id, identity)
         print(f"ssh up at {machine.host}:{machine.port}")
         free = remote_disk_free_gb(machine)
         print(f"free disk {free:.0f} GB, need {need.disk_gb:.0f}")
@@ -157,32 +309,64 @@ def main(argv: list[str] | None = None) -> int:
                 f"{free:.0f} GB free against {need.disk_gb:.0f} needed; stopping before the "
                 "upload rather than paying for a run that stalls on PFFDTD's disk prompt"
             )
-        result = voxelise_remote(
-            machine,
-            spec,
-            args.out,
-            build_script=Path(__file__).with_name("build_pffdtd.sh"),
-            timeout=args.hours * 3600,
-            fetch_entry=not args.payload,
-        )
-        computed = True
-        print(f"\n{result.summary()}")
-        print(json.dumps(result.report, indent=2)[:1200])
-
-        if args.payload:
-            labels = sorted(spec.mat_files)
-            print("\nbuilding the payload on the machine that just made the grid")
-            report, _ = build_payload_remote(
+        spent = 0.0
+        for fmax in bands:
+            spec = specs[fmax][0]
+            # A directory per band, because the child writes its result under
+            # fixed names and spills its per-voxel scratch beside them; two
+            # bands sharing one would delete each other's and die on an
+            # assertion about triangle counts that reads like a bad scene.
+            remote_dir = f"{REMOTE_WORK}/{fmax:g}"
+            out = args.out / f"{fmax:g}"
+            print(f"\n=== {fmax:g} Hz, key {spec.key}", flush=True)
+            result = voxelise_remote(
                 machine,
-                args.out,
-                labels=labels,
-                target_cubes=args.viewer_cubes,
+                spec,
+                out,
+                build_script=Path(__file__).with_name("build_pffdtd.sh"),
+                remote_dir=remote_dir,
                 timeout=args.hours * 3600,
+                fetch_entry=not args.payload,
             )
-            print(json.dumps(report, indent=2)[:900])
-        billed = vast.estimate_cost_usd(offer.dph_total, result.total_s / 3600)
-        print(f"\nabout {result.total_s / 3600:.2f} h at the offer's rate = {billed:.2f} USD")
-    except RetrievalFailed:
+            computed = True
+            spent += result.total_s
+            print(result.summary())
+            print(json.dumps(result.report, indent=2)[:900])
+
+            if args.payload:
+                print("building the payload on the machine that just made the grid")
+                report, _ = build_payload_remote(
+                    machine,
+                    out,
+                    labels=sorted(spec.mat_files),
+                    target_cubes=args.viewer_cubes,
+                    remote_dir=remote_dir,
+                    timeout=args.hours * 3600,
+                )
+                print(json.dumps(report, indent=2)[:600])
+            else:
+                # Into the cache under its key, with the manifest everything
+                # downstream reads. A fetched grid that is not an entry is a
+                # grid that has to be computed again to be used.
+                entry = install_entry(spec, out, result.report, result.voxelise_s)
+                print(f"installed {entry.key} -> {entry.path} ({entry.complete=})")
+                if store is not None:
+                    from reverberate.wave.vox_store import publish_entry
+
+                    started = time.time()
+                    digests = publish_entry(store, entry)
+                    print(
+                        f"published {len(digests)} files to the store in "
+                        f"{(time.time() - started) / 60:.1f} min"
+                    )
+            # The grid is off the machine; its scratch is not, and 300 GB of
+            # spill would refuse the next band on the same disk.
+            _run(machine.ssh_command(f"rm -rf {shlex.quote(remote_dir)}"), what="clear band")
+        billed = vast.estimate_cost_usd(offer.dph_total, spent / 3600)
+        print(f"\nabout {spent / 3600:.2f} h at the offer's rate = {billed:.2f} USD")
+    except (RetrievalFailed, MachineLost):
+        # Both mean the work is not the thing that failed, so the instance is
+        # left running for a human to fetch from. The watchdog still ends it.
         computed = True
         raise
     finally:

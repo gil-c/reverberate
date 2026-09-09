@@ -21,12 +21,33 @@ before the voxeliser runs, not recovered from its output.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 
 import numpy as np
 import trimesh
 
-__all__ = ["SealedRegion", "SealedReport", "sealed_regions"]
+from reverberate.geometry.orientation import is_closed
+
+__all__ = ["REPORT_MIN_VOLUME_M3", "SealedRegion", "SealedReport", "sealed_regions"]
+
+#: Smallest interior :meth:`SealedReport.record` lists one by one, in cubic
+#: metres. One litre.
+#:
+#: Not a display preference: the record is embedded in the run page and the
+#: page shows eight rows. A carve on a 2 mm cell splits a plant into thousands
+#: of closed leaves, and every one of them is an interior -- measured on this
+#: flat, **11 278 regions of which 10 899 are under a tenth of a litre and
+#: together hold 24.6 litres of 26 840**. Listing them took the report from
+#: 0.18 MB to 2.54 MB for rows nobody reads.
+#:
+#: A litre is where the question stops being answerable anyway. Such a cavity is
+#: about 10 cm across and would have rung at 1.7 kHz, where a tenth of a litre
+#: of air holds no energy worth naming; the whole point of the row is the
+#: 125 Hz boom of a wardrobe, and that is three orders of magnitude away. What
+#: is dropped is *counted*, in ``interiors_omitted``, so the total is never
+#: implied by a truncated list.
+REPORT_MIN_VOLUME_M3 = 0.001
 
 
 @dataclass(frozen=True)
@@ -59,6 +80,14 @@ class SealedReport:
     #: decomposition could not be unioned into one solid, so its bodies still
     #: overlap and a per-body volume would double-count the overlap. Nothing
     #: is claimed about them either way -- named so the viewer can mark them.
+    #:
+    #: One entry per *body*, so an assignment appears once for each of its own
+    #: that could not be judged. :meth:`record` publishes the distinct owners
+    #: and the per-owner counts separately, because the two answer different
+    #: questions and conflating them made the page say something false: a
+    #: carve on a 2 mm cell splits a christmas tree into thousands of closed
+    #: twigs and a few thousand slivers of under four faces, and the raw length
+    #: of this list then read as "32 300 bodies are not closed" for 195 objects.
     unclosed: list[str] = field(default_factory=list)
 
     @property
@@ -69,14 +98,35 @@ class SealedReport:
         return (
             f"{len(self.interiors)} sealed interiors, "
             f"{self.sealed_volume_m3:.3f} m3, "
-            f"{len(self.unclosed)} bodies not closed"
+            f"{len(self.unclosed)} bodies not closed over "
+            f"{len(set(self.unclosed))} objects"
         )
 
     def record(self) -> dict[str, object]:
         """The JSON the scene description carries and the viewer draws."""
+        counts = Counter(self.unclosed)
+        ordered = sorted(self.interiors, key=lambda r: r.volume_m3, reverse=True)
+        listed = [r for r in ordered if r.volume_m3 >= REPORT_MIN_VOLUME_M3]
+        omitted = ordered[len(listed) :]
         return {
             "sealed_volume_m3": round(self.sealed_volume_m3, 6),
-            "unclosed_bodies": sorted(self.unclosed),
+            # Every region, so a reader counting the list below does not mistake
+            # it for the total. The page prints this, not ``len(interiors)``.
+            "interior_count": len(self.interiors),
+            "interiors_omitted": {
+                "count": len(omitted),
+                "volume_m3": round(sum(r.volume_m3 for r in omitted), 6),
+                "below_m3": REPORT_MIN_VOLUME_M3,
+            },
+            # The distinct owners, so a count of this list is a count of
+            # objects. The viewer prints its length in a sentence about
+            # objects, and one name per unjudged body made that sentence
+            # wrong by two orders of magnitude.
+            "unclosed_bodies": sorted(counts),
+            # And how many bodies each of them contributed, for a reader who
+            # wants to know whether an object is one open shell or a thousand
+            # slivers the carve left behind.
+            "unclosed_body_counts": dict(sorted(counts.items())),
             "interiors": [
                 {
                     "owner": region.owner,
@@ -85,7 +135,7 @@ class SealedReport:
                     "first_mode_hz": round(region.first_mode_hz, 1),
                     "centroid": [round(v, 4) for v in region.centroid],
                 }
-                for region in sorted(self.interiors, key=lambda r: r.volume_m3, reverse=True)
+                for region in listed
             ],
         }
 
@@ -124,7 +174,16 @@ def sealed_regions(
             report.unclosed.append(name)
             continue
         for body in mesh.split(only_watertight=False):
-            if not body.is_watertight or len(body.faces) < 4:
+            # Closed, not edge-manifold: the same distinction
+            # :func:`~reverberate.geometry.orientation.is_closed` was introduced
+            # for. A body the solver seals is one whose inside is
+            # distinguishable from its outside, and a handful of non-manifold
+            # edges on a carved isosurface does not change that. Asking for
+            # watertightness here would report every carved object as unclosed
+            # while the solver went on sealing it, which is the picture and the
+            # simulation disagreeing -- the one thing this module exists to
+            # prevent.
+            if not is_closed(body) or len(body.faces) < 4:
                 report.unclosed.append(name)
                 continue
             volume = abs(float(body.volume))

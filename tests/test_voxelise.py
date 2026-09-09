@@ -280,3 +280,58 @@ class TestScratchDirectory:
         cwd = recorded.get("cwd")
         assert cwd is not None
         assert Path(str(cwd)).name.startswith(f".{spec.key}.partial.")
+
+
+class TestNhForABand:
+    """``Nh`` is a cell count, so one number is a different voxel at each band.
+
+    Left fixed at 40 -- the value W31 settled on for 16 kHz, where it is 8.2 cm
+    -- it becomes a 1.31 m voxel at 1 kHz holding a large share of this flat's
+    four million triangles. Measured on a rented 48 core box: fifteen minutes,
+    one core at 100 per cent, not one voxel written.
+    """
+
+    FLAT = {
+        1000.0: (730, 96, 573),
+        4000.0: (2894, 358, 2265),
+        16000.0: (11549, 1407, 9035),
+    }
+
+    def test_it_reproduces_the_setting_the_whole_flat_ran_on(self) -> None:
+        """40 cells at 16 kHz is the one value with a three hour run behind it,
+        so the budget has to give it back rather than replace it."""
+        from reverberate.wave.voxelise import nh_for
+
+        assert nh_for(self.FLAT[16000.0]) == 40
+
+    def test_a_coarser_band_gets_a_smaller_cell_count(self) -> None:
+        from reverberate.wave.voxelise import nh_for
+
+        assert nh_for(self.FLAT[1000.0]) < nh_for(self.FLAT[4000.0])
+        assert nh_for(self.FLAT[4000.0]) < nh_for(self.FLAT[16000.0])
+
+    def test_every_band_stays_inside_the_budget(self) -> None:
+        from reverberate.wave.voxelise import VOXEL_BUDGET, nh_for
+
+        for shape in self.FLAT.values():
+            nh = nh_for(shape)
+            voxels = 1
+            for size in shape:
+                voxels *= -(-size // nh)
+            assert voxels <= VOXEL_BUDGET
+
+    def test_it_never_goes_below_what_pffdtd_accepts(self) -> None:
+        """``vox_grid.py:84`` asserts ``Nh > 3``, and it asserts it *after*
+        building the grid -- so a value of 2 costs the whole setup and then
+        dies. The budget alone would ask for 2 on this flat at 1 kHz."""
+        from reverberate.wave.voxelise import MIN_NH, VOXEL_BUDGET, nh_for
+
+        assert MIN_NH == 4
+        assert nh_for((10, 10, 10)) == MIN_NH
+        assert nh_for(self.FLAT[1000.0]) >= MIN_NH
+        assert nh_for(self.FLAT[1000.0], max_voxels=VOXEL_BUDGET) >= MIN_NH
+
+    def test_a_tighter_budget_asks_for_bigger_voxels(self) -> None:
+        from reverberate.wave.voxelise import nh_for
+
+        assert nh_for(self.FLAT[4000.0], max_voxels=100_000) > nh_for(self.FLAT[4000.0])

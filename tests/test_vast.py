@@ -31,7 +31,12 @@ from reverberate.gpu.vast import (
 )
 
 
-def make_offer(offer_id: int = 1, dph: float = 0.30, gpu_ram_gb: float = 24.0) -> Offer:
+def make_offer(
+    offer_id: int = 1,
+    dph: float = 0.30,
+    gpu_ram_gb: float = 24.0,
+    cpu_ghz: float = 3.5,
+) -> Offer:
     return Offer(
         id=offer_id,
         gpu_name="RTX 4090",
@@ -39,6 +44,8 @@ def make_offer(offer_id: int = 1, dph: float = 0.30, gpu_ram_gb: float = 24.0) -
         dph_total=dph,
         gpu_ram_gb=gpu_ram_gb,
         cpu_cores=32.0,
+        cpu_ghz=cpu_ghz,
+        cpu_name="Core i9-14900K",
         ram_gb=128.0,
         disk_gb=60.0,
         cuda_max=12.6,
@@ -455,3 +462,41 @@ class TestAbsentIsNotUnreachable:
         import inspect
 
         assert 'api_version="v1"' in inspect.getsource(vast.VastClient.instances)
+
+
+class TestCpuSpeedIsVisible:
+    """A CPU-bound stage is bought by the core, not by the count.
+
+    W35 measured 192 vCPU voxelising at the same speed as ten, and this project
+    then rented a 48 vCPU box at 3.0 GHz that took about twice the laptop's
+    time on the same flat at 4 kHz. Both lessons were unactionable while the
+    field went unread.
+    """
+
+    def test_the_clock_survives_the_api_round_trip(self) -> None:
+        offer = Offer.from_api(
+            {
+                "id": 7,
+                "gpu_name": "RTX 3060",
+                "dph_total": 0.049,
+                "cpu_cores_effective": 16.0,
+                "cpu_ghz": 4.8,
+                "cpu_name": "Core\u2122 i7-10700 ",
+                "cpu_ram": 64214,
+                "disk_space": 821.0,
+            }
+        )
+        assert offer.cpu_ghz == 4.8
+        assert offer.cpu_name == "Core\u2122 i7-10700"
+        assert "4.8 GHz" in offer.describe()
+
+    def test_a_missing_clock_reads_as_zero_rather_than_failing(self) -> None:
+        """Vast has returned nulls for fields it does not know, and a rental
+        must not die on one; a zero simply fails any floor asked of it."""
+        offer = Offer.from_api({"id": 8, "cpu_ghz": None, "cpu_name": None})
+        assert offer.cpu_ghz == 0.0
+        assert offer.cpu_name == ""
+
+    def test_the_query_can_ask_for_a_floor_on_it(self) -> None:
+        assert "cpu_ghz>=4.0" in search_query(min_cpu_ghz=4.0)
+        assert "cpu_ghz" not in search_query()

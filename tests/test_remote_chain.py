@@ -15,10 +15,12 @@ import pytest
 from reverberate.wave.remote_voxelise import (
     MachineNeed,
     grid_shape_of,
+    install_entry,
     nodes_from_shape,
     payload_need_for,
     voxelise_need,
 )
+from reverberate.wave.voxelise import SceneSpec
 
 
 class _Offer:
@@ -148,3 +150,124 @@ def test_merge_satisfies_both_stages() -> None:
     both = voxelise.merge(payload)
     assert (both.cores, both.ram_gb, both.disk_gb) == (32, 64, 400)
     assert "voxelise" in both.why and "payload" in both.why
+
+
+class TestInstallEntry:
+    """A fetched grid is not a cache entry until it is installed as one.
+
+    Everything downstream addresses a grid by its key and reads
+    ``manifest.json`` for the material labels, so a rented voxelisation that
+    stopped at the transfer had to be recomputed locally to be usable -- the
+    opposite of what the split exists for.
+    """
+
+    @pytest.fixture
+    def spec(self, tmp_path: Path, model: Path) -> SceneSpec:
+        from reverberate.wave.voxelise import SceneSpec
+
+        materials = tmp_path / "materials"
+        materials.mkdir()
+        (materials / "shell.h5").write_bytes(b"not really an h5, and never read here")
+        return SceneSpec(
+            model_json=model,
+            mat_folder=materials,
+            mat_files={"shell": "shell.h5"},
+            fmax=1000.0,
+            ppw=10.5,
+            slabs=4,
+        )
+
+    def _fetched(self, root: Path) -> Path:
+        from reverberate.wave.voxelise import CACHE_FILES
+
+        root.mkdir(parents=True, exist_ok=True)
+        for name in CACHE_FILES:
+            (root / name).write_bytes(b"x" * 16)
+        return root
+
+    def test_it_lands_in_the_cache_under_the_key(
+        self, spec: SceneSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+        fetched = self._fetched(tmp_path / "landing")
+        entry = install_entry(spec, fetched, {"Nbt": 7}, wall_s=12.5)
+        assert entry.complete
+        assert entry.path.name == spec.key
+        assert not fetched.exists()
+
+    def test_the_manifest_carries_what_the_audit_view_reads(
+        self, spec: SceneSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``audit_view`` takes its material labels from here, and
+        ``grid_page`` its fmax and its model path. A manifest missing either
+        fails deep inside a build rather than at the transfer."""
+        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+        entry = install_entry(spec, self._fetched(tmp_path / "landing"), {"Nbt": 7}, wall_s=1.0)
+        assert entry.manifest["materials"] == {"shell": "shell.h5"}
+        assert entry.manifest["fmax"] == 1000.0
+        assert entry.manifest["slabs"] == 4
+        assert entry.manifest["computed_on"] == "rented"
+        assert entry.manifest["Nbt"] == 7
+        assert entry.manifest["geometry_sha256"]
+
+    def test_it_refuses_a_transfer_that_is_missing_a_file(
+        self, spec: SceneSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Half a grid installed under a key is a cache poisoned forever: the
+        key is content addressed, so nothing later would ever recompute it."""
+        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+        fetched = self._fetched(tmp_path / "landing")
+        (fetched / "vox_out.h5").unlink()
+        with pytest.raises(RuntimeError, match="vox_out.h5"):
+            install_entry(spec, fetched, {}, wall_s=1.0)
+
+
+class TestLaunchCommand:
+    """The shell quoting that costs a rental when it is wrong.
+
+    ``cmd1 && cmd2 & cmd3`` backgrounds the whole ``&&`` chain. The first
+    detached launcher did exactly that: it backgrounded the creation of the job
+    file, took the chain's pid for the child's, and left ``ssh`` waiting out its
+    five minute timeout on a machine where the child was already running.
+    """
+
+    DIR = "/root/vox/16000"
+
+    def _command(self) -> str:
+        from reverberate.wave.remote_voxelise import launch_command
+
+        return launch_command({"fmax": 16000.0}, self.DIR)
+
+    def test_only_the_launcher_is_backgrounded(self) -> None:
+        """Everything before the ``&`` must be a completed statement, so the
+        setup has run by the time the child starts."""
+        command = self._command()
+        head, _, tail = command.partition(" & ")
+        assert tail.strip() == "echo $!"
+        # The chain that prepares the job ends in ';', not in '&&', so the '&'
+        # applies to the setsid alone.
+        assert "; setsid sh " in head
+        assert "&& setsid" not in head
+
+    def test_the_job_reaches_the_child_as_a_file(self) -> None:
+        """Piping it in was what tied the job to the connection."""
+        command = self._command()
+        assert f"> {self.DIR}/job.json" in command
+        assert f"< {self.DIR}/job.json" in command
+
+    def test_every_descriptor_is_off_the_ssh_channel(self) -> None:
+        """``ssh`` returns when nothing still holds the channel, and a
+        background process holding stdout holds it."""
+        command = self._command()
+        assert "< /dev/null > /dev/null 2>&1 &" in command
+        assert f"> {self.DIR}/voxelise.out 2>&1" in command
+
+    def test_the_exit_status_is_kept_beside_the_log(self) -> None:
+        """A child that dies without printing its report is diagnosed by it --
+        137 is the kernel, and that is a different fix from a bad scene."""
+        assert f"echo $? > {self.DIR}/voxelise.rc" in self._command()
+
+    def test_the_stale_files_of_a_previous_attempt_are_removed(self) -> None:
+        """A retry in the same directory must not read the last run's log."""
+        command = self._command()
+        assert f"rm -f {self.DIR}/voxelise.out {self.DIR}/voxelise.rc" in command

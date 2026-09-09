@@ -21,6 +21,7 @@ against a real ``sim_setup`` run.
 
 from __future__ import annotations
 
+import itertools
 import json
 import multiprocessing
 import os
@@ -29,6 +30,50 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+
+def slab_groups(voxels: list[int], starts: list[int], slabs: int) -> list[list[int]]:
+    """``voxels`` split into ``slabs`` contiguous bands of roughly equal count.
+
+    **Cut by how much each band holds, not by how wide it is.** Equal spatial
+    bands were the first rule here, and "peak memory is one slab" is only true
+    of them if the scene is uniform along the cut axis -- a flat is not. A band
+    through the living room holds several times the nodes of one through a
+    bathroom, and the consolidate loop's arrays scale with the slab: the subs,
+    the rotated index, the argsort permutation and two fancy-indexed copies of
+    ``adj_bn``. Measured on this flat at 16 kHz with sixteen equal bands, the
+    child was killed by the kernel at the fifteenth slab with 20.4 GB of 22
+    already written, on a box whose resident set had never passed 12 of 31 GB
+    -- a spike, in one band, at the end.
+
+    ``starts`` is each voxel's coordinate on the cut axis. Voxels are ordered by
+    it and the cuts fall between two *different* coordinates, never inside one,
+    so a voxel's core is never split and a slab is still a contiguous range of
+    engine indices -- which is what every claim in :func:`_slabbed_adj`'s
+    docstring rests on. What changes is only which voxels share a slab.
+
+    Non-empty voxel count is the proxy for node count, and a good one: both
+    follow the surface through the band. Empty trailing slabs are returned as
+    empty lists rather than dropped, so the caller's loop count is what it
+    asked for.
+    """
+    if slabs <= 1:
+        return [list(voxels)]
+    order = sorted(range(len(voxels)), key=lambda i: starts[i])
+    total = len(voxels)
+    groups: list[list[int]] = [[] for _ in range(slabs)]
+    # By position in the cumulative count, not by filling one group until it is
+    # full. Filling greedily makes the *last* group the remainder: every group
+    # that stops a little under its share pushes what it did not take to the
+    # end, and the end is where the run was already dying. Measured on this
+    # flat at 16 kHz with 32 slabs, the greedy cut left the last one 32 147
+    # non-empty voxels against about 7 500 for its neighbours.
+    seen = 0
+    for _, run in itertools.groupby(order, key=lambda i: starts[i]):
+        indices = [voxels[i] for i in run]
+        groups[min(slabs - 1, seen * slabs // total)].extend(indices)
+        seen += len(indices)
+    return groups
 
 
 def _slabbed_adj(
@@ -97,13 +142,28 @@ def _slabbed_adj(
 
     # Cut along the axis that ends up outermost, which is what makes a slab a
     # contiguous range of engine indices.
+    #
+    # **Cut by how much each band holds, not by how wide it is.** Equal spatial
+    # bands were the first rule here, and "peak memory is one slab" is only
+    # true of them if the scene is uniform along that axis -- a flat is not. A
+    # band through the living room holds several times the nodes of one through
+    # a bathroom, and this loop's own arrays scale with the slab: the subs, the
+    # rotated index, the argsort permutation and two fancy-indexed copies of
+    # ``adj_bn``. Measured on this flat at 16 kHz with sixteen equal bands, the
+    # child was killed by the kernel at the fifteenth slab with 20.4 GB of
+    # 22 already written, on a box whose resident set had never passed 12 of
+    # 31 GB -- a spike, in one band, at the end.
+    #
+    # So order the voxels by their coordinate on that axis and cut at equal
+    # cumulative counts. The cuts still fall on a coordinate, so a slab is
+    # still a contiguous range of engine indices and every claim in the
+    # docstring above still holds; what changes is only which voxels share a
+    # slab. Non-empty voxel count is the proxy for node count, and a good one:
+    # both follow the surface through the band.
     axis = int(order[0])
     nonempty = list(vox_grid.nonempty_idx)
-    starts = np.array([vox_grid.voxels[i].ixyz_start[axis] for i in nonempty], dtype=np.int64)
-    edges = np.linspace(0, int(grid[axis]), slabs + 1)[1:-1]
-    groups: list[list[int]] = [[] for _ in range(slabs)]
-    for voxel, start in zip(nonempty, starts, strict=True):
-        groups[int(np.searchsorted(edges, start, side="right"))].append(voxel)
+    starts = [int(vox_grid.voxels[i].ixyz_start[axis]) for i in nonempty]
+    groups = slab_groups(nonempty, starts, slabs)
 
     handle = h5py.File(out_dir / "vox_out.h5", "w")
     datasets = {

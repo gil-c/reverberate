@@ -102,6 +102,16 @@ class Offer:
     dph_total: float
     gpu_ram_gb: float
     cpu_cores: float
+    #: Clock of one core, in GHz, as the offer advertises it. Carried because
+    #: **this workload is bought by the core, not by the count.** W35 measured
+    #: 192 vCPU voxelising at the same speed as ten, and 2026-09-07 measured a
+    #: 48 vCPU box at 3.0 GHz taking about twice the laptop's time on the same
+    #: flat at 4 kHz. Nothing in this module could act on that until the field
+    #: was read.
+    cpu_ghz: float
+    #: What the offer calls the part, for the record. Two boxes at the same
+    #: advertised clock are not the same machine.
+    cpu_name: str
     ram_gb: float
     disk_gb: float
     cuda_max: float
@@ -118,6 +128,8 @@ class Offer:
             dph_total=float(raw.get("dph_total", 0.0)),
             gpu_ram_gb=float(raw.get("gpu_ram", 0.0)) / 1024.0,
             cpu_cores=float(raw.get("cpu_cores_effective", 0.0)),
+            cpu_ghz=float(raw.get("cpu_ghz", 0.0) or 0.0),
+            cpu_name=str(raw.get("cpu_name", "") or "").strip(),
             ram_gb=float(raw.get("cpu_ram", 0.0)) / 1024.0,
             disk_gb=float(raw.get("disk_space", 0.0)),
             cuda_max=float(raw.get("cuda_max_good", 0.0)),
@@ -131,7 +143,8 @@ class Offer:
         return (
             f"offer {self.id}: {self.num_gpus}x {self.gpu_name} "
             f"{self.gpu_ram_gb:.0f} GB, {self.dph_total:.3f} USD/h, "
-            f"{self.cpu_cores:.0f} vCPU, {self.ram_gb:.0f} GB RAM, "
+            f"{self.cpu_cores:.0f} vCPU at {self.cpu_ghz:.1f} GHz "
+            f"({self.cpu_name or 'unnamed'}), {self.ram_gb:.0f} GB RAM, "
             f"{self.disk_gb:.0f} GB disk, CUDA {self.cuda_max}, "
             f"reliability {self.reliability:.3f}, {self.location}"
         )
@@ -197,6 +210,7 @@ def search_query(
     min_inet_down_mbps: int = 300,
     min_gpu_ram_gb: float = 0.0,
     min_cpu_cores: int = 0,
+    min_cpu_ghz: float = 0.0,
 ) -> str:
     """Build a Vast.ai offer query string.
 
@@ -227,6 +241,10 @@ def search_query(
         tokens.append(f"gpu_ram>={int(min_gpu_ram_gb * 1024)}")
     if min_cpu_cores > 0:
         tokens.append(f"cpu_cores_effective>={min_cpu_cores}")
+    if min_cpu_ghz > 0:
+        # The one filter that matters for a CPU-bound stage, and the one that
+        # was missing: see Offer.cpu_ghz for what its absence cost.
+        tokens.append(f"cpu_ghz>={min_cpu_ghz}")
     return " ".join(tokens)
 
 
