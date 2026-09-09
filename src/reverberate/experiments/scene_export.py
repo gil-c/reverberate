@@ -52,6 +52,7 @@ from reverberate.geometry.apartment import build_apartment, instances_on_storey
 from reverberate.geometry.hssd_room import load_object_instances
 from reverberate.geometry.orientation import BOTH
 from reverberate.geometry.pra_room import MeshMaterialAssignment
+from reverberate.geometry.scene_ids import local_name
 from reverberate.geometry.sim_geometry import instances_in_room, simulation_geometry
 from reverberate.materials.extrapolation import extend_low_bands, low_band_family
 
@@ -388,6 +389,9 @@ def export(
 
     manifest = {
         "scene_id": scene_id,
+        # This project's own name for the scene, which is what a run directory
+        # should be named after: an HSSD id says nothing a reader can hold on to.
+        "dwelling": local_name(scene_id),
         "room": room_name,
         # The regions the room is actually made of. `room` above is what was
         # asked for; this is what was simulated, and on an open plan the two
