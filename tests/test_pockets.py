@@ -113,6 +113,11 @@ def test_sealing_makes_the_pocket_static_and_keeps_the_grid_sorted(tmp_path: Pat
     assert below.any() and above.any()
     assert not adj[below, 4].any() and not adj[above, 5].any()
     assert adj[above, 4].any(), "the top wall still faces the room"
+    # A wall with no air side left carries no material: the engine asserts it.
+    buried = ~adj.any(axis=1)
+    assert buried.sum() > pocket_index.size, "some cabinet walls faced only the pocket"
+    assert np.all(mat[buried] == -1)
+    assert record["walls_made_static"] == int(buried.sum()) - pocket_index.size
     # The census of the sealed grid finds the room alone.
     after = census(out)
     assert after.to_seal() == []

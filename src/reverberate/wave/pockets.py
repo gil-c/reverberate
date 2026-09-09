@@ -279,6 +279,13 @@ def seal(vox_out: Path, out: Path, pockets: list[Pocket]) -> dict[str, Any]:
             adj[:, column] &= ~into
             column += 1
     del is_pocket
+    # A wall that faced nothing but the pocket now has no air side at all. The
+    # engine asserts that such a node carries no material (fdtd_data.h,
+    # ``if (all_not_adj) assert(mat_bn[i]==-1)``), so it becomes static too.
+    buried = ~adj.any(axis=1)
+    buried_walls = int((buried & (mat != -1)).sum())
+    mat = np.where(buried, -1, mat).astype(mat.dtype)
+    saf = np.where(buried, 0, saf).astype(saf.dtype)
 
     new_bn = np.concatenate([bn, pocket_cells])
     new_adj = np.concatenate([adj, np.zeros((pocket_cells.size, 6), dtype=bool)])
@@ -302,6 +309,7 @@ def seal(vox_out: Path, out: Path, pockets: list[Pocket]) -> dict[str, Any]:
         "cells_sealed": int(pocket_cells.size),
         "volume_sealed_m3": round(float(pocket_cells.size * grid["h"] ** 3), 4),
         "bits_cleared": cleared,
+        "walls_made_static": buried_walls,
         "boundary_nodes_before": int(bn.size),
         "boundary_nodes_after": int(new_bn.size),
     }
