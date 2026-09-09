@@ -354,7 +354,7 @@ def axial_modes(
     searched within ``search`` of ``c / 2H`` for the one whose harmonics stand
     highest above that floor. ``prominence_db`` per line and its mean are what
     to read against ``between_lines_db``, the same statistic half way between
-    the lines; a ``contrast_db`` above about 6 dB is a flutter a listener hears
+    the lines; a ``contrast_db`` above 4 dB is a flutter a listener hears
     as a pitch in the tail. Nothing here removes it: the report says
     what the model's flat parallel surfaces did.
     """
@@ -422,7 +422,7 @@ def axial_modes(
         "mean_prominence_db": round(lines_db, 2),
         "between_lines_db": round(between_db, 2),
         "contrast_db": round(score, 2),
-        "flutter": bool(score > 6.0),
+        "flutter": bool(score > 4.0),
         "note": (
             "axial modes between the floor and the ceiling, n c / 2H; flat parallel "
             "surfaces in the model ring where a real room's scattering breaks them"
