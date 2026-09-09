@@ -124,10 +124,14 @@ def pressures_of_run(
     delivery_rate_hz: float = DELIVERY_RATE_HZ,
     air: Atmosphere | None = None,
     sound_speed_m_s: float = 343.2,
+    lowcut_order: int = 4,
 ) -> tuple[np.ndarray, float]:
     """One row per receiver at the delivery rate, air absorption applied or not.
 
     ``None`` skips the filter and is then an omission the report has to name.
+    ``lowcut_order`` is the Butterworth order of the high pass; four leaves the
+    modes just under the cut ringing, and a room whose lowest mode is real but
+    whose damping is not may want eight.
     """
     reduced, differentiated = audio.read_engine_output(run_dir, comms_path)
     signals = audio.integrate_and_lowcut(
@@ -135,6 +139,7 @@ def pressures_of_run(
         1.0 / reduced.sample_rate_hz,
         differentiated=differentiated,
         fcut=lowcut_hz,
+        order=lowcut_order,
     )
     signals = audio.lowpass(signals, reduced.sample_rate_hz, fmax_hz)
     signals = audio.resample_to(signals, reduced.sample_rate_hz, delivery_rate_hz)
@@ -668,6 +673,7 @@ class EncodedRun:
     rate: float
     fmax: float
     lowcut_hz: float
+    lowcut_order: int
     room: dict[str, Any] | None
     theory_record: dict[str, Any] | None
     model_path: str | None
@@ -709,6 +715,7 @@ def encode_run(
     *,
     air: Atmosphere | None,
     lowcut_hz: float | None = None,
+    lowcut_order: int = 4,
 ) -> EncodedRun:
     """Read one room run and encode it on its own array. Nothing is written."""
     plan = json.loads((run_dir / "plan.json").read_text())
@@ -771,6 +778,7 @@ def encode_run(
         lowcut_hz=lowcut_hz,
         air=air,
         sound_speed_m_s=float(plan["sound_speed_m_s"]),
+        lowcut_order=lowcut_order,
     )
     array_rows, extra_rows = signals[: design.count], signals[design.count :]
 
@@ -790,6 +798,7 @@ def encode_run(
         rate=rate,
         fmax=fmax,
         lowcut_hz=lowcut_hz,
+        lowcut_order=lowcut_order,
         room=room,
         theory_record=theory_record,
         model_path=model_path,
@@ -819,7 +828,7 @@ def spatial_report(
     array_rows, extra_rows, extras = encoded.array_rows, encoded.extra_rows, encoded.extras
     source, centre, rate, fmax = encoded.source, encoded.centre, encoded.rate, encoded.fmax
     room, theory_record, model_path = encoded.room, encoded.theory_record, encoded.model_path
-    lowcut_hz = encoded.lowcut_hz
+    lowcut_hz, lowcut_order = encoded.lowcut_hz, encoded.lowcut_order
     ambisonic = encoded.ambisonic if ambisonic is None else ambisonic
     reference = direction_to_scene_point(ambisonic, source)
     times, order_energy = energy_per_order(ambisonic)
@@ -887,6 +896,7 @@ def spatial_report(
             }
         ),
         "low_cut_hz": lowcut_hz,
+        "low_cut_order": lowcut_order,
         "centre_identity": identity,
         "direction_of_arrival": band_directions(ambisonic, reference),
         "reference_direction": [round(float(v), 5) for v in reference],

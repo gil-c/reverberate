@@ -229,6 +229,7 @@ def assemble_run(
     order: int = 7,
     fit_order: int = 10,
     lowcut_hz: float | None = None,
+    lowcut_order: int = 4,
     measured_path: Path | None = None,
     plain_decode: bool = False,
     seed: int = 20260908,
@@ -254,6 +255,7 @@ def assemble_run(
             _settings(order, fit_order, float(band["fmax_hz"])),
             air=air,
             lowcut_hz=lowcut_hz,
+            lowcut_order=lowcut_order,
         )
     solves = {
         name: BandSolve(
@@ -440,6 +442,7 @@ def _assemble(args: argparse.Namespace) -> int:
         order=args.order,
         fit_order=args.fit_order,
         lowcut_hz=args.low_cut,
+        lowcut_order=args.low_cut_order,
         measured_path=args.measured_head,
         plain_decode=args.plain_decode,
         seed=args.seed,
@@ -525,6 +528,13 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--temperature", type=float, default=20.0)
     build.add_argument("--humidity", type=float, default=50.0)
     build.add_argument("--low-cut", type=float)
+    build.add_argument(
+        "--low-cut-order",
+        type=int,
+        default=4,
+        help="Butterworth order of the high pass at --low-cut; 8 where the modes under the "
+        "cut ring for want of damping the catalogue does not have",
+    )
     build.add_argument("--measured-head", type=Path)
     build.add_argument("--plain-decode", action="store_true")
     build.add_argument("--audio", action="store_true")

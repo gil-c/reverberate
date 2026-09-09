@@ -530,3 +530,13 @@ def test_receivers_are_absorbed_independently_and_identically() -> None:
     together = apply_air_absorption(batch, 48000.0, sound_speed_m_s=343.2)
     apart = np.stack([apply_air_absorption(row, 48000.0, sound_speed_m_s=343.2) for row in batch])
     assert np.allclose(together, apart)
+
+
+def test_a_higher_low_cut_order_rejects_more_below_the_cut() -> None:
+    rate = 48000.0
+    time = np.arange(int(rate)) / rate
+    tone = np.sin(2.0 * np.pi * 20.0 * time)
+    gentle = integrate_and_lowcut(tone, 1.0 / rate, differentiated=False, fcut=40.0, order=4)
+    steep = integrate_and_lowcut(tone, 1.0 / rate, differentiated=False, fcut=40.0, order=8)
+    late = slice(int(0.5 * rate), None)
+    assert np.sqrt((steep[late] ** 2).mean()) < 0.3 * np.sqrt((gentle[late] ** 2).mean())
