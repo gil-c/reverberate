@@ -122,6 +122,7 @@ def spectrogram(
     bins: int = SPECTROGRAM_BINS,
     frames: int = SPECTROGRAM_FRAMES,
     max_hz: float | None = None,
+    band_limit_hz: float | None = None,
 ) -> dict[str, Any]:
     """A short time Fourier magnitude, in decibels, quantised to bytes.
 
@@ -171,6 +172,9 @@ def spectrogram(
         "bins": bins,
         "frames": frames,
         "max_hz": round(bins * nyquist / rows, 1),
+        # What the solver ran to, so the page can draw the line above which
+        # every value is the encoder's own zero rather than a quiet room.
+        "band_limit_hz": round(float(band_limit_hz), 1) if band_limit_hz else None,
         "seconds": round(signal.size / float(sample_rate_hz), 4),
         "range_db": SPECTROGRAM_RANGE_DB,
         "data": base64.b64encode(data.tobytes()).decode("ascii"),
@@ -328,6 +332,119 @@ def _sample_rows(
     return rows
 
 
+def _room_geometry(report: dict[str, Any]) -> dict[str, Any] | None:
+    """The room as the solver's boundary realised it, whichever key holds it.
+
+    Two report shapes put different things under ``room``: a point run puts the
+    geometry there, a spatial run puts the room's name and the geometry under
+    ``room_geometry``. Choosing by truthiness handed the panel a string and it
+    asked the string for a volume.
+    """
+    for key in ("room_geometry", "room"):
+        value = report.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def is_spatial(report: Mapping[str, Any]) -> bool:
+    """Whether this run is an ambisonic one rather than a set of point receivers.
+
+    The two produce different artefacts and neither is a special case of the
+    other: a point run writes one response per receiver and one wet file per
+    pair, a spatial run writes one ambisonic response about one listening point
+    and one pair of ears per head and head orientation.
+    """
+    return "binaural_decodes" in report
+
+
+def _spatial_rows(
+    run_dir: Path, report: dict[str, Any], audio_names: set[str]
+) -> list[dict[str, Any]]:
+    """One row per head and head orientation, plus the ambisonic response itself.
+
+    The plots come from the left ear of each binaural response, because that is
+    the signal the file plays; the ambisonic row plots its own W channel, which
+    is the pressure at the listening point.
+    """
+    import sofar
+
+    rate = float(report["sample_rate_hz"])
+    limit = float(report["encoder"].get("max_frequency_hz") or 16000.0)
+    # A little above the band the solver ran, not half as much again: at 16 kHz
+    # a ceiling of 24 kHz is the delivery Nyquist and spends a third of the
+    # picture drawing an empty band, which reads as a response that stops well
+    # below where it does.
+    ceiling = limit * 1.15
+    rows: list[dict[str, Any]] = []
+
+    ambisonic = run_dir / "responses" / "ambisonic.sofa"
+    if ambisonic.is_file():
+        signals = np.asarray(sofar.read_sofa(str(ambisonic)).Data_IR)[0]
+        rows.append(
+            {
+                "id": "ambisonic",
+                "label": "ambisonic, omnidirectional channel",
+                "source_index": 0,
+                "receiver_index": 0,
+                "yaw_deg": 0.0,
+                "sample_rate_hz": rate,
+                "seconds": round(signals.shape[1] / rate, 4),
+                "peak": round(float(np.max(np.abs(signals[0]))), 6),
+                "envelope": envelope(signals[0]),
+                "decay": decay_curve_points(signals[0], rate),
+                "spectrogram": spectrogram(signals[0], rate, max_hz=ceiling, band_limit_hz=limit),
+                "measures": report.get("omnidirectional"),
+                "wet_audio": (
+                    "audio/ambisonic_acn_sn3d.wav"
+                    if "ambisonic_acn_sn3d.wav" in audio_names
+                    else None
+                ),
+                "note": "64 channels in ambiX; the plots are the W channel alone",
+            }
+        )
+
+    # The row a reader should land on. A spatial run is listened to through its
+    # decode, so opening on the ambisonic channel put a reader one click away
+    # from the thing the run is for, on a row whose plots are the pressure at a
+    # point rather than what a head hears.
+    preferred = None
+    for head, block in report["binaural_decodes"].items():
+        path = run_dir / "responses" / f"binaural_{head}.sofa"
+        if not path.is_file():
+            continue
+        sofa = sofar.read_sofa(str(path))
+        responses = np.asarray(sofa.Data_IR)
+        views = np.asarray(sofa.ListenerView, dtype=float)
+        for index in range(responses.shape[0]):
+            yaw = float(np.degrees(np.arctan2(views[index][1], views[index][0])))
+            left = responses[index, 0]
+            name = f"binaural_{head}_yaw{int(round(yaw))}.wav"
+            rows.append(
+                {
+                    "id": f"{head}_yaw{int(round(yaw))}",
+                    "label": f"{head.replace('_', ' ')}, head at {yaw:+.0f} degrees",
+                    "source_index": 0,
+                    "receiver_index": 0,
+                    "yaw_deg": yaw,
+                    "sample_rate_hz": rate,
+                    "seconds": round(left.size / rate, 4),
+                    "peak": round(float(np.max(np.abs(responses[index]))), 6),
+                    "envelope": envelope(left),
+                    "decay": decay_curve_points(left, rate),
+                    "spectrogram": spectrogram(left, rate, max_hz=ceiling, band_limit_hz=limit),
+                    "measures": block["measures"].get(f"yaw_{int(round(yaw))}"),
+                    "wet_audio": f"audio/{name}" if name in audio_names else None,
+                    "note": block["decoder"].get("head"),
+                }
+            )
+            if preferred is None and abs(yaw) < 1.0:
+                preferred = len(rows) - 1
+    if preferred is not None:
+        rows[preferred]["preferred"] = True
+    return rows
+
+
 @dataclass(frozen=True)
 class RunRef:
     """Where a rendered run is, and which apartment it belongs to."""
@@ -354,12 +471,69 @@ def run_scene(run_dir: Path) -> RunRef:
     )
 
 
+#: Keys :func:`build_site` dereferences without a default **for a run of placed
+#: points**. A report missing any of them cannot be drawn, so
+#: :func:`discover_runs` refuses it there rather than letting the builder raise
+#: halfway through the collection and take every other run down with it.
+POINT_RUN_REPORT_KEYS = (
+    "run",
+    "scene_sha256",
+    "cache_key",
+    "room",
+    "theory",
+    "placement",
+    "binaural_note",
+    "dry_voice",
+    "sources",
+    "model_json",
+)
+
+#: The same list for a **spatial** run, which is a different shape and not a
+#: shorter version of the one above. It has one listening point, an ambisonic
+#: expansion about it and a pair of ears per head and orientation, so it holds
+#: no ``placement``, no ``sources`` and no ``scene_sha256``, and inventing them
+#: would put receivers on the page that the run never simulated. Checking it
+#: against the point keys would drop a good run out of the viewer without a
+#: word, which is the quiet version of the crash the guard exists to stop.
+SPATIAL_RUN_REPORT_KEYS = (
+    "run",
+    "cache_key",
+    "room",
+    "theory",
+    "model_json",
+    "array",
+    "encoder",
+    "binaural_decodes",
+    "sample_rate_hz",
+)
+
+
+def report_is_drawable(record: Mapping[str, Any]) -> bool:
+    """Whether a report holds every key **its own shape** is read for.
+
+    The shape is decided by :func:`is_spatial`, which reads what the report
+    holds rather than what the run was called.
+    """
+    keys = SPATIAL_RUN_REPORT_KEYS if is_spatial(record) else POINT_RUN_REPORT_KEYS
+    return all(key in record for key in keys)
+
+
 def discover_runs(runs_root: Path) -> list[RunRef]:
     """Every rendered run under ``runs_root``, newest name last.
 
-    A run counts as rendered only if it has both the plan that names the scene
-    and the report the payload is built from. A half-finished run directory is
-    skipped rather than offered and then failing to open.
+    A run counts as rendered only if it has the plan that names the scene, the
+    report the payload is built from, **and** every field that report is read
+    for, as listed in :data:`POINT_RUN_REPORT_KEYS` or, for the other shape,
+    :data:`SPATIAL_RUN_REPORT_KEYS`. A half-finished run directory is skipped
+    rather than offered and then failing to open.
+
+    That last condition is not belt and braces. The runs directory is shared
+    between sessions, and a report written for something other than a solve, a
+    cost study or a domain census, has a plan and a report and none of the
+    placement a page needs. Checking only that the two files exist let one such
+    directory raise ``KeyError`` inside the builder's loop and take down the
+    whole viewer, every other run with it. The promise in this docstring was
+    already the right one; it just was not kept.
     """
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
@@ -370,11 +544,14 @@ def discover_runs(runs_root: Path) -> list[RunRef]:
         runs_root = runs_root.parent
     found: list[RunRef] = []
     for plan in sorted(runs_root.glob("*/plan.json")):
-        if not (plan.parent / "report.json").is_file():
+        report = plan.parent / "report.json"
+        if not report.is_file():
             continue
         try:
+            if not report_is_drawable(json.loads(report.read_text())):
+                continue
             found.append(run_scene(plan.parent))
-        except (KeyError, json.JSONDecodeError):
+        except (KeyError, OSError, json.JSONDecodeError):
             continue
     return found
 
@@ -559,15 +736,56 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
 
     audit = _link_audit(run_dir, target, store)
     groups = surface_groups(model, model_materials(model_json), geometry=audit is None)
-    placement = report["placement"]
     scene = run_scene(run_dir)
+    spatial = is_spatial(report)
+    if spatial:
+        # A spatial run has one listening point rather than a placement, and its
+        # geometry lives in the plan beside the report. Read from there rather
+        # than reshaped into a placement it does not have: inventing one would
+        # put six receivers on the page that the run never simulated.
+        plan = json.loads((run_dir / "plan.json").read_text())
+        centre = list(report["array"]["centre"])
+        sources = [{"index": 0, "position": list(plan["source"]), "archetype": "source"}]
+        receivers = [{"index": 0, "position": centre, "archetype": "listening point"}]
+        receivers += [
+            {"index": index + 1, "position": list(position)}
+            for index, position in enumerate(plan.get("extra_receivers", []))
+        ]
+        samples = _spatial_rows(run_dir, report, audio_names)
+    else:
+        placement = report["placement"]
+        sources = [
+            {"index": index, "position": entry["position"], "archetype": entry.get("archetype")}
+            for index, entry in enumerate(placement["sources"])
+        ]
+        receivers = [
+            {"index": index, "position": entry["position"]}
+            for index, entry in enumerate(placement["receivers"])
+        ]
+        samples = _sample_rows(run_dir, report, audio_names)
+
     payload = {
         "run": report["run"],
         "scene_id": scene.scene_id,
         "room_name": scene.room,
-        "scene_sha256": report["scene_sha256"],
+        "scene_sha256": report.get("scene_sha256") or report.get("geometry_sha256", ""),
         "cache_key": report["cache_key"],
-        "room": report["room"],
+        "spatial": spatial,
+        # The ball the field was expanded about, so a reader can see what the
+        # encoder actually looked at rather than a point that stands for it.
+        "array": report.get("array"),
+        "encoder": report.get("encoder"),
+        "conditioning": report.get("conditioning"),
+        "centre_identity": report.get("centre_identity"),
+        "direction_of_arrival": report.get("direction_of_arrival"),
+        "heads": report.get("heads"),
+        "licence_conflict": report.get("licence_conflict"),
+        "air_absorption": report.get("air_absorption"),
+        # A spatial run's report uses "room" for the room's *name* and
+        # "room_geometry" for the boundary the solver realised; a point run uses
+        # "room" for the geometry itself. Picking by truthiness handed the
+        # panel the string "bedroom.001" and it asked it for a volume.
+        "room": _room_geometry(report),
         "theory": report["theory"],
         "theory_shell_only": report.get("theory_shell_only"),
         "theory_note": report.get("theory_note"),
@@ -583,20 +801,14 @@ def build_site(run_dir: Path, target: Path, store: ObjectStore | None = None) ->
         "voxels": None if audit else _write_voxels(report, target, store),
         "band_note": report.get("band_note"),
         "low_cut_hz": report.get("low_cut_hz"),
-        "binaural_note": report["binaural_note"],
+        "binaural_note": report.get("binaural_note"),
         "omissions": report.get("omissions", []),
-        "dry_voice": report["dry_voice"],
+        "dry_voice": report.get("dry_voice"),
         "dry_audio": "audio/dry_voice.wav" if "dry_voice.wav" in audio_names else None,
         "groups": groups,
-        "sources": [
-            {"index": index, "position": entry["position"], "archetype": entry.get("archetype")}
-            for index, entry in enumerate(placement["sources"])
-        ],
-        "receivers": [
-            {"index": index, "position": entry["position"]}
-            for index, entry in enumerate(placement["receivers"])
-        ],
-        "samples": _sample_rows(run_dir, report, audio_names),
+        "sources": sources,
+        "receivers": receivers,
+        "samples": samples,
     }
     (target / "run.json").write_text(json.dumps(payload) + "\n")
     return RunView(

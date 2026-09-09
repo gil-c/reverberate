@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -37,9 +38,12 @@ import urllib.request
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from reverberate.settings import runs_dir
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle, needed for the annotation only
+    from reverberate.wave.remote import Machine
 
 __all__ = [
     "API_KEY_ENV",
@@ -52,9 +56,11 @@ __all__ = [
     "cheapest",
     "estimate_cost_usd",
     "ledger_total_usd",
+    "account_identity",
     "rent",
     "search_query",
     "teardown",
+    "wait_for_ssh",
 ]
 
 #: Vast.ai credential, read from the process environment only (section 10).
@@ -73,7 +79,16 @@ _API_VERSION = "v0"
 
 
 class VastError(RuntimeError):
-    """Any failure talking to Vast.ai, or any refusal to spend."""
+    """Any failure talking to Vast.ai, or any refusal to spend.
+
+    ``status`` carries the HTTP code when there was one, so a caller can tell a
+    machine that does not exist from an API it could not reach. That difference
+    decides whether a rented card gets destroyed.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -310,7 +325,28 @@ class VastClient:
         self._key = key
         self._timeout = timeout
 
-    def _request(
+    @staticmethod
+    def _ssl_context() -> ssl.SSLContext:
+        """Verify against ``certifi`` when it is installed, the system store otherwise.
+
+        **The symptom this prevents looks like a network outage and is not one.**
+        The python.org framework build of Python on macOS ships no certificate
+        store of its own, so every call through ``urllib`` fails with
+        ``CERTIFICATE_VERIFY_FAILED, unable to get local issuer certificate``,
+        while the store client keeps working because ``boto3`` carries
+        ``certifi``. Two sessions of this project met it and one of them read it
+        as the API being unreachable.
+
+        Verification is never turned off. If ``certifi`` is absent the system
+        store is used, which is the standard behaviour.
+        """
+        try:
+            import certifi
+        except ImportError:  # pragma: no cover - certifi arrives with boto3
+            return ssl.create_default_context()
+        return ssl.create_default_context(cafile=certifi.where())
+
+    def request(
         self,
         method: str,
         path: str,
@@ -325,13 +361,23 @@ class VastClient:
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+            context = self._ssl_context()
+            with urllib.request.urlopen(  # noqa: S310
+                request, timeout=self._timeout, context=context
+            ) as response:
                 return json.loads(response.read().decode())
         except urllib.error.HTTPError as error:
             # The body can echo the request; never let it reach a log with the key in it.
-            raise VastError(f"{method} {path} failed: HTTP {error.code}") from None
+            raise VastError(f"{method} {path} failed: HTTP {error.code}", error.code) from None
         except urllib.error.URLError as error:
-            raise VastError(f"{method} {path} failed: {error.reason}") from None
+            hint = ""
+            if isinstance(error.reason, ssl.SSLCertVerificationError):
+                hint = (
+                    ". This is a certificate store problem on this machine and not a "
+                    "network one; install certifi, or run "
+                    "'Install Certificates.command' from the Python framework"
+                )
+            raise VastError(f"{method} {path} failed: {error.reason}{hint}") from None
 
     def search(self, query: str, limit: int = 20) -> list[Offer]:
         """Offers matching ``query``, cheapest first.
@@ -342,7 +388,7 @@ class VastClient:
         """
         filters = {**parse_query(query), "order": [["dph_total", "asc"]], "limit": limit}
         params = urllib.parse.urlencode({"q": json.dumps(filters)})
-        payload = self._request("GET", f"/bundles/?{params}")
+        payload = self.request("GET", f"/bundles/?{params}")
         offers = [Offer.from_api(raw) for raw in payload.get("offers", [])]
         return sorted(offers, key=lambda offer: offer.dph_total)
 
@@ -352,7 +398,7 @@ class VastClient:
         The listing lives under ``/api/v1``: since 2026-08 the ``v0`` form
         answers HTTP 410 and names its replacement.
         """
-        payload = self._request("GET", "/instances/", api_version="v1")
+        payload = self.request("GET", "/instances/", api_version="v1")
         return [Instance.from_api(raw) for raw in payload.get("instances", [])]
 
     def instance(self, instance_id: int) -> Instance | None:
@@ -363,9 +409,17 @@ class VastClient:
         the listing endpoint is being moved around.
         """
         try:
-            payload = self._request("GET", f"/instances/{instance_id}/")
-        except VastError:
-            return None
+            payload = self.request("GET", f"/instances/{instance_id}/")
+        except VastError as error:
+            # **Absent and unreachable are not the same answer.** Swallowing
+            # every failure here makes a transient API fault look exactly like
+            # an instance that no longer exists, and two callers act on that:
+            # ``destroy_and_verify`` would report a card destroyed while it is
+            # still billing, and ``wait_for_ssh`` would abandon a rental that is
+            # merely starting. Only a 404 means gone.
+            if error.status == 404:
+                return None
+            raise
         raw = payload.get("instances")
         if not raw:
             return None
@@ -383,7 +437,7 @@ class VastClient:
         onstart_cmd: str = "touch /root/.onstart_done; sleep infinity",
     ) -> int:
         """Rent ``offer_id`` and return the new instance id."""
-        payload = self._request(
+        payload = self.request(
             "PUT",
             f"/asks/{offer_id}/",
             {
@@ -400,7 +454,7 @@ class VastClient:
 
     def destroy(self, instance_id: int) -> None:
         """Ask Vast.ai to destroy an instance. Verify with :meth:`instance`."""
-        self._request("DELETE", f"/instances/{instance_id}/")
+        self.request("DELETE", f"/instances/{instance_id}/")
 
     def destroy_and_verify(self, instance_id: int, attempts: int = 5, pause: float = 20.0) -> bool:
         """Destroy, then confirm it is gone. Section 13.5: do not assume."""
@@ -408,8 +462,13 @@ class VastClient:
             with contextlib.suppress(VastError):
                 self.destroy(instance_id)
             time.sleep(pause)
-            if self.instance(instance_id) is None:
-                return True
+            try:
+                if self.instance(instance_id) is None:
+                    return True
+            except VastError:
+                # Unreachable is not gone. Try again rather than report a
+                # destruction that was never confirmed.
+                continue
         return False
 
 
@@ -492,6 +551,60 @@ def rent(
         }
     )
     return Rental(instance_id=instance_id, offer=offer, deadline=deadline, watchdog_pid=pid)
+
+
+def account_identity(client: VastClient) -> Path:
+    """The local private key whose public half Vast will install, or refuse.
+
+    Checked before renting. The alternative is what it cost to learn: an
+    instance comes up, ssh answers ``Permission denied (publickey)`` on every
+    poll for the full timeout, and the run tears down having done nothing.
+    """
+    registered = {
+        (key.get("public_key") or "").split()[1]
+        for key in client.request("GET", "/ssh/")
+        if len((key.get("public_key") or "").split()) > 1
+    }
+    if not registered:
+        raise VastError("the Vast account has no ssh key registered; add one in the console")
+    for public in sorted(Path.home().joinpath(".ssh").glob("*.pub")):
+        blob = public.read_text().split()
+        if len(blob) > 1 and blob[1] in registered:
+            private = public.with_suffix("")
+            if private.is_file():
+                return private
+    raise VastError(
+        "no private key here matches a key registered on the Vast account, so ssh into "
+        "the instance would be refused; nothing was rented"
+    )
+
+
+def wait_for_ssh(
+    client: VastClient, instance_id: int, identity: Path, timeout: float = 900.0
+) -> Machine:
+    """Block until the instance answers a command, not merely until it exists.
+
+    **Readiness is ssh answering.** The API reports ``running`` one second after
+    create and then reverts to ``loading``, which cost three premature
+    teardowns before it was believed; it supplies the host and the port and
+    nothing else.
+    """
+    from reverberate.wave.remote import Machine, _run
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        instance = client.instance(instance_id)
+        if instance is None:
+            raise VastError(f"instance {instance_id} vanished while starting")
+        if instance.ssh_host and instance.status == "running":
+            machine = Machine(host=instance.ssh_host, port=instance.ssh_port, identity=identity)
+            try:
+                _run(machine.ssh_command("true"), what="ssh probe", timeout=30)
+                return machine
+            except Exception:  # noqa: BLE001 - not up yet is the common case
+                pass
+        time.sleep(15)
+    raise TimeoutError(f"instance {instance_id} never answered on ssh")
 
 
 def teardown(client: VastClient, instance_id: int) -> bool:

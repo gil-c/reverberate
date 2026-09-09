@@ -162,6 +162,36 @@ class MachineNeed:
         return problems
 
 
+def pick_offer(client: Any, need: MachineNeed, max_dph: float) -> Any:
+    """The cheapest offer that meets ``need``, or an explanation and no rental.
+
+    Shared by every stage's driver, because the failure it prevents is the same
+    one each time: an offer that looks affordable, is rented, and then turns out
+    to be missing the disk or the memory the job needs. The requirement is
+    arithmetic and it is applied **before** an instance exists.
+    """
+    from reverberate.gpu import vast
+
+    offers = client.search(
+        vast.search_query(
+            gpu_name="",
+            min_disk_gb=int(need.disk_gb),
+            min_cpu_cores=need.cores,
+            min_gpu_ram_gb=need.vram_gb if need.needs_gpu else 0.0,
+            min_reliability=0.99,
+        ),
+        limit=200,
+    )
+    affordable = [offer for offer in offers if offer.dph_total <= max_dph]
+    eligible = [offer for offer in affordable if not need.unmet(offer)]
+    if not eligible:
+        print(f"{len(offers)} offers matched the query, {len(affordable)} under {max_dph} USD/h")
+        for offer in affordable[:5]:
+            print(f"  {offer.id}: {', '.join(need.unmet(offer))}")
+        raise RuntimeError(f"nothing meets: {need.why}")
+    return min(eligible, key=lambda offer: offer.dph_total)
+
+
 def grid_shape_of(model_json: Path, fmax: float, ppw: float) -> tuple[int, int, int]:
     """The grid a voxelisation will build, without building it.
 
