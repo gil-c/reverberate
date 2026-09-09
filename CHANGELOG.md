@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `reverberate.geometry.scene_ids`: a short, stable name for every scene,
+  `hssd_0011`, and a suffix for each storey of a multi-storey one,
+  `hssd_0001_1`. 135 of the 168 HSSD ids are compound, like
+  `105515175_173104107`, so a suffix appended to one cannot be taken apart
+  again; a local name is always `hssd_` and four digits, so it can.
+  `data/scene_ids.csv` is a record written once in sorted order and never
+  renumbered: a name printed in a report has to keep meaning the same scene.
+  The export manifest carries it as `dwelling`.
+
 - `scripts/room_openings.py`: every shared boundary of a scene with the rule
   that decided it. This is where `DOOR_MAX_M` and `WALL_MAX_M` were read off.
 
