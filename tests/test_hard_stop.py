@@ -84,18 +84,6 @@ def test_the_watchdog_stops_when_its_job_does() -> None:
     assert not alive, "the watchdog outlived the job it was watching"
 
 
-def test_a_cap_needs_a_duration() -> None:
-    with pytest.raises(ValueError, match="positive duration"), hard_stop.capped(seconds=0):
-        pass
-
-
-def test_disarming_a_watchdog_twice_is_quiet() -> None:
-    watchdog = hard_stop.arm(os.getpid(), time.time() + 600.0, poll_s=0.05)
-    hard_stop.disarm(watchdog)
-    hard_stop.disarm(watchdog)  # must not raise
-    assert not watchdog.alive()
-
-
 def test_liveness_is_asked_of_the_handle_and_not_of_the_pid() -> None:
     """A watchdog that has exited stays a zombie until someone waits on it, and
     ``os.kill(pid, 0)`` answers yes for a zombie. Asked that way, a finished

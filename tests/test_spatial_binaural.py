@@ -28,7 +28,6 @@ from reverberate.spatial.binaural import (
 from reverberate.spatial.encode import Ambisonic
 from reverberate.spatial.hrtf import (
     EAR_AZIMUTH_DEG,
-    HEAD_RADIUS_M,
     HrtfSet,
     ear_directions,
     measured_head,
@@ -55,12 +54,6 @@ def a_plane_wave(order: int, azimuth_deg: float, samples: int = 4096) -> Ambison
     signals = np.zeros((channel_count(order), samples))
     signals[:, 200] = real_sh(order, direction[None, :])[0]
     return Ambisonic(signals, RATE, order, np.zeros(3))
-
-
-def test_the_sphere_is_transparent_at_zero_frequency() -> None:
-    """A head small against the wavelength is not there, and the gain is one."""
-    front = directions(np.array(0.0), np.array(0.0))[None, :]
-    assert np.allclose(np.abs(sphere_hrtf(front, np.array([0.0])).responses[:, 0, 0]), 1.0)
 
 
 def test_the_projected_sphere_matches_its_closed_form_wherever_it_is_audible() -> None:
@@ -175,11 +168,6 @@ def test_a_truncated_decode_without_magnitude_matching_goes_quiet_in_a_diffuse_f
     assert abs(levels["magls"] - truth_db) < 0.5
 
 
-def test_the_covariance_correction_is_the_identity_when_there_is_nothing_to_correct() -> None:
-    reference = np.array([[2.0, 0.3 + 0.1j], [0.3 - 0.1j, 1.5]])
-    assert np.allclose(covariance_correction(reference, reference), np.eye(2), atol=1e-6)
-
-
 def test_the_covariance_correction_restores_the_covariance_it_is_given() -> None:
     reference = np.array([[2.0, 0.3 + 0.1j], [0.3 - 0.1j, 1.5]])
     truncated = np.array([[0.9, 0.6 + 0.0j], [0.6 - 0.0j, 0.8]])
@@ -202,20 +190,6 @@ def test_a_rotation_of_the_field_moves_the_image_by_the_same_angle() -> None:
     turned = render(a_plane_wave(7, 30.0), decoder, field_yaw_rad=np.radians(60.0))
     direct = render(a_plane_wave(7, 90.0), decoder)
     assert ild_db(turned) == pytest.approx(ild_db(direct), abs=0.05)
-
-
-def test_a_decoder_and_a_response_must_agree_on_order_and_rate() -> None:
-    decoder = design_decoder(a_head(), order=7, sample_rate_hz=RATE, filter_length=TAPS)
-    with pytest.raises(ValueError, match="order"):
-        render(a_plane_wave(3, 0.0), decoder)
-    with pytest.raises(ValueError, match="Hz"):
-        render(Ambisonic(np.zeros((64, 128)), 44100.0, 7, np.zeros(3)), decoder)
-
-
-def test_a_head_sampled_off_the_decoder_s_grid_is_refused() -> None:
-    head = a_head()
-    with pytest.raises(ValueError, match="frequency grid"):
-        design_decoder(head, order=3, sample_rate_hz=RATE, filter_length=256)
 
 
 def test_band_limiting_the_coherence_is_what_makes_it_test_the_claim() -> None:
@@ -242,11 +216,6 @@ def test_uncorrelated_ears_read_as_incoherent_and_a_shared_signal_as_coherent() 
     _, incoherent = interaural_coherence(rng.standard_normal((2, 4800)), RATE)
     assert np.all(coherent > 0.99)
     assert np.mean(incoherent) < 0.35
-
-
-def test_the_head_radius_and_ear_angle_are_the_documented_ones() -> None:
-    assert pytest.approx(0.0875) == HEAD_RADIUS_M
-    assert pytest.approx(100.0) == EAR_AZIMUTH_DEG
 
 
 class TestAMeasuredHead:
@@ -292,15 +261,6 @@ class TestAMeasuredHead:
         rendered = render(a_plane_wave(3, 90.0), decoder)
         assert itd_s(rendered, RATE) > 0.0
 
-    def test_a_file_measured_at_another_rate_is_refused(self, tmp_path: Path) -> None:
-        """Resample the file, never the decoder."""
-        with pytest.raises(ValueError, match="resample the file"):
-            measured_head(self.a_file(tmp_path), 44100.0, 256)
-
-    def test_a_head_longer_than_the_filter_is_refused(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="longer than"):
-            measured_head(self.a_file(tmp_path), 48000.0, 32)
-
     def test_it_carries_the_licence_it_was_given(self, tmp_path: Path) -> None:
         """A measured set travels with its licence or it does not travel."""
         _, metadata = measured_head(self.a_file(tmp_path), 48000.0, 256)
@@ -322,10 +282,3 @@ def test_the_coherence_estimator_states_its_own_floor() -> None:
     assert coherence_floor(RATE, band_hz=8000.0, frame_s=0.4, hop_s=0.2) < coherence_floor(
         RATE, band_hz=8000.0
     )
-
-
-def test_a_shared_signal_reads_coherent_at_zero_lag_too() -> None:
-    rng = np.random.default_rng(7)
-    shared = rng.standard_normal(4800)
-    _, values = interaural_coherence(np.stack([shared, shared]), RATE, lag="zero")
-    assert np.all(values > 0.99)

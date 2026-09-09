@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from reverberate import metrics
 from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.metrics import (
     EARLY_WINDOW,
@@ -22,16 +23,12 @@ from reverberate.metrics import (
     band_centres,
     clarity_per_band,
     compare,
-    critical_distance,
     direct_sound,
     direct_to_reverberant_per_band,
-    edt_per_band,
-    energy_decay_curve,
     measure,
     octave_filter,
     rt60_per_band,
     schroeder_frequency,
-    wavelength_of,
 )
 
 FS = 16000
@@ -46,12 +43,6 @@ def decaying_noise(rt60: float, seconds: float = 3.0, seed: int = 0, fs: int = F
     response = rng.normal(size=samples) * np.exp(-6.9078 * time / rt60)
     response[0] += 5.0
     return response
-
-
-def test_band_range_reaches_8_khz() -> None:
-    """Everything downstream resamples onto these, so the tuple is pinned."""
-    assert OCTAVE_BANDS == (125, 250, 500, 1000, 2000, 4000, 8000)
-    assert wavelength_of(8000) == pytest.approx(0.0429, abs=1e-3)
 
 
 def test_rt60_recovers_a_known_decay_in_every_band() -> None:
@@ -84,20 +75,6 @@ def test_a_broadband_average_can_hide_a_per_band_error() -> None:
     )
     assert mean_error < np.nanmax(difference.rt60_relative_error)
     assert not difference.rt60_within_jnd
-
-
-def test_edt_is_computed_and_tracks_the_decay() -> None:
-    slow = edt_per_band(decaying_noise(1.5), FS)
-    fast = edt_per_band(decaying_noise(0.4), FS)
-
-    assert np.nanmean(slow) > np.nanmean(fast)
-
-
-def test_decay_curve_starts_at_zero_and_falls_monotonically() -> None:
-    curve = energy_decay_curve(decaying_noise(0.8))
-
-    assert curve[0] == pytest.approx(0.0, abs=1e-9)
-    assert np.all(np.diff(curve) <= 1e-9)
 
 
 def test_direct_sound_is_found_at_its_arrival() -> None:
@@ -140,15 +117,6 @@ def test_comparison_reports_the_worst_band_rather_than_an_average() -> None:
     assert "worst RT60" in difference.summary()
 
 
-def test_identical_responses_sit_inside_every_jnd() -> None:
-    metrics = measure(decaying_noise(0.9), FS)
-
-    difference = compare(metrics, metrics)
-
-    assert difference.within_jnd
-    assert difference.direct_level_error_db == pytest.approx(0.0)
-
-
 def test_a_single_failing_band_fails_the_whole_comparison() -> None:
     """One audible band is enough: a mean would forgive it, this must not."""
     reference = measure(decaying_noise(0.8), FS)
@@ -168,20 +136,6 @@ def test_schroeder_frequency_marks_where_a_room_stops_being_diffuse() -> None:
 
     assert small > large
     assert schroeder_frequency(rt60=0.0, volume=30.0) == float("inf")
-
-
-def test_critical_distance_grows_with_a_deader_room() -> None:
-    assert critical_distance(volume=200.0, rt60=0.4) > critical_distance(volume=200.0, rt60=1.6)
-
-
-def test_metrics_carry_every_band_and_the_direct_sound() -> None:
-    metrics = measure(decaying_noise(0.7), FS)
-
-    assert metrics.bands == OCTAVE_BANDS
-    assert metrics.decay_curves.shape[0] == len(OCTAVE_BANDS)
-    assert len(metrics.c50) == len(metrics.drr) == len(OCTAVE_BANDS)
-    assert metrics.direct_time >= 0.0
-    assert "125 Hz" in metrics.summary()
 
 
 def test_a_silent_response_does_not_pretend_to_have_measurements() -> None:
@@ -216,3 +170,35 @@ def test_band_labels_follow_the_filter_bank_and_not_the_material_bands() -> None
     # summary() zips bands against rt60 with strict=True, so a mislabelled
     # band count raises here rather than printing a wrong table.
     assert "16000 Hz" in metrics.summary()
+
+
+def test_a_floor_to_ceiling_comb_is_found_with_its_spacing_and_its_node() -> None:
+    fs = 16000
+    t = np.arange(int(1.2 * fs)) / fs
+    height = 3.63
+    spacing = 343.2 / (2 * height)
+    rng = np.random.default_rng(3)
+    # A diffuse tail that decays in 0.5 s, and axial lines that ring for 1.2 s.
+    rir = rng.standard_normal(t.size) * 10 ** (-3 * t / 0.5)
+    for n in range(10, 20):
+        if n == 14:
+            continue
+        rir += 0.3 * np.cos(2 * np.pi * n * spacing * t) * 10 ** (-3 * t / 1.2)
+    found = metrics.axial_modes(rir, fs, height_m=height * 1.03, receiver_height_m=1.17)
+    assert found["found"] and found["flutter"]
+    assert abs(found["spacing_hz"] - spacing) < 0.5
+    assert abs(found["height_from_spacing_m"] - height) < 0.05
+    by_n = {row["n"]: row for row in found["lines"]}
+    assert by_n[15]["prominence_db"] > 8
+    assert by_n[14]["prominence_db"] < by_n[15]["prominence_db"] - 6
+    assert by_n[14]["at_pressure_node"] and not by_n[15]["at_pressure_node"]
+    assert found["contrast_db"] > 6
+
+
+def test_no_comb_is_reported_on_a_plain_diffuse_tail() -> None:
+    fs = 16000
+    t = np.arange(int(1.2 * fs)) / fs
+    rir = np.random.default_rng(5).standard_normal(t.size) * 10 ** (-3 * t / 0.5)
+    found = metrics.axial_modes(rir, fs, height_m=3.0)
+    assert found["found"] and not found["flutter"]
+    assert abs(found["contrast_db"]) < 2

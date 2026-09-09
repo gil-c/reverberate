@@ -30,6 +30,7 @@ different question about an approximation:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pyroomacoustics as pra
@@ -316,6 +317,117 @@ def compare(reference: BandMetrics, candidate: BandMetrics) -> MetricComparison:
         direct_level_error_db=candidate.direct_level - reference.direct_level,
         worst_band=reference.bands[worst_index],
     )
+
+
+def _peak_within(
+    freqs: np.ndarray, prominence: np.ndarray, centre: float, tolerance: float = 0.015
+) -> tuple[float, float] | None:
+    """The highest bin within ``tolerance`` of ``centre``, as ``(hz, db)``."""
+    window = (freqs > centre * (1 - tolerance)) & (freqs < centre * (1 + tolerance))
+    if not window.any():
+        return None
+    at = int(np.flatnonzero(window)[np.argmax(prominence[window])])
+    return float(freqs[at]), float(prominence[at])
+
+
+def axial_modes(
+    rir: np.ndarray,
+    fs: int,
+    *,
+    height_m: float,
+    sound_speed_m_s: float = SPEED_OF_SOUND,
+    receiver_height_m: float | None = None,
+    start_s: float = 0.3,
+    band_hz: tuple[float, float] = (300.0, 1200.0),
+    search: float = 0.06,
+) -> dict[str, Any]:
+    """The floor to ceiling axial series in the late response, found and sized.
+
+    Two large parallel surfaces with the least absorption in the room, the
+    floor and the ceiling, keep a comb of axial modes at ``n c / 2H`` ringing
+    after the diffuse field has decayed. W39 met it as a "line at 701 Hz" that
+    a pocket census could not explain: it was ``n = 15`` of a 3.63 m room, and
+    the missing ``n = 14`` sat on a pressure node at the listener's height.
+
+    The late part of ``rir`` (from ``start_s``) is transformed, each bin is
+    compared with a 60 Hz moving mean of the spectrum, and the comb spacing is
+    searched within ``search`` of ``c / 2H`` for the one whose harmonics stand
+    highest above that floor. ``prominence_db`` per line and its mean are what
+    to read against ``between_lines_db``, the same statistic half way between
+    the lines; a ``contrast_db`` above 4 dB is a flutter a listener hears
+    as a pitch in the tail. Nothing here removes it: the report says
+    what the model's flat parallel surfaces did.
+    """
+    signal = np.asarray(rir, dtype=float)
+    late = signal[int(round(start_s * fs)) :]
+    if late.size < fs // 4:
+        return {"found": False, "why": f"under 0.25 s of response after {start_s} s"}
+    late = late * np.hanning(late.size)
+    n = 1 << int(np.ceil(np.log2(late.size * 8)))
+    spectrum = np.abs(np.fft.rfft(late, n=n)) ** 2
+    freqs = np.fft.rfftfreq(n, 1.0 / fs)
+    width = max(int(round(60.0 / (freqs[1] - freqs[0]))), 3)
+    kernel = np.ones(width) / width
+    floor = np.convolve(spectrum, kernel, mode="same")
+    prominence = 10.0 * np.log10((spectrum + 1e-30) / (floor + 1e-30))
+
+    nominal = sound_speed_m_s / (2.0 * height_m)
+    best: tuple[float, float, list[dict[str, Any]], float, float] | None = None
+    for spacing in np.linspace(nominal * (1 - search), nominal * (1 + search), 61):
+        orders = np.arange(int(np.ceil(band_hz[0] / spacing)), int(band_hz[1] / spacing) + 1)
+        if orders.size < 4:
+            continue
+        rows, between = [], []
+        for order in orders:
+            centre = order * spacing
+            found = _peak_within(freqs, prominence, centre)
+            if found is None:
+                continue
+            rows.append(
+                {
+                    "n": int(order),
+                    "predicted_hz": round(float(centre), 1),
+                    "found_hz": round(float(found[0]), 1),
+                    "prominence_db": round(float(found[1]), 1),
+                }
+            )
+            # The same statistic half way to the next line: what a peak picked
+            # out of noise alone measures, and what a line is compared with.
+            offset = _peak_within(freqs, prominence, centre + 0.5 * spacing)
+            if offset is not None:
+                between.append(offset[1])
+        if len(rows) < 4 or not between:
+            continue
+        lines_db = float(np.mean([row["prominence_db"] for row in rows]))
+        between_db = float(np.mean(between))
+        score = lines_db - between_db
+        if best is None or score > best[0]:
+            best = (score, float(spacing), rows, lines_db, between_db)
+    if best is None:
+        return {"found": False, "why": "the band holds fewer than four harmonics"}
+    score, spacing, rows, lines_db, between_db = best
+    fitted_height = sound_speed_m_s / (2.0 * spacing)
+    if receiver_height_m is not None:
+        for row in rows:
+            shape = abs(np.cos(np.pi * row["n"] * receiver_height_m / fitted_height))
+            row["at_pressure_node"] = bool(shape < 0.25)
+    return {
+        "found": True,
+        "height_m": round(float(height_m), 3),
+        "spacing_hz": round(spacing, 2),
+        "height_from_spacing_m": round(fitted_height, 3),
+        "late_from_s": start_s,
+        "band_hz": [float(band_hz[0]), float(band_hz[1])],
+        "lines": rows,
+        "mean_prominence_db": round(lines_db, 2),
+        "between_lines_db": round(between_db, 2),
+        "contrast_db": round(score, 2),
+        "flutter": bool(score > 4.0),
+        "note": (
+            "axial modes between the floor and the ceiling, n c / 2H; flat parallel "
+            "surfaces in the model ring where a real room's scattering breaks them"
+        ),
+    }
 
 
 def schroeder_frequency(rt60: float, volume: float) -> float:

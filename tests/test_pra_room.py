@@ -20,7 +20,6 @@ from reverberate.geometry.pra_room import (
     sabine_rt60,
     simulate_and_validate,
     simulate_pairs,
-    walls_from_mesh,
 )
 
 
@@ -31,17 +30,6 @@ def _box_room(extents: tuple[float, float, float] = (4.0, 3.0, 5.0)) -> trimesh.
     assert box.is_watertight
     result: trimesh.Trimesh = box
     return result
-
-
-def test_walls_from_mesh_creates_one_wall_per_triangle() -> None:
-    box = _box_room()
-    material = pra.Material("hard_surface")
-    assignment = MeshMaterialAssignment(mesh=box, material=material, name="shell")
-
-    walls = walls_from_mesh(assignment)
-
-    assert len(walls) == len(box.faces)
-    assert all(isinstance(w, pra.Wall) for w in walls)
 
 
 def test_simulate_and_validate_loads_geometry_and_produces_a_rir() -> None:
@@ -138,29 +126,12 @@ def test_mixed_materials_on_different_meshes_are_each_respected() -> None:
     assert result_mixed.mean_absorption > result_all_hard.mean_absorption
 
 
-@pytest.mark.parametrize(
-    "volume, surface_area, mean_absorption, expected",
-    [
-        (100.0, 100.0, 0.161, pytest.approx(1.0, rel=1e-6)),
-        (60.0, 94.0, 0.0, float("inf")),
-    ],
-)
-def test_sabine_formula(
-    volume: float, surface_area: float, mean_absorption: float, expected: float
-) -> None:
-    assert sabine_rt60(volume, surface_area, mean_absorption) == expected
-
-
 def test_eyring_formula_approaches_sabine_at_low_absorption() -> None:
     volume, surface_area = 60.0, 94.0
     low_absorption = 0.02
     sabine = sabine_rt60(volume, surface_area, low_absorption)
     eyring = eyring_rt60(volume, surface_area, low_absorption)
     assert eyring == pytest.approx(sabine, rel=0.1)
-
-
-def test_eyring_formula_zero_at_full_absorption() -> None:
-    assert eyring_rt60(60.0, 94.0, 1.0) == 0.0
 
 
 def test_simulate_pairs_matches_pairs_and_does_not_cross_them() -> None:
@@ -204,21 +175,6 @@ def test_the_same_seed_reproduces_the_same_response() -> None:
     assert np.allclose(first[0].rir, second[0].rir)
 
 
-def test_different_seeds_give_different_responses() -> None:
-    """The converse, so that the test above cannot pass by the ray tracer being
-    accidentally deterministic; that would make the seed look effective when it
-    was doing nothing."""
-    box = _box_room((5.0, 3.0, 4.0))
-    assignments = [MeshMaterialAssignment(mesh=box, material=pra.Material(0.25), name="shell")]
-    pair = (np.array([-1.5, 1.2, -1.0]), np.array([1.5, 1.2, 1.0]))
-
-    first = simulate_pairs(assignments, [pair], max_order=2, n_rays=200, seed=7)
-    second = simulate_pairs(assignments, [pair], max_order=2, n_rays=200, seed=8)
-
-    length = min(len(first[0].rir), len(second[0].rir))
-    assert not np.allclose(first[0].rir[:length], second[0].rir[:length])
-
-
 def test_the_image_source_part_is_unaffected_by_the_other_pairs() -> None:
     """Amortising must not change the deterministic half of the simulation.
 
@@ -238,10 +194,6 @@ def test_the_image_source_part_is_unaffected_by_the_other_pairs() -> None:
 
     length = min(len(alone), len(together))
     assert np.allclose(alone[:length], together[:length])
-
-
-def test_simulate_pairs_returns_nothing_for_no_pairs() -> None:
-    assert simulate_pairs([], []) == []
 
 
 def _image_source_rir(

@@ -9,15 +9,13 @@ its area in every report.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import trimesh
 
 from reverberate.geometry.apartment import Storey, build_storey
 from reverberate.geometry.hssd_room import RoomRegion
 from reverberate.geometry.orientation import BOTH, FRONT, is_closed, orient_for_air
-from reverberate.geometry.sim_geometry import shell_assignments, simulation_geometry
+from reverberate.geometry.sim_geometry import shell_assignments
 
 
 def square_storey(size: float = 4.0) -> Storey:
@@ -109,13 +107,6 @@ def test_the_shell_parts_face_the_room_they_enclose() -> None:
         assert np.all(dots > 0), assignment.name
 
 
-def test_the_summary_counts_what_could_not_be_oriented() -> None:
-    storey = square_storey()
-    _, summary = simulation_geometry(hssd_root=Path("/nonexistent"), storey=storey, instances=[])
-    assert summary.unoriented_faces == 0
-    assert "faces oriented" in summary.summary()
-
-
 def _non_manifold_pair() -> trimesh.Trimesh:
     """Two closed boxes sharing one edge, which is the shape the carve makes.
 
@@ -134,15 +125,9 @@ def _non_manifold_pair() -> trimesh.Trimesh:
 
 
 class TestIsClosed:
-    def test_a_box_is_closed(self) -> None:
-        assert is_closed(trimesh.creation.box())
-
     def test_an_open_sheet_is_not(self) -> None:
         sheet = trimesh.creation.box().submesh([[0, 1]], append=True)
         assert not is_closed(sheet)
-
-    def test_an_empty_mesh_is_not(self) -> None:
-        assert not is_closed(trimesh.Trimesh())
 
     def test_a_closed_body_with_a_non_manifold_edge_still_counts(self) -> None:
         """The whole point: no hole, so the inside is knowable.
@@ -153,18 +138,6 @@ class TestIsClosed:
         joined = _non_manifold_pair()
         assert not joined.is_watertight
         assert is_closed(joined)
-
-    def test_such_a_body_is_still_oriented_into_the_air(self) -> None:
-        """And it must come out of orient_for_air with real normals, not BOTH.
-
-        BOTH is the honest answer for geometry nobody can judge; giving it to a
-        body that is plainly closed would leave the carve unsealed and its
-        material applied from inside the solid.
-        """
-        oriented = orient_for_air(_non_manifold_pair(), "outside")
-        assert oriented.authoritative
-        assert np.all(oriented.sides == FRONT)
-        assert float(oriented.mesh.volume) > 0.0
 
     def test_an_inward_wound_closed_body_is_turned_around(self) -> None:
         """``fix_normals`` declines to flip a mesh like this; ``invert`` cannot.

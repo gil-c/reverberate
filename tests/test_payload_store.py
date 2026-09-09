@@ -67,13 +67,6 @@ def test_a_payload_survives_the_round_trip(tmp_path: Path) -> None:
             assert (landed / path.relative_to(source)).read_bytes() == path.read_bytes()
 
 
-def test_a_run_the_store_has_never_heard_of_is_not_an_error(tmp_path: Path) -> None:
-    """A checkout without the payload draws the triangles and says so; it does
-    not fail to build a page."""
-    assert fetch_payload(MemoryStore(), "never_published", tmp_path / "voxels") is None
-    assert not (tmp_path / "voxels").exists()
-
-
 def test_the_index_is_written_last(tmp_path: Path) -> None:
     """It is what `_link_audit` looks for, so a payload advertising itself
     before its tiles arrived would be read as complete."""

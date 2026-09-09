@@ -37,20 +37,16 @@ import numpy as np
 from reverberate.audio import Atmosphere
 from reverberate.metrics import (
     band_centres,
-    energy_decay_curve,
     octave_filter,
-    rt60_per_band,
 )
 
 __all__ = [
     "DIFFUSE_COHERENCE_LIMIT_HZ",
     "Transposition",
-    "local_decay_s",
-    "window_for_level_s",
     "effective_mean_free_path_m",
     "eyring_t60_s",
-    "mixing_time_s",
-    "splice",
+    "local_decay_s",
+    "mean_absorption_of",
     "synthesise",
     "transpose",
 ]
@@ -63,17 +59,29 @@ __all__ = [
 DIFFUSE_COHERENCE_LIMIT_HZ = 1000.0
 
 
-def mixing_time_s(volume_m3: float) -> float:
-    """When the field becomes diffuse, in seconds. Polack's ``sqrt(V)`` in ms.
+def mean_absorption_of(report: dict[str, Any], bands: int) -> np.ndarray:
+    """Area-weighted absorption per band, from a run's own report.
 
-    Reproduces the roadmap's own figures: 12 ms for the living room's 151.7 m3
-    and 7 ms for the kitchen's 45.5. It is the earliest a synthetic tail can
-    honestly take over, because before it the response is discrete reflections
-    whose arrival times carry the spatial information, and noise has none.
+    Extends the catalogue's top band to the analysis bank's top by the rule of
+    roadmap 6.2: each class's own 2 to 4 kHz ratio applied per octave, clipped
+    to at most 1 and at least 0.8. The catalogue stops at 8 kHz because that is
+    where its measurements stop, and the extension is a judgement labelled as
+    one rather than a measurement.
     """
-    if volume_m3 <= 0.0:
-        raise ValueError(f"volume must be positive, got {volume_m3} m3")
-    return float(np.sqrt(volume_m3) / 1000.0)
+    classes = report["room"]["per_class"]
+    area = np.array([entry["area_m2"] for entry in classes], dtype=float)
+    alpha = np.array([entry["random_incidence_absorption"] for entry in classes], dtype=float)
+    if area.sum() <= 0.0:
+        raise ValueError("the report has no surface area to weight absorption by")
+
+    while alpha.shape[1] < bands:
+        ratio = np.clip(
+            np.where(alpha[:, -3] > 0.0, alpha[:, -2] / np.maximum(alpha[:, -3], 1e-9), 1.0),
+            0.8,
+            1.0,
+        )
+        alpha = np.column_stack([alpha, np.clip(alpha[:, -1] * ratio, 1e-4, 0.99)])
+    return np.asarray((area[:, None] * alpha[:, :bands]).sum(axis=0) / area.sum())
 
 
 def local_decay_s(
@@ -132,64 +140,6 @@ def local_decay_s(
         if slopes:
             out[band] = float(np.median(slopes))
     return out
-
-
-def window_for_level_s(
-    ir: np.ndarray,
-    sample_rate_hz: int,
-    level_db: float,
-    *,
-    bands_hz: tuple[float, float] | None = None,
-    floor_s: float = 0.010,
-) -> float:
-    """How long to solve for, to reach ``level_db`` in every band that matters.
-
-    Replaces a duration typed by an operator. ``duration`` reaches the solver as
-    ``Nt`` and nothing derived it, so a run was as long as somebody guessed.
-    This measures it instead, on the energy decay curve of a response of the
-    same room, and takes the **slowest** band the run contributes, because a
-    window that suits the top of a band cuts the bottom of it short.
-
-    **The rule scales itself, which is the point.** Air absorption steepens the
-    decay towards the top of the audible range, so one level gives a long
-    window low down and a short one high up. Measured on ``w29_16k`` with air,
-    a -30 dB window is 223 ms at 125 Hz, 124 ms at 2 kHz and 86 ms at 16 kHz.
-    It also reproduces the figure this project arrived at empirically: 60 ms
-    for the high band is about -18 dB.
-
-    ``bands_hz`` restricts the search to the octave centres a band run actually
-    contributes, as ``(low, high)`` inclusive. Passing ``None`` considers every
-    band, which is what a single broadband run wants.
-
-    Returns seconds, never less than ``floor_s``. A band whose decay never
-    reaches ``level_db`` inside the response contributes the whole response
-    rather than a NaN: the answer is then "at least this long", which is the
-    honest reading of a measurement that ran out of signal.
-    """
-    signals = np.atleast_2d(np.asarray(ir, dtype=float))
-    if level_db >= 0.0:
-        raise ValueError(f"level must be a decay in decibels below zero, got {level_db}")
-    centres = np.asarray(band_centres(sample_rate_hz), dtype=float)
-    if bands_hz is not None:
-        low, high = bands_hz
-        wanted = (centres >= low) & (centres <= high)
-    else:
-        wanted = np.ones(len(centres), dtype=bool)
-    if not wanted.any():
-        raise ValueError(f"no octave band of this rate lies in {bands_hz}")
-
-    longest = floor_s
-    for receiver in range(signals.shape[0]):
-        for band, keep in zip(
-            octave_filter(signals[receiver], sample_rate_hz), wanted, strict=True
-        ):
-            if not keep:
-                continue
-            curve = energy_decay_curve(band)
-            below = np.flatnonzero(curve <= level_db)
-            reached = below[0] / sample_rate_hz if len(below) else len(band) / sample_rate_hz
-            longest = max(longest, float(reached))
-    return longest
 
 
 def eyring_t60_s(
@@ -425,49 +375,3 @@ def synthesise(
         out[receiver] = computed * (1.0 - weight) + tail * weight
 
     return out[0] if np.ndim(early) == 1 else out
-
-
-def splice(
-    reference: np.ndarray,
-    sample_rate_hz: int,
-    window_s: float,
-    t60_s: np.ndarray,
-    *,
-    rng: np.random.Generator,
-    fade_s: float = 0.010,
-) -> np.ndarray:
-    """Truncate a response at ``window_s`` and extend it with a synthetic tail.
-
-    The experimental form of :func:`synthesise`. Truncating a stored response
-    is exactly equivalent to having stopped the solve at that window, because
-    an explicit time-marching scheme cannot revise a sample it has already
-    written. So the whole duration lever can be measured on a response that has
-    already been bought, at no rental, by splicing here and comparing against
-    the untruncated original.
-    """
-    signals = np.atleast_2d(np.asarray(reference, dtype=float))
-    window = int(round(window_s * sample_rate_hz))
-    if not 0 < window <= signals.shape[1]:
-        raise ValueError(
-            f"a {window_s * 1000:g} ms window is {window} samples, outside the "
-            f"{signals.shape[1]} the reference holds"
-        )
-    spliced = synthesise(
-        signals[:, :window],
-        sample_rate_hz,
-        t60_s,
-        signals.shape[1],
-        rng=rng,
-        fade_s=fade_s,
-    )
-    return spliced[0] if np.ndim(reference) == 1 else spliced
-
-
-def measured_decay(ir: np.ndarray, sample_rate_hz: int) -> np.ndarray:
-    """T30 per band, the quantity a spliced tail is judged on.
-
-    A thin alias for :func:`reverberate.metrics.rt60_per_band`, present so a
-    caller of this module does not have to know that the project's T60 is a T30
-    extrapolated from the -5 to -35 dB span.
-    """
-    return rt60_per_band(ir, sample_rate_hz)

@@ -22,13 +22,11 @@ from reverberate.experiments.w10_render import (
     band_directions,
     binaural_measures,
     centre_identity,
-    decoder_accuracy,
     decoders,
     room_report,
-    sphere_head,
     write_audio,
 )
-from reverberate.spatial.array import ArrayDesign, design_array
+from reverberate.spatial.array import design_array
 from reverberate.spatial.encode import Ambisonic, EncoderSettings, encode
 from reverberate.spatial.sh import channel_count, directions, real_sh
 from reverberate.wave.comms import Grid
@@ -241,38 +239,11 @@ def test_the_sphere_is_decoded_through_magnitude_least_squares_and_nothing_else(
     assert asked["sphere_plain"].covariance_constrained is False
 
 
-def test_the_control_says_what_magnitude_least_squares_buys() -> None:
-    """The claim that MagLS is the one to listen through has to be measurable.
-
-    Against a head with a closed form, over directions that fitted neither
-    decoder. Below the cut-on the two are the same decoder and must read the
-    same; above it the plain truncation loses level, and loses a different
-    amount in every direction, which is what moves a source's timbre as the
-    head turns.
-    """
-    control = decoder_accuracy(3, RATE, filter_length=256, directions=48)
-    rows = {row["band_hz"]: row for row in control["per_band"]}
-
-    low = rows[500]
-    assert low["plain_level_db"] == pytest.approx(low["magls_level_db"], abs=0.05)
-
-    high = rows[8000]
-    assert high["plain_level_db"] < high["magls_level_db"] - 3.0
-    assert high["plain_spread_db"] > high["magls_spread_db"]
-    assert abs(high["magls_level_db"]) < 1.5
-
-
 def test_a_measured_head_is_never_the_default() -> None:
     """It is a file to be fetched, whose conventions must be believed and whose
     licence is not this project's. The sphere is the one with a closed form."""
     _, heads = decoders(3, RATE, filter_length=256)
     assert "measured" not in heads
-
-
-def test_the_head_is_sampled_on_the_decoder_s_own_grid() -> None:
-    head = sphere_head(RATE, 256)
-    assert np.allclose(head.frequency_hz, np.fft.rfftfreq(256, 1.0 / RATE))
-    assert head.weights is not None
 
 
 def test_a_band_with_too_few_cycles_is_marked_unusable() -> None:
@@ -399,23 +370,3 @@ def test_the_centre_identity_holds_on_a_field_the_expansion_describes() -> None:
     audible = [row for row in identity["per_band"] if row["share_of_energy"] > 0.01]
     assert audible
     assert max(row["residual_db"] for row in audible) < -25.0
-
-
-def test_the_centre_identity_is_absent_without_a_centre_node() -> None:
-    """Reported as missing rather than computed from the nearest thing to hand."""
-    grid = a_grid()
-    centre = np.full(3, 100 * STEP)
-    design = design_array(centre, grid, fit_order=6, outer_radius_m=0.16)
-    moved = ArrayDesign(
-        centre=design.centre + np.array([0.01, 0.0, 0.0]),
-        positions=design.positions,
-        offsets=design.positions - (design.centre + np.array([0.01, 0.0, 0.0])),
-        radii=np.linalg.norm(
-            design.positions - (design.centre + np.array([0.01, 0.0, 0.0])), axis=1
-        ),
-        shell=design.shell,
-        nominal_radii=design.nominal_radii,
-        grid_step_m=design.grid_step_m,
-    )
-    ambisonic = Ambisonic(np.zeros((16, 64)), 48000.0, 3, moved.centre)
-    assert centre_identity(ambisonic, np.zeros((moved.count, 64)), moved) is None

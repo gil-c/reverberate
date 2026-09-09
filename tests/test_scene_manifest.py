@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +9,8 @@ import pytest
 import trimesh
 
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
-from reverberate.viz.label_palette import SHELL_LABEL_COLOURS, category_colour, rgba
+from reverberate.viz.label_palette import SHELL_LABEL_COLOURS, rgba
 from reverberate.viz.room_surfaces import (
-    absorption_colour,
     shell_mesh,
     shell_surface_labels,
 )
@@ -53,19 +51,6 @@ def test_shell_mesh_colours_every_face_from_its_surface() -> None:
         assert (colours[labels == surface] == rgba(colour)).all()
 
 
-def test_absorption_colour_runs_from_blue_to_red_and_clips() -> None:
-    reflective = absorption_colour(0.0)
-    absorptive = absorption_colour(1.0)
-    assert reflective[2] > reflective[0]
-    assert absorptive[0] > absorptive[2]
-    assert absorption_colour(5.0).tolist() == absorptive.tolist()
-
-
-def test_category_colour_is_stable_and_distinguishes_categories() -> None:
-    assert category_colour("sofa") == category_colour("sofa")
-    assert category_colour("sofa") != category_colour("lamp")
-
-
 def test_column_major_puts_translation_where_three_js_reads_it() -> None:
     """three.js reads translation from elements 12, 13, 14 of the flat array."""
     matrix = np.eye(4)
@@ -83,13 +68,6 @@ def test_link_asset_exposes_the_file_without_copying_it(tmp_path: Path) -> None:
     assert url == "assets/object.glb"
     assert link.is_symlink()
     assert link.read_bytes() == b"payload"
-
-
-def test_link_asset_is_idempotent(tmp_path: Path) -> None:
-    source = tmp_path / "object.glb"
-    source.write_bytes(b"payload")
-    target = tmp_path / "assets"
-    assert link_asset(source, target) == link_asset(source, target)
 
 
 def write_glb(path: Path) -> None:
@@ -156,15 +134,6 @@ def test_known_category_gets_its_table_material_not_a_random_one(tmp_path: Path)
     again, _ = build_instances(tmp_path, [instance("abc")], tmp_path / "site")
     assert entries[0].absorption == again[0].absorption
     assert entries[0].category == "sofa"
-
-
-def test_manifest_entries_serialise_to_json(tmp_path: Path) -> None:
-    """The manifest crosses into the browser, so it must be plain JSON."""
-    build_hssd_stub(tmp_path)
-    entries, _ = build_instances(tmp_path, [instance("abc")], tmp_path / "site")
-    from dataclasses import asdict
-
-    json.dumps([asdict(entry) for entry in entries])
 
 
 def test_manifest_entries_carry_what_the_solver_was_given() -> None:

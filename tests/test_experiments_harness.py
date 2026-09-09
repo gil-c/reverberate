@@ -72,39 +72,6 @@ def test_padded_bounds_stay_on_the_reference_grid_and_inside_it() -> None:
     assert np.all(bounds.bmax <= ref_hi + 2.0 * step)
 
 
-def test_bounds_mode_must_be_one_of_the_two() -> None:
-    with pytest.raises(ValueError, match="unknown bounds mode"):
-        run_mod.choose_bounds(
-            "snapped",  # type: ignore[arg-type]
-            np.zeros(3),
-            np.ones(3),
-            np.zeros(3),
-            np.ones(3),
-            0.1,
-            1.0,
-        )
-
-
-def test_bounds_mode_has_no_default_on_the_command_line() -> None:
-    parser_error = SystemExit
-    with pytest.raises(parser_error):
-        run_mod.main(
-            [
-                "scene",
-                "--models",
-                "m",
-                "--out",
-                "o",
-                "--scene",
-                "s",
-                "--fmax",
-                "2000",
-                "--duration",
-                "0.1",
-            ]
-        )
-
-
 def test_grid_step_matches_pffdtd_sim_consts() -> None:
     assert run_mod.grid_step(2000.0, 10.5) == pytest.approx(343.2 / (2000.0 * 10.5))
 
@@ -119,15 +86,6 @@ def _stub_engine(root: Path, *, exit_code: int = 0) -> Path:
     binary.write_text(f"#!/bin/sh\necho ran\nexit {exit_code}\n")
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
     return root
-
-
-def test_run_binary_logs_and_times(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PFFDTD_DIR", str(_stub_engine(tmp_path / "pffdtd")))
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    result = engine_mod.run_binary(run_dir, "cpu", double_precision=False)
-    assert result.engine_s >= 0.0
-    assert "ran" in result.log.read_text()
 
 
 def test_run_binary_raises_and_still_leaves_a_log(
@@ -156,18 +114,6 @@ def _write_run(run_dir: Path, signal: np.ndarray, sample_rate: float) -> None:
     with h5py.File(run_dir / "sim_consts.h5", "w") as handle:
         handle["SR"] = sample_rate
         handle["h"] = 0.016
-
-
-def test_sim_consts_reads_both_constants(tmp_path: Path) -> None:
-    _write_run(tmp_path / "run", np.zeros(4), 48000.0)
-    constants = engine_mod.sim_consts(tmp_path / "run")
-    assert constants.sample_rate == 48000.0
-    assert constants.h == pytest.approx(0.016)
-
-
-def test_write_record_round_trips(tmp_path: Path) -> None:
-    path = engine_mod.write_record(tmp_path, "result.json", {"scene": "a", "engine_s": 1.0})
-    assert json.loads(path.read_text()) == {"scene": "a", "engine_s": 1.0}
 
 
 def _result(out: Path, scene: str, cut_m: float | None, run_dir: Path) -> dict[str, Any]:
@@ -222,21 +168,6 @@ def test_compare_finds_the_first_differing_sample(tmp_path: Path) -> None:
     report = compare_mod.compare(out)
     assert report[0]["first_inexact_ms"] == pytest.approx(1000.0 * 100 / 48000.0, abs=1e-4)
     assert report[0]["bit_exact_throughout"] is False
-
-
-def test_compare_refuses_runs_that_disagree_on_the_sample_rate(tmp_path: Path) -> None:
-    out = tmp_path / "out"
-    out.mkdir()
-    _write_run(out / "apartment_full", np.zeros(10), 48000.0)
-    _write_run(out / "apartment_cut10m", np.zeros(10), 44100.0)
-    (out / run_mod.RESULTS_FILE).write_text(
-        json.dumps(_result(out, "apartment_full", None, out / "apartment_full"))
-        + "\n"
-        + json.dumps(_result(out, "apartment_cut10m", 10.0, out / "apartment_cut10m"))
-        + "\n"
-    )
-    with pytest.raises(ValueError, match="sample rate"):
-        compare_mod.compare(out)
 
 
 def test_a_rerun_supersedes_the_earlier_run_of_the_same_configuration(

@@ -360,6 +360,14 @@ def plan_room(
     duration_s: float,
     outer_radius_m: float = 0.16,
     extra_receivers: tuple[tuple[float, float, float], ...] = W29_RECEIVERS,
+    scene_id: str = SCENE_ID,
+    room: str = ROOM,
+    reference_run: str | None = "w29_16k",
+    reference_note: str | None = (
+        "same room and same source as w29_16k, but the carved geometry of "
+        "W33 rather than W25's, so the comparison is across two geometries "
+        "and is stated as such rather than reported as one number"
+    ),
 ) -> dict[str, Any]:
     """Everything decided before a card is rented, written down and costed."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -373,18 +381,16 @@ def plan_room(
     extras = np.asarray(extra_receivers, dtype=float).reshape(-1, 3)
     record: dict[str, Any] = {
         "run": out_dir.name,
-        "scene_id": SCENE_ID,
-        "room": ROOM,
+        "scene_id": scene_id,
+        "room": room,
         "cache_key": manifest["key"],
         "cache_root": str(entry_path.parent),
         "model_json": manifest.get("model_json"),
         "geometry_sha256": manifest.get("geometry_sha256"),
-        "reference_run": "w29_16k",
-        "reference_note": (
-            "same room and same source as w29_16k, but the carved geometry of "
-            "W33 rather than W25's, so the comparison is across two geometries "
-            "and is stated as such rather than reported as one number"
-        ),
+        "fmax_hz": manifest.get("fmax"),
+        "grid_step_m": manifest.get("h_m"),
+        "reference_run": reference_run,
+        "reference_note": reference_note,
         "sample_rate_hz": constants.sample_rate,
         "sound_speed_m_s": sound_speed(),
         "duration_s": duration_s,

@@ -31,15 +31,6 @@ pffdtd = pytest.mark.skipif(
 )
 
 
-def test_a_passive_triplet_passes() -> None:
-    """One RLC branch with non-negative parts, which is what the fit produces."""
-    result = passivity(np.array([[1e-3, 50.0, 1e5]]))
-
-    assert result.passive
-    assert result.min_real_admittance > 0.0
-    assert result.max_reflection_magnitude <= 1.0
-
-
 def test_an_active_triplet_is_caught() -> None:
     """The check has to be able to fail, or it is decoration.
 

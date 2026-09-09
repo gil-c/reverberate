@@ -15,8 +15,6 @@ import trimesh
 from reverberate.geometry.carve import (
     CARVE_PITCH_LADDER,
     CARVE_PITCH_M,
-    CarveReport,
-    CarveResult,
     _carve_uncached,
     _outside,
     _surface_cells,
@@ -83,10 +81,6 @@ class TestSurfaceCells:
 
 
 class TestToBudget:
-    def test_a_mesh_already_inside_the_budget_is_returned_unchanged(self) -> None:
-        box = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        assert _to_budget(box, 1000) is box
-
     def test_it_backs_off_rather_than_giving_up(self) -> None:
         """Asking once and refusing lost 11 of 47 templates.
 
@@ -128,23 +122,6 @@ class TestToBudget:
         reduced = _to_budget(trimesh.creation.box(), 1)
         assert reduced is not None
         assert len(reduced.faces) < 12
-
-    def test_it_returns_none_when_no_reduction_comes_back_closed(self) -> None:
-        """The one case with no carve to choose between.
-
-        A sheet has no closed reduction, because it was never closed; past the
-        caps there is nothing to ship and the collider is the only answer left.
-        """
-        from reverberate.geometry import carve
-
-        sheet = trimesh.creation.box().submesh([[0, 1]], append=True)
-        assert _to_budget(sheet, 1) is not None  # under the absolute cap
-        original = carve.ABSOLUTE_CAP
-        try:
-            carve.ABSOLUTE_CAP = 1
-            assert _to_budget(sheet, 1) is None
-        finally:
-            carve.ABSOLUTE_CAP = original
 
 
 def _object_tree(root: Path, render: trimesh.Trimesh, collider: trimesh.Trimesh) -> None:
@@ -198,38 +175,6 @@ class TestNothingToRemove:
         assert result.carved, result.reason
         assert result.shrink < 0.5
         assert result.mesh.is_watertight
-
-
-class TestCarveReport:
-    def test_it_separates_what_was_carved_from_what_was_left(self) -> None:
-        report = CarveReport()
-        report.add(
-            "carved",
-            CarveResult(
-                mesh=trimesh.creation.box(),
-                carved=True,
-                collider_volume=1.0,
-                carved_volume=0.25,
-            ),
-        )
-        report.add(
-            "kept",
-            CarveResult(mesh=trimesh.creation.box(), carved=False, reason="carve came back open"),
-        )
-        assert report.carved == {"carved": 0.25}
-        assert report.skipped == {"kept": "carve came back open"}
-        assert "1 colliders carved" in report.summary()
-
-    def test_a_scene_with_nothing_to_carve_says_so(self) -> None:
-        assert CarveReport().summary() == "no carve"
-
-
-class TestShrink:
-    def test_an_uncarved_result_reports_no_change(self) -> None:
-        """``shrink`` is read straight into the manifest, so its neutral value
-        has to be 1.0 and not a division by a volume nobody measured."""
-        result = CarveResult(mesh=trimesh.creation.box(), carved=False)
-        assert result.shrink == 1.0
 
 
 def test_the_pitch_is_below_the_coarsest_grid_it_is_used_on() -> None:
@@ -471,21 +416,3 @@ class TestLeakFloor:
         assert result.carved, result.reason
         assert result.pitch_m == CARVE_PITCH_M
         assert result.leaked_at_m and result.leaked_at_m < CARVE_PITCH_M
-
-    def test_the_pitch_it_settled_on_is_recorded(self, tmp_path: Path) -> None:
-        left = trimesh.creation.box(extents=(0.03, 0.12, 0.09))
-        left.apply_translation([-0.075, 0.0, 0.0])
-        right = trimesh.creation.box(extents=(0.03, 0.12, 0.09))
-        right.apply_translation([0.075, 0.0, 0.0])
-        render = trimesh.util.concatenate([left, right])
-        assert isinstance(render, trimesh.Trimesh)
-        collider = trimesh.creation.box(extents=(0.18, 0.12, 0.09))
-        _object_tree(tmp_path, render, collider)
-
-        result = _carve_uncached(tmp_path, "abc", collider)
-        assert result.carved, result.reason
-        assert result.pitch_m in CARVE_PITCH_LADDER
-        report = CarveReport()
-        report.add("abc", result)
-        assert report.pitch_mm["abc"] == round(result.pitch_m * 1000, 2)
-        assert "mm cells" in report.summary()

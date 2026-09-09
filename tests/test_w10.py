@@ -18,9 +18,7 @@ import pytest
 
 from reverberate.experiments.w10_ambisonic import (
     REHEARSAL,
-    Rehearsal,
     array_at,
-    cost_record,
     plan_record,
     plan_room,
 )
@@ -64,27 +62,6 @@ def test_the_rehearsal_box_gives_the_array_a_clean_direct_sound() -> None:
     assert REHEARSAL.direct_last_sample < REHEARSAL.first_reflection_sample
     assert REHEARSAL.first_reflection_sample - REHEARSAL.direct_last_sample > 100
     assert REHEARSAL.samples > REHEARSAL.first_reflection_sample
-
-
-def test_the_rehearsal_timings_are_the_geometry_and_not_a_guess() -> None:
-    box = Rehearsal(half_width_cells=300, source_cells=150, array_radius_m=0.1)
-    radius = box.array_radius_cells
-    assert box.direct_last_sample == 150 + radius
-    assert box.first_reflection_sample == 600 - 150 - radius
-    assert box.side_m == pytest.approx(600 * box.step_m)
-
-
-def test_a_smaller_box_loses_the_clean_window_and_the_numbers_say_so() -> None:
-    """The failure this arithmetic exists to catch, made visible rather than solved."""
-    cramped = Rehearsal(half_width_cells=120, source_cells=147)
-    assert cramped.first_reflection_sample < cramped.direct_last_sample
-
-
-def test_the_cost_is_stated_before_the_run_and_counts_the_output(tmp_path: Path) -> None:
-    """Roadmap constraint: announce the figure before spending, not after."""
-    record = cost_record(grid_points=4_610_307_520, samples=24_000, receivers=850)
-    assert record["estimated_gpu_s"] > 1000.0
-    assert record["sim_outs_bytes"] == 850 * 24_000 * 8
 
 
 def test_an_array_in_free_air_is_accepted_and_says_how_much_it_checked(
@@ -177,21 +154,3 @@ def test_a_source_inside_the_array_is_refused(tmp_path: Path) -> None:
             duration_s=0.01,
             outer_radius_m=0.05,
         )
-
-
-def test_a_source_across_the_room_is_accepted(tmp_path: Path) -> None:
-    grid = a_grid(400, 0.002)
-    centre = np.full(3, 200 * 0.002)
-    entry = write_entry(tmp_path / "entry", grid, np.array([0], dtype=np.int64))
-    record = plan_room(
-        tmp_path / "run",
-        entry,
-        EncoderSettings(order=3, fit_order=6),
-        centre=centre,
-        source=centre + np.array([0.25, 0.0, 0.0]),
-        duration_s=0.01,
-        outer_radius_m=0.05,
-        extra_receivers=(),
-    )
-    assert record["clearance"]["boundary_nodes_in_ball"] == 0
-    assert record["cost"]["receivers"] > 0

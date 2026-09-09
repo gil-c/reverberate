@@ -210,6 +210,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="keep each fetched grid local instead of pushing it to the object store",
     )
+    parser.add_argument(
+        "--no-seal-pockets",
+        action="store_true",
+        help="skip the grid census that seals every air component smaller than a room "
+        "(reverberate.wave.pockets); on by default because a 0.49 m closet interior "
+        "the mesh census had not closed rang at 700 Hz for a whole response",
+    )
+    parser.add_argument(
+        "--min-ram-gb",
+        type=float,
+        default=0.0,
+        help="floor on the machine's RAM, above what the requirement model asks. The "
+        "model asked 16 GB for a 1 M triangle room at 8 kHz and a 31 GB box was "
+        "OOM killed at consolidate with 12 workers",
+    )
+    parser.add_argument(
+        "--nprocs",
+        type=int,
+        default=None,
+        help="worker processes for the voxeliser; unset lets it take every core, which "
+        "on a 32 vCPU box with 31 GB segfaulted the room at 8 kHz",
+    )
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     args = parser.parse_args(argv)
 
@@ -235,6 +257,17 @@ def main(argv: list[str] | None = None) -> int:
             one = one.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
         need = one if need is None else need.merge(one)
     assert need is not None
+    if args.min_ram_gb > need.ram_gb:
+        need = need.merge(
+            MachineNeed(
+                cores=need.cores,
+                ram_gb=args.min_ram_gb,
+                disk_gb=need.disk_gb,
+                why=f"a RAM floor of {args.min_ram_gb:.0f} GB asked on the command line",
+                needs_gpu=need.needs_gpu,
+                vram_gb=need.vram_gb,
+            )
+        )
 
     for fmax in bands:
         spec = specs[fmax][0]
@@ -327,11 +360,20 @@ def main(argv: list[str] | None = None) -> int:
                 remote_dir=remote_dir,
                 timeout=args.hours * 3600,
                 fetch_entry=not args.payload,
+                nprocs=args.nprocs,
             )
             computed = True
             spent += result.total_s
             print(result.summary())
             print(json.dumps(result.report, indent=2)[:900])
+            if not args.payload and not args.no_seal_pockets:
+                # Every air component smaller than a room, sealed on the grid
+                # before the entry is installed and published, so that what
+                # the cache holds is what the solver should read.
+                from reverberate.wave.pockets import seal_in_place
+
+                result.report["pockets"] = seal_in_place(out / "vox_out.h5")
+                print(json.dumps(result.report["pockets"], indent=1)[:600])
 
             if args.payload:
                 print("building the payload on the machine that just made the grid")

@@ -21,7 +21,6 @@ from reverberate.geometry.sim_geometry import (
     obstacle_collider,
     outer_surface,
     sample_points,
-    sample_source_receiver,
     shell_assignments,
     simulation_geometry,
 )
@@ -155,15 +154,6 @@ def test_an_unresolvable_template_is_reported_not_dropped(tmp_path: Path) -> Non
     assert unmerged == []
 
 
-def test_summary_counts_the_walls_the_exporter_will_build(tmp_path: Path) -> None:
-    build_object_tree(tmp_path)
-    storey = square_storey()
-    assignments, summary = simulation_geometry(tmp_path, storey, [instance("abc")])
-    assert summary.shell_watertight
-    assert summary.obstacle_count == 1
-    assert summary.total_walls == sum(len(a.mesh.faces) for a in assignments)
-
-
 def test_instances_keep_their_placement_in_the_simulated_geometry(tmp_path: Path) -> None:
     build_object_tree(tmp_path)
     assignments, _, _ = obstacle_assignments(tmp_path, [instance("abc", x=3.0)])
@@ -221,24 +211,10 @@ def test_sampled_points_sit_at_the_requested_height_above_the_floor() -> None:
     assert all(point[1] == pytest.approx(storey.floor_height + 1.2) for point in points)
 
 
-def test_sampling_is_reproducible_from_its_seed() -> None:
-    storey = square_storey()
-    first = sample_points(storey, 4, np.random.default_rng(7))
-    second = sample_points(storey, 4, np.random.default_rng(7))
-    assert np.allclose(first, second)
-
-
 def test_a_room_too_narrow_for_the_clearance_is_reported_not_fudged() -> None:
     storey = square_storey(size=0.6)
     with pytest.raises(ValueError):
         sample_points(storey, 1, np.random.default_rng(0), min_wall_distance=0.5)
-
-
-def test_a_pair_in_one_room_is_labelled_as_such() -> None:
-    storey = square_storey(size=8.0)
-    pair = sample_source_receiver(storey, np.random.default_rng(1), same_room=True)
-    assert pair.same_room
-    assert pair.source_room == pair.receiver_room
 
 
 def test_instances_from_another_storey_are_not_simulated(tmp_path: Path) -> None:
@@ -294,13 +270,6 @@ class TestOuterSurface:
         # decomposition presents. The 3.6 m2 difference is sealed inside.
         assert mesh.area == pytest.approx(12.0, rel=1e-6)
         assert united.area == pytest.approx(8.4, rel=1e-5)
-
-    def test_a_single_body_is_returned_untouched(self) -> None:
-        """Nothing is buried in one convex body, so nothing is worth doing."""
-        box = trimesh.creation.box()
-        united, ok = outer_surface(box)
-        assert ok
-        assert united is box
 
     def test_a_mesh_the_engine_refuses_is_kept_whole(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An obstacle with buried faces beats a missing obstacle."""

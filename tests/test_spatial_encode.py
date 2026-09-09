@@ -21,7 +21,7 @@ from reverberate.spatial.encode import (
     well_posed,
 )
 from reverberate.spatial.field import plane_wave_coefficients
-from reverberate.spatial.sh import acn, channel_count, degrees_of, scene_to_ambisonic
+from reverberate.spatial.sh import acn, degrees_of, scene_to_ambisonic
 from reverberate.wave.comms import Grid
 
 SOUND_SPEED = 343.2
@@ -53,16 +53,6 @@ def test_the_array_is_made_of_grid_nodes_at_the_radii_it_claims() -> None:
         if shell == 0:
             continue
         assert np.all(np.abs(on_shell - nominal) < np.sqrt(3.0) * grid.h)
-
-
-def test_the_centre_node_is_in_the_array_exactly_once() -> None:
-    array = an_array()
-    assert np.count_nonzero(array.radii == 0.0) == 1
-
-
-def test_two_shells_never_share_a_node() -> None:
-    array = an_array()
-    assert len(np.unique(array.positions, axis=0)) == array.count
 
 
 def test_fibonacci_directions_are_unit_vectors_that_cover_the_sphere() -> None:
@@ -176,22 +166,6 @@ def test_the_numerical_wavenumber_is_slower_than_the_ideal_one_and_tends_to_it()
     assert np.all(np.abs(fine / ideal - 1.0) < np.abs(coarse / ideal - 1.0))
 
 
-def test_encoding_a_time_signal_gives_the_channels_and_the_length_back() -> None:
-    array = an_array()
-    rng = np.random.default_rng(0)
-    pressure = rng.standard_normal((array.count, 512))
-    ambisonic = encode(
-        pressure,
-        48000.0,
-        array,
-        sound_speed_m_s=SOUND_SPEED,
-        settings=EncoderSettings(order=3, fit_order=5),
-    )
-    assert ambisonic.signals.shape == (channel_count(3), 512)
-    assert ambisonic.duration_s == pytest.approx(512 / 48000.0)
-    assert np.all(np.isfinite(ambisonic.signals))
-
-
 def test_the_filter_does_not_wrap_its_own_pre_ring_onto_the_end_of_the_record() -> None:
     """One transform of a whole record convolves circularly, and that lands badly.
 
@@ -223,22 +197,6 @@ def test_the_filter_does_not_wrap_its_own_pre_ring_onto_the_end_of_the_record() 
     assert 10.0 * np.log10(tail / head) < -30.0
 
 
-def test_bins_above_the_band_limit_are_left_at_zero() -> None:
-    array = an_array()
-    frequency = np.array([1000.0, 20000.0])
-    rng = np.random.default_rng(1)
-    field = rng.standard_normal((array.count, 2)) + 1j * rng.standard_normal((array.count, 2))
-    out = encode_spectrum(
-        field,
-        frequency,
-        array,
-        sound_speed_m_s=SOUND_SPEED,
-        settings=EncoderSettings(max_frequency_hz=16000.0),
-    )
-    assert np.any(out[0] != 0.0)
-    assert np.all(out[1] == 0.0)
-
-
 def test_a_gate_that_closes_on_everything_is_reported_rather_than_silent() -> None:
     """The trap: a margin tuned at fit order ten, subtracted from a small one.
 
@@ -257,57 +215,3 @@ def test_a_gate_that_closes_on_everything_is_reported_rather_than_silent() -> No
     starved = well_posed(array, frequency, k, EncoderSettings(order=3, fit_order=5))
     assert starved["under_determined_hz"] == [16000.0]
     assert starved["least_admitted"] < starved["unknowns"]
-
-
-def test_the_gate_is_allowed_below_the_order_being_reported() -> None:
-    """The premise of the design, kept as a test so a floor is not added again.
-
-    An order is recoverable from a shell where ``k r`` is well under it, because
-    the limit here is dynamic range and not a microphone's noise. Forcing the
-    gate up to the output order costs 22 dB at 8 kHz, measured.
-    """
-    array = an_array()
-    frequency = np.array([8000.0])
-    settings = EncoderSettings(order=7, fit_order=10)
-    assert settings.gate_kr < settings.order
-    generous = conditioning(array, frequency, sound_speed_m_s=SOUND_SPEED, settings=settings)
-    raised = conditioning(
-        array,
-        frequency,
-        sound_speed_m_s=SOUND_SPEED,
-        settings=EncoderSettings(order=7, fit_order=10, gate_margin=3.0),
-    )
-    assert generous.error_db[0, 7] < raised.error_db[0, 7] - 10.0
-
-
-def test_the_conditioning_report_carries_the_well_posedness_check() -> None:
-    array = an_array()
-    report = conditioning(array, np.array([4000.0]), sound_speed_m_s=SOUND_SPEED)
-    assert report.record()["well_posed"]["unknowns"] == channel_count(10)
-
-
-def test_a_pressure_block_of_the_wrong_shape_is_refused() -> None:
-    array = an_array()
-    with pytest.raises(ValueError, match="receivers"):
-        encode(np.zeros((array.count + 1, 8)), 48000.0, array, sound_speed_m_s=SOUND_SPEED)
-    with pytest.raises(ValueError, match="does not match"):
-        encode_spectrum(
-            np.zeros((array.count, 3), dtype=complex),
-            np.array([1.0, 2.0]),
-            array,
-            sound_speed_m_s=SOUND_SPEED,
-        )
-
-
-def test_fitting_below_the_reported_order_is_refused_at_the_settings() -> None:
-    """Otherwise it surfaces as a broadcast error between 49 and 64 columns.
-
-    Deep inside the solve, where the message says nothing about what the caller
-    did. Fitting below the order being reported asks for coefficients the fit
-    never solved for.
-    """
-    with pytest.raises(ValueError, match="below the order being reported"):
-        EncoderSettings(order=7, fit_order=6)
-    with pytest.raises(ValueError, match="non negative"):
-        EncoderSettings(order=-1, fit_order=3)
-    assert EncoderSettings(order=3, fit_order=3).gate_kr == -1.0

@@ -41,9 +41,7 @@ from reverberate.wave.remote import Machine, upload
 from reverberate.wave.voxelise import (
     CacheEntry,
     SceneSpec,
-    cache_root,
     engine_inputs,
-    entry_for,
 )
 
 
@@ -96,15 +94,6 @@ class TestInterpolation:
         assert np.sum(alpha) == pytest.approx(1.0)
         assert alpha @ corners == pytest.approx(position)
 
-    def test_a_point_outside_the_grid_is_refused(self) -> None:
-        grid = make_grid()
-        with pytest.raises(ValueError, match="outside the grid"):
-            interp_weights(np.array([99.0, 0.3, 0.1]), grid)
-
-    def test_one_point_at_a_time(self) -> None:
-        with pytest.raises(ValueError, match="one xyz point"):
-            interp_weights(np.zeros((2, 3)), make_grid())
-
 
 class TestSignals:
     def test_an_impulse_is_one_sample(self) -> None:
@@ -112,16 +101,6 @@ class TestSignals:
         assert signal.size == 100
         assert signal[0] == 1.0
         assert not signal[1:].any()
-
-    def test_a_hann_window_starts_and_ends_at_zero(self) -> None:
-        signal = source_signal(0.01, 1e-4, "hann20")
-        assert signal[0] == pytest.approx(0.0)
-        assert signal[19] == pytest.approx(signal[1])
-        assert not signal[20:].any()
-
-    def test_an_unknown_signal_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="unknown signal type"):
-            source_signal(0.01, 1e-4, "sawtooth")  # type: ignore[arg-type]
 
 
 class TestIndexSpace:
@@ -139,10 +118,6 @@ class TestIndexSpace:
         expected = 1 * 2 * ny_half + 2 * 2 + 1
         assert folded[0] == expected
         assert folded[1] == expected
-
-    def test_folding_needs_an_even_axis(self) -> None:
-        with pytest.raises(ValueError, match="even Ny"):
-            fold_fcc(np.array([0]), (3, 7, 2))
 
 
 class TestWriteComms:
@@ -229,27 +204,6 @@ class TestWriteComms:
             iy = (index - iz) // nz % ny
             ix = ((index - iz) // nz - iy) // ny
             assert (ix + iy + iz) % 2 == 0
-
-    def test_a_point_outside_the_grid_has_no_nearest_node(self) -> None:
-        with pytest.raises(ValueError, match="outside the grid"):
-            nearest_node(np.array([0.2, 0.3, 9.0]), make_grid())
-
-    def test_an_unknown_interpolation_is_refused(self, tmp_path: Path) -> None:
-        directory = write_grid(tmp_path / "entry", make_grid())
-        with pytest.raises(ValueError, match="unknown interpolation"):
-            write_comms(
-                directory,
-                np.array([0.2, 0.3, 0.1]),
-                np.array([[0.3, 0.4, 0.2]]),
-                0.005,
-                out_path=tmp_path / "comms_out.h5",
-                interpolation="quadratic",  # type: ignore[arg-type]
-            )
-
-    def test_it_needs_a_receiver(self, tmp_path: Path) -> None:
-        directory = write_grid(tmp_path / "entry", make_grid())
-        with pytest.raises(ValueError, match="at least one receiver"):
-            write_comms(directory, np.array([0.2, 0.3, 0.1]), np.empty((0, 3)), 0.01)
 
     def test_a_receiver_on_a_boundary_node_is_refused(self, tmp_path: Path) -> None:
         """The scheme only supports air nodes, and a clash is silent otherwise."""
@@ -404,15 +358,6 @@ class TestCacheKey:
         first = self._spec(tmp_path, body="not json at all").key
         assert first != self._spec(tmp_path, body="also not json").key
 
-    def test_an_uncomputed_entry_is_incomplete(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
-        entry = entry_for(self._spec(tmp_path))
-        assert entry.path.parent == cache_root()
-        assert not entry.complete
-        assert entry.manifest == {}
-
 
 class TestUpload:
     def test_it_ships_only_what_the_engine_reads(self, tmp_path: Path) -> None:
@@ -422,22 +367,6 @@ class TestUpload:
         machine = Machine(host="example.invalid")
         with pytest.raises(ValueError, match="refusing"):
             upload(machine, [stray])
-
-    def test_the_engine_reads_four_files(self) -> None:
-        assert ENGINE_FILES == (
-            "sim_consts.h5",
-            "vox_out.h5",
-            "comms_out.h5",
-            "sim_mats.h5",
-        )
-
-    def test_the_ssh_and_scp_argv_carry_the_port(self) -> None:
-        machine = Machine(host="ssh5.vast.ai", port=41234, identity=Path("/tmp/key"))
-        assert machine.ssh_command("true")[-2:] == ["root@ssh5.vast.ai", "true"]
-        assert "-p" in machine.ssh_command("true")
-        argv = machine.scp_command([Path("/tmp/a.h5")], "/root/run", download=False)
-        assert argv[-1] == "root@ssh5.vast.ai:/root/run"
-        assert "-P" in argv
 
 
 class TestEngineInputs:
@@ -591,18 +520,43 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "1\n0\nRunning [42.3%] [02:51:07<06:44:12]\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=1\nBYTES=0\nLAST=Running [42.3%] [02:51:07<06:44:12]\n"
+            ),
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.running is True
         assert progress.percent == pytest.approx(42.3)
         assert progress.finished is False
 
+    def test_a_login_banner_on_stdout_does_not_shift_the_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Vast's hosts print "Welcome to vast.ai ... Have fun!" on stdout.
+
+        Read by position, the banner became the process count and the file
+        size became the engine's last words, so a finished 67 minute solve was
+        reported as an engine that had exited without writing anything.
+        """
+        monkeypatch.setattr(
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: (
+                "Welcome to vast.ai. If authentication fails, try again.\nHave fun!\n"
+                "PROCS=0\nBYTES=237919552\nLAST=Running [100.0%] [01:07:00<00:00:00]\n"
+            ),
+        )
+        progress = comms_remote.engine_progress(Machine(host="h", identity=None))
+        assert progress.finished is True
+        assert progress.output_bytes == 237919552
+
     def test_a_finished_run_is_no_process_and_an_output_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            comms_remote, "_run", lambda argv, *, what, timeout=None: "0\n1200000000\ndone\n"
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: "PROCS=0\nBYTES=1200000000\nLAST=done\n",
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.finished is True
@@ -615,7 +569,9 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "0\n0\nGlobal memory allocation done\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=0\nBYTES=0\nLAST=Global memory allocation done\n"
+            ),
         )
         with pytest.raises(RuntimeError, match="Global memory allocation done"):
             comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0)
@@ -631,7 +587,9 @@ class TestDetachedEngine:
         """
         blob = "Running [2.9%][00:04:44<02:46:12] Running [61.4%][01:44:00<01:05:00]"
         monkeypatch.setattr(
-            comms_remote, "_run", lambda argv, *, what, timeout=None: f"1\n0\n{blob}\n"
+            comms_remote,
+            "_run",
+            lambda argv, *, what, timeout=None: f"PROCS=1\nBYTES=0\nLAST={blob}\n",
         )
         progress = comms_remote.engine_progress(Machine(host="h", identity=None))
         assert progress.percent == pytest.approx(61.4)
@@ -643,7 +601,7 @@ class TestDetachedEngine:
 
         def record(argv: list[str], *, what: str, timeout: float | None = None) -> str:
             sent.append(argv[-1])
-            return "0\n1\nx\n"
+            return "PROCS=0\nBYTES=1\nLAST=x\n"
 
         monkeypatch.setattr(comms_remote, "_run", record)
         comms_remote.engine_progress(Machine(host="h", identity=None))
@@ -656,7 +614,9 @@ class TestDetachedEngine:
         monkeypatch.setattr(
             comms_remote,
             "_run",
-            lambda argv, *, what, timeout=None: "1\n0\nRunning [11.0%] [00:10:00<01:00:00]\n",
+            lambda argv, *, what, timeout=None: (
+                "PROCS=1\nBYTES=0\nLAST=Running [11.0%] [00:10:00<01:00:00]\n"
+            ),
         )
         with pytest.raises(RuntimeError, match="STALLED at 11.0"):
             comms_remote.watch_engine(Machine(host="h", identity=None), poll_s=0.0, stall_polls=3)

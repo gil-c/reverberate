@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,10 @@ __all__ = [
     "centre_identity",
     "binaural_measures",
     "decoders",
+    "encode_run",
+    "finish_run",
     "pressures_of_run",
+    "spatial_report",
     "sphere_head",
     "write_audio",
     "main",
@@ -120,10 +124,14 @@ def pressures_of_run(
     delivery_rate_hz: float = DELIVERY_RATE_HZ,
     air: Atmosphere | None = None,
     sound_speed_m_s: float = 343.2,
+    lowcut_order: int = 4,
 ) -> tuple[np.ndarray, float]:
     """One row per receiver at the delivery rate, air absorption applied or not.
 
     ``None`` skips the filter and is then an omission the report has to name.
+    ``lowcut_order`` is the Butterworth order of the high pass; four leaves the
+    modes just under the cut ringing, and a room whose lowest mode is real but
+    whose damping is not may want eight.
     """
     reduced, differentiated = audio.read_engine_output(run_dir, comms_path)
     signals = audio.integrate_and_lowcut(
@@ -131,6 +139,7 @@ def pressures_of_run(
         1.0 / reduced.sample_rate_hz,
         differentiated=differentiated,
         fcut=lowcut_hz,
+        order=lowcut_order,
     )
     signals = audio.lowpass(signals, reduced.sample_rate_hz, fmax_hz)
     signals = audio.resample_to(signals, reduced.sample_rate_hz, delivery_rate_hz)
@@ -648,6 +657,28 @@ def rehearsal_report(
     }
 
 
+@dataclass(frozen=True)
+class EncodedRun:
+    """A room run read, filtered and encoded, with everything the report reads."""
+
+    run_dir: Path
+    plan: dict[str, Any]
+    design: ArrayDesign
+    ambisonic: Ambisonic
+    array_rows: np.ndarray
+    extra_rows: np.ndarray
+    extras: np.ndarray
+    source: np.ndarray
+    centre: np.ndarray
+    rate: float
+    fmax: float
+    lowcut_hz: float
+    lowcut_order: int
+    room: dict[str, Any] | None
+    theory_record: dict[str, Any] | None
+    model_path: str | None
+
+
 def room_report(
     run_dir: Path,
     settings: EncoderSettings,
@@ -666,6 +697,27 @@ def room_report(
     signals when a mapping is passed, so a caller that wants to write audio or
     artefacts does not have to encode a second time. Nothing is written here.
     """
+    return spatial_report(
+        encode_run(run_dir, settings, air=air, lowcut_hz=lowcut_hz),
+        settings,
+        air=air,
+        yaws_deg=yaws_deg,
+        filter_length=filter_length,
+        measured_path=measured_path,
+        plain_decode=plain_decode,
+        rendered=rendered,
+    )
+
+
+def encode_run(
+    run_dir: Path,
+    settings: EncoderSettings,
+    *,
+    air: Atmosphere | None,
+    lowcut_hz: float | None = None,
+    lowcut_order: int = 4,
+) -> EncodedRun:
+    """Read one room run and encode it on its own array. Nothing is written."""
     plan = json.loads((run_dir / "plan.json").read_text())
     positions = np.load(run_dir / "array_positions.npy")
     requested = np.asarray(plan["centre"], dtype=float)
@@ -726,12 +778,58 @@ def room_report(
         lowcut_hz=lowcut_hz,
         air=air,
         sound_speed_m_s=float(plan["sound_speed_m_s"]),
+        lowcut_order=lowcut_order,
     )
     array_rows, extra_rows = signals[: design.count], signals[design.count :]
 
     ambisonic = encode(
         array_rows, rate, design, sound_speed_m_s=float(plan["sound_speed_m_s"]), settings=settings
     )
+    return EncodedRun(
+        run_dir=run_dir,
+        plan=plan,
+        design=design,
+        ambisonic=ambisonic,
+        array_rows=array_rows,
+        extra_rows=extra_rows,
+        extras=extras,
+        source=source,
+        centre=centre,
+        rate=rate,
+        fmax=fmax,
+        lowcut_hz=lowcut_hz,
+        lowcut_order=lowcut_order,
+        room=room,
+        theory_record=theory_record,
+        model_path=model_path,
+    )
+
+
+def spatial_report(
+    encoded: EncodedRun,
+    settings: EncoderSettings,
+    *,
+    air: Atmosphere | None,
+    yaws_deg: tuple[float, ...] = YAWS_DEG,
+    filter_length: int = 512,
+    measured_path: Path | None = None,
+    plain_decode: bool = False,
+    rendered: dict[str, Any] | None = None,
+    ambisonic: Ambisonic | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Decode an encoded run through the heads and measure all of it.
+
+    ``ambisonic`` replaces the run's own encoding when given, which is how a
+    response assembled from several bands is reported against the plan of the
+    band whose grid it is centred on. ``extra`` is merged into the report.
+    """
+    run_dir, plan, design = encoded.run_dir, encoded.plan, encoded.design
+    array_rows, extra_rows, extras = encoded.array_rows, encoded.extra_rows, encoded.extras
+    source, centre, rate, fmax = encoded.source, encoded.centre, encoded.rate, encoded.fmax
+    room, theory_record, model_path = encoded.room, encoded.theory_record, encoded.model_path
+    lowcut_hz, lowcut_order = encoded.lowcut_hz, encoded.lowcut_order
+    ambisonic = encoded.ambisonic if ambisonic is None else ambisonic
     reference = direction_to_scene_point(ambisonic, source)
     times, order_energy = energy_per_order(ambisonic)
     identity = centre_identity(ambisonic, array_rows, design, max_frequency_hz=fmax)
@@ -798,6 +896,7 @@ def room_report(
             }
         ),
         "low_cut_hz": lowcut_hz,
+        "low_cut_order": lowcut_order,
         "centre_identity": identity,
         "direction_of_arrival": band_directions(ambisonic, reference),
         "reference_direction": [round(float(v), 5) for v in reference],
@@ -822,6 +921,7 @@ def room_report(
         "decoder_accuracy": decoder_accuracy(settings.order, rate, filter_length=filter_length),
         "heads": heads,
         "licence_conflict": _licence_conflict(heads),
+        **(extra or {}),
     }
 
 
@@ -888,6 +988,94 @@ def _rehearsal(args: argparse.Namespace) -> int:
     return 0
 
 
+def finish_run(
+    run_dir: Path,
+    report: dict[str, Any],
+    rendered: dict[str, Any],
+    settings: EncoderSettings,
+    *,
+    fmax_hz: float,
+    band: str = "high",
+    audio_wanted: bool,
+    publish_wanted: bool,
+    seed: int,
+) -> dict[str, Any]:
+    """Write the SOFA artefacts, the audio and the report, and publish if asked."""
+    ambisonic = rendered["ambisonic"]
+    provenance = Provenance(
+        scene_sha256=str(rendered["plan"].get("geometry_sha256") or ""),
+        mats_hash=str(rendered["plan"].get("cache_key") or ""),
+        engine="cuda",
+        band=band,
+        fmax_hz=float(fmax_hz),
+        grid_step_m=float(rendered["plan"]["array"]["grid_step_m"]),
+        points_per_wavelength=10.5,
+        sound_speed_m_s=float(rendered["plan"]["sound_speed_m_s"]),
+        seed=0,
+        run_id=run_dir.name,
+        notes=(
+            "ambisonic order "
+            f"{settings.order}, N3D, ACN, about one point; the effective order "
+            "per frequency is in report.json and is lower below 1 kHz"
+        ),
+    )
+    artefacts = [
+        write_ambisonic_sofa(
+            ambisonic,
+            run_dir / "responses" / "ambisonic.sofa",
+            source_position=rendered["source"],
+            provenance=provenance,
+            title=f"{run_dir.name}: ambisonic room impulse response",
+            licence=LICENCE,
+        )
+    ]
+    ears = ear_directions()
+    for head, angles in rendered["brirs"].items():
+        yaws = sorted(angles)
+        artefacts.append(
+            write_brir_sofa(
+                np.stack([angles[yaw] for yaw in yaws]),
+                np.asarray(yaws, dtype=float),
+                run_dir / "responses" / f"binaural_{head}.sofa",
+                sample_rate_hz=ambisonic.sample_rate_hz,
+                listener_position=rendered["centre"],
+                source_position=rendered["source"],
+                ear_positions=HEAD_RADIUS_M * ears,
+                provenance=provenance,
+                title=f"{run_dir.name}: binaural room impulse responses, {head}",
+                licence=LICENCE,
+            )
+        )
+    report["artefacts"] = [path.name for path in artefacts]
+
+    if audio_wanted:
+        store = shared_store()
+        if store is None:
+            print("no store credentials, so no anechoic clip and no audio")
+        else:
+            dry, dry_record = dry_voice(store, seed)
+            report["dry_voice"] = dry_record
+            report["audio"] = write_audio(ambisonic, rendered["brirs"], dry, run_dir / "audio")
+            audio.write_wav(run_dir / "audio" / "dry_voice.wav", dry, ambisonic.sample_rate_hz)
+    write_record(run_dir, "report.json", report)
+
+    if publish_wanted:
+        store = shared_store()
+        if store is None:
+            raise SystemExit("no store credentials, so nothing can be published")
+        files = [*artefacts, run_dir / "report.json", run_dir / "plan.json"]
+        files += sorted((run_dir / "audio").glob("*.wav"))
+        conflict = report.get("licence_conflict")
+        if conflict:
+            # Written locally for listening, kept out of the store. Publishing
+            # is what a licence governs, and this one is not ours to resolve.
+            files = [path for path in files if "measured" not in path.name]
+            print(f"not publishing the measured decode: {conflict['what']}")
+        report["published"] = publish(store, run_dir.name, files)
+        write_record(run_dir, "report.json", report)
+    return report
+
+
 def _room(args: argparse.Namespace) -> int:
     settings = EncoderSettings(
         order=args.order, fit_order=args.fit_order, max_frequency_hz=args.fmax
@@ -907,78 +1095,16 @@ def _room(args: argparse.Namespace) -> int:
         plain_decode=args.plain_decode,
         rendered=rendered,
     )
-    ambisonic = rendered["ambisonic"]
-    provenance = Provenance(
-        scene_sha256=str(rendered["plan"].get("geometry_sha256") or ""),
-        mats_hash=str(rendered["plan"].get("cache_key") or ""),
-        engine="cuda",
-        band="high",
+    finish_run(
+        args.run,
+        report,
+        rendered,
+        settings,
         fmax_hz=float(args.fmax),
-        grid_step_m=float(rendered["plan"]["array"]["grid_step_m"]),
-        points_per_wavelength=10.5,
-        sound_speed_m_s=float(rendered["plan"]["sound_speed_m_s"]),
-        seed=0,
-        run_id=args.run.name,
-        notes=(
-            "ambisonic order "
-            f"{settings.order}, N3D, ACN, about one point; the effective order "
-            "per frequency is in report.json and is lower below 1 kHz"
-        ),
+        audio_wanted=bool(args.audio),
+        publish_wanted=bool(args.publish),
+        seed=args.seed,
     )
-    artefacts = [
-        write_ambisonic_sofa(
-            ambisonic,
-            args.run / "responses" / "ambisonic.sofa",
-            source_position=rendered["source"],
-            provenance=provenance,
-            title=f"{args.run.name}: ambisonic room impulse response",
-            licence=LICENCE,
-        )
-    ]
-    ears = ear_directions()
-    for head, angles in rendered["brirs"].items():
-        yaws = sorted(angles)
-        artefacts.append(
-            write_brir_sofa(
-                np.stack([angles[yaw] for yaw in yaws]),
-                np.asarray(yaws, dtype=float),
-                args.run / "responses" / f"binaural_{head}.sofa",
-                sample_rate_hz=ambisonic.sample_rate_hz,
-                listener_position=rendered["centre"],
-                source_position=rendered["source"],
-                ear_positions=HEAD_RADIUS_M * ears,
-                provenance=provenance,
-                title=f"{args.run.name}: binaural room impulse responses, {head}",
-                licence=LICENCE,
-            )
-        )
-    report["artefacts"] = [path.name for path in artefacts]
-
-    if args.audio:
-        store = shared_store()
-        if store is None:
-            print("no store credentials, so no anechoic clip and no audio")
-        else:
-            dry, dry_record = dry_voice(store, args.seed)
-            report["dry_voice"] = dry_record
-            report["audio"] = write_audio(ambisonic, rendered["brirs"], dry, args.run / "audio")
-            audio.write_wav(args.run / "audio" / "dry_voice.wav", dry, ambisonic.sample_rate_hz)
-    write_record(args.run, "report.json", report)
-
-    if args.publish:
-        store = shared_store()
-        if store is None:
-            raise SystemExit("no store credentials, so nothing can be published")
-        files = [*artefacts, args.run / "report.json", args.run / "plan.json"]
-        files += sorted((args.run / "audio").glob("*.wav"))
-        conflict = report.get("licence_conflict")
-        if conflict:
-            # Written locally for listening, kept out of the store. Publishing
-            # is what a licence governs, and this one is not ours to resolve.
-            files = [path for path in files if "measured" not in path.name]
-            print(f"not publishing the measured decode: {conflict['what']}")
-        report["published"] = publish(store, args.run.name, files)
-        write_record(args.run, "report.json", report)
     return 0
 
 

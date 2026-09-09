@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -164,6 +165,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--double", action="store_true")
     parser.add_argument("--yes", action="store_true", help="required to spend money")
     parser.add_argument(
+        "--exclude-gpu",
+        nargs="*",
+        default=["RTX 50", "RTX PRO", "B200", "B100"],
+        help="card families never rented: the build image is CUDA 12.4 and its nvcc does "
+        "not compile Blackwell (sm_120), so a rental there fails at the build and pays "
+        "for nothing. Pass an empty list once the image is 12.8 or later",
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help=(
+            "leave the instance up after a successful solve, for the next band to attach "
+            "to with --instance; the watchdog still destroys it at the deadline"
+        ),
+    )
+    parser.add_argument(
         "--instance",
         type=int,
         default=None,
@@ -217,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
             limit=200,
         )
         ranked = rank_offers(
-            [candidate for candidate in offers if candidate.dph_total <= args.max_dph],
+            [
+                candidate
+                for candidate in offers
+                if candidate.dph_total <= args.max_dph
+                and not any(name.lower() in candidate.gpu_name.lower() for name in args.exclude_gpu)
+            ],
             need,
             anchor_hours,
             args.hours,
@@ -252,13 +274,37 @@ def main(argv: list[str] | None = None) -> int:
         say("\nnothing rented: pass --yes once the figures above are approved")
         return 0
 
+    machine = None
     if args.instance is None:
         assert offer is not None
-        rental = vast.rent(
-            client, offer, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
-        )
-        instance_id = rental.instance_id
-        say(f"rented {instance_id}, watchdog pid {rental.watchdog_pid}")
+        # Down the list until one rents *and answers*. An offer is an
+        # advertisement: two rentals in a row on one Quebec host came up with
+        # "failed to create task for container" and never answered ssh, and a
+        # driver that rents its single best offer and waits fifteen minutes
+        # pays for that host twice. The chain learnt this first (W35).
+        for candidate, candidate_hours, _, _ in ranked[:5]:
+            if candidate_hours is not None and candidate_hours > args.hours:
+                continue
+            try:
+                rental = vast.rent(
+                    client, candidate, hours=args.hours, image=IMAGE, disk_gb=int(need.disk_gb) + 20
+                )
+            except vast.VastError as refusal:
+                say(f"  {candidate.id} would not rent ({refusal}); trying the next")
+                continue
+            instance_id = rental.instance_id
+            say(f"rented {instance_id} on {candidate.describe()}")
+            say(f"  watchdog pid {rental.watchdog_pid}")
+            try:
+                machine = vast.wait_for_ssh(client, instance_id, identity, timeout=420.0)
+            except (TimeoutError, vast.VastError) as silence:
+                say(f"  {instance_id} never answered ({silence}); destroying it, trying the next")
+                vast.teardown(client, instance_id)
+                continue
+            offer = candidate
+            break
+        if machine is None:
+            raise SystemExit("no offer that met the requirement produced a machine that answered")
     else:
         instance_id = int(args.instance)
         existing = client.instance(instance_id)
@@ -270,9 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             f"up {existing.uptime_hours():.2f} h. Its own watchdog still holds the deadline; "
             "no second rental and no second ledger row"
         )
+        machine = vast.wait_for_ssh(client, instance_id, identity)
     retrieved = False
     try:
-        machine = vast.wait_for_ssh(client, instance_id, identity)
         say(f"ssh up at {machine.host}:{machine.port}")
         built = provision(machine, Path("scripts/build_pffdtd.sh"))
         say(f"engine built in {built / 60:.1f} min")
@@ -290,6 +336,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         retrieved = True
         (args.run / "source0" / "engine.log").write_text(result.log)
+        # The render reads the sample rate from the constants beside the
+        # output, as a local run leaves them; a fetched run had none and the
+        # first assembly of three fetched bands stopped on the missing file.
+        shutil.copy2(entry.path / "sim_consts.h5", args.run / "source0" / "sim_consts.h5")
         write_record(
             args.run,
             "solve.json",
@@ -318,8 +368,15 @@ def main(argv: list[str] | None = None) -> int:
         say(f"solved in {result.engine_s / 3600:.2f} h, fetched in {result.fetch_s:.0f} s")
     finally:
         if retrieved:
-            say("tearing down, the artefact is home")
-            vast.teardown(client, instance_id)
+            if args.keep:
+                say(
+                    f"KEEPING instance {instance_id} up as asked: attach the next band with "
+                    f"--instance {instance_id}, and the watchdog ends it at the "
+                    f"{args.hours:g} h deadline regardless"
+                )
+            else:
+                say("tearing down, the artefact is home")
+                vast.teardown(client, instance_id)
         else:
             say(
                 f"NOT tearing down instance {instance_id}: the artefact is not home. "

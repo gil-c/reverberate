@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import trimesh
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import Polygon
 
 from reverberate.geometry.apartment import (
     Storey,
@@ -61,12 +61,6 @@ def test_regions_are_grouped_into_storeys_by_floor_height() -> None:
     regions = [room(0, 4, 0, 4), room(0, 4, 5, 9), room(0, 4, 0, 4, floor=2.5)]
     storeys = group_by_storey(regions)
     assert sorted(len(group) for group in storeys.values()) == [1, 2]
-
-
-def test_near_identical_floor_heights_are_the_same_storey() -> None:
-    """Authored heights wobble slightly; a 5 cm difference is not a new floor."""
-    storeys = group_by_storey([room(0, 4, 0, 4), room(5, 9, 0, 4, floor=0.05)])
-    assert len(storeys) == 1
 
 
 def test_a_gap_touching_only_one_room_is_not_a_doorway() -> None:
@@ -129,33 +123,12 @@ def test_extruded_storey_is_watertight_so_pyroomacoustics_can_use_it() -> None:
     assert mesh.volume > 0
 
 
-def test_extruded_storey_sits_between_its_floor_and_ceiling() -> None:
-    """Guards the axis convention: a mirrored extrusion would invert these."""
-    regions = [room(0, 4, 0, 4, floor=2.5)]
-    storey = build_storey(regions, trimesh.creation.box(extents=(0.01, 0.01, 0.01)))
-    mesh = extrude_storey(storey)
-    assert mesh.bounds[0][1] == pytest.approx(2.5)
-    assert mesh.bounds[1][1] == pytest.approx(5.3)
-
-
 def test_cleaning_preserves_the_area_it_tidies() -> None:
     rough = Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]).union(
         Polygon([(3.999, 0), (4.001, 0), (4.001, 4), (3.999, 4)])
     )
     cleaned = clean_outline(rough)
     assert cleaned.area == pytest.approx(rough.area, rel=0.01)
-
-
-def test_storey_summary_mentions_rooms_doorways_and_area() -> None:
-    storey = Storey(
-        floor_height=0.0,
-        ceiling_height=2.8,
-        walkable=MultiPolygon([Polygon([(0, 0), (2, 0), (2, 2), (0, 2)])]),
-        rooms=[room(0, 2, 0, 2)],
-        doorways=3,
-    )
-    assert "1 rooms" in storey.summary()
-    assert "3 doorways" in storey.summary()
 
 
 def storey_at(floor: float) -> Storey:

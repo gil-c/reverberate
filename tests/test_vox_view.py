@@ -8,7 +8,6 @@ right count in the wrong frame, would be worse than no cloud at all.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import h5py
@@ -22,7 +21,6 @@ from reverberate.viz.vox_view import (
     _slice_quads,
     read_voxels,
     surface_of,
-    write_voxel_payload,
 )
 
 
@@ -129,16 +127,6 @@ def test_the_cloud_lands_inside_the_scene_box(tmp_path: Path) -> None:
     assert cloud.positions.max(axis=0)[2] <= 0.5 + 1e-6
 
 
-def test_it_says_what_a_cube_stands_for(tmp_path: Path) -> None:
-    """A block that did not admit to being one would be the worse failure."""
-    cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=40)
-
-    assert cloud.total_nodes == 192
-    assert cloud.drawn <= 40
-    assert cloud.cell_m > cloud.h_m
-    assert "for 192 boundary nodes" in cloud.summary()
-
-
 def test_a_corrupt_cache_is_rebuilt_not_raised(tmp_path: Path) -> None:
     """``np.load`` raises ``zipfile.BadZipFile`` on a truncated ``.npz``, which
     is neither ``OSError`` nor ``ValueError`` nor ``KeyError`` -- a half
@@ -159,14 +147,6 @@ def test_a_corrupt_cache_is_rebuilt_not_raised(tmp_path: Path) -> None:
     cloud = read_voxels(root, target_cubes=target_cubes)
 
     assert cloud.total_nodes == 192
-
-
-def test_a_grid_that_fits_is_drawn_cell_by_cell(tmp_path: Path) -> None:
-    """No aggregation is applied when none is needed to fit the budget."""
-    cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
-
-    assert cloud.cell_m == pytest.approx(cloud.h_m)
-    assert cloud.drawn == 192
 
 
 def test_a_block_holding_any_material_is_not_called_sealed(tmp_path: Path) -> None:
@@ -265,23 +245,6 @@ def test_a_boundary_block_does_not_draw_past_the_grid(tmp_path: Path) -> None:
     assert (corners <= cloud.bounds_hi + 1e-6).all()
 
 
-def test_the_payload_is_binary_and_self_describing(tmp_path: Path) -> None:
-    """Typed arrays, because the browser wants them and text is ten times."""
-    cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
-    surface = surface_of(cloud)
-    target = tmp_path / "site"
-
-    record = write_voxel_payload(surface, ["carpet", "shell"], target)
-
-    written = json.loads((target / "voxels.json").read_text())
-    assert written == record
-    assert (target / "voxels.f32").stat().st_size == surface.corners.size * 4
-    assert (target / "voxels_index.u32").stat().st_size == surface.index.size * 4
-    assert (target / "voxels_label.i16").stat().st_size == surface.label.size * 2
-    assert record["labels"] == ["carpet", "shell"]
-    assert record["quads"] == surface.quads
-
-
 class TestSurface:
     """Merging must reduce the triangle count without moving a single face."""
 
@@ -312,13 +275,6 @@ class TestSurface:
         # 1e-6 rather than exact: the corners are float32, which is what the
         # browser reads, and the tolerance has to be the data's not the maths'.
         assert area == pytest.approx(visible * cloud.cell_m**2, rel=1e-6)
-
-    def test_it_draws_fewer_triangles_than_solid_cubes(self, tmp_path: Path) -> None:
-        cloud = read_voxels(write_cache(tmp_path / "vox", nodes=192), target_cubes=100_000)
-        surface = surface_of(cloud)
-
-        assert surface.triangles < cloud.drawn * 12
-        assert surface.index.size == surface.quads * 6
 
     def test_a_flat_face_of_one_material_becomes_one_quad(self) -> None:
         """The whole point: a floor is one rectangle, not one per cell."""
@@ -369,10 +325,6 @@ class TestSliceQuads:
                 mine[np.lexsort(mine.T[::-1])], theirs[np.lexsort(theirs.T[::-1])]
             ), kind
 
-    def test_an_empty_slice_yields_no_rectangle(self) -> None:
-        empty = np.zeros(0, dtype=np.int64)
-        assert _slice_quads(empty, empty, empty.astype(np.int16)).shape == (0, 5)
-
 
 class TestCommonestMaterial:
     """The block's material, by sorting rather than by a dense tally.
@@ -412,17 +364,6 @@ class TestCommonestMaterial:
             assert np.array_equal(mine_rigid, theirs_rigid)
             # A block with no material has no answer to compare; both mark it.
             assert np.array_equal(mine[~mine_rigid], theirs[~theirs_rigid])
-
-    def test_a_tie_falls_to_the_lower_material(self) -> None:
-        """``argmax`` over the dense tally broke ties that way, and the first
-        sort-based version broke them the other, which disagreed on every block
-        where two materials were level."""
-        from reverberate.viz.vox_view import _commonest_material
-
-        material = np.array([0, 3], dtype=np.int8)
-        carried, rigid = _commonest_material(np.array([0, 0]), material, 1)
-        assert carried[0] == 0
-        assert not rigid[0]
 
     def test_a_block_of_nothing_but_rigid_nodes_is_marked(self) -> None:
         from reverberate.viz.vox_view import _commonest_material

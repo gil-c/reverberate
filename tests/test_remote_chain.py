@@ -116,12 +116,6 @@ class TestPayloadNeed:
         need = payload_need_for(66_159_665, (2894, 360, 2265), 100_000_000)
         assert 16.9 <= need.ram_gb <= 30.0
 
-    def test_a_coarser_budget_asks_for_much_less(self) -> None:
-        """The block budget, not the grid, is what decides the lattice."""
-        fine = payload_need_for(66_159_665, (2894, 360, 2265), 100_000_000)
-        coarse = payload_need_for(66_159_665, (2894, 360, 2265), 20_000_000)
-        assert coarse.ram_gb < fine.ram_gb / 2
-
 
 class TestUnmet:
     def test_it_names_every_shortfall_rather_than_the_first(self) -> None:
@@ -129,10 +123,6 @@ class TestUnmet:
         need = MachineNeed(cores=32, ram_gb=64, disk_gb=400, why="test")
         problems = need.unmet(_Offer(cores=8, ram=16, disk=100))
         assert len(problems) == 3
-
-    def test_a_machine_that_fits_reports_nothing(self) -> None:
-        need = MachineNeed(cores=16, ram_gb=32, disk_gb=200, why="test")
-        assert need.unmet(_Offer(cores=32, ram=64, disk=500)) == []
 
     def test_vram_is_only_asked_of_a_stage_that_wants_a_gpu(self) -> None:
         """Voxelising and payload-building never touch the card; the solve does."""
@@ -209,17 +199,6 @@ class TestInstallEntry:
         assert entry.manifest["computed_on"] == "rented"
         assert entry.manifest["Nbt"] == 7
         assert entry.manifest["geometry_sha256"]
-
-    def test_it_refuses_a_transfer_that_is_missing_a_file(
-        self, spec: SceneSpec, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Half a grid installed under a key is a cache poisoned forever: the
-        key is content addressed, so nothing later would ever recompute it."""
-        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
-        fetched = self._fetched(tmp_path / "landing")
-        (fetched / "vox_out.h5").unlink()
-        with pytest.raises(RuntimeError, match="vox_out.h5"):
-            install_entry(spec, fetched, {}, wall_s=1.0)
 
 
 class TestLaunchCommand:

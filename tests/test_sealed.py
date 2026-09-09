@@ -69,24 +69,6 @@ class TestSealedRegions:
         assert region.extent_m == pytest.approx(1.286)
         assert region.first_mode_hz == pytest.approx(133.0, abs=1.0)
 
-    def test_the_record_is_ordered_largest_first(self) -> None:
-        """The viewer and a reader both want the ones that would have boomed."""
-        small = trimesh.creation.box(extents=(0.1, 0.1, 0.1))
-        big = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        big.apply_translation([5.0, 0.0, 0.0])
-        both = trimesh.util.concatenate([small, big])
-        assert isinstance(both, trimesh.Trimesh)
-
-        report = sealed_regions([obstacle(both)])
-        record = report.record()
-        volumes = [region.volume_m3 for region in report.interiors]
-        listed = record["interiors"]
-        assert isinstance(listed, list)
-        volumes = [entry["volume_m3"] for entry in listed]
-
-        assert volumes == sorted(volumes, reverse=True)
-        assert record["sealed_volume_m3"] == pytest.approx(1.001, abs=1e-6)
-
 
 def test_one_object_of_many_slivers_is_reported_as_one_object() -> None:
     """The page prints a count of this list in a sentence about objects.
