@@ -62,8 +62,11 @@ __all__ = [
     "assemble",
     "calibration_bands_hz",
     "centre_offsets",
+    "continue_from",
+    "decay_from_bands",
     "extend",
     "extend_spectrum",
+    "level_gain",
     "pad_order",
 ]
 
@@ -178,6 +181,126 @@ def _level(
     }
 
 
+def level_gain(subject: BandSolve, reference: BandSolve) -> tuple[float, dict[str, Any]]:
+    """The gain that puts ``subject`` on ``reference``'s scale, checked against the bandwidths."""
+    return _level(subject, reference, int(round(reference.ambisonic.sample_rate_hz)))
+
+
+def decay_from_bands(
+    low: BandSolve,
+    mid: BandSolve,
+    *,
+    mean_absorption: np.ndarray,
+    atmosphere: Atmosphere,
+    sound_speed_m_s: float,
+    edge: float = 0.7,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """One decay per octave band, each read from the solve that can measure it.
+
+    The low band was solved for the whole decay and resolves the bottom
+    octaves; the mid band resolves the middle ones over its own window. Above
+    the mid band the decay is transposed by Eyring on the calibrated mean free
+    path plus the air, which is roadmap 5.5's rule. A band that holds a solve's
+    own edge is not read from that solve, since half of it is the low pass
+    skirt: ``edge`` is the fraction of ``fmax`` under which a band is trusted.
+    """
+    rate = int(round(mid.ambisonic.sample_rate_hz))
+    centres = np.asarray(band_centres(rate), dtype=float)
+    prediction = transpose(
+        rt60_per_band(mid.omni, rate),
+        mean_absorption,
+        rate,
+        mid_fmax_hz=edge * mid.fmax_hz,
+        atmosphere=atmosphere,
+        sound_speed_m_s=sound_speed_m_s,
+    )
+    decay = np.asarray(prediction.t60_s, dtype=float)
+    source = ["mid" if measured else "transposed" for measured in prediction.measured]
+    from_low = rt60_per_band(low.omni, int(round(low.ambisonic.sample_rate_hz)))
+    for band, centre in enumerate(centres):
+        if centre <= edge * low.fmax_hz and np.isfinite(from_low[band]) and from_low[band] > 0:
+            decay[band] = from_low[band]
+            source[band] = "low"
+    record = {
+        "band_centres_hz": [int(c) for c in centres],
+        "t60_s": [None if not np.isfinite(v) else round(float(v), 4) for v in decay],
+        "source": source,
+        "transposition": prediction.record(),
+    }
+    return decay, record
+
+
+def continue_from(
+    high: BandSolve,
+    mid: BandSolve,
+    *,
+    gain: float,
+    t60_s: np.ndarray,
+    atmosphere: Atmosphere,
+    sound_speed_m_s: float,
+    fade_s: float = 0.010,
+) -> tuple[BandSolve, dict[str, Any]]:
+    """Carry the high band past its window with the mid band's computed structure.
+
+    A short high band solve ends while the room is still throwing discrete
+    reflections at the listener: in 296 m3 a far wall answers every thirty
+    milliseconds well past a hundred. Noise there is the wrong texture, and
+    audibly so. The mid band was solved longer and holds those same
+    reflections, at the same instants and from the same directions, an octave
+    or two lower; :func:`extend_spectrum` writes them up to the high band's
+    ``fmax`` with the decay corrected per band, and the result, put on the high
+    band's scale by ``gain``, continues the high band from its last computed
+    samples to the end of the mid band's window. The diffuse tail after that
+    is :func:`extend`'s business.
+    """
+    rate = int(round(high.ambisonic.sample_rate_hz))
+    if int(round(mid.ambisonic.sample_rate_hz)) != rate:
+        raise ValueError("the two bands are delivered at different sample rates")
+    window = high.ambisonic.signals.shape[1]
+    length = mid.ambisonic.signals.shape[1]
+    if length <= window:
+        return high, {"continued": False, "why": "the mid band is no longer than the high band"}
+    fade = int(round(fade_s * rate))
+    if fade < 1 or fade > window:
+        raise ValueError(f"a {fade_s * 1000:g} ms crossfade does not fit in the high band's window")
+    lifted, extension = extend_spectrum(
+        mid.ambisonic,
+        fmax_hz=mid.fmax_hz,
+        t60_s=t60_s,
+        atmosphere=atmosphere,
+        sound_speed_m_s=sound_speed_m_s,
+        ceiling_hz=high.fmax_hz,
+    )
+    order = max(high.ambisonic.order, lifted.order)
+    own = pad_order(high.ambisonic, order).signals
+    borrowed = pad_order(lifted, order).signals * gain
+    weight = np.zeros(length)
+    weight[window - fade : window] = np.linspace(0.0, 1.0, fade, endpoint=False)
+    weight[window:] = 1.0
+    signals = borrowed * weight[None, :]
+    signals[:, :window] += own * (1.0 - weight[None, :window])
+    continued = Ambisonic(
+        signals=np.ascontiguousarray(signals),
+        sample_rate_hz=float(rate),
+        order=order,
+        centre=high.ambisonic.centre,
+    )
+    record = {
+        "continued": True,
+        "computed_s": round(window / rate, 4),
+        "continued_to_s": round(length / rate, 4),
+        "fade_s": fade_s,
+        "gain_db": round(20.0 * float(np.log10(gain)), 3),
+        "from": f"the mid band's computed structure, lifted {extension['template_hz']} -> "
+        f"{extension['synthesised_hz']} Hz",
+        "rule": (
+            "the discrete reflections the mid band solved are carried up an octave at their "
+            "own instants and directions; noise starts only where the mid band's window ends"
+        ),
+    }
+    return BandSolve(high.name, continued, high.fmax_hz, high.grid_step_m), record
+
+
 def assemble(
     low: BandSolve,
     mid: BandSolve,
@@ -257,8 +380,14 @@ def extend(
     sound_speed_m_s: float,
     seed: int,
     fade_s: float = 0.010,
+    t60_s: np.ndarray | None = None,
 ) -> tuple[BandSolve, dict[str, Any]]:
     """Continue a band's computed response with a diffuse tail to ``total_s``.
+
+    ``t60_s`` overrides the decay per band when given, which is what
+    :func:`decay_from_bands` is for: a fit on the last forty milliseconds of a
+    short solve read 2.8 s at 8 kHz on the mid band of a room that decays in
+    half a second, and nothing downstream should trust a number like that.
 
     The decay is read on the ``W`` channel: locally, on the last part of what
     was solved, where that fit converges, and otherwise transposed from the
@@ -284,8 +413,12 @@ def extend(
         sound_speed_m_s=sound_speed_m_s,
     )
     transposed = np.asarray(prediction.t60_s, dtype=float)
-    local = local_decay_s(solve.omni[None, :], rate, window / rate)
-    decay = np.where(np.isfinite(local), local, transposed)
+    if t60_s is not None:
+        decay = np.asarray(t60_s, dtype=float)
+        local = np.full_like(decay, np.nan)
+    else:
+        local = local_decay_s(solve.omni[None, :], rate, window / rate)
+        decay = np.where(np.isfinite(local), local, transposed)
     if total == window:
         extended = solve.ambisonic
     else:
@@ -316,6 +449,7 @@ def extend(
         "band_centres_hz": [int(c) for c in band_centres(rate)],
         "tail_t60_s": [None if not np.isfinite(v) else round(float(v), 4) for v in decay],
         "from_local_fit": [bool(v) for v in np.isfinite(local)],
+        "decay_given": t60_s is not None,
         "transposition": prediction.record(),
         "note": (
             "one decay per band read on W, independent noise per channel levelled on "

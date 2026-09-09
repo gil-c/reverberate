@@ -50,16 +50,18 @@ from reverberate.experiments.w10_render import (
     spatial_report,
 )
 from reverberate.experiments.w37_window import mean_absorption_of
-from reverberate.metrics import band_centres, rt60_per_band
+from reverberate.metrics import band_centres
 from reverberate.spatial.bands import (
     BandSolve,
     assemble,
     centre_offsets,
+    continue_from,
+    decay_from_bands,
     extend,
     extend_spectrum,
+    level_gain,
 )
 from reverberate.spatial.encode import EncoderSettings
-from reverberate.tail import transpose
 from reverberate.wave import Machine, engine_inputs
 
 __all__ = ["BANDS", "assemble_run", "main", "outer_radius_for", "plan_bands", "prepare_bands"]
@@ -266,6 +268,25 @@ def assemble_run(
     total_s = solves["low"].ambisonic.duration_s
     absorption, absorption_source = _absorption(encoded["high"], len(band_centres(rate)))
     atmosphere = air or Atmosphere()
+    sound_speed = float(plan["sound_speed_m_s"])
+    # One decay per band, each from the solve that can measure it, used for the
+    # continuation, both tails and the spectral extension alike.
+    decay, decay_record = decay_from_bands(
+        solves["low"],
+        solves["mid"],
+        mean_absorption=absorption,
+        atmosphere=atmosphere,
+        sound_speed_m_s=sound_speed,
+    )
+    gain_mid, _ = level_gain(solves["mid"], solves["high"])
+    solves["high"], continuation = continue_from(
+        solves["high"],
+        solves["mid"],
+        gain=gain_mid,
+        t60_s=decay,
+        atmosphere=atmosphere,
+        sound_speed_m_s=sound_speed,
+    )
     tails: list[dict[str, Any]] = []
     for index, name in enumerate(("mid", "high")):
         solves[name], record = extend(
@@ -274,8 +295,9 @@ def assemble_run(
             calibration=solves["mid"],
             mean_absorption=absorption,
             atmosphere=atmosphere,
-            sound_speed_m_s=float(plan["sound_speed_m_s"]),
+            sound_speed_m_s=sound_speed,
             seed=seed + 1000 * index,
+            t60_s=decay,
         )
         tails.append(record)
     assembled, assembly = assemble(solves["low"], solves["mid"], solves["high"])
@@ -283,30 +305,20 @@ def assemble_run(
     fmax_high = solves["high"].fmax_hz
     extension: dict[str, Any] | None = None
     if ceiling_hz is None or ceiling_hz > fmax_high:
-        # The decay above the solve from the room's absorption and the air, the
-        # band holding the solve's own edge predicted rather than read, since
-        # half of it is the low pass skirt.
-        prediction = transpose(
-            rt60_per_band(assembled.signals[0], rate),
-            absorption,
-            rate,
-            mid_fmax_hz=0.7 * fmax_high,
-            atmosphere=atmosphere,
-            sound_speed_m_s=float(plan["sound_speed_m_s"]),
-        )
         assembled, extension = extend_spectrum(
             assembled,
             fmax_hz=fmax_high,
-            t60_s=np.asarray(prediction.t60_s, dtype=float),
+            t60_s=decay,
             atmosphere=atmosphere,
-            sound_speed_m_s=float(plan["sound_speed_m_s"]),
+            sound_speed_m_s=sound_speed,
             ceiling_hz=ceiling_hz,
         )
-        extension["transposition"] = prediction.record()
         extension["validated_by"] = "w39_extension_check"
 
     extra = {
         "spectral_extension": extension,
+        "decay": decay_record,
+        "continuation": continuation,
         "kind": plan["kind"],
         "trick": plan["trick"],
         "assembly": assembly,
@@ -450,6 +462,12 @@ def _assemble(args: argparse.Namespace) -> int:
         print(
             f"{row['band']:>4}: order {row['order']}, {row['computed_s']} s, "
             f"gain {row['gain_db']:+.2f} dB"
+        )
+    cont = report["continuation"]
+    if cont.get("continued"):
+        print(
+            f"high: continued from {cont['computed_s']} s to {cont['continued_to_s']} s "
+            "by the mid band"
         )
     for row in report["tails"]:
         print(f"{row['band']:>4}: tail from {row['computed_s']} s to {row['total_s']} s")

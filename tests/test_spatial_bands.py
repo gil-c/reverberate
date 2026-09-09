@@ -13,6 +13,8 @@ from reverberate.spatial.bands import (
     assemble,
     calibration_bands_hz,
     centre_offsets,
+    continue_from,
+    decay_from_bands,
     extend,
     extend_spectrum,
     pad_order,
@@ -325,3 +327,103 @@ def test_the_extension_refuses_a_ceiling_under_the_solved_band() -> None:
             sound_speed_m_s=SOUND_SPEED,
             ceiling_hz=5000.0,
         )
+
+
+def test_the_high_band_is_continued_by_the_mid_band_s_own_reflections() -> None:
+    """After its window the high band carries the mid band's structure, lifted an octave."""
+    truth = _decaying_field({c: 0.4 for c in metrics.band_centres(RATE)}, seconds=0.4)
+    # A discrete reflection at 0.25 s in the mid band, after the high band's window.
+    mid_signals = (
+        signal.sosfiltfilt(
+            signal.butter(8, 4000 / (RATE / 2), output="sos"), truth.signals, axis=-1
+        )
+        * 2.0
+    )
+    spike = int(0.25 * RATE)
+    mid_signals[:, spike] += np.array([1.0, 0.6, -0.3, 0.45]) * 0.5
+    mid = BandSolve(
+        "mid",
+        Ambisonic(signals=mid_signals, sample_rate_hz=float(RATE), order=1, centre=np.zeros(3)),
+        4000.0,
+        0.0082,
+    )
+    high = _band(truth, "high", 8000.0, 0.0041, seconds=0.1)
+    decay = np.full(len(metrics.band_centres(RATE)), 0.4)
+    continued, record = continue_from(
+        high, mid, gain=0.5, t60_s=decay, atmosphere=Atmosphere(), sound_speed_m_s=SOUND_SPEED
+    )
+    assert record["continued"] is True
+    assert continued.ambisonic.signals.shape[1] == mid.ambisonic.signals.shape[1]
+    window, fade = int(0.1 * RATE), int(0.010 * RATE)
+    assert np.array_equal(
+        continued.ambisonic.signals[:, : window - fade], high.ambisonic.signals[:, : window - fade]
+    )
+    # The reflection shows up above 4 kHz after the window, where the high band had nothing.
+    hf = signal.sosfiltfilt(
+        signal.butter(8, [4500 / (RATE / 2), 7500 / (RATE / 2)], btype="band", output="sos"),
+        continued.ambisonic.signals[0],
+    )
+    around = np.abs(hf[spike - 200 : spike + 200]).max()
+    elsewhere = np.abs(hf[spike + 2000 : spike + 4000]).max()
+    assert around > 3.0 * elsewhere
+    # And it keeps the mid band's direction, which is the ratio between channels.
+    seg = continued.ambisonic.signals[:, spike - 50 : spike + 50]
+    ratios = seg[1:] @ seg[0] / (seg[0] @ seg[0])
+    assert ratios == pytest.approx([0.6, -0.3, 0.45], abs=0.05)
+
+
+def test_a_mid_band_no_longer_than_the_high_band_continues_nothing() -> None:
+    truth = _truth(seconds=0.1)
+    low, mid, high = _three(truth)
+    same, record = continue_from(
+        high,
+        mid,
+        gain=1.0,
+        t60_s=np.full(8, 0.3),
+        atmosphere=Atmosphere(),
+        sound_speed_m_s=SOUND_SPEED,
+    )
+    assert record["continued"] is False
+    assert same is high
+
+
+def test_each_band_s_decay_comes_from_the_solve_that_can_measure_it() -> None:
+    centres = metrics.band_centres(RATE)
+    slow = _decaying_field({c: 0.9 for c in centres}, seconds=1.0, seed=1)
+    fast = _decaying_field({c: 0.3 for c in centres}, seconds=0.4, seed=2)
+    low = _band(slow, "low", 1000.0, 0.0327)
+    mid = _band(fast, "mid", 4000.0, 0.0082)
+    decay, record = decay_from_bands(
+        low,
+        mid,
+        mean_absorption=np.full(8, 0.2),
+        atmosphere=Atmosphere(),
+        sound_speed_m_s=SOUND_SPEED,
+    )
+    source = dict(zip(centres, record["source"], strict=True))
+    assert source[125] == "low" and source[500] == "low"
+    assert source[1000] == "mid" and source[2000] == "mid"
+    assert source[8000] == "transposed" and source[16000] == "transposed"
+    by_band = dict(zip(centres, decay, strict=True))
+    assert by_band[250] == pytest.approx(0.9, rel=0.2)
+    assert by_band[2000] == pytest.approx(0.3, rel=0.2)
+
+
+def test_a_given_decay_overrides_the_local_fit() -> None:
+    truth = _truth(seconds=0.5)
+    low, mid, high = _three(truth)
+    short = _band(truth, "high", 16000.0, 0.00204, seconds=0.08)
+    given = np.full(len(metrics.band_centres(RATE)), 0.2)
+    _, record = extend(
+        short,
+        0.5,
+        calibration=mid,
+        mean_absorption=np.full(8, 0.2),
+        atmosphere=Atmosphere(),
+        sound_speed_m_s=SOUND_SPEED,
+        seed=0,
+        t60_s=given,
+    )
+    assert record["decay_given"] is True
+    assert not any(record["from_local_fit"])
+    assert record["tail_t60_s"] == [0.2] * 8
