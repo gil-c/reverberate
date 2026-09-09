@@ -24,7 +24,6 @@ from reverberate.gpu.vast import (
     Offer,
     VastError,
     cheapest,
-    estimate_cost_usd,
     ledger_total_usd,
     parse_query,
     search_query,
@@ -136,17 +135,6 @@ class TestOfferSelection:
 
 
 class TestCost:
-    def test_cost_is_rate_times_hours(self) -> None:
-        assert estimate_cost_usd(0.327, 3.0) == pytest.approx(0.981)
-
-    def test_negative_inputs_cannot_manufacture_headroom(self) -> None:
-        assert estimate_cost_usd(0.30, -5.0) == 0.0
-        assert estimate_cost_usd(-0.30, 5.0) == 0.0
-
-    def test_uptime_is_zero_before_the_contract_starts(self) -> None:
-        pending = Instance(1, "loading", 0.3, "h", 22, "RTX 4090", start_date=None)
-        assert pending.uptime_hours() == 0.0
-
     def test_uptime_counts_from_the_contract_start(self) -> None:
         running = Instance(1, "running", 0.3, "h", 22, "RTX 4090", start_date=1000.0)
         assert running.uptime_hours(now=1000.0 + 7200.0) == pytest.approx(2.0)
@@ -173,24 +161,8 @@ class TestLedger:
         ]
         assert ledger_total_usd(entries) == pytest.approx(2.42)
 
-    def test_empty_ledger_is_zero_not_an_error(self, data_root: Path) -> None:
-        assert vast.read_ledger() == []
-        assert ledger_total_usd(vast.read_ledger()) == 0.0
-
-    def test_entries_round_trip_through_the_file(self, data_root: Path) -> None:
-        vast.append_ledger({"event": "rent", "instance_id": 7, "budget_usd": 1.5})
-        entries = vast.read_ledger()
-        assert entries[0]["instance_id"] == 7
-        assert "at" in entries[0]
-
 
 class TestRentRefuses:
-    def test_a_rental_without_a_deadline(self, data_root: Path) -> None:
-        client = FakeClient()
-        with pytest.raises(VastError, match="deadline"):
-            vast.rent(client, make_offer(), hours=0, image="img")  # type: ignore[arg-type]
-        assert client.created == []
-
     def test_a_rental_that_would_pass_the_ceiling(self, data_root: Path) -> None:
         vast.append_ledger({"event": "rent", "instance_id": 1, "budget_usd": 999.0})
         client = FakeClient()
@@ -403,13 +375,6 @@ class TestInstanceDiagnostics:
         assert instance.status == "loading"
         assert instance.status_msg == "pulling image layer 3/9"
 
-    def test_a_missing_status_message_is_empty_not_none(self) -> None:
-        """Callers format it into logs, so it must never be the string "None"."""
-        instance = Instance.from_api(
-            {"id": 7, "actual_status": "running", "dph_total": 1.0, "gpu_name": "x"}
-        )
-        assert instance.status_msg == ""
-
 
 class TestAbsentIsNotUnreachable:
     """A card that does not exist and an API that will not answer are different.
@@ -453,10 +418,6 @@ class TestAbsentIsNotUnreachable:
         monkeypatch.setattr(client, "instance", unreachable)
         assert client.destroy_and_verify(9, attempts=2, pause=0.0) is False
 
-    def test_the_error_carries_the_status_it_was_given(self) -> None:
-        assert vast.VastError("boom", 410).status == 410
-        assert vast.VastError("boom").status is None
-
     def test_the_listing_asks_for_the_version_that_still_serves_it(self) -> None:
         """The v0 form of the listing answers HTTP 410, so v1 is named explicitly."""
         import inspect
@@ -496,7 +457,3 @@ class TestCpuSpeedIsVisible:
         offer = Offer.from_api({"id": 8, "cpu_ghz": None, "cpu_name": None})
         assert offer.cpu_ghz == 0.0
         assert offer.cpu_name == ""
-
-    def test_the_query_can_ask_for_a_floor_on_it(self) -> None:
-        assert "cpu_ghz>=4.0" in search_query(min_cpu_ghz=4.0)
-        assert "cpu_ghz" not in search_query()

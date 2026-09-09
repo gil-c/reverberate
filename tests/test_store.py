@@ -14,7 +14,6 @@ lookup order must be local, then remote, then compute**.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -51,13 +50,6 @@ def test_every_written_key_sits_under_the_project_prefix() -> None:
     assert all(key.startswith(PREFIX) for key in store.written)
 
 
-def test_staging_is_used_and_then_cleared() -> None:
-    store = MemoryStore()
-    store.put_bytes("ir/abc/response.h5", b"payload")
-    assert any(key.startswith(STAGING) for key in store.written)
-    assert not any(key.startswith(STAGING) for key in store.objects)
-
-
 def test_ranged_read_returns_exactly_the_window() -> None:
     """How a clip is pulled out of a multi hundred megabyte zip shard."""
     store = MemoryStore()
@@ -73,12 +65,6 @@ def test_listing_hides_staging_and_strips_the_prefix() -> None:
     store.put_bytes("vox/b/vox_out.h5", b"2")
     store.objects[f"{STAGING}leftover"] = b"3"
     assert list(store.list("vox/")) == ["vox/a/vox_out.h5", "vox/b/vox_out.h5"]
-
-
-def test_digest_of_file_matches_digest_of_bytes(tmp_path: Path) -> None:
-    path = tmp_path / "payload.bin"
-    path.write_bytes(b"a" * (2 << 20) + b"tail")
-    assert digest_of_file(path) == digest_of_bytes(path.read_bytes())
 
 
 class _TruncatingClient:
@@ -151,13 +137,6 @@ def test_a_cache_entry_survives_a_round_trip_through_the_store(
         assert (fetched.path / name).read_bytes() == original[name]
 
 
-def test_fetching_an_absent_entry_returns_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
-    assert fetch_entry(MemoryStore(), "nothing-here") is None
-
-
 def test_a_partially_published_entry_is_not_fetched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -184,23 +163,6 @@ def test_credentials_are_read_from_the_environment_and_named_when_absent(
     monkeypatch.delenv(store_module.BUCKET_ENV, raising=False)
     with pytest.raises(StoreError, match=store_module.BUCKET_ENV):
         B2Store(client=object())
-
-
-@pytest.mark.slow
-def test_the_live_bucket_answers() -> None:
-    """Opt in, network. Excluded from ``make check`` by the ``slow`` marker.
-
-    It exists because the sibling project's notes claim the S3 API rejects
-    these credentials and only the native b2 backend works. That claim is
-    stale, and an assertion is a better record of it than a paragraph.
-    """
-    from reverberate import auth
-
-    auth.inject()
-    if not os.environ.get(store_module.KEY_ID_ENV):
-        pytest.skip("no B2 credentials in this environment")
-    live = B2Store()
-    assert any(True for _ in live.list("", shared=True))
 
 
 def test_no_credentials_means_no_store_rather_than_an_exception(

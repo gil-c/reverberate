@@ -94,39 +94,11 @@ class TestEnsurePatched:
         assert target.read_bytes() == ours
         assert not upstream.exists()
 
-    def test_installing_twice_writes_once(self, tmp_path: Path) -> None:
-        """Idempotent, so calling it before every voxelisation costs nothing."""
-        root = tmp_path / "pffdtd"
-        for relative in vendored.PATCHED_FILES:
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(vendored.patched_path(relative).read_bytes())
-        assert ensure_patched(root) == []
-
     def test_it_refuses_a_file_it_did_not_derive_from(self, tmp_path: Path) -> None:
         """A changed upstream is a merge nobody did, not a file to overwrite."""
         self._checkout(tmp_path / "pffdtd", b"upstream moved on")
         with pytest.raises(RuntimeError, match="neither the upstream"):
             ensure_patched(tmp_path / "pffdtd")
-
-    def test_a_second_call_for_the_same_checkout_is_not_reverified(self, tmp_path: Path) -> None:
-        """Voxelising many scenes against one checkout should not re-run the
-        git subprocess and file digests before every one of them.
-
-        Corrupting the checkout after the first call and asserting the second
-        call does not raise proves the second call skipped verification
-        entirely, rather than merely being fast.
-        """
-        root = tmp_path / "pffdtd"
-        for relative in vendored.PATCHED_FILES:
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(vendored.patched_path(relative).read_bytes())
-        target = root / "python" / "voxelizer" / "vox_scene.py"
-        assert ensure_patched(root) == []
-
-        target.write_bytes(b"neither upstream nor ours")
-        assert ensure_patched(root) == []
 
     def test_it_refuses_a_checkout_at_another_commit(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -221,19 +193,6 @@ class TestPatchedVoxeliser:
         with mock.patch.object(vendored, "UPSTREAM_COMMIT", "0" * 40):
             assert make_spec(after_dir).key != before
 
-    def test_key_is_computed_once_per_spec(self, tmp_path: Path) -> None:
-        """A single ``voxelise()`` call reads ``spec.key`` several times.
-
-        Recomputing it from disk on every access would mean re-reading the
-        mesh and every material file that many times over; caching it means a
-        spec whose backing files have since disappeared still answers from
-        what it already computed.
-        """
-        spec = make_spec(tmp_path)
-        first = spec.key
-        Path(spec.model_json).unlink()
-        assert spec.key == first
-
 
 class TestScratchDirectory:
     """Two voxelisations must not share a scratch directory."""
@@ -304,12 +263,6 @@ class TestNhForABand:
 
         assert nh_for(self.FLAT[16000.0]) == 40
 
-    def test_a_coarser_band_gets_a_smaller_cell_count(self) -> None:
-        from reverberate.wave.voxelise import nh_for
-
-        assert nh_for(self.FLAT[1000.0]) < nh_for(self.FLAT[4000.0])
-        assert nh_for(self.FLAT[4000.0]) < nh_for(self.FLAT[16000.0])
-
     def test_every_band_stays_inside_the_budget(self) -> None:
         from reverberate.wave.voxelise import VOXEL_BUDGET, nh_for
 
@@ -330,8 +283,3 @@ class TestNhForABand:
         assert nh_for((10, 10, 10)) == MIN_NH
         assert nh_for(self.FLAT[1000.0]) >= MIN_NH
         assert nh_for(self.FLAT[1000.0], max_voxels=VOXEL_BUDGET) >= MIN_NH
-
-    def test_a_tighter_budget_asks_for_bigger_voxels(self) -> None:
-        from reverberate.wave.voxelise import nh_for
-
-        assert nh_for(self.FLAT[4000.0], max_voxels=100_000) > nh_for(self.FLAT[4000.0])

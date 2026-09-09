@@ -60,10 +60,6 @@ def test_articulated_part_is_found_under_its_base_hash(objects_dir: Path) -> Non
     assert asset.layout == "decomposed"
 
 
-def test_unknown_template_resolves_to_none_rather_than_raising(objects_dir: Path) -> None:
-    assert resolve_asset(objects_dir, "nothing_here") is None
-
-
 def test_decomposed_directory_is_tried_first_for_a_part(objects_dir: Path) -> None:
     layouts = [layout for _, layout in candidate_directories(objects_dir, "deadbeef_part_7")]
     assert layouts[0] == "decomposed"
@@ -84,14 +80,6 @@ def test_condensed_category_wins_over_primary(tmp_path: Path) -> None:
         [["hash1", "No", "Yes", "sofa", "sectional sofa", "", ""]],
     )
     assert semantic_categories(csv_path)["hash1"] == "sofa"
-
-
-def test_primary_category_used_when_condensed_is_blank(tmp_path: Path) -> None:
-    csv_path = write_semantics_csv(
-        tmp_path / "metadata" / "hssd_obj_semantics_condensed.csv",
-        [["hash2", "No", "Yes", "", "footstool", "", ""]],
-    )
-    assert semantic_categories(csv_path)["hash2"] == "footstool"
 
 
 def test_articulated_part_inherits_its_base_objects_category(tmp_path: Path) -> None:

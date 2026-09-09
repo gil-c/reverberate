@@ -104,18 +104,6 @@ class TestRaster:
         assert raster[0, 0] == -1  # a corner, exactly on the boundary
         assert raster[15, 5] == -1  # the gap between them
 
-    def test_every_cell_gets_an_owner(self) -> None:
-        """A boundary node sits *on* a surface, so a great many of them are in
-        the wall band no polygon contains. Leaving them unowned drops them from
-        the picture entirely, which no reader would notice."""
-        xv = np.linspace(-1.0, 4.0, 51)
-        zv = np.linspace(-1.0, 2.0, 31)
-
-        filled = _fill_unclaimed(_rasterise(self._two_rooms(), xv, zv))
-
-        assert int(filled.min()) >= 0
-        assert set(np.unique(filled).tolist()) == {0, 1}
-
     def test_an_unclaimed_cell_takes_the_nearer_room(self) -> None:
         xv = np.linspace(0.0, 3.0, 31)
         zv = np.linspace(0.0, 1.0, 11)

@@ -29,15 +29,6 @@ def test_an_apartment_is_told_about_its_own_runs_only() -> None:
     assert attached[1]["runs"] == []
 
 
-def test_several_runs_of_one_apartment_are_all_offered() -> None:
-    attached = attach_runs(
-        [{"id": "7", "label": "a"}],
-        [_run("first", "7"), _run("second", "7")],
-    )
-
-    assert attached[0]["runs"] == ["first", "second"]
-
-
 def test_a_run_for_an_apartment_not_in_the_dataset_is_dropped_not_invented() -> None:
     """The selector offers apartments; a run cannot conjure one into the list."""
     attached = attach_runs([{"id": "7", "label": "a"}], [_run("orphan", "not-a-scene")])

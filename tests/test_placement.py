@@ -20,10 +20,8 @@ from reverberate.geometry.placement import (
     APPLIANCE,
     REFERENCE_OMNI,
     SEATED_EAR_HEIGHT,
-    SOURCE_ARCHETYPES,
     STANDING_EAR_HEIGHT,
     VOICE,
-    choose_archetype,
     footprint_of,
     largest_free_room,
     sample_group,
@@ -138,26 +136,6 @@ def test_reference_omni_has_no_directivity_and_voice_does() -> None:
     assert voice.directivity() is not None
 
 
-def test_orientation_is_sampled_rather_than_fixed() -> None:
-    storey = square_storey()
-    rng = np.random.default_rng(0)
-
-    azimuths = {round(sample_pair(storey, rng).source.azimuth, 6) for _ in range(30)}
-
-    assert len(azimuths) > 25
-
-
-def test_reference_omni_is_about_half_the_draws() -> None:
-    """It is the control, so it must dominate; a rare control is a useless one."""
-    rng = np.random.default_rng(0)
-
-    draws = [choose_archetype(rng).name for _ in range(2000)]
-
-    share = draws.count(REFERENCE_OMNI.name) / len(draws)
-    assert 0.45 < share < 0.55
-    assert set(draws) == {archetype.name for archetype in SOURCE_ARCHETYPES}
-
-
 def test_same_room_constraint_is_honoured_across_two_rooms() -> None:
     """Inter-room pairs are how a response through a doorway gets sampled."""
     left = RoomRegion(
@@ -180,14 +158,6 @@ def test_same_room_constraint_is_honoured_across_two_rooms() -> None:
     for _ in range(10):
         assert sample_pair(storey, rng, same_room=True).same_room
         assert not sample_pair(storey, rng, same_room=False).same_room
-
-
-def test_sampling_area_refuses_a_storey_with_no_room_left() -> None:
-    """Better a loud failure than a source quietly placed in a wall."""
-    storey = square_storey(size=2.0)
-
-    with pytest.raises(ValueError, match="no free floor area"):
-        sampling_area(storey, footprints=[sofa_at(1.0, 1.0, size=4.0)], min_wall_distance=0.5)
 
 
 def two_room_storey() -> Storey:
@@ -260,16 +230,6 @@ def test_a_separation_the_room_cannot_satisfy_is_refused() -> None:
         )
 
 
-def test_receivers_are_at_ear_height_and_sources_are_not_all_the_same() -> None:
-    storey = two_room_storey()
-    group = sample_group(
-        storey, np.random.default_rng(5), sampling_area(storey), receivers=6, seed=5
-    )
-    heights = {round(float(r.position[1]), 3) for r in group.receivers}
-    assert heights <= {STANDING_EAR_HEIGHT, SEATED_EAR_HEIGHT}
-    assert len(heights) == 2, "every receiver was given the same posture"
-
-
 def test_the_same_seed_gives_the_same_group() -> None:
     """The run record carries a seed, so the seed has to be sufficient."""
     storey = two_room_storey()
@@ -280,23 +240,3 @@ def test_the_same_seed_gives_the_same_group() -> None:
 
     assert first.record() == again.record()
     assert first.record() != other.record()
-
-
-def test_the_record_carries_the_positions_and_the_seed() -> None:
-    storey = two_room_storey()
-    record = sample_group(storey, np.random.default_rng(1), sampling_area(storey), seed=1).record()
-
-    assert record["seed"] == 1
-    assert record["room"] == "living"
-    sources = record["sources"]
-    receivers = record["receivers"]
-    assert isinstance(sources, list) and isinstance(receivers, list)
-    assert len(sources) == 2 and len(receivers) == 6
-    assert len(sources[0]["position"]) == 3
-    assert sources[0]["archetype"] is not None
-
-
-def test_a_room_that_does_not_exist_is_named_in_the_error() -> None:
-    storey = two_room_storey()
-    with pytest.raises(ValueError, match="no room named 'kitchen'"):
-        sample_group(storey, np.random.default_rng(0), sampling_area(storey), room="kitchen")

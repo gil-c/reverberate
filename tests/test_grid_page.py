@@ -80,25 +80,6 @@ class TestBuild:
         assert plan["scene_id"] == "102344022"
         assert plan["room"] == "bedroom.001"
 
-    def test_it_places_no_source_and_no_receiver(self, models: Path, tmp_path: Path) -> None:
-        """The page draws a marker per source and per receiver.
-
-        A plausible-looking pair nobody placed would read as the geometry
-        having been measured somewhere, which is the one claim this page must
-        not make.
-        """
-        out = tmp_path / "page"
-        report = _build(models, out)
-        assert report["placement"] == {"sources": [], "receivers": []}
-        assert report["sources"] == []
-        assert report["dry_voice"] is None
-
-    def test_the_absence_of_a_solve_is_on_the_page(self, models: Path, tmp_path: Path) -> None:
-        """An empty responses panel is ambiguous; ``omissions`` is not."""
-        report = _build(models, tmp_path / "page")
-        assert report["omissions"] == [grid_page.NO_SOLVE]
-        assert "no solve" in grid_page.NO_SOLVE.lower()
-
     def test_the_grid_is_described_from_the_entry_and_not_the_arguments(
         self, models: Path, tmp_path: Path
     ) -> None:

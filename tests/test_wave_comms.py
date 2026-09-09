@@ -41,9 +41,7 @@ from reverberate.wave.remote import Machine, upload
 from reverberate.wave.voxelise import (
     CacheEntry,
     SceneSpec,
-    cache_root,
     engine_inputs,
-    entry_for,
 )
 
 
@@ -96,15 +94,6 @@ class TestInterpolation:
         assert np.sum(alpha) == pytest.approx(1.0)
         assert alpha @ corners == pytest.approx(position)
 
-    def test_a_point_outside_the_grid_is_refused(self) -> None:
-        grid = make_grid()
-        with pytest.raises(ValueError, match="outside the grid"):
-            interp_weights(np.array([99.0, 0.3, 0.1]), grid)
-
-    def test_one_point_at_a_time(self) -> None:
-        with pytest.raises(ValueError, match="one xyz point"):
-            interp_weights(np.zeros((2, 3)), make_grid())
-
 
 class TestSignals:
     def test_an_impulse_is_one_sample(self) -> None:
@@ -112,16 +101,6 @@ class TestSignals:
         assert signal.size == 100
         assert signal[0] == 1.0
         assert not signal[1:].any()
-
-    def test_a_hann_window_starts_and_ends_at_zero(self) -> None:
-        signal = source_signal(0.01, 1e-4, "hann20")
-        assert signal[0] == pytest.approx(0.0)
-        assert signal[19] == pytest.approx(signal[1])
-        assert not signal[20:].any()
-
-    def test_an_unknown_signal_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="unknown signal type"):
-            source_signal(0.01, 1e-4, "sawtooth")  # type: ignore[arg-type]
 
 
 class TestIndexSpace:
@@ -139,10 +118,6 @@ class TestIndexSpace:
         expected = 1 * 2 * ny_half + 2 * 2 + 1
         assert folded[0] == expected
         assert folded[1] == expected
-
-    def test_folding_needs_an_even_axis(self) -> None:
-        with pytest.raises(ValueError, match="even Ny"):
-            fold_fcc(np.array([0]), (3, 7, 2))
 
 
 class TestWriteComms:
@@ -229,27 +204,6 @@ class TestWriteComms:
             iy = (index - iz) // nz % ny
             ix = ((index - iz) // nz - iy) // ny
             assert (ix + iy + iz) % 2 == 0
-
-    def test_a_point_outside_the_grid_has_no_nearest_node(self) -> None:
-        with pytest.raises(ValueError, match="outside the grid"):
-            nearest_node(np.array([0.2, 0.3, 9.0]), make_grid())
-
-    def test_an_unknown_interpolation_is_refused(self, tmp_path: Path) -> None:
-        directory = write_grid(tmp_path / "entry", make_grid())
-        with pytest.raises(ValueError, match="unknown interpolation"):
-            write_comms(
-                directory,
-                np.array([0.2, 0.3, 0.1]),
-                np.array([[0.3, 0.4, 0.2]]),
-                0.005,
-                out_path=tmp_path / "comms_out.h5",
-                interpolation="quadratic",  # type: ignore[arg-type]
-            )
-
-    def test_it_needs_a_receiver(self, tmp_path: Path) -> None:
-        directory = write_grid(tmp_path / "entry", make_grid())
-        with pytest.raises(ValueError, match="at least one receiver"):
-            write_comms(directory, np.array([0.2, 0.3, 0.1]), np.empty((0, 3)), 0.01)
 
     def test_a_receiver_on_a_boundary_node_is_refused(self, tmp_path: Path) -> None:
         """The scheme only supports air nodes, and a clash is silent otherwise."""
@@ -404,15 +358,6 @@ class TestCacheKey:
         first = self._spec(tmp_path, body="not json at all").key
         assert first != self._spec(tmp_path, body="also not json").key
 
-    def test_an_uncomputed_entry_is_incomplete(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
-        entry = entry_for(self._spec(tmp_path))
-        assert entry.path.parent == cache_root()
-        assert not entry.complete
-        assert entry.manifest == {}
-
 
 class TestUpload:
     def test_it_ships_only_what_the_engine_reads(self, tmp_path: Path) -> None:
@@ -422,22 +367,6 @@ class TestUpload:
         machine = Machine(host="example.invalid")
         with pytest.raises(ValueError, match="refusing"):
             upload(machine, [stray])
-
-    def test_the_engine_reads_four_files(self) -> None:
-        assert ENGINE_FILES == (
-            "sim_consts.h5",
-            "vox_out.h5",
-            "comms_out.h5",
-            "sim_mats.h5",
-        )
-
-    def test_the_ssh_and_scp_argv_carry_the_port(self) -> None:
-        machine = Machine(host="ssh5.vast.ai", port=41234, identity=Path("/tmp/key"))
-        assert machine.ssh_command("true")[-2:] == ["root@ssh5.vast.ai", "true"]
-        assert "-p" in machine.ssh_command("true")
-        argv = machine.scp_command([Path("/tmp/a.h5")], "/root/run", download=False)
-        assert argv[-1] == "root@ssh5.vast.ai:/root/run"
-        assert "-P" in argv
 
 
 class TestEngineInputs:

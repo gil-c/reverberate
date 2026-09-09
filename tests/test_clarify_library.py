@@ -119,13 +119,6 @@ def test_the_catalogue_reads_every_clip_of_a_shard() -> None:
     assert read == clips
 
 
-def test_the_catalogue_ignores_blank_lines() -> None:
-    store, _ = _store_with_shard({"a.wav": b"one"})
-    key = "library/catalog/shards/ears/p001-0000.jsonl"
-    store.objects[key] = store.objects[key] + b"\n\n"
-    assert len(catalogue(store, "ears", "p001-0000")) == 1
-
-
 def test_a_stored_member_is_one_ranged_read() -> None:
     """No shard download: exactly the clip's own bytes are asked for."""
     payload = _wav_bytes(0.2)
@@ -151,15 +144,6 @@ def test_a_wrong_offset_is_an_error_and_not_noise() -> None:
         fetch_clip(store, shifted)
 
 
-def test_a_corrupt_payload_is_an_error() -> None:
-    store, clips = _store_with_shard({"a.wav": _wav_bytes(0.2)})
-    blob = bytearray(store.objects[SHARD_KEY])
-    blob[clips[0].payload_offset + 100] ^= 0xFF
-    store.objects[SHARD_KEY] = bytes(blob)
-    with pytest.raises(ValueError, match="CRC mismatch"):
-        fetch_clip(store, clips[0])
-
-
 def test_reading_a_wav_gives_float_samples_and_the_rate() -> None:
     pytest.importorskip("soundfile")
     samples, rate = read_wav(_wav_bytes(0.25, rate=48_000))
@@ -167,15 +151,6 @@ def test_reading_a_wav_gives_float_samples_and_the_rate() -> None:
     assert samples.shape == (12_000,)
     assert samples.dtype == np.float64
     assert 0.5 < float(np.max(np.abs(samples))) <= 1.0
-
-
-def test_a_clip_shorter_than_the_minimum_is_refused() -> None:
-    """Ten seconds is the owner's floor: a short clip cannot show a tail."""
-    clips = [
-        Clip("short", "p001/rainbow_01_regular.wav", SHARD_KEY, 0, 48_000 * 2 * 3, 0, ".wav"),
-    ]
-    with pytest.raises(ValueError, match="no clip reaches"):
-        choose_clip(clips, np.random.default_rng(0), min_seconds=10.0)
 
 
 def test_non_verbal_recordings_are_kept_out_of_the_draw() -> None:

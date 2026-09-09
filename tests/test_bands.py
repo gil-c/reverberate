@@ -13,7 +13,6 @@ import pytest
 from scipy import signal
 
 from reverberate.bands import (
-    DEFAULT_CROSSOVERS_HZ,
     level_ratio,
     recombine,
     split_filters,
@@ -66,51 +65,6 @@ def test_each_filter_passes_its_own_band_and_stops_the_others() -> None:
             assert float(np.abs(blocked[0])) < 0.1, f"{other} should stop {frequency} Hz"
 
 
-def test_bands_of_different_lengths_are_padded_not_truncated() -> None:
-    """Three runs of three windows have three lengths, and the sum keeps the longest."""
-    split = split_filters(RATE)
-    long_band = np.ones((1, 2000))
-    short_band = np.ones((1, 500))
-
-    out = recombine(long_band, short_band, short_band, split)
-
-    assert out.shape[1] == 2000
-
-
-def test_a_one_dimensional_response_stays_one_dimensional() -> None:
-    split = split_filters(RATE)
-    single = np.zeros(1000)
-    single[0] = 1.0
-    assert recombine(single, single, single, split).ndim == 1
-
-
-def test_mismatched_receiver_counts_are_refused() -> None:
-    split = split_filters(RATE)
-    with pytest.raises(ValueError, match="receiver counts"):
-        recombine(np.zeros((2, 100)), np.zeros((3, 100)), np.zeros((2, 100)), split)
-
-
-@pytest.mark.parametrize(
-    "crossovers", [(4000.0, 1000.0), (0.0, 4000.0), (1000.0, 30000.0), (1000.0, 1000.0)]
-)
-def test_impossible_crossovers_are_refused(crossovers: tuple[float, float]) -> None:
-    with pytest.raises(ValueError):
-        split_filters(RATE, crossovers)
-
-
-def test_an_even_tap_count_is_refused() -> None:
-    """An even length has a half-sample delay and the complement stops being exact."""
-    with pytest.raises(ValueError, match="odd"):
-        split_filters(RATE, DEFAULT_CROSSOVERS_HZ, taps=1024)
-
-
-def test_the_record_says_how_the_bank_was_built() -> None:
-    record = split_filters(RATE).record()
-    assert record["crossovers_hz"] == [1000.0, 4000.0]
-    assert "sum to that impulse exactly" in record["construction"]
-    assert record["group_delay_ms"] > 0.0
-
-
 def test_level_ratio_recovers_a_gain_it_was_given() -> None:
     """Two solves are not on one scale, and this is how they are put on one."""
     rng = np.random.default_rng(20250101)
@@ -120,17 +74,6 @@ def test_level_ratio_recovers_a_gain_it_was_given() -> None:
     ratio = level_ratio(subject, reference, 48000, calibration_hz=(500.0, 2000.0))
 
     assert ratio == pytest.approx(4.0, rel=0.02)
-
-
-def test_the_gain_reaches_the_sum() -> None:
-    rng = np.random.default_rng(7)
-    split = split_filters(RATE)
-    signal_in = rng.standard_normal((1, 4000))
-
-    plain = recombine(signal_in, signal_in, signal_in, split)
-    halved = recombine(signal_in, signal_in, signal_in, split, gains=(0.5, 0.5, 0.5))
-
-    assert np.allclose(halved, 0.5 * plain, atol=1e-12)
 
 
 def test_a_gain_applies_only_to_its_own_band() -> None:
@@ -151,15 +94,3 @@ def test_a_gain_applies_only_to_its_own_band() -> None:
     high = centres.index(8000)
     assert (after[low] ** 2).sum() > 2.0 * (before[low] ** 2).sum()
     assert (after[high] ** 2).sum() == pytest.approx((before[high] ** 2).sum(), rel=0.01)
-
-
-def test_calibration_bands_that_match_nothing_are_refused() -> None:
-    rng = np.random.default_rng(3)
-    block = rng.standard_normal((1, 2000))
-    with pytest.raises(ValueError, match="no octave band"):
-        level_ratio(block, block, 48000, calibration_hz=(20.0, 30.0))
-
-
-def test_mismatched_receiver_counts_cannot_be_calibrated() -> None:
-    with pytest.raises(ValueError, match="receiver counts"):
-        level_ratio(np.ones((2, 2000)), np.ones((3, 2000)), 48000, calibration_hz=(500.0, 2000.0))

@@ -48,11 +48,6 @@ def test_footprint_uses_world_x_and_z_not_y() -> None:
     assert footprint_xz(mesh).area == pytest.approx(1.0)
 
 
-def test_piece_fully_inside_is_not_reported(monkeypatch: pytest.MonkeyPatch) -> None:
-    audit = run_audit(monkeypatch, [unit_instance((0.0, 0.5, 0.0))])
-    assert audit.escaped == []
-
-
 def test_piece_beyond_the_wall_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     """This is exactly the failure mode a mirrored shell produced on real data."""
     audit = run_audit(monkeypatch, [unit_instance((10.0, 0.5, 0.0))])

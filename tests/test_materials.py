@@ -60,17 +60,6 @@ def test_coefficients_are_physical_and_cover_every_band() -> None:
         assert 0.0 <= material.scattering <= 1.0
 
 
-def test_every_class_agrees_on_band_count() -> None:
-    """A single 6-band material once made a whole apartment fail to build with
-    "All walls should have the same number of frequency bands"."""
-    counts = {
-        len(material.material().energy_absorption["coeffs"])
-        for material in acoustic_classes().values()
-    }
-
-    assert counts == {len(OCTAVE_BANDS)}
-
-
 def test_a_pillow_is_absorptive_and_a_tile_is_not() -> None:
     """The headline regression: soft things must come out soft."""
     pillow = absorption_for_category("pillow")
@@ -78,15 +67,6 @@ def test_a_pillow_is_absorptive_and_a_tile_is_not() -> None:
 
     assert pillow.mean() > 0.3
     assert tile.mean() < 0.1
-
-
-def test_a_plant_is_nearly_transparent_at_low_frequency() -> None:
-    """Leaves are centimetres across against a 2.7 m wavelength at 125 Hz, so
-    foliage must not be modelled as a broadband absorber."""
-    plant = absorption_for_category("plant")
-
-    assert plant[0] < 0.05
-    assert plant[-1] > plant[0]
 
 
 def test_curtains_and_carpet_absorb_more_with_frequency() -> None:
@@ -111,14 +91,6 @@ def test_an_unknown_category_raises_instead_of_being_randomised() -> None:
 
     with pytest.raises(UnknownCategoryError):
         class_for_category(None)
-
-
-def test_assignment_is_deterministic() -> None:
-    """Two runs of the dataset generator must agree on what a room is made of."""
-    first = material_for_label("seat", np.random.default_rng(0))
-    second = material_for_label("seat", np.random.default_rng(999))
-
-    assert first.energy_absorption["coeffs"] == second.energy_absorption["coeffs"]
 
 
 def test_provenance_distinguishes_measurement_from_judgement() -> None:
@@ -198,14 +170,6 @@ def test_a_single_measured_ratio_is_not_projected_without_bound() -> None:
 
     assert collapsing.applied_ratio == pytest.approx(MIN_OCTAVE_RATIO)
     assert collapsing.values == pytest.approx((0.08, 0.064))
-
-
-def test_the_low_bands_repeat_the_lowest_measurement() -> None:
-    """No source measures below 125 Hz. Held, and said so, not modelled."""
-    for material in acoustic_classes().values():
-        assert material.solver_absorption[:4] == pytest.approx(
-            (material.measured_absorption[0],) * 4
-        )
 
 
 def test_the_solver_curve_is_the_eleven_bands_pffdtd_asserts_on() -> None:

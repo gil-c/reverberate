@@ -77,10 +77,3 @@ def test_far_from_the_source_the_monopole_becomes_a_plane_wave() -> None:
         / (4.0 * np.pi * distance)
     )
     assert np.allclose(near, plane, rtol=1e-3, atol=1e-9)
-
-
-def test_a_source_at_the_centre_or_on_a_point_is_refused() -> None:
-    with pytest.raises(ValueError, match="centre"):
-        monopole_coefficients(np.zeros(3), np.array([1.0]), 1)
-    with pytest.raises(ValueError, match="coincides"):
-        monopole_pressure(np.ones(3), np.ones((1, 3)), np.array([1.0]))

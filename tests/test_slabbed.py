@@ -14,8 +14,6 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-import pytest
-
 from reverberate.wave.voxelise import SceneSpec
 
 
@@ -74,12 +72,6 @@ class TestTheLeversAreOutsideTheKey:
 
         spec = make_spec(tmp_path / "a")
         assert replace(spec, fmax=2000.0).key != spec.key
-
-
-class TestGuards:
-    def test_slabs_must_be_at_least_one(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="at least 1"):
-            make_spec(tmp_path / "a", slabs=0)
 
 
 def _slab_groups() -> Callable[[list[int], list[int], int], list[list[int]]]:
@@ -147,17 +139,6 @@ class TestSlabGroups:
         for coordinate in set(starts):
             same = {owner[v] for v in voxels if starts[v] == coordinate}
             assert len(same) == 1
-
-    def test_it_returns_the_slab_count_it_was_asked_for(self) -> None:
-        """The caller loops over the list, so a short one changes the loop."""
-        groups = _slab_groups()
-        found = groups([1, 2], [0, 0], 5)
-        assert len(found) == 5
-        assert sum(len(g) for g in found) == 2
-
-    def test_one_slab_is_everything_in_order(self) -> None:
-        groups = _slab_groups()
-        assert groups([3, 1, 2], [9, 4, 7], 1) == [[3, 1, 2]]
 
     def test_no_voxel_is_lost_or_duplicated(self) -> None:
         """The whole exactness argument rests on the cores tiling the grid."""

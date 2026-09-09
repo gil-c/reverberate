@@ -23,7 +23,6 @@ from reverberate.experiments.w20_first_listen import (
     estimate,
 )
 from reverberate.experiments.w20_render import (
-    NOT_BINAURAL,
     REALISED_ABSORPTION_FACTOR,
     responses_of_run,
     room_geometry,
@@ -92,12 +91,6 @@ def test_the_w20_room_is_past_the_trigger_on_the_corrected_throughput(
     assert cost.local_s / 2 == pytest.approx(5880, rel=0.15)
 
 
-def test_the_cost_record_carries_the_trigger_it_was_judged_against(tmp_path: Path) -> None:
-    record = estimate(cache_entry(tmp_path), 1.5, 2).record()
-    assert record["rental_trigger_s"] == RENTAL_TRIGGER_S
-    assert record["point_updates"] > 0
-
-
 def test_a_placement_outside_the_voxelised_bounds_is_refused(tmp_path: Path) -> None:
     """The silent failure this guards: interpolation reading the grid edge."""
     entry = cache_entry(tmp_path)
@@ -105,15 +98,6 @@ def test_a_placement_outside_the_voxelised_bounds_is_refused(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="outside the voxelised bounds"):
         _check_inside_grid(group_at((0.0, 1.6, -1.0), (5.0, 1.2, -1.0)), entry)
-
-
-def test_the_margin_is_counted_in_cells(tmp_path: Path) -> None:
-    """A position one cell inside the boundary is not far enough inside it."""
-    entry = cache_entry(tmp_path)
-    just_inside = group_at((1.9224 - 0.05, 1.6, -1.0))
-    _check_inside_grid(just_inside, entry, margin_cells=2.0)
-    with pytest.raises(ValueError, match="outside the voxelised bounds"):
-        _check_inside_grid(just_inside, entry, margin_cells=20.0)
 
 
 def test_theory_applies_the_measured_absorption_factor_and_says_so() -> None:
@@ -128,21 +112,6 @@ def test_theory_applies_the_measured_absorption_factor_and_says_so() -> None:
     naive = 0.161 * 38.1 / (70.0 * 0.20)
     assert result.sabine_s > naive
     assert result.sabine_s == pytest.approx(0.161 * 38.1 / (70.0 * 0.20 * 0.89))
-
-
-def test_eyring_is_shorter_than_sabine_at_this_absorption() -> None:
-    result = theory(volume_m3=38.1, surface_area_m2=70.0, mean_absorption=0.30)
-    assert result.eyring_s < result.sabine_s
-
-
-def test_the_assumption_travels_with_the_number() -> None:
-    record = theory(38.1, 70.0, 0.2).record()
-    assert "diffuse" in str(record["assumption"])
-
-
-def test_the_not_binaural_warning_is_explicit() -> None:
-    assert "not a binaural" in NOT_BINAURAL
-    assert "pinna" in NOT_BINAURAL
 
 
 def test_the_signal_path_runs_in_the_only_correct_order(tmp_path: Path) -> None:

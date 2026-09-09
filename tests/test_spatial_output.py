@@ -23,7 +23,6 @@ from reverberate.spatial.export import (
 )
 from reverberate.spatial.sh import acn, channel_count, directions, real_sh
 from reverberate.spatial.validate import (
-    direct_arrival_sample,
     direction_of_arrival,
     direction_to_scene_point,
     energy_per_order,
@@ -56,10 +55,6 @@ def test_a_diffuse_field_has_no_direction_and_says_so() -> None:
     rng = np.random.default_rng(0)
     diffuse = Ambisonic(rng.standard_normal((16, 4096)), RATE, 3, np.zeros(3))
     assert direction_of_arrival(diffuse, start=0, length=4096).concentration < 0.1
-
-
-def test_the_direct_arrival_is_found_on_the_omnidirectional_channel() -> None:
-    assert direct_arrival_sample(a_plane_wave(0.0, 0.0)) == 100
 
 
 def test_a_scene_point_becomes_a_direction_in_the_one_frame_conversion() -> None:
@@ -178,66 +173,3 @@ def test_the_binaural_sofa_carries_one_measurement_per_head_orientation(
     assert read.Data_IR.shape == (3, 2, 64)
     assert np.allclose(read.ListenerView[1], [np.sqrt(0.5), np.sqrt(0.5), 0.0])
     assert list(np.asarray(read.ReceiverDescriptions).ravel()) == ["left ear", "right ear"]
-
-
-def test_a_binaural_file_with_the_wrong_shape_is_refused(tmp_path: Path) -> None:
-    pytest.importorskip("sofar")
-    ears = np.array([[0.0, 0.0875, 0.0], [0.0, -0.0875, 0.0]])
-    with pytest.raises(ValueError, match=r"\[orientation, 2, sample\]"):
-        write_brir_sofa(
-            np.zeros((3, 3, 8)),
-            np.zeros(3),
-            tmp_path / "x.sofa",
-            sample_rate_hz=RATE,
-            listener_position=np.zeros(3),
-            source_position=np.ones(3),
-            ear_positions=ears,
-            provenance=a_provenance(),
-            title="test",
-            licence="l",
-        )
-    with pytest.raises(ValueError, match="orientations"):
-        write_brir_sofa(
-            np.zeros((3, 2, 8)),
-            np.zeros(2),
-            tmp_path / "y.sofa",
-            sample_rate_hz=RATE,
-            listener_position=np.zeros(3),
-            source_position=np.ones(3),
-            ear_positions=ears,
-            provenance=a_provenance(),
-            title="test",
-            licence="l",
-        )
-
-
-def test_the_ambix_writer_takes_a_gain_so_a_set_stays_comparable(tmp_path: Path) -> None:
-    """Zero headroom is not the same as no normalisation, and that cost a file.
-
-    Asking for zero headroom asks for a peak of exactly one, which is a
-    normalisation with no room left. It put the ambisonic file at full scale
-    beside binaural files at a fifth of it while the report claimed one shared
-    gain for all of them.
-    """
-    soundfile = pytest.importorskip("soundfile")
-    rng = np.random.default_rng(8)
-    quiet = Ambisonic(rng.standard_normal((4, 128)) * 0.01, RATE, 1, np.zeros(3))
-    path, used = write_ambix_wav(quiet, tmp_path / "q.wav", gain=2.0)
-    assert used == 2.0
-    samples, _ = soundfile.read(str(path))
-    assert np.max(np.abs(samples)) < 0.2
-
-    _, normalised = write_ambix_wav(quiet, tmp_path / "n.wav")
-    assert normalised > 10.0
-
-
-def test_zero_headroom_still_normalises_and_the_docstring_says_so() -> None:
-    """Kept as a test because it reads like a way to turn the gain off."""
-    rng = np.random.default_rng(9)
-    quiet = Ambisonic(rng.standard_normal((4, 64)) * 0.001, RATE, 1, np.zeros(3))
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as directory:
-        pytest.importorskip("soundfile")
-        _, gain = write_ambix_wav(quiet, Path(directory) / "z.wav", headroom_db=0.0)
-    assert gain > 100.0

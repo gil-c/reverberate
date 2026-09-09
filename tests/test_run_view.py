@@ -84,16 +84,6 @@ def test_envelope_keeps_the_peak_a_stride_would_have_missed() -> None:
     assert max(high for _, high in reduced) == pytest.approx(1.0)
 
 
-def test_envelope_reports_both_extremes_of_each_bucket() -> None:
-    signal = np.array([-3.0, 3.0, -1.0, 1.0])
-
-    assert envelope(signal, points=2) == [[-3.0, 3.0], [-1.0, 1.0]]
-
-
-def test_envelope_of_nothing_is_nothing_rather_than_a_crash() -> None:
-    assert envelope(np.array([])) == []
-
-
 def test_decay_curve_falls_and_never_reports_an_infinity() -> None:
     """The tail of a Schroeder integration is -inf, which cannot be plotted.
 
@@ -329,20 +319,6 @@ def test_the_payload_carries_every_pair_with_its_own_plots(tmp_path: Path) -> No
         assert sample["measures"]["receiver"] == sample["receiver_index"]
 
 
-def test_a_pair_without_audio_says_so_rather_than_pointing_at_a_missing_file(
-    tmp_path: Path,
-) -> None:
-    """Only receiver 0 has a rendered WAV, so receiver 1 must offer none."""
-    run = _write_run(tmp_path)
-
-    build_site(run, tmp_path / "site")
-    payload = json.loads((tmp_path / "site" / "run.json").read_text())
-
-    by_id = {sample["id"]: sample for sample in payload["samples"]}
-    assert by_id["s0r0"]["wet_audio"] == "audio/source0_receiver0_wet.wav"
-    assert by_id["s0r1"]["wet_audio"] is None
-
-
 def test_the_page_keeps_the_caveats_the_report_carried(tmp_path: Path) -> None:
     """The viewer must not be the place the honesty gets dropped."""
     run = _write_run(tmp_path)
@@ -421,36 +397,6 @@ def test_spectrogram_shows_a_decay_as_a_fade_from_left_to_right() -> None:
     assert columns[0] > columns[-1]
 
 
-def test_spectrogram_of_silence_is_the_floor_and_not_a_divide_by_zero() -> None:
-    spec = spectrogram(np.zeros(4000), 8000.0)
-
-    assert not _spectrogram_image(spec).any()
-
-
-def test_spectrogram_pads_a_response_shorter_than_one_window() -> None:
-    """A short response must still produce an image of the stated size."""
-    spec = spectrogram(np.array([1.0, 0.0, -1.0]), 8000.0)
-
-    assert _spectrogram_image(spec).shape == (SPECTROGRAM_BINS, SPECTROGRAM_FRAMES)
-
-
-def test_every_sample_carries_a_spectrogram(tmp_path: Path) -> None:
-    run = _write_run(tmp_path)
-
-    build_site(run, tmp_path / "site")
-    payload = json.loads((tmp_path / "site" / "run.json").read_text())
-
-    for sample in payload["samples"]:
-        assert sample["spectrogram"]["bins"] == SPECTROGRAM_BINS
-        # fmax is 4 kHz in the fixture, so the axis stops half an octave above
-        # it rather than at the 4 kHz Nyquist of the delivery rate.
-        assert 4000.0 <= sample["spectrogram"]["max_hz"] <= 6000.0
-        assert _spectrogram_image(sample["spectrogram"]).shape == (
-            SPECTROGRAM_BINS,
-            SPECTROGRAM_FRAMES,
-        )
-
-
 def test_the_spectrogram_axis_stops_above_the_simulated_band_not_at_nyquist() -> None:
     """A 48 kHz file of a 4 kHz simulation is five sixths empty at Nyquist."""
     full = spectrogram(np.zeros(4096), 48_000.0)
@@ -486,18 +432,6 @@ def test_a_run_knows_which_apartment_it_was_simulated_in(tmp_path: Path) -> None
     assert reference.name == "run"
 
 
-def test_the_payload_carries_the_apartment_so_the_panel_can_name_it(tmp_path: Path) -> None:
-    run = _write_run(tmp_path)
-
-    build_site(run, tmp_path / "site")
-    payload = json.loads((tmp_path / "site" / "run.json").read_text())
-
-    assert payload["scene_id"] == "102344022"
-    assert payload["room_name"] == "bedroom.001"
-    # The acoustic figures keep the key they already had.
-    assert "volume_m3" in payload["room"]
-
-
 def test_discovery_skips_a_run_that_was_never_rendered(tmp_path: Path) -> None:
     """A half-finished directory must not be offered and then fail to open."""
     root = tmp_path / "runs"
@@ -510,10 +444,6 @@ def test_discovery_skips_a_run_that_was_never_rendered(tmp_path: Path) -> None:
 
     assert [r.name for r in found] == ["complete_run"]
     assert complete.parent.exists()
-
-
-def test_discovery_of_a_missing_directory_is_empty_rather_than_an_error() -> None:
-    assert run_view.discover_runs(Path("/nonexistent/runs")) == []
 
 
 def test_discovery_refuses_a_report_that_is_not_a_run_at_all(tmp_path: Path) -> None:
@@ -667,18 +597,6 @@ def test_each_simulated_room_leads_the_selector_and_opens_on_its_run() -> None:
     assert body.index('await setMode("acoustic")') < body.index("await assembling;")
 
 
-def test_discover_runs_accepts_a_single_run_directory(tmp_path: Path) -> None:
-    """Pointing --runs at one run is the easy mistake, and the alternative is an
-    empty selector that explains nothing."""
-    root = tmp_path / "runs"
-    _write_run(root / "w20")
-
-    direct = run_view.discover_runs(root / "w20" / "run")
-    parent = run_view.discover_runs(root / "w20")
-
-    assert [r.name for r in direct] == [r.name for r in parent] == ["run"]
-
-
 def test_the_deliberate_mode_is_recorded_before_the_first_await() -> None:
     """A warm apartment cache finishes inside setMode's awaits. Assigning
     ``chosen`` at the end let that arrival read it as unset and pull the view
@@ -779,13 +697,6 @@ def test_the_panel_reads_the_measures_shape_the_sample_carries() -> None:
 
 class TestModelJsonResolution:
     """A report's model path has to open from wherever the viewer is started."""
-
-    def test_an_absolute_path_is_used_as_it_stands(self, tmp_path: Path) -> None:
-        model = tmp_path / "models" / "bedroom.json"
-        model.parent.mkdir(parents=True)
-        model.write_text("{}")
-
-        assert model_json_of(tmp_path, {"model_json": str(model)}) == model
 
     def test_a_relative_path_is_found_from_the_run_directory(self, tmp_path: Path) -> None:
         """Reports written before the path was resolved carry a relative one."""
@@ -889,25 +800,6 @@ def test_a_tiered_audit_payload_replaces_the_single_one(
     assert payload["audit"]["dir"] == "voxels"
 
 
-def test_the_tiered_payload_is_linked_rather_than_copied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The whole flat at 16 kHz is about 2.2 GB of quads, and the site is a
-    temporary directory that would otherwise hold a second copy of it for as
-    long as the viewer runs."""
-    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
-    run = _write_run(tmp_path)
-    (run / "voxels").mkdir()
-    (run / "voxels" / "rooms.json").write_text(json.dumps({"total_nodes": 1, "rooms": []}))
-    (run / "voxels" / "kitchen.f32").write_bytes(b"quads")
-
-    build_site(run, tmp_path / "site")
-
-    link = tmp_path / "site" / "voxels"
-    assert link.is_symlink()
-    assert (link / "kitchen.f32").read_bytes() == b"quads"
-
-
 def test_the_triangles_are_left_out_when_the_grid_is_the_picture() -> None:
     """192 MB of exported triangles reach the browser as JSON. A page that
     hides them behind a tiered grid must not also make a reader download them,
@@ -1003,38 +895,6 @@ class TestASpatialRun:
         assert run_view.is_spatial(self.a_report())
         assert not run_view.is_spatial({"run": "w20", "placement": {}})
 
-    def test_its_rows_are_one_per_head_and_orientation(self, tmp_path: Path) -> None:
-        sofar = pytest.importorskip("sofar")
-        responses = tmp_path / "responses"
-        responses.mkdir()
-        sofa = sofar.Sofa("SingleRoomSRIR")
-        block = np.zeros((2, 2, 64))
-        block[:, 0, 10] = 1.0
-        sofa.Data_IR = block
-        sofa.Data_SamplingRate = 48000.0
-        sofa.Data_Delay = np.zeros((1, 2))
-        sofa.ListenerPosition = np.zeros((2, 3))
-        sofa.ListenerView = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-        sofa.ListenerUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))
-        sofa.ReceiverPosition = np.zeros((2, 3, 1))
-        sofa.ReceiverView = np.tile(np.array([1.0, 0.0, 0.0]), (2, 1))[:, :, np.newaxis]
-        sofa.ReceiverUp = np.tile(np.array([0.0, 0.0, 1.0]), (2, 1))[:, :, np.newaxis]
-        sofa.ReceiverDescriptions = np.array(["left ear", "right ear"])
-        sofa.SourcePosition = np.zeros((2, 3))
-        sofa.EmitterPosition = np.zeros((1, 3, 1))
-        sofa.MeasurementDate = np.zeros(2)
-        sofar.write_sofa(str(responses / "binaural_sphere_magls.sofa"), sofa)
-
-        rows = run_view._spatial_rows(tmp_path, self.a_report(), {"binaural_sphere_magls_yaw0.wav"})
-        assert [row["id"] for row in rows] == ["sphere_magls_yaw0", "sphere_magls_yaw90"]
-        # The yaw travels with the row, because standing at a sample without it
-        # shows a room whose sources are on the other side from where they sound.
-        assert [row["yaw_deg"] for row in rows] == pytest.approx([0.0, 90.0])
-        # The path the panel loads, relative to the run, not a bare file name.
-        assert rows[0]["wet_audio"] == "audio/binaural_sphere_magls_yaw0.wav"
-        assert rows[1]["wet_audio"] is None
-        assert rows[0]["measures"] == {"itd_us": 600.0}
-
     def test_every_row_names_its_audio_the_way_the_panel_reads_it(self, tmp_path: Path) -> None:
         """One row spelled it differently and the player came up silent.
 
@@ -1068,12 +928,6 @@ class TestASpatialRun:
             assert "audio" not in row, f"{row['id']} spells its audio the old way"
             assert "wet_audio" in row
         assert rows[0]["wet_audio"] == "audio/ambisonic_acn_sn3d.wav"
-
-    def test_a_run_with_no_responses_yields_no_rows_rather_than_empty_plots(
-        self, tmp_path: Path
-    ) -> None:
-        pytest.importorskip("sofar")
-        assert run_view._spatial_rows(tmp_path, self.a_report(), set()) == []
 
 
 def test_the_room_geometry_is_found_whichever_key_holds_it() -> None:

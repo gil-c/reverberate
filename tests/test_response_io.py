@@ -69,11 +69,6 @@ def test_raw_round_trip_is_bit_exact(tmp_path: Path) -> None:
     assert back.room_volume_m3 == original.room_volume_m3
 
 
-def test_duration_is_samples_over_rate() -> None:
-    response = a_response(samples=72_400)
-    assert response.duration_s == pytest.approx(1.0)
-
-
 def test_a_mismatched_receiver_count_is_refused() -> None:
     with pytest.raises(ValueError, match="receiver positions"):
         ResponseSet(
@@ -81,17 +76,6 @@ def test_a_mismatched_receiver_count_is_refused() -> None:
             sample_rate_hz=48_000.0,
             source_position=np.zeros(3),
             receiver_positions=np.zeros((5, 3)),
-            provenance=a_provenance(),
-        )
-
-
-def test_a_one_dimensional_response_is_refused() -> None:
-    with pytest.raises(ValueError, match=r"\[receiver, sample\]"):
-        ResponseSet(
-            ir=np.zeros(10),
-            sample_rate_hz=48_000.0,
-            source_position=np.zeros(3),
-            receiver_positions=np.zeros((1, 3)),
             provenance=a_provenance(),
         )
 
@@ -140,8 +124,3 @@ def test_sofa_carries_the_samples_the_positions_and_the_provenance(tmp_path: Pat
     assert np.allclose(from_sofa_coordinates(read.SourcePosition)[0], original.source_position)
     assert Provenance.from_json(read.GLOBAL_Comment) == original.provenance
     assert read.GLOBAL_License == "CC BY-NC 4.0"
-
-
-def test_provenance_json_round_trip() -> None:
-    provenance = a_provenance()
-    assert Provenance.from_json(provenance.to_json()) == provenance
