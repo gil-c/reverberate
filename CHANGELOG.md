@@ -67,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renumbered: a name printed in a report has to keep meaning the same scene.
   The export manifest carries it as `dwelling`.
 
+- `scripts/plan_top_view.py`: a scene drawn twice, the rooms beside the
+  dataset's own regions, with each dissolved boundary and each passage marked.
+  It reads the rules from `reverberate.geometry.rooms` rather than restating
+  them. The rendered plans are not checked in.
+
+- `scripts/dwelling_inventory.py`: the whole scene set counted by the same
+  rules, one row per storey. 176 dwellings from 168 scenes, 1 520 rooms from
+  2 154 regions -- the dataset over-cuts by about a third.
+
 - `scripts/room_openings.py`: every shared boundary of a scene with the rule
   that decided it. This is where `DOOR_MAX_M` and `WALL_MAX_M` were read off.
 

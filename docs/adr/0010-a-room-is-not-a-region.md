@@ -92,3 +92,10 @@ anything may use: widening it by 5 cm moves every number here.
   with `make test-slow`.
 - `scripts/room_openings.py` prints every shared boundary with the rule that
   decided it. It is where the two thresholds above were read off.
+- `scripts/plan_top_view.py` draws a scene twice, the rooms beside the dataset's
+  own regions, and reads the rules from the module rather than restating them,
+  so the picture cannot drift from what is solved. The rendered plans are not
+  checked in; run it when you need one.
+- `scripts/dwelling_inventory.py` applies the rules to the whole scene set, one
+  row per storey: 176 dwellings from 168 scenes, **1 520 rooms from 2 154
+  regions**.
