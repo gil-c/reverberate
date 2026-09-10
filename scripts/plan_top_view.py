@@ -224,7 +224,7 @@ def draw(scene, out, root=ROOT):
     for (i, j), boundary in shared_boundaries(polys, wall).items():
         if regions[i].label in OUTDOOR_LABELS and regions[j].label in OUTDOOR_LABELS:
             continue
-        line = polys[i].exterior.intersection(polys[j].buffer(0.16))
+        line = polys[i].boundary.intersection(polys[j].buffer(0.16))
         same = owner[regions[i].name] is owner[regions[j].name]
         if same:
             dissolved.append(line)
@@ -268,12 +268,15 @@ def draw(scene, out, root=ROOT):
     flag_name, flag_txt = FLAG.get(scene, (None, "-"))
     for i, r in enumerate(regions):
         outdoor = r.label in OUTDOOR_LABELS
-        xs, zs = polys[i].exterior.xy
-        ax.fill(xs, zs, color="0.85" if outdoor else cmap(i % 20), alpha=0.35, zorder=0)
-        ax.plot(xs, zs, color="0.2" if outdoor else cmap(i % 20), lw=2.2, zorder=3)
-        if r.name == flag_name:
-            ax.fill(xs, zs, facecolor="none", hatch="///", edgecolor="crimson", lw=0, zorder=1)
-            ax.plot(xs, zs, color="crimson", lw=3.2, zorder=4)
+        # A region whose authored loop self-intersects cleans to a MultiPolygon;
+        # two of the 168 scenes have one, so never assume a single ring here.
+        for part in _runs(polys[i]):
+            xs, zs = part.exterior.xy
+            ax.fill(xs, zs, color="0.85" if outdoor else cmap(i % 20), alpha=0.35, zorder=0)
+            ax.plot(xs, zs, color="0.2" if outdoor else cmap(i % 20), lw=2.2, zorder=3)
+            if r.name == flag_name:
+                ax.fill(xs, zs, facecolor="none", hatch="///", edgecolor="crimson", lw=0, zorder=1)
+                ax.plot(xs, zs, color="crimson", lw=3.2, zorder=4)
         place(ax, polys[i], f"{r.name}\n{metres(polys[i].area)}", 9.5, centre, pending)
     ax.set_title(
         f"Le decoupage du dataset : region_annotations de {scene}\nhachure rouge = {flag_txt}",
@@ -321,5 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", default=".")
     parser.add_argument("--hssd-root", type=Path, default=ROOT)
     args = parser.parse_args()
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     for scene in args.scenes:
-        draw(scene, Path(args.out_dir) / f"plan_{scene}.png", args.hssd_root)
+        draw(scene, out_dir / f"plan_{scene}.png", args.hssd_root)
