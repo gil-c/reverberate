@@ -15,15 +15,30 @@ from shapely.geometry import Point
 
 from reverberate.geometry.apartment import Storey, build_storey
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
+from reverberate.geometry.outer_surface import outer_surface
 from reverberate.geometry.sim_geometry import (
     carve_of,
     obstacle_assignments,
     obstacle_collider,
-    outer_surface,
     sample_points,
     shell_assignments,
     simulation_geometry,
 )
+from reverberate.settings import DATA_ROOT_ENV
+
+
+@pytest.fixture(autouse=True)
+def _own_data_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give each test its own caches.
+
+    The per-template collider pool is keyed on the template name, which in HSSD
+    is a hash of the asset itself. A test that invents the name ``abc`` for two
+    different meshes breaks that assumption, and the second would silently read
+    the first one's answer.
+    """
+    monkeypatch.setenv(DATA_ROOT_ENV, str(tmp_path_factory.mktemp("data")))
 
 
 def square_storey(size: float = 4.0) -> Storey:

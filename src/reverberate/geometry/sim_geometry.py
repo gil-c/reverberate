@@ -30,6 +30,7 @@ import pyroomacoustics as pra
 import trimesh
 from shapely.geometry import MultiPoint, Point
 
+from reverberate.geometry import collider_cache
 from reverberate.geometry.apartment import (
     Storey,
     build_apartment,
@@ -40,7 +41,8 @@ from reverberate.geometry.carve import CarveReport, CarveResult, carve_collider
 from reverberate.geometry.hssd_assets import category_for_template, resolve_asset
 from reverberate.geometry.hssd_room import FurnitureInstance, load_object_instances
 from reverberate.geometry.materials import material_for_label
-from reverberate.geometry.orientation import BOTH, is_closed, orient_for_air
+from reverberate.geometry.orientation import BOTH, orient_for_air
+from reverberate.geometry.outer_surface import outer_surface
 from reverberate.geometry.pra_room import MeshMaterialAssignment
 from reverberate.geometry.sealed import SealedReport, sealed_regions
 from reverberate.viz.room_surfaces import shell_surface_labels
@@ -103,52 +105,6 @@ class GeometrySummary:
         )
 
 
-def outer_surface(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, bool]:
-    """The union of a collider's convex bodies, and whether the union succeeded.
-
-    HSSD ships colliders as convex decompositions whose bodies interpenetrate.
-    Every contact between two bodies leaves a pair of faces *inside* the solid,
-    where sound never reaches, and the voxeliser's adjacency graph around them
-    is a tangle of shards rather than one sealed surface.
-
-    That is not cosmetic. PFFDTD deliberately does not fill solids -- it builds
-    an adjacency graph so it can accept non-watertight scenes -- so the air
-    inside every object is simulated, bounded by nodes marked rigid, which is a
-    cavity with no absorption at all and a correspondingly enormous Q. Measured
-    on one bedroom: 403 such pockets holding 3.77 m3, 11 per cent of the room's
-    own air, and 211 of them resonating between 1 and 4 kHz at a mean size of
-    8.6 cm. The responses show the consequence as narrow lines near 2 kHz that
-    only emerge below -25 dB and drag the late decay to three times the early
-    one.
-
-    The union removes the buried faces exactly rather than approximately. It
-    conserves volume to the digit, so nothing about the shape is given up; only
-    the interior area goes, which is the area that was never reachable.
-
-    Returns the original mesh unchanged, and False, when the boolean engine
-    cannot do it, or when it returns something that is not actually one sealed
-    solid: an obstacle with its buried faces is still better than no obstacle,
-    and the caller reports the count rather than hiding it. Closure is checked
-    here rather than assumed, because "conserves volume to the digit" is a
-    claim about a *closed* solid, and a union that comes back open has not
-    earned it. Closure by
-    :func:`~reverberate.geometry.orientation.is_closed`, which is the claim
-    being made; ``trimesh``'s ``is_watertight`` would add edge-manifoldness on
-    top of it and discard unions that are sealed.
-    """
-    if mesh.body_count <= 1:
-        return mesh, True
-    try:
-        united = trimesh.boolean.union(list(mesh.split(only_watertight=False)))
-    except Exception:
-        return mesh, False
-    if not isinstance(united, trimesh.Trimesh) or len(united.faces) == 0:
-        return mesh, False
-    if not is_closed(united):
-        return mesh, False
-    return united, True
-
-
 @lru_cache(maxsize=512)
 def _load_and_union(hssd_root: Path, template: str) -> tuple[trimesh.Trimesh, bool] | None:
     """The unioned collider for a template, and whether the union held.
@@ -162,6 +118,15 @@ def _load_and_union(hssd_root: Path, template: str) -> tuple[trimesh.Trimesh, bo
     asset = resolve_asset(hssd_root / "objects", template)
     if asset is None:
         return None
+    # The whole of what follows is a property of the template, not of the
+    # scene, and it is the expensive part of assembling an apartment. So it is
+    # kept on disk under a key covering the code that decides it, and a warm
+    # template costs one glTF read instead of a boolean union and a flood
+    # fill. See reverberate.geometry.collider_cache.
+    cached = collider_cache.load_entry(template)
+    if cached is not None:
+        _CARVE_RESULTS[template] = cached.carve
+        return cached.mesh, cached.merged
     mesh = trimesh.load(asset.collider, force="mesh")
     if not isinstance(mesh, trimesh.Trimesh):
         return None
@@ -172,6 +137,7 @@ def _load_and_union(hssd_root: Path, template: str) -> tuple[trimesh.Trimesh, bo
     # collider unchanged and says why; see reverberate.geometry.carve.
     result = carve_collider(hssd_root, template, united)
     _CARVE_RESULTS[template] = result
+    collider_cache.store_entry(template, result.mesh, merged, result)
     return result.mesh, merged
 
 
