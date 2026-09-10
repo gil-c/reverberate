@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,7 @@ __all__ = [
     "digest_of_bytes",
     "digest_of_file",
     "shared_store",
+    "staging_key",
 ]
 
 #: Environment variables carrying the credentials. Read here, never elsewhere.
@@ -75,11 +77,32 @@ STAGING = f"{PREFIX}staging/"
 #: Object metadata key carrying the SHA-256 a reader checks against.
 DIGEST_META = "sha256"
 
+#: Above this size a staged upload is named by its digest alone, so an upload
+#: interrupted after its bytes landed can be promoted rather than re-sent --
+#: which matters at 25 GB a grid. Below it the name also carries a random
+#: suffix, because a shared name is a race: the scene pools are thousands of
+#: small files on thirty-two threads, many byte for byte identical, and two
+#: writers of the same bytes staged under one name, the first promoted it and
+#: deleted it, and the second found nothing there.
+RESUMABLE_BYTES = 64 << 20
+
 _CHUNK = 1 << 20
 
 
 class StoreError(RuntimeError):
     """A store operation failed, or returned something other than was asked for."""
+
+
+def staging_key(digest: str, size: int) -> str:
+    """Where an upload of ``size`` bytes with ``digest`` waits to be promoted.
+
+    Shared by digest for large files, so they can be resumed; unique per
+    upload for small ones, so identical small files uploaded concurrently do
+    not delete each other's staged bytes. See :data:`RESUMABLE_BYTES`.
+    """
+    if size >= RESUMABLE_BYTES:
+        return f"{STAGING}{digest}"
+    return f"{STAGING}{digest}.{uuid.uuid4().hex}"
 
 
 def digest_of_bytes(payload: bytes) -> str:
@@ -119,6 +142,8 @@ class ObjectStore(Protocol):
 
     def list(self, prefix: str, *, shared: bool = False) -> Iterator[str]: ...
 
+    def presigned_get(self, key: str, expires_in: int, *, shared: bool = False) -> str: ...
+
 
 @dataclass
 class MemoryStore:
@@ -142,7 +167,7 @@ class MemoryStore:
 
     def put_bytes(self, key: str, payload: bytes) -> str:
         digest = digest_of_bytes(payload)
-        staging = f"{STAGING}{digest}"
+        staging = staging_key(digest, len(payload))
         self.objects[staging] = payload
         self.written.append(staging)
         if len(self.objects[staging]) != len(payload):  # pragma: no cover - cannot happen here
@@ -179,6 +204,11 @@ class MemoryStore:
             if key.startswith(full) and not key.startswith(STAGING):
                 yield key if shared else key[len(PREFIX) :]
 
+    def presigned_get(self, key: str, expires_in: int, *, shared: bool = False) -> str:
+        if not self.exists(key, shared=shared):
+            raise StoreError(f"no object at {self._key(key, shared)!r} to sign for")
+        return f"memory://{self._key(key, shared)}?expires={expires_in}"
+
 
 class B2Store:
     """Backblaze B2 through its S3 compatible API.
@@ -208,7 +238,7 @@ class B2Store:
 
     def put_bytes(self, key: str, payload: bytes) -> str:
         digest = digest_of_bytes(payload)
-        staging = f"{STAGING}{digest}"
+        staging = staging_key(digest, len(payload))
         self._client.put_object(
             Bucket=self._bucket,
             Key=staging,
@@ -229,8 +259,8 @@ class B2Store:
         object of the right size is promoted rather than re-sent.
         """
         digest = digest_of_file(path)
-        staging = f"{STAGING}{digest}"
         size = path.stat().st_size
+        staging = staging_key(digest, size)
         if not self._staged(staging, size):
             with path.open("rb") as handle:
                 self._client.upload_fileobj(
@@ -310,6 +340,22 @@ class B2Store:
         shutil.move(str(partial), str(destination))
         return destination
 
+    def presigned_get(self, key: str, expires_in: int, *, shared: bool = False) -> str:
+        """A time limited, read only URL for one object, and nothing else.
+
+        What a rented machine is given instead of the bucket's keys. It can
+        fetch the one object named here until the URL expires, and it can
+        neither list the bucket nor write to it, so a machine this project does
+        not own never holds a credential. Nothing here is logged: the URL
+        carries a signature.
+        """
+        url = self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self._bucket, "Key": self._key(key, shared)},
+            ExpiresIn=expires_in,
+        )
+        return str(url)
+
     def list(self, prefix: str, *, shared: bool = False) -> Iterator[str]:
         full = self._key(prefix, shared)
         token: str | None = None
@@ -352,14 +398,41 @@ def _require(name: str) -> str:
     return value
 
 
-def _make_client() -> Any:
-    import boto3
+def _region_of(endpoint: str) -> str:
+    """B2 puts its region in the endpoint host: ``s3.eu-central-003.backblazeb2.com``.
 
+    Read off rather than configured, because the endpoint is already the one
+    setting that says where the bucket is and a second one could disagree with
+    it. An unrecognised host gives ``us-east-1``, botocore's own default, which
+    is what was in force before this function existed.
+    """
+    host = endpoint.split("://")[-1].split("/")[0]
+    parts = host.split(".")
+    return parts[1] if len(parts) > 2 and parts[0] == "s3" else "us-east-1"
+
+
+def _make_client() -> Any:
+    """The S3 client, signing with SigV4.
+
+    **Both halves of this are load bearing.** Without an explicit region and
+    signature version, botocore presigns with SigV2 -- ``AWSAccessKeyId`` and
+    ``Signature`` in the query string -- and B2 answers 401
+    ``bucket is not authorized`` to every one of those URLs, while ordinary
+    calls on the same client keep working. So the failure shows up only in
+    :meth:`B2Store.presigned_get`, which is the one thing a rented machine
+    depends on, and it shows up on the rented machine.
+    """
+    import boto3
+    from botocore.config import Config
+
+    endpoint = _require(ENDPOINT_ENV)
     return boto3.client(
         "s3",
-        endpoint_url=_require(ENDPOINT_ENV),
+        endpoint_url=endpoint,
+        region_name=_region_of(endpoint),
         aws_access_key_id=_require(KEY_ID_ENV),
         aws_secret_access_key=_require(SECRET_ENV),
+        config=Config(signature_version="s3v4"),
     )
 
 

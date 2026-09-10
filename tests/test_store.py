@@ -254,10 +254,17 @@ def test_promotion_uses_the_copy_that_survives_a_file_over_five_gigabytes(
     assert "copy" in client.calls
 
 
-def test_an_upload_interrupted_before_promotion_is_not_sent_again(tmp_path: Path) -> None:
+def test_an_upload_interrupted_before_promotion_is_not_sent_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """25 GB for one grid at 16 kHz, and a terabyte is about 22 hours. The
     staging name is the file's own digest, so the bytes of a failed attempt are
-    already under the name the next one would choose."""
+    already under the name the next one would choose.
+
+    Only files above RESUMABLE_BYTES keep that shared name; the threshold is
+    lowered here because what is under test is the resume, not the threshold.
+    """
+    monkeypatch.setattr("reverberate.store.RESUMABLE_BYTES", 0)
     payload = tmp_path / "vox_out.h5"
     payload.write_bytes(b"a grid")
     staging = f"{STAGING}{digest_of_file(payload)}"
@@ -279,3 +286,34 @@ def test_a_staged_object_of_the_wrong_size_is_sent_again(tmp_path: Path) -> None
     B2Store(client=client, bucket="Clarify").put_file("vox/a/vox_out.h5", payload)
 
     assert "upload_fileobj" in client.calls
+
+
+def test_the_region_is_read_off_the_endpoint() -> None:
+    """B2 puts it in the host, and a second setting could disagree with it."""
+    from reverberate.store import _region_of
+
+    assert _region_of("https://s3.eu-central-003.backblazeb2.com") == "eu-central-003"
+    assert _region_of("https://s3.us-west-004.backblazeb2.com/") == "us-west-004"
+    assert _region_of("https://storage.example.com") == "us-east-1"
+
+
+def test_large_uploads_keep_the_resumable_name() -> None:
+    """A 25 GB grid interrupted after its bytes landed is promoted, not re-sent."""
+    from reverberate.store import RESUMABLE_BYTES, staging_key
+
+    digest = "cd" * 32
+    assert staging_key(digest, RESUMABLE_BYTES) == f"reverberate/staging/{digest}"
+    assert staging_key(digest, RESUMABLE_BYTES) == staging_key(digest, RESUMABLE_BYTES + 1 - 1)
+
+
+def test_concurrent_identical_uploads_both_land() -> None:
+    """The race, reproduced on the in-memory store with real threads."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = MemoryStore()
+    payload = b'{"carved": false, "reason": "too small"}'
+    keys = [f"scene_pool/sim/t{i}.json" for i in range(64)]
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        list(pool.map(lambda key: store.put_bytes(key, payload), keys))
+    assert all(store.exists(key) for key in keys)
+    assert not any(k.startswith("reverberate/staging/") for k in store.objects)
