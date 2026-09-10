@@ -61,6 +61,30 @@ That single scene description is handed to both solvers. Each covers the
 frequency range where its approximation holds, and the two are recombined across
 the crossover band into one impulse response per source and listener pair.
 
+## Looking at an apartment
+
+    python -m reverberate.viz.serve_room <hssd root> --scene hssd_0002
+
+opens the dataset in a browser: pick any of its **176 storeys** by name --
+`hssd_0002`, and `hssd_0001_2` for a first floor -- and walk through it.
+
+**It does not assemble anything.** The whole dataset was assembled once and
+published to the object store, so an apartment arrives as a manifest and the
+meshes that flat happens to place: measured at **3 to 15 seconds cold, and at once
+after that, on a machine with no copy of HSSD at all**. Before that it was minutes per flat, and the reason
+is worth stating because it decided the design: turning one piece of furniture
+into the mesh the solver receives costs about a minute, the dataset places
+53 021 pieces drawn from **15 684 distinct templates**, and every apartment
+was doing that work again for furniture the flat next door also owns.
+
+So the meshes are pooled, once for the whole dataset, and only the pool is
+expensive. Rebuilding every manifest -- which is what changes when the
+reconstruction rules change -- costs about a quarter of an hour. See
+`docs/adr/0011-the-dataset-is-assembled-once-and-shared.md`.
+
+A machine with credentials for the store needs nothing else. A machine without
+them assembles locally instead, which works and is slow, and says so.
+
 ## Running the wave engine on a rented GPU
 
 The wave engine below the crossover is [PFFDTD](https://github.com/bsxfun/pffdtd),

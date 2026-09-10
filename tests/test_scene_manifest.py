@@ -9,10 +9,26 @@ import pytest
 import trimesh
 
 from reverberate.geometry.hssd_room import FurnitureInstance, RoomRegion
+from reverberate.settings import DATA_ROOT_ENV
 from reverberate.viz.room_surfaces import (
     shell_surface_labels,
 )
-from reverberate.viz.scene_manifest import build_instances, column_major, link_asset
+from reverberate.viz.scene_manifest import build_instances, column_major
+from reverberate.viz.scene_pool import link_into
+
+
+@pytest.fixture(autouse=True)
+def _own_data_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give each test its own caches.
+
+    The per-template collider pool is keyed on the template name, which in HSSD
+    is a hash of the asset itself. A test that invents the name ``abc`` for two
+    different meshes breaks that assumption, and the second would silently read
+    the first one's answer.
+    """
+    monkeypatch.setenv(DATA_ROOT_ENV, str(tmp_path_factory.mktemp("data")))
 
 
 def square_region(height: float = 2.5) -> RoomRegion:
@@ -49,10 +65,10 @@ def test_column_major_puts_translation_where_three_js_reads_it() -> None:
     assert len(flat) == 16
 
 
-def test_link_asset_exposes_the_file_without_copying_it(tmp_path: Path) -> None:
+def test_link_into_exposes_the_file_without_copying_it(tmp_path: Path) -> None:
     source = tmp_path / "object.glb"
     source.write_bytes(b"payload")
-    url = link_asset(source, tmp_path / "site" / "assets")
+    url = link_into(tmp_path / "site", "assets", "object.glb", source)
     link = tmp_path / "site" / "assets" / "object.glb"
     assert url == "assets/object.glb"
     assert link.is_symlink()
@@ -149,3 +165,25 @@ def test_manifest_entries_carry_what_the_solver_was_given() -> None:
         }
         & names
     )
+
+
+def test_rooms_json_puts_the_label_inside_an_l_shaped_room() -> None:
+    """A centroid of an L sits in the notch, outside the room; the plan must
+    write the name where the room is."""
+    from shapely.geometry import Point, Polygon
+
+    from reverberate.geometry.rooms import RoomPartition
+    from reverberate.viz.scene_manifest import rooms_json
+
+    shape = Polygon([(0, 0), (4, 0), (4, 1), (1, 1), (1, 4), (0, 4)])
+    [entry] = rooms_json(
+        [RoomPartition("living room-closet", "living room", shape, ("living room", "closet"))]
+    )
+
+    assert entry["regions"] == ["living room", "closet"]
+    label_at = entry["label_at"]
+    assert isinstance(label_at, list)
+    assert shape.contains(Point(*label_at))
+    outline = entry["outline"]
+    assert isinstance(outline, list)
+    assert outline[0][0] == outline[0][-1], "rings close on themselves"

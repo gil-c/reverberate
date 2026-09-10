@@ -34,32 +34,70 @@ import webbrowser
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from reverberate.store import shared_store
+from reverberate.geometry.scene_ids import scene_of
+from reverberate.store import ObjectStore, shared_store
+from reverberate.viz import scene_store
+from reverberate.viz.assemble_dataset import every_storey
 from reverberate.viz.run_view import RunRef, build_site, discover_runs
 from reverberate.viz.scene_cache import SceneEntry, ensure_scene
 
 STATIC_DIR = Path(__file__).parent / "web"
 
 
-def list_apartments(hssd_root: Path, first: str | None = None) -> list[dict[str, str]]:
-    """Every scene in the dataset, as an apartment the selector can offer.
+def list_apartments(
+    hssd_root: Path, first: str | None = None, store: ObjectStore | None = None
+) -> list[dict[str, str]]:
+    """Every storey in the dataset, as an apartment the selector can offer.
+
+    Labelled with this project's own name for it -- ``hssd_0011``, and a suffix
+    per storey where a scene has more than one -- because 135 of HSSD's 168 ids
+    are compound and none of them says anything a reader can hold on to. The id
+    travels beside the name rather than instead of it, since it is what the
+    dataset, the solver runs and the store are keyed by.
 
     ``first`` is put at the head of the list so that the apartment already
     assembled is the one the viewer opens with, rather than paying for a second
-    assembly on load.
+    assembly on load. It is matched on either name.
     """
     semantics = hssd_root / "semantics" / "scenes"
+    if not semantics.is_dir() and store is not None:
+        # No dataset on this machine: the published catalogue is the list of
+        # what can be opened, and it is exactly what this viewer can serve.
+        apartments = [
+            {
+                "id": str(row["scene_id"]),
+                "local": str(row["local"]),
+                "label": str(row["local"]),
+                "storey_index": str(row["storey_index"]),
+            }
+            for row in sorted(scene_store.fetch_index(store), key=lambda r: str(r["local"]))
+        ]
+        if first is not None:
+            apartments.sort(key=lambda a: first not in (a["id"], a["local"]))
+        return apartments
     apartments = [
-        {"id": scene_id, "label": scene_id}
-        for scene_id in sorted(
-            path.name.split(".")[0] for path in (hssd_root / "scenes").glob("*.scene_instance.json")
-        )
+        {
+            "id": row.scene_id,
+            "local": row.local,
+            "label": row.local,
+            "storey_index": str(row.storey_index),
+        }
+        for row in every_storey()
         # A scene without region annotations has no rooms to assemble.
-        if (semantics / f"{scene_id}.semantic_config.json").is_file()
+        if (semantics / f"{row.scene_id}.semantic_config.json").is_file()
     ]
     if first is not None:
-        apartments.sort(key=lambda apartment: apartment["id"] != first)
+        apartments.sort(key=lambda a: first not in (a["id"], a["local"]))
     return apartments
+
+
+def _resolve(name: str) -> tuple[str, int]:
+    """The HSSD scene id and storey index behind whichever name was asked for."""
+    try:
+        scene_id, storey = scene_of(name)
+    except KeyError:
+        return name, 0
+    return scene_id, (storey - 1) if storey else 0
 
 
 def attach_runs(
@@ -96,12 +134,15 @@ class SiteBuilder:
         self.lead = lead
         self._lock = threading.Lock()
         self._built: dict[str, SceneEntry] = {}
+        # Resolved once, at startup, and handed to every assembly: the store is
+        # where the whole dataset was assembled to, so an apartment opened here
+        # is fetched rather than rebuilt. A machine without credentials gets
+        # None and assembles locally, which is slow and not silent.
+        self.store = shared_store()
         shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
 
         self.runs = discover_runs(runs_root) if runs_root is not None else []
-        # Resolved once, before the loop: it reads the vault, and a run whose
-        # grid is missing would otherwise ask for it again per run.
-        store = shared_store() if self.runs else None
+        store = self.store
         # Runs are built up front, unlike apartments: there are a handful of
         # them and the payload is a second of work, so paying for it here keeps
         # the mode switch instant and the failure visible at startup.
@@ -128,31 +169,45 @@ class SiteBuilder:
             )
         )
 
-        apartments = attach_runs(list_apartments(hssd_root, first), self.runs)
+        apartments = attach_runs(list_apartments(hssd_root, first, self.store), self.runs)
         (target / "apartments.json").write_text(json.dumps(apartments))
 
-    def ensure(self, scene_id: str) -> SceneEntry:
+    def ensure(self, name: str) -> SceneEntry:
+        """Put one apartment under ``scenes/<name>/``, by whichever name is asked.
+
+        ``name`` is this project's own -- ``hssd_0011``, ``hssd_0001_2`` for a
+        second storey -- or an HSSD id, which means the ground floor. Both are
+        accepted because the page that was written before the names existed asks
+        by id, and a URL that used to work has no reason to stop.
+        """
         # Serialised deliberately: two browser requests for the same scene must
         # not both run the assembly, which is the slow part.
         with self._lock:
-            if scene_id not in self._built:
-                cached = ensure_scene(self.hssd_root, scene_id, force=self.rebuild)
+            if name not in self._built:
+                scene_id, storey = _resolve(name)
+                cached = ensure_scene(
+                    self.hssd_root,
+                    scene_id,
+                    storey=storey,
+                    force=self.rebuild,
+                    store=self.store,
+                )
                 # The site is a temporary directory and the entry is not: the
                 # scene is linked into place rather than copied, because its
                 # asset symlinks are absolute and a copy would duplicate the
                 # exported meshes for the lifetime of the process.
-                link = self.target / "scenes" / scene_id
+                link = self.target / "scenes" / name
                 link.parent.mkdir(parents=True, exist_ok=True)
                 if link.is_symlink():
                     link.unlink()
                 elif link.exists():
                     shutil.rmtree(link)
                 link.symlink_to(cached.path, target_is_directory=True)
-                print(f"{scene_id}: {cached.summary()}")
-                print(f"{scene_id}: {cached.storey()}")
-                print(f"{scene_id}: cache entry {cached.key}")
-                self._built[scene_id] = cached
-            return self._built[scene_id]
+                print(f"{name}: {cached.summary()}")
+                print(f"{name}: {cached.storey()}")
+                print(f"{name}: cache entry {cached.key}")
+                self._built[name] = cached
+            return self._built[name]
 
 
 def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHandler]:
