@@ -210,3 +210,16 @@ def test_material_round_trips_into_pyroomacoustics() -> None:
 
     assert material.energy_absorption["center_freqs"] == list(OCTAVE_BANDS)
     assert len(material.scattering["coeffs"]) == len(OCTAVE_BANDS)
+
+
+def test_the_one_placed_na_object_takes_the_material_of_its_identical_twin() -> None:
+    """HSSD labels one part of a garden bistro set '#N/A' in its own metadata.
+
+    It is the set's second chair: its render mesh measures 0.528 x 0.891 x
+    0.553 m, exactly the sibling part labelled 'seat'. Of HSSD's 43 '#N/A'
+    templates it is the only one any scene places, so the row maps it to the
+    class its twin already has rather than inventing an absorption.
+    """
+    from reverberate.materials.db import class_for_category
+
+    assert class_for_category("#N/A") == class_for_category("seat")
