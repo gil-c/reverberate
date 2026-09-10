@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reverberate.settings import data_root
+from reverberate.store import ObjectStore
+from reverberate.viz import scene_store
 from reverberate.viz.scene_manifest import write_manifest
 
 __all__ = [
@@ -45,6 +47,7 @@ __all__ = [
     "code_digest",
     "ensure_scene",
     "entry_for",
+    "published_key",
     "scene_key",
 ]
 
@@ -58,13 +61,25 @@ SOURCES = (
     "acoustics.py",
     "geometry/apartment.py",
     "geometry/carve.py",
+    "geometry/collider_cache.py",
     "geometry/hssd_assets.py",
     "geometry/hssd_room.py",
     "geometry/materials.py",
+    "geometry/outer_surface.py",
+    "geometry/rooms.py",
+    "geometry/scene_ids.py",
     "geometry/sim_geometry.py",
+    # The absorption every instance carries comes from these: the category to
+    # class table, the per band coefficients, and the rule above 4 kHz. Left
+    # out, an edit to a coefficient would be served stale from every entry.
+    "materials/data/acoustic_classes.csv",
+    "materials/data/category_materials.csv",
+    "materials/db.py",
+    "materials/extrapolation.py",
     "viz/label_palette.py",
     "viz/room_surfaces.py",
     "viz/scene_manifest.py",
+    "viz/scene_pool.py",
 )
 
 
@@ -85,7 +100,7 @@ def code_digest() -> str:
     return digest.hexdigest()
 
 
-def scene_key(hssd_root: Path, scene_id: str, seed: int = 0) -> str:
+def scene_key(hssd_root: Path, scene_id: str, seed: int = 0, storey: int = 0) -> str:
     """Everything an assembled scene depends on, and nothing else."""
     digest = hashlib.sha256()
     for path in (
@@ -98,6 +113,7 @@ def scene_key(hssd_root: Path, scene_id: str, seed: int = 0) -> str:
             {
                 "scene_id": scene_id,
                 "seed": seed,
+                "storey": storey,
                 "code": code_digest(),
             },
             sort_keys=True,
@@ -128,42 +144,103 @@ class SceneEntry:
         return str(self.manifest.get("storey", ""))
 
 
-def entry_for(hssd_root: Path, scene_id: str, seed: int = 0) -> SceneEntry:
+def entry_for(hssd_root: Path, scene_id: str, seed: int = 0, storey: int = 0) -> SceneEntry:
     """The cache entry for this scene, whether or not it has been assembled."""
-    key = scene_key(hssd_root, scene_id, seed)
+    key = scene_key(hssd_root, scene_id, seed, storey)
     path = cache_root() / key
     record = path / "entry.json"
     manifest = json.loads(record.read_text()) if record.is_file() else {}
     return SceneEntry(path=path, key=key, manifest=manifest)
 
 
+def _has_scene_files(hssd_root: Path, scene_id: str) -> bool:
+    """Whether this machine holds the two files a scene's key is made from."""
+    return (hssd_root / "scenes" / f"{scene_id}.scene_instance.json").is_file() and (
+        hssd_root / "semantics" / "scenes" / f"{scene_id}.semantic_config.json"
+    ).is_file()
+
+
+#: The published catalogue, read once per process and store: every storey a
+#: viewer without HSSD opens asks it which key to fetch.
+_CATALOGUES: dict[int, list[dict[str, object]]] = {}
+
+
+def published_key(store: ObjectStore, scene_id: str, storey: int = 0) -> str | None:
+    """The key the published catalogue gives for this storey, if it has one."""
+    rows = _CATALOGUES.setdefault(id(store), scene_store.fetch_index(store))
+    for row in rows:
+        if str(row.get("scene_id")) == scene_id and int(str(row.get("storey_index", 0))) == storey:
+            return str(row["key"])
+    return None
+
+
 def ensure_scene(
     hssd_root: Path,
     scene_id: str,
     seed: int = 0,
+    storey: int = 0,
     force: bool = False,
+    store: ObjectStore | None = None,
 ) -> SceneEntry:
     """Assemble ``scene_id`` into the cache, or reuse what is already there.
+
+    The lookup order is local, then remote, then assemble, and an assembled
+    scene is published when a store was given. That is the order
+    :mod:`reverberate.wave.vox_store` established and the reason is the same:
+    **the remote is the source of truth and the local disk is a read-through
+    cache**, so a second checkout, a second machine or a rented instance start
+    from what has already been built rather than paying for it again. Passing
+    no store is a machine working alone, which is not an error and is not
+    silent either -- the caller is the one that says so.
 
     Publication is atomic: the assembly writes into a sibling staging directory
     and is renamed into place only once its record is written, so a run killed
     mid-assembly cannot leave a half scene that :attr:`SceneEntry.complete`
     would accept.
     """
-    entry = entry_for(hssd_root, scene_id, seed)
+    if not _has_scene_files(hssd_root, scene_id):
+        # No copy of the dataset here, so no way to compute the key: it hashes
+        # the scene's own two files. The published catalogue says which key
+        # holds this storey, and on such a machine that is the only answer
+        # there is. Found locally from an earlier open, it is not fetched again.
+        if store is None:
+            raise FileNotFoundError(
+                f"{scene_id} is not in {hssd_root} and no store was given to fetch it from"
+            )
+        key = published_key(store, scene_id, storey)
+        if key is None:
+            raise LookupError(f"{scene_id} storey {storey} is not in the published catalogue")
+        local = cache_root() / key
+        if (local / "manifest.json").is_file() and (local / "entry.json").is_file():
+            return SceneEntry(
+                path=local,
+                key=key,
+                manifest=json.loads((local / "entry.json").read_text(encoding="utf-8")),
+            )
+        fetched = scene_store.fetch_entry(store, key)
+        if fetched is None:
+            raise LookupError(f"the catalogue names {key} for {scene_id} but the store lacks it")
+        return fetched
+
+    entry = entry_for(hssd_root, scene_id, seed, storey)
     if entry.complete and not force:
         return entry
+    if store is not None and not force:
+        fetched = scene_store.fetch_entry(store, entry.key)
+        if fetched is not None:
+            return fetched
 
     root = cache_root()
     staging = root / f".{entry.key}.partial.{os.getpid()}"
     if staging.exists():
         shutil.rmtree(staging)
     try:
-        report = write_manifest(hssd_root, scene_id, staging)
+        report = write_manifest(hssd_root, scene_id, staging, storey)
         record = {
             "scene_id": scene_id,
             "key": entry.key,
             "seed": seed,
+            "storey_index": storey,
             "summary": report.summary(),
             "storey": report.storey,
         }
@@ -179,4 +256,7 @@ def ensure_scene(
     finally:
         if staging.exists():
             shutil.rmtree(staging)
-    return entry_for(hssd_root, scene_id, seed)
+    published = entry_for(hssd_root, scene_id, seed, storey)
+    if store is not None and published.complete:
+        scene_store.publish_entry(store, published)
+    return published
