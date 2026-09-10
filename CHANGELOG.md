@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The whole dataset is assembled once and published.** ADR 0011. Opening a flat
+  assembled it first, at about a minute per distinct template for the boolean union
+  and flood fill of its collider; HSSD places 15 684 distinct templates, about 266
+  hours of one core. `geometry.collider_cache` keeps each template's simulated mesh
+  once for the whole dataset, `viz.scene_pool` does the same for render meshes, and
+  an assembled storey is now a manifest, two shells and symlinks into both pools.
+  `viz.scene_store` publishes and fetches them, the remote being the source of truth
+  and the disk a read-through cache. All 176 storeys are published: an apartment
+  opens in 3 to 15 s cold and at once warm, on a machine with no copy of HSSD.
+- `viz.assemble_dataset` assembles and publishes every storey, and fills the pool
+  for one shard with `--warm i/n`; `scripts/remote_assemble.py` rents cores for that,
+  handing the instance a presigned URL rather than a credential. The pool was built
+  for 5.48 USD across ten rentals at 0.055 to 0.344 USD/h.
+- `#n/a` in the material table: one part of a garden bistro set carries it in HSSD's
+  metadata; it is the set's second chair, the same size as its sibling `seat`, and
+  takes the same class.
+
+### Changed
+
+- The scene manifest carries `local`, `scene_id`, `storey_index`, `storeys` and the
+  everyday rooms of its storey, and the viewer labels apartments by short name.
+- The scene cache key covers the material tables, which it did not: a coefficient
+  edited in place was served stale from every entry.
+
+### Fixed
+
+- `B2Store` presigns with SigV4 (B2 refused the SigV2 URLs botocore produced) and
+  gives small uploads a unique staging name: identical bytes staged under one digest
+  name deleted each other's upload under concurrency.
+
 ### Removed
 
 - `viz.room_surfaces.shell_mesh` and `select_region`, which extruded a single
