@@ -28,6 +28,25 @@ judged against that.
 - The generated dataset, and a validation report stating how far the result can
   be trusted.
 
+## Walking through a simulated flat
+
+The app stands you in an apartment, draws the solver's own grid around you
+and plays the sources of a run through your head as you walk and turn.
+
+    PYTHONPATH=src python -m reverberate.viz.voices            # once: the anechoic voices
+    PYTHONPATH=src python -m reverberate.viz.app_payload data/runs/synthetic_walk_mock  # a mock run
+    python src/reverberate/viz/serve_room.py                   # or the run button on that file
+
+The app reads `walk.toml` (paths, the run and apartment to open on, the port),
+found in the working directory or at the root of the main checkout, so every
+worktree shares one unversioned copy; see `reverberate.viz.walk_config`. An
+apartment is greyed out until it has been assembled, here or in the store.
+
+Drag to look, W A S D to walk, arrows to turn, wheel to zoom; drag the dot on
+the plan to jump, the slider beside it for height. A run the app can open is a
+directory with `walk.json` (`reverberate.viz.app_payload`) and one field per
+source (`docs/formats/response-field.md`).
+
 ## What is not covered
 
 Predicting acoustics from geometry with a learned surrogate, its baselines and
