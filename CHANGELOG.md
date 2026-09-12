@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everyday rooms of its storey, and the viewer labels apartments by short name.
 - The scene cache key covers the material tables, which it did not: a coefficient
   edited in place was served stale from every entry.
+- **The viewer is a first-person walk-through app** (`src/reverberate/viz/app/`,
+  ADR 0012), and `viz/web/` and `viz/run_view` are gone with the page that read
+  them. A run the app opens is a directory carrying `walk.json`
+  (`viz.app_payload`): sources, one impulse response field each
+  (`viz.field_payload`, `docs/formats/response-field.md`), one tiered mesh
+  payload per band limit. Earlier runs have none and are never opened. What
+  depends on the listener is computed in the page: the exact rotation of the
+  harmonics, the order-7 decode to two ears in a worker, the convolution on
+  the browser's convolvers, the plots of the response at the listener; a cell
+  is read out of the HDF5 by range request. Python builds the inputs once:
+  the decoder filters (`viz.decoders`), twelve anechoic EARS voices
+  (`viz.voices`, CC BY-NC 4.0, published to the store). The app runs from
+  `walk.toml` (`viz.walk_config`), found from any worktree, and
+  `serve_room.py` runs as a file.
 
 ### Fixed
 
@@ -44,49 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `viz.room_surfaces.shell_mesh` and `select_region`, which extruded a single
   region as if it were a room. Nothing in production called them, and leaving
   them was leaving the superseded idea loaded for the next reader to pick up.
-
-### Changed
-
-- **A room is no longer a `region_annotation`.** ADR 0010. HSSD's regions are floor
-  polygons with a label, and nothing in them says whether a wall stands between
-  two neighbours, so the dataset cuts one body of air into several "rooms". On
-  `102344403` the `living room` it names is 81 m2 of a space that runs on into
-  a 26.7 m2 kitchen through an opening **6.87 m wide**, and `w39_living_8k`
-  solved exactly that region: 296 m3 sealed by a rigid wall across the opening,
-  where the room is 126 m2 and 461 m3.
-
-  `reverberate.geometry.rooms` now groups regions by four rules, and
-  `isolated_storey` -- the one place the simulator picks a room -- goes through
-  them, so a run that asks for `living room` gets the room rather than the
-  slice. The manifest records `room_regions`, which is what was simulated as
-  against what was asked for.
-
-  1. The passage must be wider than a door, `DOOR_MAX_M`. A dressing room shut
-     by a door keeps its own volume, whatever the dataset labels it.
-  2. A wall separates whatever the hole in it: the shared boundary must carry
-     less than `WALL_MAX_M` of wall.
-  3. A hallway counts as a door, then joins the largest room it opens onto.
-  4. Nothing under `MIN_ROOM_M2` is a room.
-
-  **Both thresholds are read off the data.** HSSD models no room door anywhere,
-  in the stage or as an object, so a doorway is only a gap the walls leave in
-  the section at `WALL_SECTION_HEIGHT`. Those gaps stop at 0.96 m and resume at
-  1.33 m; among the boundaries that pass that test, the ones that should
-  dissolve carry at most 0.79 m of wall and the ones that should hold at least
-  1.35 m. Each threshold sits mid-band. `MIN_ROOM_M2` is a decision and says so.
-
-  The regions of a room do not touch -- HSSD holds them 0.15 m apart with the
-  wall band -- so a room is unioned with its own doorways, the way
-  `build_storey` already did for a whole storey. Without that the 126 m2 room
-  comes back as three disjoint prisms.
-
-  `merge_closets` and `MIN_ROOM_AREA` are gone; `Storey` carries `everyday`.
-  Counted over the three scenes in play, 20 regions become 15 rooms, 19 become
-  10, and 10 become 4.
-
-- `OUTDOOR_LABELS` gains `porch/terrace/deck/driveway`, which 71 regions of the
-  dataset carry. On `102344403` the drive opens onto the garage through 8.64 m
-  of doorway, so without it a 110 m2 outdoor slab joined the interior.
 
 ### Added
 
