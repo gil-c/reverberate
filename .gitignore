@@ -22,3 +22,6 @@ htmlcov/
 # commit.
 mmap_dat/
 adj_check.dat
+
+# The walk-through app's machine-local configuration.
+walk.toml
