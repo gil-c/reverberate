@@ -1,0 +1,246 @@
+:root {
+  --ground: #0b0e12;
+  --panel: #13181f;
+  --panel-2: #1a2028;
+  --line: #262e38;
+  --line-2: #34404d;
+  --text: #e6ebf1;
+  --muted: #a3afbd;
+  --dim: #6d7a89;
+  --src: #f2a541;
+  --src-dim: #8a5f23;
+  --ear: #4fd1e8;
+  --ok: #6fd18a;
+  --font: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --rail: 28px;
+}
+* { box-sizing: border-box; }
+:root { color-scheme: dark; accent-color: var(--ear); }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--ground); color: var(--text);
+  font: 14px/1.45 var(--font); overflow: hidden; height: 100vh;
+}
+#app {
+  display: grid; height: 100vh;
+  grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 320px);
+}
+
+/* panels */
+.panel {
+  position: relative; background: var(--panel); min-width: 0;
+  display: flex; flex-direction: row; overflow: hidden;
+}
+/* The handle sits on the panel's inner edge: after the body on the left
+   panel, before it on the right, whatever the markup order. */
+.panel.left { flex-direction: row-reverse; }
+.panel.right { flex-direction: row; }
+.panel.left { border-right: 1px solid var(--line); }
+.panel.right { border-left: 1px solid var(--line); }
+.panel .body {
+  flex: 1; padding: 10px 14px 20px; overflow-y: auto; overflow-x: hidden; display: flex;
+  flex-direction: column; gap: 12px; min-width: 0; contain: layout paint;
+}
+.panel .body > * { min-width: 0; }
+/* A scrollbar that is seen and grabbed: a 10 px track of the panel's own
+   colour, a thumb that reads against it. */
+.panel .body::-webkit-scrollbar { width: 10px; }
+.panel .body::-webkit-scrollbar-track { background: var(--panel); }
+.panel .body::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 5px; border: 2px solid var(--panel); }
+.panel .body::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+.panel.collapsed .body { display: none; }
+/* The collapse button only: the rail takes no pointer events itself, so the
+   scrollbar and the resize handle under it stay usable. */
+.rail {
+  position: absolute; top: 0; height: 32px; width: var(--rail); z-index: 3;
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 6px;
+  pointer-events: none;
+}
+.rail button { pointer-events: auto; }
+.panel.left .rail { right: 8px; }
+.panel.right .rail { left: 8px; }
+.panel.collapsed .rail { left: 0; right: 0; width: 100%; bottom: 0; height: auto; background: var(--panel); }
+.rail button {
+  width: 18px; height: 22px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--muted); cursor: pointer; font: 13px var(--mono); padding: 0;
+}
+.rail button:hover, .rail button:focus-visible { background: var(--panel-2); color: var(--text); outline: none; }
+/* The resize handle: a strip of its own beside the scrolling body, never over
+   the scrollbar, with a mark in the middle so it can be found. */
+.grip {
+  flex: none; width: 8px; cursor: col-resize; position: relative; background: var(--panel-2);
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+}
+.grip::after {
+  content: ""; position: absolute; left: 2px; top: 50%; width: 2px; height: 28px; margin-top: -14px;
+  border-radius: 1px; background: var(--line-2);
+}
+.grip:hover, .grip.active { background: var(--line); }
+.grip:hover::after, .grip.active::after { background: var(--ear); }
+.panel.collapsed .grip { display: none; }
+
+/* controls */
+.label {
+  font-size: 11.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+  margin: 0 0 6px;
+}
+.amber { color: var(--src); }
+/* One shape for every control that takes a value: dropdowns, numbers, text. */
+select, .field input:not([type=checkbox]):not([type=range]), .player select.voice {
+  width: 100%; height: 28px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 0 8px; font: 13px var(--mono); line-height: 26px;
+}
+select + select { margin-top: 6px; }
+select:disabled { color: var(--dim); }
+select:focus-visible, .field input:focus-visible, .seg button:focus-visible {
+  outline: 1px solid var(--ear); outline-offset: 1px;
+}
+.seg { display: flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button {
+  flex: 1; border: 0; background: transparent; color: var(--muted); padding: 0; height: 26px;
+  font: 500 13px var(--font); cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--panel-2); color: var(--text); }
+.seg.sub button { font: 13px var(--mono); height: 24px; }
+.seg button:disabled { color: var(--dim); cursor: not-allowed; }
+.seg.sub:empty { display: none; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+/* A box toggles only under the pointer: the row and its word are not a target. */
+.check, .field.switch { pointer-events: none; cursor: default; }
+.check input, .field.switch input { pointer-events: auto; cursor: pointer; }
+.check input, .field.switch input[type=checkbox] {
+  width: 16px; height: 16px; justify-self: start; accent-color: var(--ear); margin: 0;
+}
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 2px 0 0; font: 12px var(--mono); }
+.facts dt { color: var(--dim); }
+.facts dd { margin: 0; color: var(--muted); text-align: right; }
+.facts:empty { display: none; }
+
+/* foldable sections */
+.fold { display: flex; flex-direction: column; gap: 8px; }
+.fold-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  background: none; border: 0; padding: 4px 0; cursor: pointer; color: inherit;
+}
+.fold-head .label { margin: 0; }
+.fold-head i { width: 6px; height: 6px; margin: 0 4px 3px 0; border-right: 1.5px solid var(--dim); border-bottom: 1.5px solid var(--dim); transform: rotate(45deg); transition: transform .15s; }
+.fold.closed .fold-head i { transform: rotate(-135deg); }
+.fold.closed .fold-body { display: none; }
+.fold + .fold { border-top: 1px solid var(--line); padding-top: 8px; }
+select option:disabled { color: var(--dim); }
+.panel.right.idle .body > *:not(:first-child) { opacity: .35; pointer-events: none; }
+.stack { display: flex; flex-direction: column; gap: 6px; }
+.note { font: 12px var(--mono); color: var(--muted); min-height: 1.3em; }
+
+.field { display: grid; grid-template-columns: 52px minmax(0, 1fr) 30px; align-items: center; gap: 6px 8px; }
+.field span { color: var(--muted); font-size: 13px; }
+.field input:not([type=checkbox]):not([type=range]) { text-align: right; min-width: 0; }
+.field input[type=number] { -moz-appearance: textfield; appearance: textfield; }
+.field input[type=number]::-webkit-inner-spin-button,
+.field input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.field em { font: 12px var(--mono); color: var(--muted); font-style: normal; }
+.field .slide { grid-column: 2; width: 100%; margin: 0 0 2px; }
+.fields { display: flex; flex-direction: column; gap: 6px; }
+input[type=range].slide {
+  -webkit-appearance: none; appearance: none; height: 2px; background: var(--line-2);
+  padding: 0; border: 0; margin: 2px 0 4px;
+}
+input[type=range].slide::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ear); border: 2px solid var(--panel);
+}
+input[type=range].slide::-moz-range-thumb {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--ear); border: 2px solid var(--panel);
+}
+
+/* plan */
+.map { display: block; }
+.map svg {
+  width: 100%; aspect-ratio: 1 / 1; background: #0e1217; border: 1px solid var(--line);
+  border-radius: 4px; display: block; touch-action: none;
+}
+.map .walk { fill: #10151b; stroke: none; }
+.map .room { fill: #161c24; stroke: var(--line-2); stroke-width: 1.2; }
+.map .room.here { fill: #1b2430; }
+.map .name { font: 10.5px var(--font); fill: var(--muted); pointer-events: none; }
+.map .name.here { fill: var(--text); }
+.map .wedge { fill: var(--ear); opacity: .28; }
+.map .ear { fill: var(--ear); cursor: grab; }
+.map .src-mark { fill: none; stroke: var(--src); stroke-width: 1.6; cursor: pointer; }
+.map .src-mark.off { stroke: var(--src-dim); }
+.map .src-mark.sel { stroke-width: 2.6; }
+.map .src-dot { fill: var(--src); pointer-events: none; }
+.map .src-name { font: 10px var(--mono); fill: var(--src); pointer-events: none; }
+.map .measure { fill: var(--src-dim); pointer-events: none; }
+
+/* sources */
+.srcs { display: flex; flex-direction: column; gap: 2px; }
+.srcrow {
+  display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: center;
+  padding: 6px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent;
+}
+.srcrow:hover { background: var(--panel-2); }
+.srcrow.sel { border-color: var(--src-dim); background: var(--panel-2); }
+.srcrow.off .nm { color: var(--muted); }
+.srcrow .nm { font-weight: 500; }
+.srcrow .pos { font: 12px var(--mono); color: var(--muted); }
+.srcrow .kind { font: 12px var(--mono); color: var(--muted); }
+.srcrow input { accent-color: var(--src); margin: 0; }
+
+/* viewport */
+#view-pane { position: relative; min-width: 0; background: #000; }
+#view-pane canvas { display: block; width: 100%; height: 100%; cursor: default; }
+.hud {
+  position: absolute; left: 14px; bottom: 12px; font: 12px var(--mono); color: var(--muted);
+  display: flex; gap: 18px; pointer-events: none;
+}
+.hud b { color: var(--text); font-weight: 500; }
+#hud-busy { color: var(--src); }
+.crumb {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  font: 500 13px var(--font); color: var(--text); letter-spacing: .06em; text-transform: uppercase;
+  pointer-events: none;
+}
+.crumb b { color: var(--text); }
+
+/* audio */
+.players { display: flex; flex-direction: column; gap: 8px; }
+.player {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) 26px; grid-template-rows: auto auto auto; gap: 4px 10px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-2);
+}
+.player.sel { border-color: var(--src-dim); }
+.player .pb {
+  grid-row: 1 / 4; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--src);
+  background: transparent; color: var(--src); cursor: pointer; font-size: 10px; align-self: center;
+}
+.player .pb.playing { background: var(--src); color: #1a1104; }
+.player .pb:disabled { border-color: var(--src-dim); color: var(--src-dim); cursor: not-allowed; }
+.player .ttl { grid-column: 2; grid-row: 1; display: flex; justify-content: space-between; align-items: baseline; }
+.player .vol-box { grid-column: 2; grid-row: 3; }
+.player .ttl b { font-weight: 500; }
+.player .ttl span { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.player .vol {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 2px; background: var(--line-2); margin: 6px 0;
+}
+.player .vol::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 10px; height: 10px; border-radius: 50%; background: var(--text);
+}
+.player .vol::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--text); border: 0; }
+.player .loop {
+  grid-row: 1 / 4; align-self: center; width: 26px; height: 22px; border-radius: 4px;
+  border: 1px solid var(--line-2); background: transparent; color: var(--dim); cursor: pointer; font: 12px var(--mono);
+}
+.player .loop.on { color: var(--text); border-color: var(--text); }
+.meter { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: var(--ok); }
+.plot {
+  width: 100%; height: 118px; display: block; background: #0e1217; border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.status { font: 12px var(--mono); color: var(--muted); display: flex; justify-content: space-between; min-height: 1.3em; }
+.status b { color: var(--ok); font-weight: 500; }
+.plot-cap { font: 12px var(--mono); color: var(--muted); margin-top: 4px; min-height: 1.3em; }
+.player select.voice { grid-column: 2; grid-row: 2; }
+.status { flex-wrap: wrap; gap: 4px 12px; }

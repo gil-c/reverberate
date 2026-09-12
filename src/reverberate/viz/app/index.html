@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>reverberate</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <aside class="panel left" id="left">
+        <div class="rail"><button type="button" title="Collapse" data-collapse="left">‹</button></div>
+        <div class="grip" data-grip="left"></div>
+        <div class="body">
+          <section class="fold" data-fold="apartment">
+            <button type="button" class="fold-head"><span class="label">Apartment</span><i></i></button>
+            <div class="fold-body stack">
+              <label class="check"><input type="checkbox" id="with-audio" /><span>with audio</span></label>
+              <select id="apartment"></select>
+              <select id="run" hidden></select>
+              <dl class="facts" id="facts"></dl>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="view">
+            <button type="button" class="fold-head"><span class="label">View</span><i></i></button>
+            <div class="fold-body stack">
+              <div class="seg" id="view">
+                <button type="button" class="on" data-view="colour">Colour</button>
+                <button type="button" data-view="acoustic">Acoustic</button>
+              </div>
+              <div class="seg sub" id="fmax"></div>
+              <div class="note" id="fmax-note"></div>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="plan">
+            <button type="button" class="fold-head"><span class="label">Plan</span><i></i></button>
+            <div class="fold-body">
+              <div class="map">
+                <svg id="map" viewBox="0 0 240 240" aria-label="floor plan"></svg>
+              </div>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="listener">
+            <button type="button" class="fold-head"><span class="label">Listener</span><i></i></button>
+            <div class="fold-body">
+              <div class="fields" id="pose-fields"></div>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="sources">
+            <button type="button" class="fold-head"><span class="label">Sources</span><i></i></button>
+            <div class="fold-body">
+              <div class="srcs" id="sources"></div>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="settings">
+            <button type="button" class="fold-head"><span class="label">Settings</span><i></i></button>
+            <div class="fold-body" id="tab-set">
+              <div class="fields">
+                <label class="field switch"><span>exact</span><input type="checkbox" data-setting="exact" /><em></em></label>
+                <label class="field"><span>settle</span><input data-setting="settleMs" /><em>ms</em></label>
+                <label class="field"><span>glide</span><input data-setting="glideMs" /><em>ms</em></label>
+                <label class="field switch"><span>points</span><input type="checkbox" data-setting="showPoints" /><em></em></label>
+                <label class="field switch"><span>grab</span><input type="checkbox" data-setting="grabDrag" /><em></em></label>
+                <label class="field"><span>split</span><input data-setting="earlyMs" /><em>ms</em></label>
+                <label class="field"><span>still</span><input data-setting="stillMs" /><em>ms</em></label>
+                <label class="field"><span>fade</span><input data-setting="fadeMs" /><em>ms</em></label>
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
+
+      <main id="view-pane">
+        <canvas id="scene"></canvas>
+        <div class="crumb"><b id="room"></b></div>
+        <div class="hud">
+          <span id="hud-pos"></span>
+          <span id="hud-tier"></span>
+          <span id="hud-busy"></span>
+        </div>
+      </main>
+
+      <aside class="panel right" id="right">
+        <div class="rail"><button type="button" title="Collapse" data-collapse="right">›</button></div>
+        <div class="grip" data-grip="right"></div>
+        <div class="body">
+          <div class="stack">
+            <p class="label">Head</p>
+            <select id="head"></select>
+            <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="0" /><em id="level-read">0 dB</em></label>
+
+          </div>
+          <div>
+            <p class="label">Sources</p>
+            <div class="players" id="players"></div>
+          </div>
+          <div>
+            <p class="label">Spectrogram · <span id="plot-source" class="amber"></span></p>
+            <canvas class="plot" id="spectrogram" width="600" height="236"></canvas>
+            <div class="plot-cap" id="spectrogram-cap"></div>
+          </div>
+          <div>
+            <p class="label">Energy decay</p>
+            <canvas class="plot" id="decay" width="600" height="236"></canvas>
+            <div class="plot-cap" id="decay-cap"></div>
+          </div>
+          <div class="status"><span id="audio-format"></span><span id="audio-update"></span></div>
+        </div>
+      </aside>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

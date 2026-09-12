@@ -7,7 +7,7 @@ only way to see it was to render a *run* -- which means a plan, a placement,
 comms files, a solve, responses and audio. Looking at the geometry cost a GPU.
 
 So: the same page, from the voxelisation alone. It writes the ``plan.json`` and
-``report.json`` that :mod:`reverberate.viz.run_view` reads, filled from the
+``report.json`` of a solver run, filled from the
 grid, the exported model and the room's own geometry, and nothing else. The
 sections that need responses come out empty rather than invented, and
 ``omissions`` says so on the page.
