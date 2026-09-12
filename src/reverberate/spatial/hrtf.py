@@ -41,7 +41,7 @@ import numpy as np
 from scipy.special import eval_legendre
 
 from reverberate.spatial.field import spherical_hankel2
-from reverberate.spatial.sh import analyse, channel_count, directions, real_sh
+from reverberate.spatial.sh import analyse, channel_count, directions, quadrature, real_sh
 
 __all__ = [
     "EAR_AZIMUTH_DEG",
@@ -51,6 +51,7 @@ __all__ = [
     "load_hrir_sofa",
     "measured_head",
     "project",
+    "sphere_head",
     "sphere_hrtf",
     "sphere_hrtf_sh",
     "woodworth_itd_s",
@@ -307,3 +308,13 @@ def load_hrir_sofa(path: Path | str) -> tuple[np.ndarray, np.ndarray, float, dic
         float(np.asarray(sofa.Data_SamplingRate).ravel()[0]),
         metadata,
     )
+
+
+def sphere_head(
+    sample_rate_hz: float, filter_length: int, *, quadrature_degree: int = 60
+) -> HrtfSet:
+    """The analytic rigid sphere, sampled on a decoder's own frequency grid."""
+    grid, weights = quadrature(quadrature_degree)
+    frequency = np.fft.rfftfreq(filter_length, 1.0 / sample_rate_hz)
+    sampled = sphere_hrtf(grid, frequency)
+    return HrtfSet(sampled.responses, grid, frequency, sampled.description, weights=weights)
