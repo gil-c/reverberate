@@ -1,98 +1,107 @@
-"""Serve the apartment viewer over the whole HSSD dataset.
+"""Serve the walk-through app over the whole HSSD dataset.
 
-One running process browses every apartment: the viewer asks for a scene, the
+One running process browses every apartment: the app asks for a scene, the
 server assembles it on demand and caches the result. Building all 168 scenes up
 front is not an option, and neither is restarting the process per scene, which
 is what the previous single-region viewer forced.
 
 The browser does the rendering, so this process needs no renderer, no GPU
-binding and no simulator: the whole visualisation is a standard glTF web
-component that can be lifted into the Gradio demo later, or replaced, without
-touching the reconstruction code. Furniture assets are symlinked in place and
-decoded by the browser, because their KTX2 textures do not survive a Python
-side merge.
+binding and no simulator. Furniture assets are symlinked in place and decoded
+by the browser, because their KTX2 textures do not survive a Python side merge.
 
-It also serves the solver runs. A rendered run names the scene and room it was
-simulated in, so it is offered as a fourth mode of that apartment rather than as
-a separate application: one selector, one camera, one place to look. Apartments
-with a run say so in the selector, and the mode is absent for the rest.
+It also serves the solver runs the app can open: those carrying a ``walk.json``,
+see :mod:`reverberate.viz.app_payload`. A run names the scene it was simulated
+in, so it is offered with that apartment rather than as a separate page.
 
-Run as ``python -m reverberate.viz.serve_room <hssd_root> [--scene ID]``.
+Run it: ``python src/reverberate/viz/serve_room.py``, or the run button on
+this file. Everything it needs is in ``walk.toml``
+(:mod:`reverberate.viz.walk_config`); any command line argument overrides the
+file for one run.
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+if __package__ in (None, ""):
+    # Run as a file, from PyCharm's run button or `python serve_room.py`:
+    # put `src` on the path so the package imports below resolve.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import argparse
 import http.server
 import json
 import shutil
 import socketserver
-import sys
 import tempfile
 import threading
 import webbrowser
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 from reverberate.geometry.scene_ids import scene_of
 from reverberate.store import ObjectStore, shared_store
-from reverberate.viz import scene_store
+from reverberate.viz.app_payload import WalkRun, build_run, discover_walk_runs
 from reverberate.viz.assemble_dataset import every_storey
-from reverberate.viz.run_view import RunRef, build_site, discover_runs
-from reverberate.viz.scene_cache import SceneEntry, ensure_scene
+from reverberate.viz.decoders import export_decoders
+from reverberate.viz.scene_cache import (
+    SceneEntry,
+    cache_root,
+    ensure_scene,
+    published_key,
+    scene_key,
+)
+from reverberate.viz.voices import voices_dir
+from reverberate.viz.walk_config import CONFIG_NAME, WalkConfig, find_config, load_config
 
-STATIC_DIR = Path(__file__).parent / "web"
+STATIC_DIR = Path(__file__).parent / "app"
 
 
 def list_apartments(
     hssd_root: Path, first: str | None = None, store: ObjectStore | None = None
-) -> list[dict[str, str]]:
-    """Every storey in the dataset, as an apartment the selector can offer.
+) -> list[dict[str, object]]:
+    """Every storey, by the project's name, with whether it opens without assembling.
 
-    Labelled with this project's own name for it -- ``hssd_0011``, and a suffix
-    per storey where a scene has more than one -- because 135 of HSSD's 168 ids
-    are compound and none of them says anything a reader can hold on to. The id
-    travels beside the name rather than instead of it, since it is what the
-    dataset, the solver runs and the store are keyed by.
-
-    ``first`` is put at the head of the list so that the apartment already
-    assembled is the one the viewer opens with, rather than paying for a second
-    assembly on load. It is matched on either name.
+    ``local`` is the short name the page asks the server for; ``scene_id`` is
+    what runs are keyed by. ``ready`` means an entry exists in the published
+    catalogue or on this disk; assembling takes minutes, so the page offers
+    only what is ready. ``first`` goes to the head of the list.
     """
-    semantics = hssd_root / "semantics" / "scenes"
-    if not semantics.is_dir() and store is not None:
-        # No dataset on this machine: the published catalogue is the list of
-        # what can be opened, and it is exactly what this viewer can serve.
-        apartments = [
-            {
-                "id": str(row["scene_id"]),
-                "local": str(row["local"]),
-                "label": str(row["local"]),
-                "storey_index": str(row["storey_index"]),
-            }
-            for row in sorted(scene_store.fetch_index(store), key=lambda r: str(r["local"]))
+    rows = every_storey()
+    if not (hssd_root / "semantics" / "scenes").is_dir():
+        # No dataset here: only what the catalogue holds can be opened at all.
+        rows = [
+            r
+            for r in rows
+            if store is not None and published_key(store, r.scene_id, r.storey_index)
         ]
-        if first is not None:
-            apartments.sort(key=lambda a: first not in (a["id"], a["local"]))
-        return apartments
-    apartments = [
+    apartments: list[dict[str, object]] = [
         {
-            "id": row.scene_id,
             "local": row.local,
-            "label": row.local,
+            "scene_id": row.scene_id,
             "storey_index": str(row.storey_index),
+            "ready": _ready(hssd_root, store, row.scene_id, row.storey_index),
         }
-        for row in every_storey()
-        # A scene without region annotations has no rooms to assemble.
-        if (semantics / f"{row.scene_id}.semantic_config.json").is_file()
+        for row in rows
     ]
     if first is not None:
-        apartments.sort(key=lambda a: first not in (a["id"], a["local"]))
+        apartments.sort(key=lambda a: first not in (a["local"], a["scene_id"]))
     return apartments
 
 
+def _ready(hssd_root: Path, store: ObjectStore | None, scene_id: str, storey: int) -> bool:
+    if store is not None and published_key(store, scene_id, storey):
+        return True
+    try:
+        return (
+            cache_root() / scene_key(hssd_root, scene_id, storey=storey) / "entry.json"
+        ).is_file()
+    except (OSError, ValueError):
+        return False
+
+
 def _resolve(name: str) -> tuple[str, int]:
-    """The HSSD scene id and storey index behind whichever name was asked for."""
+    """The HSSD scene id and storey index behind either name; an id means the ground floor."""
     try:
         scene_id, storey = scene_of(name)
     except KeyError:
@@ -101,7 +110,7 @@ def _resolve(name: str) -> tuple[str, int]:
 
 
 def attach_runs(
-    apartments: Sequence[Mapping[str, object]], runs: Sequence[RunRef]
+    apartments: Sequence[Mapping[str, object]], runs: Sequence[WalkRun]
 ) -> list[dict[str, object]]:
     """Tell each apartment which solver runs exist for it.
 
@@ -112,7 +121,8 @@ def attach_runs(
     for run in runs:
         by_scene.setdefault(run.scene_id, []).append(run.name)
     return [
-        {**apartment, "runs": by_scene.get(str(apartment["id"]), [])} for apartment in apartments
+        {**apartment, "runs": by_scene.get(str(apartment["scene_id"]), [])}
+        for apartment in apartments
     ]
 
 
@@ -127,6 +137,8 @@ class SiteBuilder:
         runs_root: Path | None = None,
         rebuild: bool = False,
         lead: str | None = None,
+        voices: Path | None = None,
+        measured_head: Path | None = None,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
@@ -134,21 +146,40 @@ class SiteBuilder:
         self.lead = lead
         self._lock = threading.Lock()
         self._built: dict[str, SceneEntry] = {}
-        # Resolved once, at startup, and handed to every assembly: the store is
-        # where the whole dataset was assembled to, so an apartment opened here
-        # is fetched rather than rebuilt. A machine without credentials gets
-        # None and assembles locally, which is slow and not silent.
+        # The store is where the whole dataset was assembled to, so an
+        # apartment opened here is fetched rather than rebuilt. A machine
+        # without credentials gets None and can open only what it has.
         self.store = shared_store()
+        print("store: " + ("reachable" if self.store else "not reachable, local entries only"))
         shutil.copytree(STATIC_DIR, target, dirs_exist_ok=True)
 
-        self.runs = discover_runs(runs_root) if runs_root is not None else []
-        store = self.store
+        # The page decodes with the library's own filters, designed here at
+        # start: a second of work, and the one place the head is chosen.
+        heads = export_decoders(target / "decoders", measured_path=measured_head)
+        print("decoders: " + ", ".join(f"{h['name']} (order {h['order']})" for h in heads))
+        # Voices are fetched by `python -m reverberate.viz.voices`, once; the
+        # site links the directory and says when it is empty.
+        voices = voices if voices is not None else voices_dir()
+        if (voices / "voices.json").is_file():
+            link = target / "voices"
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(voices.resolve(), target_is_directory=True)
+            count = len(json.loads((voices / "voices.json").read_text()))
+            print(f"voices: {count} in {voices}")
+        else:
+            (target / "voices").mkdir(exist_ok=True)
+            (target / "voices" / "voices.json").write_text("[]")
+            print(f"voices: none; run python -m reverberate.viz.voices (looked in {voices})")
+
+        self.runs = discover_walk_runs(runs_root) if runs_root is not None else []
         # Runs are built up front, unlike apartments: there are a handful of
-        # them and the payload is a second of work, so paying for it here keeps
-        # the mode switch instant and the failure visible at startup.
+        # them and the payload is a link and a small file, so paying for it
+        # here keeps the failure visible at startup.
         for run in self.runs:
-            view = build_site(run.path, target / "runs" / run.name, store)
-            print(f"{run.name}: {view.summary()} (scene {run.scene_id}, {run.room})")
+            record = build_run(run, target / "runs" / run.name)
+            meshes = ", ".join(f"{k} Hz" for k in record["meshes"]) or "no mesh"
+            print(f"{run.name}: {len(run.sources)} sources, {meshes} (scene {run.scene_id})")
         (target / "runs.json").write_text(
             json.dumps(
                 [
@@ -157,11 +188,9 @@ class SiteBuilder:
                         "scene_id": r.scene_id,
                         "room": r.room,
                         "url": f"runs/{r.name}",
-                        # Which run the viewer opens on. Without it the page
-                        # takes the last by directory name, which is a stable
-                        # rule and not a useful one once an apartment has a
-                        # dozen runs: whoever started the server had a run in
-                        # mind and it is rarely the one sorting last.
+                        # Which run the app opens on. Whoever started the
+                        # server had a run in mind and it is rarely the one
+                        # sorting last.
                         "lead": r.name == self.lead,
                     }
                     for r in self.runs
@@ -173,39 +202,32 @@ class SiteBuilder:
         (target / "apartments.json").write_text(json.dumps(apartments))
 
     def ensure(self, name: str) -> SceneEntry:
-        """Put one apartment under ``scenes/<name>/``, by whichever name is asked.
-
-        ``name`` is this project's own -- ``hssd_0011``, ``hssd_0001_2`` for a
-        second storey -- or an HSSD id, which means the ground floor. Both are
-        accepted because the page that was written before the names existed asks
-        by id, and a URL that used to work has no reason to stop.
-        """
+        """Put one apartment under ``scenes/<name>/``, by either of its names."""
         # Serialised deliberately: two browser requests for the same scene must
         # not both run the assembly, which is the slow part.
+        scene_id, storey = _resolve(name)
         with self._lock:
             if name not in self._built:
-                scene_id, storey = _resolve(name)
                 cached = ensure_scene(
-                    self.hssd_root,
-                    scene_id,
-                    storey=storey,
-                    force=self.rebuild,
-                    store=self.store,
+                    self.hssd_root, scene_id, storey=storey, force=self.rebuild, store=self.store
                 )
                 # The site is a temporary directory and the entry is not: the
                 # scene is linked into place rather than copied, because its
                 # asset symlinks are absolute and a copy would duplicate the
                 # exported meshes for the lifetime of the process.
-                link = self.target / "scenes" / name
-                link.parent.mkdir(parents=True, exist_ok=True)
-                if link.is_symlink():
-                    link.unlink()
-                elif link.exists():
-                    shutil.rmtree(link)
-                link.symlink_to(cached.path, target_is_directory=True)
-                print(f"{name}: {cached.summary()}")
-                print(f"{name}: {cached.storey()}")
-                print(f"{name}: cache entry {cached.key}")
+                # Linked under both names for the ground floor: the page asks
+                # by short name, a run's scene id still resolves.
+                for alias in {name} | ({scene_id} if storey == 0 else set()):
+                    link = self.target / "scenes" / alias
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    if link.is_symlink():
+                        link.unlink()
+                    elif link.exists():
+                        shutil.rmtree(link)
+                    link.symlink_to(cached.path, target_is_directory=True)
+                print(f"{scene_id}: {cached.summary()}")
+                print(f"{scene_id}: {cached.storey()}")
+                print(f"{scene_id}: cache entry {cached.key}")
                 self._built[name] = cached
             return self._built[name]
 
@@ -223,7 +245,51 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
                 except Exception as error:  # noqa: BLE001
                     self.send_error(500, f"could not assemble {parts[1]}: {error}")
                     return
+            wanted = self.headers.get("Range")
+            if wanted and self._send_range(wanted):
+                return
             super().do_GET()
+
+        def _send_range(self, wanted: str) -> bool:
+            """Serve ``bytes=a-b`` of a file, which is how the page reads a field.
+
+            A response of gigabytes is read one cell at a time straight out of
+            the HDF5, so the server has to answer ranges; the standard handler
+            does not. Anything it cannot satisfy falls through to a whole
+            file, which the page treats as an error rather than as a cell.
+            """
+            path = Path(self.translate_path(self.path))
+            if not path.is_file() or not wanted.startswith("bytes="):
+                return False
+            first, _, last = wanted[len("bytes=") :].partition("-")
+            size = path.stat().st_size
+            try:
+                start = int(first)
+                end = int(last) if last else size - 1
+            except ValueError:
+                return False
+            if start < 0 or start >= size or end < start:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return True
+            end = min(end, size - 1)
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            with path.open("rb") as handle:
+                handle.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    block = handle.read(min(remaining, 1 << 20))
+                    if not block:
+                        break
+                    self.wfile.write(block)
+                    remaining -= len(block)
+            return True
 
         def end_headers(self) -> None:
             # The page and its modules are rebuilt from the source tree on every
@@ -255,8 +321,25 @@ class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+def _bind(builder: SiteBuilder, port: int, tries: int = 10) -> _Server:
+    """The server on ``port``, or on the next free one when that is taken.
+
+    Several sessions run a viewer on this machine at once, and a port taken by
+    one of them is a start-up failure and not a reason to stop: the port in
+    use is printed and the browser is opened on it.
+    """
+    for candidate in range(port, port + tries):
+        try:
+            return _Server(("127.0.0.1", candidate), _handler_for(builder))
+        except OSError as error:
+            if error.errno not in (48, 98):  # EADDRINUSE on macOS and Linux
+                raise
+            print(f"port {candidate} is in use, trying {candidate + 1}")
+    raise OSError(f"no free port between {port} and {port + tries - 1}")
+
+
 def serve(builder: SiteBuilder, port: int, open_browser: bool) -> None:
-    with _Server(("127.0.0.1", port), _handler_for(builder)) as server:
+    with _bind(builder, port) as server:
         url = f"http://127.0.0.1:{server.server_address[1]}/"
         print(f"serving {url} (ctrl-c to stop)")
         if open_browser:
@@ -269,55 +352,61 @@ def serve(builder: SiteBuilder, port: int, open_browser: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("hssd_root", type=Path)
-    parser.add_argument("--scene", default=None, help="assemble this apartment before serving")
+    parser.add_argument("--config", type=Path, default=None, help=f"a {CONFIG_NAME} to read")
+    parser.add_argument("hssd_root", type=Path, nargs="?", default=None)
+    parser.add_argument("--scene", default=None, help="open on this apartment")
     parser.add_argument(
-        "--runs",
-        type=Path,
-        default=None,
-        help="directory of rendered solver runs, offered as a mode of their apartment",
+        "--runs", type=Path, default=None, help="directory of runs with a walk.json"
     )
-    parser.add_argument(
-        "--run",
-        default=None,
-        help="open on this run rather than on whichever sorts last for the scene",
-    )
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--run", default=None, help="open on this run")
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--voices", type=Path, default=None, help="default: <data root>/voices")
+    parser.add_argument("--measured-head", type=Path, default=None, help="a SOFA head to add")
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="reassemble the scene even if the cache already holds it",
+        "--rebuild", action="store_true", help="reassemble the scene even if cached"
     )
     arguments = parser.parse_args(argv)
 
-    if arguments.build_only is not None:
-        builder = SiteBuilder(
-            arguments.hssd_root,
-            arguments.build_only,
-            arguments.scene,
-            arguments.runs,
-            arguments.rebuild,
-            arguments.run,
+    found = find_config(arguments.config)
+    if found is None and arguments.hssd_root is None:
+        print(
+            f"no {CONFIG_NAME} found (looked in the working directory and the main checkout) "
+            "and no hssd_root given",
+            file=sys.stderr,
         )
-        if arguments.scene:
-            builder.ensure(arguments.scene)
+        return 2
+    config = (
+        load_config(found)
+        if found is not None
+        else WalkConfig(hssd_root=arguments.hssd_root, open_browser=not arguments.no_browser)
+    )
+    config.apply_environment()
+    hssd_root = arguments.hssd_root or config.hssd_root
+    scene = arguments.scene or config.scene
+    runs = arguments.runs or config.runs
+    run = arguments.run or config.run
+    port = arguments.port or config.port
+    voices = arguments.voices or config.voices
+    head = arguments.measured_head or config.measured_head
+    rebuild = arguments.rebuild or config.rebuild
+    open_browser = config.open_browser and not arguments.no_browser
+    if found is not None:
+        print(f"config: {found}")
+
+    def build(target: Path) -> SiteBuilder:
+        builder = SiteBuilder(hssd_root, target, scene, runs, rebuild, run, voices, head)
+        if scene:
+            builder.ensure(scene)
+        return builder
+
+    if arguments.build_only is not None:
+        build(arguments.build_only)
         print(f"wrote {arguments.build_only}")
         return 0
-
     with tempfile.TemporaryDirectory(prefix="reverberate-viewer-") as temporary:
-        builder = SiteBuilder(
-            arguments.hssd_root,
-            Path(temporary),
-            arguments.scene,
-            arguments.runs,
-            arguments.rebuild,
-            arguments.run,
-        )
-        if arguments.scene:
-            builder.ensure(arguments.scene)
-        serve(builder, arguments.port, not arguments.no_browser)
+        serve(build(Path(temporary)), port, open_browser)
     return 0
 
 
