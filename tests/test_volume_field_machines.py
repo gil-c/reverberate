@@ -77,9 +77,7 @@ class TestWorkers:
         assert machines.workers_for(36, 91.0) == 13
         assert machines.workers_for(64, 183.0) == 26
         assert machines.workers_for(12, 91.0) == 11
-
-    def test_never_zero(self) -> None:
-        assert machines.workers_for(2, 1.0) == 1
+        assert machines.workers_for(2, 1.0) == 1, "never zero"
 
 
 class TestCredit:

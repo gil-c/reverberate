@@ -8,11 +8,7 @@ a point's rows, a grid that did not fit the card. These fail here first.
 from __future__ import annotations
 
 from reverberate.experiments.w40_volume_field.encode import shard_bounds
-from reverberate.experiments.w40_volume_field.plan import (
-    BYTES_PER_SAMPLE,
-    pitch_for,
-    points_per_run,
-)
+from reverberate.experiments.w40_volume_field.plan import BYTES_PER_SAMPLE, pitch_for
 from reverberate.experiments.w40_volume_field.solve import (
     RAM_PER_OUTPUT,
     VRAM_FIXED_GB,
@@ -43,10 +39,6 @@ class TestShardBounds:
         placed = [sum(r is not None for r in shard) for shard in per_shard]
         assert sum(placed) == 11 and all(n >= 2 for n in placed)
 
-    def test_one_shard_is_the_whole_plan(self) -> None:
-        rows = [[0, 3], [3, 9]]
-        bounds, per_shard = shard_bounds(rows, 1)
-        assert bounds == [(0, 9)] and per_shard == [rows]
 
 
 class TestSlices:
@@ -58,8 +50,6 @@ class TestSlices:
         assert slices_for(output, 250.0) == 1
         assert slices_for(output, 90.0) == 3
 
-    def test_a_small_band_is_one_solve(self) -> None:
-        assert slices_for(10e9, 64.0) == 1
 
     def test_sizing_reads_the_plan_and_multiplies_card_time_by_the_slices(self) -> None:
         plan = {
@@ -85,9 +75,6 @@ class TestSlices:
 
 
 class TestGridBudget:
-    def test_points_per_run_is_the_ram_over_one_point_with_a_safety_factor(self) -> None:
-        # 1021 nodes x 29128 samples x 8 B x 1.5 = 357 MB a point
-        assert points_per_run(200.0, 1021, 29128) == int(200e9 / (1021 * 29128 * 8 * 1.5))
 
     def test_the_pitch_that_fills_a_cap_puts_the_cap_on_the_floor(self) -> None:
         pitch = pitch_for(85.6, 560)

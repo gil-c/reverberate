@@ -33,6 +33,9 @@ from reverberate.experiments.w40_volume_field.solve import solve_on_card
 
 DURATIONS_S = {"low": 1.2, "mid": 0.4, "high": 0.15}
 
+#: How often the early rental of the encode boxes looks at solve.json.
+POLL_S = 60.0
+
 #: The three grids of a storey, by band.
 FMAX_HZ = {"low": 1000.0, "mid": 4000.0, "high": 8000.0}
 
@@ -283,7 +286,8 @@ def campaign(
     audit = out / "audit"
 
     if keys is None:
-        run.stage("export", lambda: export_scene(hssd_root, scene_id, models))
+        if not (models / "manifest.json").is_file():
+            run.stage("export", lambda: export_scene(hssd_root, scene_id, models))
         keys = storey_keys(models)
         say(f"grids: {keys}")
         if not grids_cached(keys):
@@ -323,7 +327,7 @@ def campaign(
     def rent_boxes_early() -> None:
         """Rent the encode boxes once the card is on its last band."""
         while True:
-            time.sleep(60)
+            time.sleep(POLL_S)
             state = run.solve_state()
             if state.get("complete") or (
                 state.get("in_progress") and len(state.get("remaining", [])) <= 1
