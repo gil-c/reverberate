@@ -41,6 +41,7 @@ __all__ = [
     "fetch",
     "solve",
     "start_engine",
+    "run_on",
     "upload",
     "watch_engine",
 ]
@@ -113,11 +114,40 @@ class SolveResult:
         return self.upload_s + self.engine_s + self.fetch_s
 
 
-def _run(argv: list[str], *, what: str, timeout: float | None = None) -> str:
-    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
-    if completed.returncode != 0:
-        raise RuntimeError(f"{what} failed: {completed.stderr.strip()[-2000:]}")
-    return completed.stdout
+#: What a transient ssh failure looks like. Vast's proxy refused a connection
+#: for a few seconds in the middle of a twenty minute solve and the whole
+#: orchestration died on it; the engine kept running, unwatched.
+_TRANSIENT = (
+    "Connection refused",
+    "Connection closed",
+    "Connection reset",
+    "kex_exchange",
+    "Connection timed out",
+)
+
+
+def _run(argv: list[str], *, what: str, timeout: float | None = None, attempts: int = 4) -> str:
+    for attempt in range(1, attempts + 1):
+        completed = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
+        if completed.returncode == 0:
+            return completed.stdout
+        stderr = completed.stderr.strip()
+        transient = any(t in stderr for t in _TRANSIENT)
+        if attempt < attempts and argv and argv[0] in ("ssh", "scp") and transient:
+            time.sleep(20.0 * attempt)
+            continue
+        raise RuntimeError(f"{what} failed: {stderr[-2000:]}")
+    raise RuntimeError(f"{what} failed after {attempts} attempts")
+
+
+def run_on(machine: Machine, command: str, *, what: str, timeout: float | None = None) -> str:
+    """Run one shell command on ``machine`` over ssh and return its stdout.
+
+    Retries the transient proxy failures like every other ssh call here.
+    """
+    return _run(machine.ssh_command(command), what=what, timeout=timeout)
 
 
 def upload(machine: Machine, files: list[Path], remote_dir: str = DEFAULT_REMOTE_DIR) -> int:
