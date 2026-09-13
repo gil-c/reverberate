@@ -5,21 +5,19 @@ cent for hours more than once through a script error or an estimate that was
 wrong, and the dataset will be rented anyway, so the chain is proved rented from
 the start. Nothing here runs locally except argument parsing.
 
-Three stages, three machines, because their needs do not overlap:
+Two stages, two machines, because their needs do not overlap:
 
 ========= ============================== =========================
 stage     wants                          wasted on it
 ========= ============================== =========================
 voxelise  many cores, a very large disk  a GPU
-payload   memory, one fast core          a GPU, many cores
 solve     VRAM                           cores
 ========= ============================== =========================
 
-``voxelise`` and ``payload`` can share one rental, and by default they do:
-``vox_out.h5`` is 25 GB for the flat at 16 kHz while the payload the browser
-fetches is about 185 MB, so building the payload on the machine that has just
-made the grid turns a transfer that has already failed once into one that takes
-seconds.
+The viewer's picture of a grid is no longer built here: a campaign builds the
+audit view from the installed cache entry with ``experiments.audit_view``,
+room by room and without loss where the reader stands (ADR 0007), so the grid
+comes home and nothing else has to.
 
 **Every requirement is arithmetic over the job, not a guess.** ``MachineNeed``
 is computed from the grid the run will build, offers that cannot meet it are
@@ -31,12 +29,7 @@ Usage::
 
     PYTHONPATH=src .venv/bin/python scripts/remote_chain.py \\
         --models data/runs/w32_carved/models --scene apartment_full \\
-        --fmax 16000 --slabs 16 --nh 40 --hours 4 --out /tmp/flat16k \\
-        --payload --viewer-cubes 2000000000 --yes
-
-Add ``--payload`` and the viewer's files are built on that same machine and
-fetched beside the grid, into ``<out>/<fmax>/payload``: a campaign solves on
-the cache entry and shows the payload, so both come home.
+        --fmax 16000 --slabs 16 --nh 40 --hours 4 --out /tmp/flat16k --yes
 """
 
 from __future__ import annotations
@@ -57,11 +50,8 @@ from reverberate.wave.remote_voxelise import (
     MachineLost,
     MachineNeed,
     RetrievalFailed,
-    build_payload_remote,
     grid_shape_of,
     install_entry,
-    nodes_from_shape,
-    payload_need_for,
     remote_disk_free_gb,
     voxelise_need,
     voxelise_remote,
@@ -69,7 +59,7 @@ from reverberate.wave.remote_voxelise import (
 from reverberate.wave.voxelise import SceneSpec, nh_for  # noqa: F401 - nh_for sizes the rental
 
 #: A CUDA image because Vast's cheap boxes are GPU boxes and the build script
-#: compiles the engine too. The voxelise and payload stages never use the card.
+#: compiles the engine too. The voxelise stage never uses the card.
 IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
 
 #: Gigabytes of the reserved disk that are gone before the job sees any of it:
@@ -157,18 +147,6 @@ def main(argv: list[str] | None = None) -> int:
         "reverberate.wave.voxelise.VOXEL_BUDGET, which is the only form that "
         "survives changing fmax",
     )
-    parser.add_argument(
-        "--viewer-cubes",
-        type=int,
-        default=20_000_000,
-        help="block budget; large enough forces one block per node, which is lossless",
-    )
-    parser.add_argument(
-        "--payload",
-        action="store_true",
-        help="after voxelising, build the viewer payload on the same machine and fetch "
-        "only that, leaving the grid where it was made",
-    )
     parser.add_argument("--max-dph", type=float, default=0.40)
     parser.add_argument(
         "--min-cpu-ghz",
@@ -223,11 +201,6 @@ def main(argv: list[str] | None = None) -> int:
         for size in shape:
             lattice *= -(-size // nh)
         one = voxelise_need(model_json, fmax, slabs=args.slabs, triangles=triangles, voxels=lattice)
-        if args.payload:
-            # One rental does both, so it has to satisfy both: the voxeliser
-            # wants cores and disk, the payload build wants memory, and neither
-            # is the other's constraint.
-            one = one.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
         need = one if need is None else need.merge(one)
     assert need is not None
     if args.min_ram_gb > need.ram_gb:
@@ -348,20 +321,6 @@ def main(argv: list[str] | None = None) -> int:
                 result.report["pockets"] = seal_in_place(out / "vox_out.h5")
                 print(json.dumps(result.report["pockets"], indent=1)[:600])
 
-            if args.payload:
-                # Both, not either: a campaign solves on the entry and shows
-                # the payload. The payload lands beside the fetched grid, in
-                # ``<out>/<fmax>/payload``; the entry goes to the cache below.
-                print("building the payload on the machine that just made the grid")
-                report, _ = build_payload_remote(
-                    machine,
-                    out / "payload",
-                    labels=sorted(spec.mat_files),
-                    target_cubes=args.viewer_cubes,
-                    remote_dir=remote_dir,
-                    timeout=args.hours * 3600,
-                )
-                print(json.dumps(report, indent=2)[:600])
             # Into the cache under its key, with the manifest everything
             # downstream reads. A fetched grid that is not an entry is a
             # grid that has to be computed again to be used.
