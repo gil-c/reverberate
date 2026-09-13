@@ -125,6 +125,9 @@ class TierPlan:
             "sealed_left_out": self.sealed_left_out,
             "tiles": self.files,
             "aggregated": self.span > 1,
+            #: Nodes per side of a drawn cube: 1 is the grid itself. The app
+            #: shows it beside ``cell_m`` so an audit knows what it looks at.
+            "aggregation": self.span,
         }
 
 

@@ -44,6 +44,7 @@ from reverberate.wave.voxelise import CACHE_FILES, CacheEntry, SceneSpec
 
 __all__ = [
     "MachineLost",
+    "rsync",
     "MachineNeed",
     "install_entry",
     "REMOTE_PFFDTD",
@@ -70,7 +71,7 @@ REMOTE_VENV = "/root/pffdtd-venv/bin/python"
 REMOTE_WORK = "/root/vox"
 
 
-def _rsync(
+def rsync(
     machine: Machine,
     sources: list[str],
     destination: str,
@@ -653,8 +654,8 @@ def voxelise_remote(
     materials = [Path(spec.mat_folder) / name for name in sorted(spec.mat_files.values())]
     payload = [Path(spec.model_json), child]
     _run(machine.ssh_command(f"mkdir -p {shlex.quote(remote_dir)}/materials"), what="mkdir work")
-    _rsync(machine, [str(f) for f in payload], remote_dir, download=False)
-    _rsync(machine, [str(f) for f in materials], f"{remote_dir}/materials", download=False)
+    rsync(machine, [str(f) for f in payload], remote_dir, download=False)
+    rsync(machine, [str(f) for f in materials], f"{remote_dir}/materials", download=False)
     uploaded = sum(f.stat().st_size for f in [*payload, *materials])
     upload_s = time.time() - started
 
@@ -665,7 +666,7 @@ def voxelise_remote(
     started = time.time()
     if fetch_entry:
         try:
-            _rsync(
+            rsync(
                 machine,
                 [f"{remote_dir}/{name}" for name in CACHE_FILES],
                 str(destination),
@@ -777,7 +778,7 @@ def build_payload_remote(
     modules = f"{remote_dir}/modules"
     here = Path(__file__).parent
     _run(machine.ssh_command(f"mkdir -p {shlex.quote(modules)}"), what="mkdir modules")
-    _rsync(
+    rsync(
         machine,
         [
             str(here.parent / "viz" / "vox_view.py"),
@@ -806,7 +807,7 @@ def build_payload_remote(
 
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    _rsync(machine, [f"{remote_dir}/payload/"], str(destination), download=True)
+    rsync(machine, [f"{remote_dir}/payload/"], str(destination), download=True)
     return report, log
 
 

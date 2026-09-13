@@ -200,6 +200,40 @@ def scene_bounds(model_json: Path) -> tuple[np.ndarray, np.ndarray]:
     return points.min(axis=0), points.max(axis=0)
 
 
+def scene_spec(
+    models: Path, scene: str, fmax: float, *, slabs: int = 1, nh: int | None = None
+) -> tuple[SceneSpec, Path, int]:
+    """The scene at one band, the model file it names, and its triangle count.
+
+    Read from the export's manifest so a machine can be sized before it is
+    rented, and so a campaign can name the cache keys its grids will have
+    before the grids exist. The triangle count comes back because the memory
+    requirement needs it and the manifest already carries it.
+    """
+    from reverberate.wave.remote_voxelise import grid_shape_of
+    from reverberate.wave.voxelise import SceneSpec, nh_for
+
+    manifest = json.loads((models / "manifest.json").read_text())
+    entry = {item["name"]: item for item in manifest["scenes"]}[scene]
+    model_json = (models / entry["file"]).resolve()
+    labels = set(json.loads(model_json.read_text())["mats_hash"])
+    mat_folder = models.parent / "materials"
+    mat_files = build_materials(labels, manifest["materials"], mat_folder)
+    return (
+        SceneSpec(
+            model_json=model_json,
+            mat_folder=mat_folder,
+            mat_files=mat_files,
+            fmax=fmax,
+            ppw=10.5,
+            slabs=slabs,
+            nh=nh if nh else nh_for(grid_shape_of(model_json, fmax, 10.5)),
+        ),
+        model_json,
+        int(entry["triangles"]),
+    )
+
+
 def build_materials(
     labels: set[str], table: dict[str, list[float]], out_dir: Path
 ) -> dict[str, str]:

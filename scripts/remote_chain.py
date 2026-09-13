@@ -5,21 +5,19 @@ cent for hours more than once through a script error or an estimate that was
 wrong, and the dataset will be rented anyway, so the chain is proved rented from
 the start. Nothing here runs locally except argument parsing.
 
-Three stages, three machines, because their needs do not overlap:
+Two stages, two machines, because their needs do not overlap:
 
 ========= ============================== =========================
 stage     wants                          wasted on it
 ========= ============================== =========================
 voxelise  many cores, a very large disk  a GPU
-payload   memory, one fast core          a GPU, many cores
 solve     VRAM                           cores
 ========= ============================== =========================
 
-``voxelise`` and ``payload`` can share one rental, and by default they do:
-``vox_out.h5`` is 25 GB for the flat at 16 kHz while the payload the browser
-fetches is about 185 MB, so building the payload on the machine that has just
-made the grid turns a transfer that has already failed once into one that takes
-seconds.
+The viewer's picture of a grid is no longer built here: a campaign builds the
+audit view from the installed cache entry with ``experiments.audit_view``,
+room by room and without loss where the reader stands (ADR 0007), so the grid
+comes home and nothing else has to.
 
 **Every requirement is arithmetic over the job, not a guess.** ``MachineNeed``
 is computed from the grid the run will build, offers that cannot meet it are
@@ -31,12 +29,7 @@ Usage::
 
     PYTHONPATH=src .venv/bin/python scripts/remote_chain.py \\
         --models data/runs/w32_carved/models --scene apartment_full \\
-        --fmax 16000 --slabs 16 --nh 40 --hours 4 --out /tmp/flat16k \\
-        --payload --viewer-cubes 2000000000 --yes
-
-Add ``--payload`` and the viewer's files are built on that same machine and
-fetched instead of the grid, which is the whole point: 185 MB comes home and
-25 GB stays where it was made.
+        --fmax 16000 --slabs 16 --nh 40 --hours 4 --out /tmp/flat16k --yes
 """
 
 from __future__ import annotations
@@ -49,7 +42,7 @@ import time
 from pathlib import Path
 
 from reverberate import auth
-from reverberate.experiments.run import build_materials
+from reverberate.experiments.run import scene_spec
 from reverberate.gpu import vast
 from reverberate.wave.remote import _run
 from reverberate.wave.remote_voxelise import (
@@ -57,19 +50,16 @@ from reverberate.wave.remote_voxelise import (
     MachineLost,
     MachineNeed,
     RetrievalFailed,
-    build_payload_remote,
     grid_shape_of,
     install_entry,
-    nodes_from_shape,
-    payload_need_for,
     remote_disk_free_gb,
     voxelise_need,
     voxelise_remote,
 )
-from reverberate.wave.voxelise import SceneSpec, nh_for
+from reverberate.wave.voxelise import SceneSpec, nh_for  # noqa: F401 - nh_for sizes the rental
 
 #: A CUDA image because Vast's cheap boxes are GPU boxes and the build script
-#: compiles the engine too. The voxelise and payload stages never use the card.
+#: compiles the engine too. The voxelise stage never uses the card.
 IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
 
 #: Gigabytes of the reserved disk that are gone before the job sees any of it:
@@ -128,35 +118,8 @@ def pick_offers(
 
 
 def spec_from(args: argparse.Namespace, fmax: float) -> tuple[SceneSpec, Path, int]:
-    """The scene at one band, the model file it names, and its triangle count.
-
-    The triangle count comes back because the memory requirement needs it and
-    the manifest already carries it: the alternative is parsing a 233 MB model
-    a second time to learn something the exporter wrote down.
-    """
-    manifest = json.loads((args.models / "manifest.json").read_text())
-    scene = {entry["name"]: entry for entry in manifest["scenes"]}[args.scene]
-    model_json = (args.models / scene["file"]).resolve()
-    labels = set(json.loads(model_json.read_text())["mats_hash"])
-    mat_folder = args.models.parent / "materials"
-    mat_files = build_materials(labels, manifest["materials"], mat_folder)
-    return (
-        SceneSpec(
-            model_json=model_json,
-            mat_folder=mat_folder,
-            mat_files=mat_files,
-            fmax=fmax,
-            ppw=10.5,
-            slabs=args.slabs,
-            # A cell count only holds at one band, so it is derived from the
-            # grid unless the caller insists. 40 cells is 8.2 cm at 16 kHz and
-            # 1.31 m at 1 kHz, and the second of those does not finish; see
-            # reverberate.wave.voxelise.VOXEL_BUDGET.
-            nh=args.nh if args.nh else nh_for(grid_shape_of(model_json, fmax, 10.5)),
-        ),
-        model_json,
-        int(scene["triangles"]),
-    )
+    """The scene at one band; see :func:`reverberate.experiments.run.scene_spec`."""
+    return scene_spec(args.models, args.scene, fmax, slabs=args.slabs, nh=args.nh)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,18 +146,6 @@ def main(argv: list[str] | None = None) -> int:
         help="voxel side in grid steps. Left unset it is derived per band from "
         "reverberate.wave.voxelise.VOXEL_BUDGET, which is the only form that "
         "survives changing fmax",
-    )
-    parser.add_argument(
-        "--viewer-cubes",
-        type=int,
-        default=20_000_000,
-        help="block budget; large enough forces one block per node, which is lossless",
-    )
-    parser.add_argument(
-        "--payload",
-        action="store_true",
-        help="after voxelising, build the viewer payload on the same machine and fetch "
-        "only that, leaving the grid where it was made",
     )
     parser.add_argument("--max-dph", type=float, default=0.40)
     parser.add_argument(
@@ -250,11 +201,6 @@ def main(argv: list[str] | None = None) -> int:
         for size in shape:
             lattice *= -(-size // nh)
         one = voxelise_need(model_json, fmax, slabs=args.slabs, triangles=triangles, voxels=lattice)
-        if args.payload:
-            # One rental does both, so it has to satisfy both: the voxeliser
-            # wants cores and disk, the payload build wants memory, and neither
-            # is the other's constraint.
-            one = one.merge(payload_need_for(nodes_from_shape(shape), shape, args.viewer_cubes))
         need = one if need is None else need.merge(one)
     assert need is not None
     if args.min_ram_gb > need.ram_gb:
@@ -359,14 +305,14 @@ def main(argv: list[str] | None = None) -> int:
                 build_script=Path(__file__).with_name("build_pffdtd.sh"),
                 remote_dir=remote_dir,
                 timeout=args.hours * 3600,
-                fetch_entry=not args.payload,
+                fetch_entry=True,
                 nprocs=args.nprocs,
             )
             computed = True
             spent += result.total_s
             print(result.summary())
             print(json.dumps(result.report, indent=2)[:900])
-            if not args.payload and not args.no_seal_pockets:
+            if not args.no_seal_pockets:
                 # Every air component smaller than a room, sealed on the grid
                 # before the entry is installed and published, so that what
                 # the cache holds is what the solver should read.
@@ -375,32 +321,20 @@ def main(argv: list[str] | None = None) -> int:
                 result.report["pockets"] = seal_in_place(out / "vox_out.h5")
                 print(json.dumps(result.report["pockets"], indent=1)[:600])
 
-            if args.payload:
-                print("building the payload on the machine that just made the grid")
-                report, _ = build_payload_remote(
-                    machine,
-                    out,
-                    labels=sorted(spec.mat_files),
-                    target_cubes=args.viewer_cubes,
-                    remote_dir=remote_dir,
-                    timeout=args.hours * 3600,
-                )
-                print(json.dumps(report, indent=2)[:600])
-            else:
-                # Into the cache under its key, with the manifest everything
-                # downstream reads. A fetched grid that is not an entry is a
-                # grid that has to be computed again to be used.
-                entry = install_entry(spec, out, result.report, result.voxelise_s)
-                print(f"installed {entry.key} -> {entry.path} ({entry.complete=})")
-                if store is not None:
-                    from reverberate.wave.vox_store import publish_entry
+            # Into the cache under its key, with the manifest everything
+            # downstream reads. A fetched grid that is not an entry is a
+            # grid that has to be computed again to be used.
+            entry = install_entry(spec, out, result.report, result.voxelise_s)
+            print(f"installed {entry.key} -> {entry.path} ({entry.complete=})")
+            if store is not None:
+                from reverberate.wave.vox_store import publish_entry
 
-                    started = time.time()
-                    digests = publish_entry(store, entry)
-                    print(
-                        f"published {len(digests)} files to the store in "
-                        f"{(time.time() - started) / 60:.1f} min"
-                    )
+                started = time.time()
+                digests = publish_entry(store, entry)
+                print(
+                    f"published {len(digests)} files to the store in "
+                    f"{(time.time() - started) / 60:.1f} min"
+                )
             # The grid is off the machine; its scratch is not, and 300 GB of
             # spill would refuse the next band on the same disk.
             _run(machine.ssh_command(f"rm -rf {shlex.quote(remote_dir)}"), what="clear band")
