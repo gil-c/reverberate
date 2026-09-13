@@ -40,7 +40,6 @@ class TestShardBounds:
         assert sum(placed) == 11 and all(n >= 2 for n in placed)
 
 
-
 class TestSlices:
     def test_the_mid_band_of_hssd_0076_needs_two_slices_on_a_188_gb_host(self) -> None:
         """437 points x 1021 nodes x 29128 samples x 8 B = 104 GB of output;
@@ -49,7 +48,6 @@ class TestSlices:
         assert slices_for(output, 180.0) == 2
         assert slices_for(output, 250.0) == 1
         assert slices_for(output, 90.0) == 3
-
 
     def test_sizing_reads_the_plan_and_multiplies_card_time_by_the_slices(self) -> None:
         plan = {
@@ -75,7 +73,6 @@ class TestSlices:
 
 
 class TestGridBudget:
-
     def test_the_pitch_that_fills_a_cap_puts_the_cap_on_the_floor(self) -> None:
         pitch = pitch_for(85.6, 560)
         assert 0.35 <= pitch <= 0.45
