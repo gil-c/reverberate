@@ -67,13 +67,13 @@ from reverberate.spatial.export import (
 )
 from reverberate.spatial.hrtf import (
     HEAD_RADIUS_M,
-    HrtfSet,
     ear_directions,
     measured_head,
+    sphere_head,
     sphere_hrtf,
     woodworth_itd_s,
 )
-from reverberate.spatial.sh import quadrature, real_sh
+from reverberate.spatial.sh import real_sh
 from reverberate.spatial.validate import (
     direct_arrival_sample,
     direction_of_arrival,
@@ -94,7 +94,6 @@ __all__ = [
     "finish_run",
     "pressures_of_run",
     "spatial_report",
-    "sphere_head",
     "write_audio",
     "main",
 ]
@@ -151,16 +150,6 @@ def pressures_of_run(
             atmosphere=air,
         )
     return signals, delivery_rate_hz
-
-
-def sphere_head(
-    sample_rate_hz: float, filter_length: int, *, quadrature_degree: int = 60
-) -> HrtfSet:
-    """The analytic head, sampled on the decoder's own frequency grid."""
-    grid, weights = quadrature(quadrature_degree)
-    frequency = np.fft.rfftfreq(filter_length, 1.0 / sample_rate_hz)
-    sampled = sphere_hrtf(grid, frequency)
-    return HrtfSet(sampled.responses, grid, frequency, sampled.description, weights=weights)
 
 
 def decoders(

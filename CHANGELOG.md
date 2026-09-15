@@ -32,6 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everyday rooms of its storey, and the viewer labels apartments by short name.
 - The scene cache key covers the material tables, which it did not: a coefficient
   edited in place was served stale from every entry.
+- **The viewer is a first-person walk-through app** (`src/reverberate/viz/app/`,
+  ADR 0012), and `viz/web/` and `viz/run_view` are gone with the page that read
+  them. A run the app opens is a directory carrying `walk.json`
+  (`viz.app_payload`): sources, one impulse response field each
+  (`viz.field_payload`, `docs/formats/response-field.md`), one tiered mesh
+  payload per band limit. Earlier runs have none and are never opened. What
+  depends on the listener is computed in the page: the exact rotation of the
+  harmonics, the order-7 decode to two ears in a worker, the convolution on
+  the browser's convolvers, the plots of the response at the listener; a cell
+  is read out of the HDF5 by range request. Python builds the inputs once:
+  the decoder filters (`viz.decoders`), twelve anechoic EARS voices
+  (`viz.voices`, CC BY-NC 4.0, published to the store). The app runs from
+  `walk.toml` (`viz.walk_config`), found from any worktree, and
+  `serve_room.py` runs as a file. In the acoustic view the coarse tier of every
+  room is resident and the fine tier is drawn within `near` metres of the
+  listener (a setting, 8 m), nearest tile first under the quad budget, evicted
+  a metre farther out; the coarse tier is cut away by the shader where a fine
+  tile is on screen. The plots are of the cell's own omnidirectional channel,
+  analysed in a worker when the cell changes, in absolute decibels against
+  the cell nearest the source, so walking away plots lower; a direction
+  diagram shows where the early and the whole energy arrive from, turned
+  with the head. The output level starts at +40 dB.
 
 ### Fixed
 

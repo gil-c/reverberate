@@ -161,13 +161,16 @@ def _has_scene_files(hssd_root: Path, scene_id: str) -> bool:
 
 
 #: The published catalogue, read once per process and store: every storey a
-#: viewer without HSSD opens asks it which key to fetch.
-_CATALOGUES: dict[int, list[dict[str, object]]] = {}
+#: viewer without HSSD opens asks it which key to fetch. The store is kept
+#: beside its rows so its id cannot be reused by a later store and answer for it.
+_CATALOGUES: dict[int, tuple[ObjectStore, list[dict[str, object]]]] = {}
 
 
 def published_key(store: ObjectStore, scene_id: str, storey: int = 0) -> str | None:
     """The key the published catalogue gives for this storey, if it has one."""
-    rows = _CATALOGUES.setdefault(id(store), scene_store.fetch_index(store))
+    if id(store) not in _CATALOGUES:
+        _CATALOGUES[id(store)] = (store, scene_store.fetch_index(store))
+    _, rows = _CATALOGUES[id(store)]
     for row in rows:
         if str(row.get("scene_id")) == scene_id and int(str(row.get("storey_index", 0))) == storey:
             return str(row["key"])
