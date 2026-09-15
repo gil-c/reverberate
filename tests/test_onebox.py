@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+from reverberate import auth
+from reverberate.gpu import vast
 from reverberate.gpu.onebox import MachineNeed, Watch, choose_offers, monitor_once
 
 
@@ -317,22 +319,28 @@ class TestRunEndToEnd:
             if download:
                 pulled.append(sources)
 
-        monkeypatch.setattr(onebox.auth, "inject", lambda names: None)
-        monkeypatch.setattr(onebox.vast, "VastClient", lambda timeout: Client())
-        monkeypatch.setattr(onebox.vast, "account_identity", lambda client: tmp_path / "id")
-        monkeypatch.setattr(
-            onebox.vast, "teardown", lambda client, instance: calls.append("teardown") or True
-        )
-        monkeypatch.setattr(
-            onebox.vast, "rent_one", lambda *a, **k: calls.append("rent") or (machine, 7)
-        )
-        monkeypatch.setattr(
-            onebox, "provision", lambda m, script, beside=(): calls.append("build") or 60.0
-        )
+        def fake_teardown(client: Any, instance: int) -> bool:
+            calls.append("teardown")
+            return True
+
+        def fake_rent_one(*args: Any, **kwargs: Any) -> tuple[Any, int]:
+            calls.append("rent")
+            return machine, 7
+
+        def fake_provision(m: Any, script: Path, beside: Any = ()) -> float:
+            calls.append("build")
+            return 60.0
+
+        monkeypatch.setattr(auth, "inject", lambda names: None)
+        monkeypatch.setattr(vast, "VastClient", lambda timeout: Client())
+        monkeypatch.setattr(vast, "account_identity", lambda client: tmp_path / "id")
+        monkeypatch.setattr(vast, "teardown", fake_teardown)
+        monkeypatch.setattr(vast, "rent_one", fake_rent_one)
+        monkeypatch.setattr(onebox, "provision", fake_provision)
         monkeypatch.setattr(onebox, "run_on", fake_run_on)
         monkeypatch.setattr(onebox, "rsync", fake_rsync)
         monkeypatch.setattr(onebox, "cache_root", lambda: tmp_path / "cache")
-        monkeypatch.setattr(onebox.time, "sleep", lambda s: None)
+        monkeypatch.setattr(time, "sleep", lambda s: None)
         record = onebox.run(
             bundle,
             tmp_path / "home",
@@ -387,10 +395,10 @@ class TestRunEndToEnd:
         (bundle / "model.json").write_text(
             json.dumps({"mats_hash": {"wall": {"pts": [[0, 0, 0], [3, 3, 3]]}}})
         )
-        monkeypatch.setattr(onebox.auth, "inject", lambda names: None)
-        monkeypatch.setattr(onebox.vast, "VastClient", lambda timeout: object())
-        monkeypatch.setattr(onebox.vast, "account_identity", lambda client: tmp_path)
-        monkeypatch.setattr(onebox.vast, "rent_one", lambda *a, **k: pytest.fail("rented"))
+        monkeypatch.setattr(auth, "inject", lambda names: None)
+        monkeypatch.setattr(vast, "VastClient", lambda timeout: object())
+        monkeypatch.setattr(vast, "account_identity", lambda client: tmp_path)
+        monkeypatch.setattr(vast, "rent_one", lambda *a, **k: pytest.fail("rented"))
         record = onebox.run(
             bundle,
             tmp_path / "home",
