@@ -1,0 +1,12 @@
+# What reverberate.accel needs on a rented CUDA machine, and nothing the
+# laptop's viewer or the store client needs. Installed by
+# scripts/provision_accel.sh into its own interpreter, beside PFFDTD's.
+numpy>=2.0
+scipy>=1.13
+h5py>=3.11
+resampy==0.4.3
+shapely>=2.1
+trimesh>=4.4
+pyroomacoustics>=0.10
+scikit-image>=0.26
+cupy-cuda12x>=13.0

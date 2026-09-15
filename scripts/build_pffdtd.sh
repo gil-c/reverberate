@@ -79,6 +79,33 @@ log "Patch 6: MNm 64 -> 128 materials"
 sed -i "s/#define MNm 64 /#define MNm 128 /" "${INSTALL_DIR}/c_cuda/fdtd_data.h"
 grep -q "#define MNm 128" "${INSTALL_DIR}/c_cuda/fdtd_data.h" || { echo "Patch 6 did not apply"; exit 1; }
 
+# Patch 8: the receiver records are kept on the host and written to sim_outs.h5
+# in the engine's own precision (Real) rather than always as float64. The
+# single precision engine computes them as float32 and the encoder rounded the
+# float64 file back to float32, so the numbers are the same and the host RAM,
+# the file and the time spent writing it are halved: the mid band of hssd_0076
+# no longer has to be solved twice for a 188 GB host. A double precision build
+# is untouched. The patch is a unified diff beside this script, applied with
+# --forward so a rebuilt machine does not apply it twice; verified by its mark.
+log "Patch 8: receiver records in the engine's own precision"
+# In the repository the patch is under scripts/pffdtd/; on a rented machine the
+# renter puts it beside this script under its own name.
+PATCH_8_NAME="0008-receiver-records-in-the-engines-own-precision.patch"
+PATCH_8="$(dirname "$0")/pffdtd/${PATCH_8_NAME}"
+[ -f "${PATCH_8}" ] || PATCH_8="$(dirname "$0")/${PATCH_8_NAME}"
+if [ ! -f "${PATCH_8}" ]; then
+  echo "Patch 8 is missing beside this script: ${PATCH_8_NAME}"; exit 1
+fi
+if grep -q "REVERBERATE PATCH 8" "${INSTALL_DIR}/c_cuda/fdtd_data.h"; then
+  echo "    already applied"
+else
+  patch -p1 --forward --directory="${INSTALL_DIR}" < "${PATCH_8}"
+fi
+for f in fdtd_data.h gpu_engine.h cpu_engine.h; do
+  grep -q "REVERBERATE PATCH 8" "${INSTALL_DIR}/c_cuda/${f}" || { echo "Patch 8 did not apply to ${f}"; exit 1; }
+done
+grep -q "double \*u_out" "${INSTALL_DIR}/c_cuda/fdtd_data.h" && { echo "Patch 8 left a float64 record"; exit 1; }
+
 
 log "Python environment"
 python3 -m venv "${VENV_DIR}"
