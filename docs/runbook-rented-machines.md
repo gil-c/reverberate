@@ -102,3 +102,121 @@ and 6 to 7 h**; with the store in the middle: **5 to 6 USD and 5 to 6 h**.
 Budget 30 per cent more for one failure. Encoding on the card itself,
 restricted to the octaves each band keeps, would take minutes and leave no
 transfer at all; it is the next thing to build.
+
+## 5. One machine, the card doing the work bought by the core (ADR 0012)
+
+From 2026-09-14 a campaign is one rental; the multi-machine driver of parts 1 to 4 was
+removed from the code on 2026-09-15, and those parts are kept as the record of what it cost. The laptop prepares a bundle
+(`python -m reverberate.accel bundle`, 88 MB for hssd_0076: the storey's
+mesh and materials, the listening grid, the rooms, the sources, the keys),
+`reverberate.gpu.onebox` rents a host whose cards together hold the largest
+grid, provisions it (`scripts/build_pffdtd.sh`, `scripts/provision_accel.sh`),
+pushes the bundle, starts `python -m reverberate.accel campaign` detached,
+and looks at it every five minutes: the instance and its bill through the
+API, the campaign's `status.json`, the card's utilisation, the disk and the
+log through ssh. It relaunches a stalled campaign once from its state on
+disk, fetches the run and the grids when `campaign.done` appears, and
+destroys the host only after the fetch is verified.
+
+### What runs where, and how it was checked
+
+| stage | before | now | checked by |
+| --- | --- | --- | --- |
+| voxelise | CPU box, 12 processes: 28, 40 and 45 min for the storey at 1, 4 and 8 kHz | the card, `accel.voxelise`: 14 s, 99 s and 222 s on an RTX 3090 | every dataset of `vox_out.h5` equal to the reference entry, pockets sealed by the same `wave.pockets` |
+| audit view | laptop | the host's cores, from the rooms in the bundle | same code, rooms serialised as WKT |
+| plan | laptop, reads HSSD | `plan_arrays` on the host from the bundle's points | `plan_field` is now `plan_points` + `plan_arrays` |
+| solve | card over ssh, pressure shrunk and pushed to boxes | card, `accel.solve`, slices by the host's RAM, pressure read in place | same engine, same comms |
+| encode | four CPU boxes, 16 to 125 s a point | the card, `accel.encode`: one preparation per band, then under a second a point | float32 identical to the CPU child on numpy; the card's numbers measured per campaign |
+| assemble | laptop | the host's cores | same code |
+
+### Lessons of the port
+
+- A GPU port that must reproduce a CPU result byte for byte is compiled
+  with `-fmad=false`: nvcc fuses `a*b+c` by default and the fused result is
+  more accurate, which is to say different.
+- PFFDTD's `normalise` divides by `|v| + eps`, so a unit ray direction is
+  `1/(1+eps)` long; the kernel carries the factor, and would otherwise
+  disagree on the last bit of every hit distance.
+- Upstream skips a leg direction for a whole voxel when no node's leg
+  reaches the triangle within one cell, before considering nodes within
+  one cell and a millionth; the kernel reduces the same "any" before it
+  marks, because the shortcut changes the answer at a node in that band.
+- The packed triangle row is 30 doubles, not 27; the first run of the
+  kernel on a real scene found 584 boundary nodes of 2.4 million.
+- The chain seals air pockets after voxelising (`wave.pockets.seal_in_place`),
+  which adds cells, clears bits and zeroes `saf_bn` on every buried node;
+  a port that forgets it differs on 1.1 million rows and is otherwise exact.
+- The engine's float64 output is not float32-exact; the shrink of the first
+  campaigns rounded it, and the card path rounds it the same way.
+- A fresh export of a scene is not the same mesh a week later
+  (1 602 718 against 1 615 178 triangles on hssd_0076); a reproduction
+  starts from the earlier export, `prepare_bundle(models_from=...)`.
+- The engine keeps every receiver's whole record on the card that holds it
+  (8 bytes a sample) beside its share of the grid, split over the cards by
+  slabs of the outermost axis; a V100 with 137 554 receivers of 29 128
+  steps asserted out of memory. `accel.solve` sizes the slices by the
+  cards as well as by the host's RAM, from the receivers' positions.
+- After its last step the engine spends minutes dumping the last samples of
+  every receiver to its log (51 MB for 223 599 receivers) before it says
+  `sim data freed`; a progress reader that looks only at the tail sees no
+  percentage there, and the write of the output is a legitimate stretch at
+  100 per cent that a stall rule must not kill.
+- cupy's memory pool keeps what it grew to: 32 GB of the first card after
+  one band's encode, and the next solve could not allocate its grid. The
+  campaign frees the pools before every engine run.
+- The engine runs one step more than the plan's `samples`, and the encode
+  child keeps every sample it wrote (57 603 at 48 kHz for the low band of
+  hssd_0076). The assembly reads the low band's length as the response's
+  duration and `tail.synthesise` draws and filters its noise over that whole
+  length, so an encoder that cut three samples changed every synthesised
+  tail of the field while the first 393 ms agreed to 1e-7. The card path
+  now encodes to the record's own length.
+- A detached job launched over ssh must be started in a subshell,
+  `( setsid nohup x > /dev/null 2>&1 < /dev/null & )`, or the session hangs
+  until it is killed and the job dies with it.
+- Two Quebec RTX 3090 hosts (offers 3884985x) never start their container
+  (`failed to inject CDI devices`); the renter skips a host whose status
+  says `Error` within eight minutes and tries the next.
+- The engine kept every receiver's record as float64 on the host, twice
+  (once as computed, once reordered for the file), and wrote float64, while
+  the single precision engine had computed float32 and the encoder rounded
+  the file back to float32. Patch 8 (`scripts/pffdtd/0008-…patch`, applied
+  by `build_pffdtd.sh`, pushed beside it by `onebox`) keeps and writes the
+  engine's own precision: half the host RAM, half the disk, half the time
+  spent writing, the same numbers (bit for bit against float32 of upstream's
+  file, checked with the CPU engines on the 1 kHz storey grid of hssd_0076).
+  `accel.solve.output_sample_bytes` reads the mark in the built source and
+  the campaign sizes its slices from it; the mid band of hssd_0076 fits a
+  188 GB host in one slice instead of two.
+- The assembly spent nine seconds a point on one core, seven of them
+  running the whole nine-band octave bank on every noise draw to keep one
+  band, sixty-four channels times two bands times nine draws. One draw per
+  band, filtered once through its own band, the block in one transform
+  (`metrics.octave_filter_rows`), and the crossovers as one FFT convolution
+  per band: under two seconds a point, the same field to 4e-12 of the peak.
+  The campaign also capped the assembly at eight workers on a 32-core host;
+  it now uses every core but one, within the host's RAM.
+- The scene export wrote two cut models around its own source and receiver
+  pair that no campaign reads; on hssd_0018 the 5 m cut held no triangle
+  and the export died writing it. The campaign's export writes the storey
+  and the room only.
+
+### Cost and time, measured on hssd_0076, one source, 437 points, 8 kHz on the storey
+
+On 2 x A100 PCIe 80 GB (0.937 USD/h, 188 GB RAM, 32 cores), 2026-09-14: provision 2 min,
+voxelise 4.8 min, audit and plan 4.9 min, low band 11 min, mid band 19 min (two slices for
+the host's RAM), high band 35 min, assembly 26 min, fetch 17 to 24 min: **about 2 h and
+2.1 USD**, against about 12 h and 12.3 USD for the same field on five machines two days
+earlier. The field agrees with that reference to 1e-7 of the peak at every point. A host
+whose RAM holds the mid band whole (240 GB) saves one slice; the assembly and the fetch
+are now the two largest lines after the high band's solve. Details and the numbers per
+band are in `data/runs/w42_gpu_hssd_0076/plan.md`.
+
+Same host class, 2026-09-15, with the engine writing float32 (patch 8) and the assembly
+rewritten: voxelise 4.9 min (no cache on the host), audit 3.4, plan 1.5, low band 4.5 + 4.4
+(engine + encode), mid band 9.6 + 2.9 in **one** slice, high band 30.6 + 1.7, assembly 3.6 min
+on 31 workers: **the campaign in 68 min** against 105 min the day before, the field again within
+1.0e-7 of the reference at every point, the card's self-checks unchanged. The fetch then took
+45 min for 21 GB, of which the field and the audit view are 6.6 GB: the rest was the encodings,
+the self-check samples and grids already installed on the laptop. The renter now brings home
+what `take_home` keeps and only the grids the laptop lacks.
