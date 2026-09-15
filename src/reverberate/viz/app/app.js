@@ -38,9 +38,12 @@ const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => vie
 
 // --- sound --------------------------------------------------------------------
 const engine = createEngine();
-const plots = createPlots($("#spectrogram"), $("#decay"), {
-  spectrogram: $("#spectrogram-cap"),
-  decay: $("#decay-cap"),
+const plots = createPlots({
+  spectrogram: $("#spectrogram"),
+  decay: $("#decay"),
+  direction: $("#direction"),
+  captions: { spectrogram: $("#spectrogram-cap"), decay: $("#decay-cap"), direction: $("#direction-cap") },
+  workerUrl: new URL("./audio/plots.worker.js", import.meta.url),
 });
 let lastRender = null;
 const spatial = createSpatial({
@@ -49,11 +52,10 @@ const spatial = createSpatial({
   onRendered: (id, message) => {
     const energy = (ear) => ear.reduce((sum, v) => sum + v * v, 0);
     lastRender = { id, left: energy(message.early[0]), right: energy(message.early[1]), ms: message.ms };
-    if (id === state.selected) {
-      plots.drawSpectrogram(message.spectrogram, engine.sampleRate, message.seconds);
-      plots.drawDecay(message.decay, message.seconds);
-    }
     audioStatus();
+  },
+  onCell: (id, position) => {
+    if (id === state.selected) showPlots(id, position);
   },
   onStatus: (id, status) => {
     const source = sourceById(id);
@@ -146,7 +148,17 @@ function selectSource(id) {
   state.selected = id;
   renderSources();
   plots.clear();
+  const source = sourceById(id);
+  if (source && source.cell !== null && source.cell !== undefined) showPlots(id, source.cell);
   spatial.update(viewport.pose(), audibleIds());
+}
+
+/** The plots of one source's response at a cell, from the field itself. */
+function showPlots(id, position) {
+  const field = spatial.fieldOf(id);
+  if (!field) return;
+  const earlySamples = Math.round((settings.earlyMs / 1000) * field.index.sample_rate_hz);
+  plots.show(field, position, earlySamples).catch((error) => busy(`${id} plots: ${error.message}`));
 }
 
 // --- settings and exact mode -----------------------------------------------------
@@ -167,6 +179,7 @@ bindSettings($("#tab-set"), settings, (key, value) => {
   }
   if (key === "exact") armSettle();
   if (key === "grabDrag") viewport.setGrab(value);
+  if (key === "nearM") followGrid(viewport.pose(), true);
 });
 
 /** Exact mode: once the listener has stood still for `settleMs`, glide to
@@ -203,9 +216,9 @@ let grid = null;
 let generation = 0;
 
 const tierText = (status) => {
-  if (!status || !status.room) return "";
-  const tiles = status.tiles > 1 ? ` · ${status.tiles_drawn}/${status.tiles} tiles` : "";
-  return `fine ${status.fine_mm.toFixed(2)} mm${tiles} · far ${status.coarse_mm.toFixed(2)} mm`;
+  if (!status) return "";
+  const tiles = `${status.tiles_drawn}/${status.tiles} tiles · ${(status.quads / 1e6).toFixed(1)} M quads`;
+  return `fine ${status.fine_mm.toFixed(2)} mm · ${tiles} · far ${status.coarse_mm.toFixed(2)} mm`;
 };
 
 function renderViewButtons() {
@@ -254,12 +267,12 @@ async function setFmax(band) {
   if (mine !== generation || state.fmax !== band) return;
   busy("");
   viewport.setAcoustic(grid.group);
-  followGrid(viewport.pose());
+  followGrid(viewport.pose(), true);
 }
 
-function followGrid(pose) {
+function followGrid(pose, force = false) {
   if (state.view !== "acoustic" || !grid) return;
-  grid.follow(new THREE.Vector3(pose.x, pose.y, pose.z), meshViews.roomIn(state.fmax, state.room));
+  grid.follow(new THREE.Vector3(pose.x, pose.y, pose.z), force);
 }
 
 /** Keep the band limit honest for the room the listener stands in.
@@ -307,6 +320,7 @@ viewport.onMove((pose) => {
   listenerTab.update(pose);
   players.updateDistances(state.sources, pose);
   points.follow(pose.x, pose.y, pose.z);
+  plots.setHead(pose.yaw);
   spatial.update(pose, audibleIds());
   // A translation arms the settle timer; a turn on the spot, the glide's own
   // motion and arriving on the point do not.
@@ -328,6 +342,7 @@ let voices = [];
 /** Open a run of the apartment on screen, or none: its sources, fields and grids. */
 async function openRun(run) {
   generation += 1;
+  const previous = state.run;
   state.run = run;
   grid = null;
   meshViews = null;
@@ -358,7 +373,7 @@ async function openRun(run) {
       cell: null,
     }));
     state.selected = state.sources.length ? state.sources[0].id : null;
-    meshViews = createMeshViews(THREE, data, (status) => {
+    meshViews = createMeshViews(THREE, data, () => settings.nearM, (status) => {
       $("#hud-tier").textContent = state.view === "acoustic" ? tierText(status) : "";
     });
     const mine = generation;
@@ -369,6 +384,7 @@ async function openRun(run) {
         .then((field) => {
           if (mine !== generation) return;
           spatial.setField(source.id, field);
+          plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
           minimap.setPoints(points.positions());
           spatial.update(viewport.pose(), [source.id]);
@@ -377,7 +393,10 @@ async function openRun(run) {
     }
     // Opening a run is a choice of what to listen to: stand a metre from its
     // first source, facing it, rather than wherever the apartment left us.
-    if (state.sources.length) {
+    // Not between two runs of one apartment: those are compared from where
+    // one stands.
+    const sameScene = previous && previous.scene_id === run.scene_id;
+    if (state.sources.length && !sameScene) {
       const [sx, sy, sz] = state.sources[0].position;
       viewport.moveTo({ x: sx + 1.0, y: sy, z: sz, yaw: Math.PI / 2, pitch: 0 });
     }
@@ -503,6 +522,7 @@ async function boot() {
     engine.setMasterDb(Number(level.value));
     $("#level-read").textContent = `${level.value} dB`;
   });
+  engine.setMasterDb(Number(level.value));
   await loadHead(heads.length ? heads[0].name : null);
 
   const runs = await fetch("runs.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
@@ -512,14 +532,9 @@ async function boot() {
   }
   const lead = runs.find((r) => r.lead) || runs[0] || null;
   // Only what opens without assembling is offered at all: minutes of work
-  // behind a click. Apartments with a run first, the lead run's own on top.
+  // behind a click. The server puts the one to open first at the head.
   const apartments = (await fetch("apartments.json").then((r) => r.json())).filter((a) => a.ready);
   for (const apartment of apartments) apartmentsById.set(apartment.local, apartment);
-  apartments.sort(
-    (a, b) =>
-      (b.scene_id === (lead && lead.scene_id)) - (a.scene_id === (lead && lead.scene_id)) ||
-      (b.runs.length > 0) - (a.runs.length > 0)
-  );
   const select = $("#apartment");
   const withAudio = $("#with-audio");
   const fill = () => {
@@ -559,4 +574,5 @@ window.reverberate = {
   setView,
   setFmax,
   lastRender: () => lastRender,
+  grid: () => grid,
 };

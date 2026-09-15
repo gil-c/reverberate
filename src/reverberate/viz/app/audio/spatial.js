@@ -17,7 +17,6 @@
  * is pending replaces the pending pose, so the newest is always next.
  */
 import { headMatrix } from "./sh.js";
-import { decay, joined, spectrogram } from "./analysis.js";
 
 //: Fastest the early part is re-rendered while the listener turns, seconds.
 const MIN_INTERVAL_S = 0.06;
@@ -27,13 +26,12 @@ const MIN_INTERVAL_S = 0.06;
  *  re-decoded for it; `fadeMs` the crossfade between the two parts. */
 export const settings = { earlyMs: 150, stillMs: 200, fadeMs: 10 };
 
-export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
+export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell }) {
   const early = new Worker(workerUrl, { type: "module" });
   const fields = new Map();
   const pendingEarly = new Map(); // request id -> source id
   let nextId = 1;
   let decoderMessage = null;
-  const stats = { lateRenders: 0, lateCancelled: 0, lateMsTotal: 0, lateStill: 0 };
 
   const sampleRate = () => engine.sampleRate;
   const earlySamples = () => Math.round((settings.earlyMs / 1000) * sampleRate());
@@ -62,16 +60,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
 
   function report(id, state) {
     if (!state.lastEarly) return;
-    const late = state.lastLate;
-    const whole = late ? joined(state.lastEarly[0], late[0], state.tailStart) : state.lastEarly[0];
-    onRendered(id, {
-      ms: state.earlyMs,
-      lateMs: state.lateMs,
-      early: state.lastEarly,
-      spectrogram: spectrogram(whole),
-      decay: decay(whole),
-      seconds: whole.length / sampleRate(),
-    });
+    onRendered(id, { ms: state.earlyMs, lateMs: state.lateMs, early: state.lastEarly });
   }
 
   function lateWorker(state) {
@@ -105,14 +94,11 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
   function onLate(state, message) {
     if (message.type !== "late") return;
     if (message.cancelled) {
-      stats.lateCancelled += 1;
       if (state.lateInFlight === message.id) state.lateInFlight = null;
       return;
     }
     if (state.lateInFlight === message.id) state.lateInFlight = null;
     if (message.missing || message.key !== state.lateKey) return;
-    stats.lateRenders += 1;
-    stats.lateMsTotal += message.ms;
     state.lastLate = message.brir;
     state.lateMs = message.ms;
     state.lateHead = state.lateHeadRequested;
@@ -157,7 +143,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
     return { key, start, fade: fadeSamples() };
   }
 
-  function renderLate(state, head, still) {
+  function renderLate(state, head) {
     if (!state.lateKey) return;
     if (state.lateInFlight !== null) {
       lateWorker(state).postMessage({ type: "cancel", id: state.lateInFlight });
@@ -166,7 +152,6 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
     const id = nextId++;
     state.lateInFlight = id;
     state.lateHeadRequested = head;
-    if (still) stats.lateStill += 1;
     lateWorker(state).postMessage({ type: "render", id, key: state.lateKey, head });
   }
 
@@ -183,7 +168,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
       const head = headMatrix(state.lastPose.yaw, state.lastPose.pitch);
       if (!state.lateKey || sameHead(head, state.lateHead)) return;
       state.lateStillPending = true;
-      renderLate(state, head, true);
+      renderLate(state, head);
     }, settings.stillMs);
   }
 
@@ -235,11 +220,12 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
           state.lastLate = null;
           state.lateHead = null;
           state.lateStillPending = false;
-          renderLate(state, head, false);
+          renderLate(state, head);
         }
       } else {
         state.lateKey = null;
       }
+      if (position !== state.cell) onCell(id, position);
       state.cell = position;
       const requestId = nextId++;
       pendingEarly.set(requestId, id);
@@ -258,7 +244,6 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus }) {
   return {
     setDecoder,
     settings,
-    stats,
     /** Change a setting; the split moves, so every kept part is dropped. */
     setSettings(changes) {
       Object.assign(settings, changes);

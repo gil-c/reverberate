@@ -123,9 +123,6 @@ export function createEngine() {
   }
 
   return {
-    get context() {
-      return context;
-    },
     get sampleRate() {
       return context ? context.sampleRate : 48000;
     },

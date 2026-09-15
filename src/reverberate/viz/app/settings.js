@@ -19,6 +19,8 @@ const DEFAULTS = {
   showPoints: false,
   // Drag the picture with the cursor, as paper, instead of turning the view.
   grabDrag: false,
+  // Acoustic view: fine tiles are drawn within this distance, coarse beyond.
+  nearM: 8,
 };
 const KEY = "reverberate.settings";
 

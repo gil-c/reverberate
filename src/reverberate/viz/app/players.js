@@ -67,8 +67,7 @@ export function createPlayers(root, { onSelect, onPlay, onVolume, onLoop, onVoic
               `<button type="button" class="pb${playing ? " playing" : ""}" ${audible ? "" : "disabled"}>${playing ? "❚❚" : "▶"}</button>` +
               `<div class="ttl"><b></b><span></span></div>` +
               `<select class="voice"></select>` +
-              `<div class="vol-box"><input class="vol" type="range" min="0" max="1" step="0.01" value="${source.volume}">` +
-              `<div class="meter"><i></i></div></div>` +
+              `<input class="vol" type="range" min="0" max="1" step="0.01" value="${source.volume}">` +
               `<button type="button" class="loop${source.loop ? " on" : ""}">⟳</button>`;
             row.querySelector("b").textContent = source.id;
             row.querySelector(".ttl span").textContent = `${dist(source.position, at).toFixed(2)} m`;

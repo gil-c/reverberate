@@ -12,8 +12,8 @@ copy is deliberately not versioned: it holds this machine's paths.
     hssd_root = "/Users/me/Developer/reverberate/data/raw/hssd-hab"
     data_root = "/Users/me/Developer/reverberate/data"   # caches and voices
     runs = "/Users/me/Developer/reverberate/data/runs"   # runs with a walk.json
-    run = "synthetic_walk_mock"                            # opened first, optional
-    scene = "hssd_0002"                                    # opened first, optional
+    run = "w41_field_hssd_0076"                            # opened first, optional
+    scene = "hssd_0076"                                    # opened first, optional
     port = 8765
     open_browser = true
     measured_head = "/Users/me/Developer/reverberate/data/raw/hrtf/HRIR_L2702.sofa"
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import tomllib
@@ -50,8 +50,6 @@ class WalkConfig:
     open_browser: bool = True
     voices: Path | None = None
     measured_head: Path | None = None
-    rebuild: bool = False
-    source: Path | None = field(default=None, compare=False)
 
     def apply_environment(self) -> None:
         """Point the caches at ``data_root`` unless the environment already does."""
@@ -125,6 +123,4 @@ def load_config(path: Path) -> WalkConfig:
         open_browser=bool(raw.get("open_browser", True)),
         voices=as_path("voices"),
         measured_head=as_path("measured_head"),
-        rebuild=bool(raw.get("rebuild", False)),
-        source=Path(path),
     )

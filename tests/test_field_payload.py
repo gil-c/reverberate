@@ -82,14 +82,6 @@ def test_a_compressed_field_is_refused_because_it_cannot_be_range_read(tmp_path:
     assert any("uncompressed" in problem for problem in check(tmp_path / "z.h5"))
 
 
-def test_the_direct_arrival_is_louder_nearer_the_source(field: Path) -> None:
-    """The mock's one claim on physics: level falls with distance."""
-    with h5py.File(field, "r") as handle:
-        peak = np.abs(handle["ir"][:, 0, :]).max(axis=1)
-        direct = handle["direct_path_m"][:]
-    assert peak[np.argmin(direct)] > peak[np.argmax(direct)]
-
-
 def test_the_index_names_every_cells_bytes_and_survives_an_unchanged_file(
     field: Path, tmp_path: Path
 ) -> None:

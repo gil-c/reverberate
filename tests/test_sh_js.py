@@ -2,8 +2,10 @@
 
 `viz/app/audio/sh.js` re-implements `real_sh` and the rotation. The library is
 the oracle: harmonics at random directions must agree to rounding, and the
-general rotation for a pure yaw must agree with `rotate_yaw`. Skipped where
-node is not installed; it is on the laptop the app is developed on.
+general rotation for a pure yaw must agree with `rotate_yaw`. The head matrix
+is checked the only way a convention can be: a direction on the camera's left
+must land on the head frame's own left. Skipped where node is not installed;
+it is on the laptop the app is developed on.
 """
 
 from __future__ import annotations
@@ -43,7 +45,14 @@ f.directions.forEach((d, i) => {
 const c = Math.cos(-f.yaw), s = Math.sin(-f.yaw);
 const blocks = sh.rotationBlocks(f.order, [c, -s, 0, s, c, 0, 0, 0, 1]);
 const yaw_err = worst(Array.from(apply(blocks, f.coefficients)), f.rotated);
-console.log(JSON.stringify({ sh_err, yaw_err }));
+// A direction on the camera's left, in the ambisonic frame (x, -z, y) of the
+// scene, brought into the head's frame, must point along +y: the head's left.
+// `f'(d) = f(M d)` maps head directions to the world, so the world comes
+// back through the transpose.
+const M = sh.headMatrix(f.camera_yaw, 0);
+const v = f.left_ambisonic;
+const head = [0, 1, 2].map((i) => M[i] * v[0] + M[3 + i] * v[1] + M[6 + i] * v[2]);
+console.log(JSON.stringify({ sh_err, yaw_err, head }));
 """
 
 
@@ -53,7 +62,13 @@ def test_the_pages_harmonics_and_rotation_match_the_library(tmp_path: Path) -> N
     directions = rng.standard_normal((6, 3))
     directions /= np.linalg.norm(directions, axis=1, keepdims=True)
     coefficients = rng.standard_normal(64)
+    camera_yaw = 0.7
+    # viewport.js: forward is (-sin yaw, 0, -cos yaw); left is up cross forward.
+    forward = np.array([-np.sin(camera_yaw), 0.0, -np.cos(camera_yaw)])
+    left = np.cross([0.0, 1.0, 0.0], forward)
     fixture = {
+        "camera_yaw": camera_yaw,
+        "left_ambisonic": [left[0], -left[2], left[1]],
         "order": 7,
         "directions": directions.tolist(),
         "sh": real_sh(7, directions).tolist(),
@@ -75,6 +90,7 @@ def test_the_pages_harmonics_and_rotation_match_the_library(tmp_path: Path) -> N
         check=True,
         timeout=60,
     )
-    errors = json.loads(result.stdout.strip().splitlines()[-1])
-    assert errors["sh_err"] < 1e-12
-    assert errors["yaw_err"] < 1e-12
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["sh_err"] < 1e-12
+    assert out["yaw_err"] < 1e-12
+    assert np.allclose(out["head"], [0.0, 1.0, 0.0], atol=1e-12)

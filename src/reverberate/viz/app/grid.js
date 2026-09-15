@@ -1,10 +1,16 @@
-/** The solver's own grid, tiered: coarse everywhere, fine where you stand.
+/** The solver's own grid, tiered: coarse everywhere, fine around the listener.
  *
  * A mesh payload is what `reverberate.experiments.audit_view` writes: every
  * room in two tiers of the *same* voxelisation, the solver's own step and
- * that step aggregated, cut into tiles where a room is too heavy for one file.
- * This draws every room's coarse tier at once and the fine tier of one room,
- * tiles nearest the listener first, under a quad budget.
+ * that step decimated, cut into tiles where a room is too heavy for one file.
+ * The coarse tier of every room is resident and always drawn. Fine tiles are
+ * admitted by distance to the listener, nearest first, under a quad budget,
+ * and evicted once they fall behind; where a fine tile is on screen its own
+ * room's coarse tier is cut away by the shader, so the two do not overlap.
+ * A tile's box is the reach of its merged quads, so boxes overlap: the cut
+ * spares what lies in the box of a tile not drawn, since those faces have no
+ * fine stand-in yet. Only its own room's: a box reaches past a doorway into
+ * the next room, whose coarse faces there are the only ones drawn.
  *
  * One `GridView` per band limit. The band limits a run offers are its
  * `run.meshes` keys, and a room absent from a payload is a room that limit
@@ -20,9 +26,15 @@ const RIGID_RGB = [0.45, 0.45, 0.48];
 
 //: The most quads the fine tier may hold at once, across every tile drawn.
 //: Sixteen million holds the largest room measured so far whole on an
-//: M-series laptop; below that a room draws with holes, and on an audit view
-//: a hole is indistinguishable from geometry the voxeliser lost.
-const FINE_QUAD_BUDGET = 16_000_000;
+//: M-series laptop; beyond that the picture is lost to swapping.
+export const FINE_QUAD_BUDGET = 16_000_000;
+
+//: A fine tile is evicted this much farther out than it is admitted, so a
+//: listener pacing on the admission radius does not fetch it again and again.
+const HYSTERESIS_M = 1;
+
+//: How many fine tile boxes of one room the coarse shader can hold per list.
+const CLIP_MAX = 64;
 
 /** A material's colour: seventeen hues over three lightnesses, by index. */
 function materialColour(rgb, index) {
@@ -31,8 +43,79 @@ function materialColour(rgb, index) {
   return rgb.setHSL(hue, 0.6, lightness);
 }
 
+/** The shader uniforms that carve the drawn fine tiles out of the coarse tier:
+ *  `cut` boxes are dropped, except where a `keep` box says otherwise. */
+function createClip(THREE) {
+  const boxes = () => ({
+    count: { value: 0 },
+    lo: { value: Array.from({ length: CLIP_MAX }, () => new THREE.Vector3()) },
+    hi: { value: Array.from({ length: CLIP_MAX }, () => new THREE.Vector3()) },
+  });
+  return { cut: boxes(), keep: boxes() };
+}
+
+/** Unlit, shaded from the face's own normal, so a face keeps its colour and
+ *  only its orientation changes how bright it is: the colour is the datum.
+ *  With `clip`, fragments inside any listed box are dropped. */
+function quadMaterial(THREE, clip) {
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  if (clip) {
+    // Pushed back a little, so where both tiers remain the fine one shows.
+    material.polygonOffset = true;
+    material.polygonOffsetFactor = 1;
+    material.polygonOffsetUnits = 1;
+  }
+  material.customProgramCacheKey = () => (clip ? "grid-clip" : "grid");
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <color_vertex>",
+      `#include <color_vertex>
+       vec3 n = normalize(normalMatrix * normal);
+       vColor.rgb *= 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);`
+    );
+    if (!clip) return;
+    Object.assign(shader.uniforms, {
+      cutCount: clip.cut.count,
+      cutLo: clip.cut.lo,
+      cutHi: clip.cut.hi,
+      keepCount: clip.keep.count,
+      keepLo: clip.keep.lo,
+      keepHi: clip.keep.hi,
+    });
+    shader.vertexShader = `varying vec3 vClip;\n${shader.vertexShader}`.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+       vClip = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+    );
+    shader.fragmentShader = `varying vec3 vClip;
+       uniform int cutCount;
+       uniform vec3 cutLo[${CLIP_MAX}];
+       uniform vec3 cutHi[${CLIP_MAX}];
+       uniform int keepCount;
+       uniform vec3 keepLo[${CLIP_MAX}];
+       uniform vec3 keepHi[${CLIP_MAX}];
+       bool inBox(vec3 lo, vec3 hi) { return all(greaterThan(vClip, lo)) && all(lessThan(vClip, hi)); }
+       ${shader.fragmentShader}`.replace(
+      "void main() {",
+      `void main() {
+       bool kept = false;
+       for (int i = 0; i < ${CLIP_MAX}; i++) {
+         if (i >= keepCount) break;
+         if (inBox(keepLo[i], keepHi[i])) { kept = true; break; }
+       }
+       if (!kept) {
+         for (int i = 0; i < ${CLIP_MAX}; i++) {
+           if (i >= cutCount) break;
+           if (inBox(cutLo[i], cutHi[i])) discard;
+         }
+       }`
+    );
+  };
+  return material;
+}
+
 /** One payload of merged quads, as a mesh: fetch the three arrays and shade them. */
-export async function fetchQuadMesh(THREE, base, meta) {
+export async function fetchQuadMesh(THREE, base, meta, clip = null) {
   const [corners, index, label] = await Promise.all([
     fetch(`${base}/${meta.corners_url}`).then((r) => r.arrayBuffer()),
     fetch(`${base}/${meta.index_url}`).then((r) => r.arrayBuffer()),
@@ -56,157 +139,143 @@ export async function fetchQuadMesh(THREE, base, meta) {
   geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index), 1));
   geometry.computeVertexNormals();
-  // Unlit, shaded from the face's own normal, so a face keeps its colour and
-  // only its orientation changes how bright it is: the colour is the datum.
-  const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
-  material.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader.replace(
-      "#include <color_vertex>",
-      `#include <color_vertex>
-       vec3 n = normalize(normalMatrix * normal);
-       vColor.rgb *= 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);`
-    );
-  };
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, quadMaterial(THREE, clip));
   mesh.name = "voxels";
   return mesh;
 }
 
-/** Load one band limit's payload and return the tiered view of it. */
-export async function loadGridView(THREE, base, onStatus) {
+/** The squared distance from a point to a tile's own box, zero inside it. */
+function reach(file, at) {
+  const [lo, hi] = file.bounds;
+  let sum = 0;
+  for (let axis = 0; axis < 3; axis++) {
+    const value = at.getComponent(axis);
+    const gap = Math.max(lo[axis] - value, 0, value - hi[axis]);
+    sum += gap * gap;
+  }
+  return sum;
+}
+
+/** Which fine tiles to draw around `at`: within `nearM`, nearest first, under the budget. */
+export function admit(tiles, at, nearM, budget = FINE_QUAD_BUDGET) {
+  const order = tiles
+    .map((tile, i) => ({ i, far: reach(tile.file, at) }))
+    .filter(({ far }) => far <= nearM * nearM)
+    .sort((a, b) => a.far - b.far);
+  let spent = 0;
+  const wanted = new Set();
+  for (const { i } of order) {
+    const quads = Number(tiles[i].file.quads);
+    if (spent && spent + quads > budget) break;
+    spent += quads;
+    wanted.add(i);
+  }
+  return { wanted, quads: spent };
+}
+
+/** Load one band limit's payload and return the tiered view of it.
+ *
+ * `near()` gives the admission radius in metres at the time of each refresh.
+ */
+export async function loadGridView(THREE, base, near, onStatus) {
   const index = await fetch(`${base}/rooms.json`).then((r) => {
     if (!r.ok) throw new Error(`${base}/rooms.json: ${r.status}`);
     return r.json();
   });
   const group = new THREE.Group();
   group.name = "grid";
-  const state = index.rooms.map((room) => ({
-    room,
-    coarse: null,
-    tiles: room.fine.tiles.map((file) => ({ file, mesh: null, loading: null, drawn: false })),
-  }));
-  let selected = null;
+  const clips = index.rooms.map(() => createClip(THREE));
+  const tiles = index.rooms.flatMap((room, r) =>
+    room.fine.tiles.map((file) => ({ file, dir: room.dir, room: r, mesh: null, loading: null, drawn: false }))
+  );
+  const step = (tier) => Math.max(...index.rooms.map((room) => room[tier].cell_m)) * 1000;
   let drawnQuads = 0;
 
   const say = () => {
-    if (!onStatus) return;
-    const entry = selected === null ? null : state[selected];
+    if (!onStatus || !index.rooms.length) return;
     onStatus({
-      room: entry ? entry.room.name : null,
-      fine_mm: entry ? entry.room.fine.cell_m * 1000 : null,
-      coarse_mm: index.rooms.length ? index.rooms[0].coarse.cell_m * 1000 : null,
-      tiles_drawn: entry ? entry.tiles.filter((tile) => tile.drawn).length : 0,
-      tiles: entry ? entry.tiles.length : 0,
+      fine_mm: step("fine"),
+      coarse_mm: step("coarse"),
+      tiles_drawn: tiles.filter((tile) => tile.drawn).length,
+      tiles: tiles.length,
+      quads: drawnQuads,
     });
   };
 
   // Every room's coarse tier up front: this is the picture of the whole flat.
-  for (const entry of state) {
-    const holder = new THREE.Group();
-    holder.name = `${entry.room.name}-coarse`;
-    for (const file of entry.room.coarse.tiles) {
-      holder.add(await fetchQuadMesh(THREE, `${base}/${entry.room.dir}`, file));
+  for (const [r, room] of index.rooms.entries()) {
+    for (const file of room.coarse.tiles) {
+      group.add(await fetchQuadMesh(THREE, `${base}/${room.dir}`, file, clips[r]));
     }
-    entry.coarse = holder;
-    group.add(holder);
   }
 
-  /** The squared distance from a point to a tile's own box, zero inside it. */
-  const reach = (file, at) => {
-    const [lo, hi] = file.bounds;
-    let sum = 0;
-    for (let axis = 0; axis < 3; axis++) {
-      const value = at.getComponent(axis);
-      const gap = Math.max(lo[axis] - value, 0, value - hi[axis]);
-      sum += gap * gap;
-    }
-    return sum;
+  const dispose = (tile) => {
+    if (!tile.mesh) return;
+    group.remove(tile.mesh);
+    tile.mesh.geometry.dispose();
+    tile.mesh.material.dispose();
+    tile.mesh = null;
   };
 
-  /** Draw as much of the selected room's fine tier as the budget allows. */
-  const refresh = async (at) => {
-    if (selected === null) return;
-    const entry = state[selected];
-    const order = entry.tiles
-      .map((tile, i) => ({ i, far: reach(tile.file, at) }))
-      .sort((a, b) => a.far - b.far);
-    let spent = 0;
-    const wanted = new Set();
-    for (const { i } of order) {
-      const quads = Number(entry.tiles[i].file.quads);
-      if (spent && spent + quads > FINE_QUAD_BUDGET) break;
-      spent += quads;
-      wanted.add(i);
+  /** Tell each room's coarse shader which fine boxes are on screen and which are not. */
+  const carve = () => {
+    for (const clip of clips) clip.cut.count.value = clip.keep.count.value = 0;
+    for (const tile of tiles) {
+      const list = tile.drawn ? clips[tile.room].cut : clips[tile.room].keep;
+      const n = list.count.value;
+      if (n === CLIP_MAX) continue;
+      list.lo.value[n].fromArray(tile.file.bounds[0]);
+      list.hi.value[n].fromArray(tile.file.bounds[1]);
+      list.count.value = n + 1;
     }
-    for (const [i, tile] of entry.tiles.entries()) {
-      if (!wanted.has(i)) {
-        if (tile.mesh) tile.mesh.visible = false;
-        tile.drawn = false;
-        continue;
-      }
+  };
+
+  let pass = 0;
+  /** Draw the fine tiles around `at`, drop those left behind. */
+  const refresh = async (at) => {
+    const mine = ++pass;
+    const nearM = near();
+    const { wanted, quads } = admit(tiles, at, nearM);
+    const hold = (nearM + HYSTERESIS_M) ** 2;
+    for (const [i, tile] of tiles.entries()) {
+      if (wanted.has(i)) continue;
+      tile.drawn = false;
+      if (tile.mesh) tile.mesh.visible = false;
+      if (reach(tile.file, at) > hold) dispose(tile);
+    }
+    // The carve follows what is on screen at every step, or a hidden tile
+    // would leave a hole in the coarse tier while the next one downloads.
+    carve();
+    for (const i of wanted) {
+      const tile = tiles[i];
       if (!tile.mesh) {
-        tile.loading =
-          tile.loading || fetchQuadMesh(THREE, `${base}/${entry.room.dir}`, tile.file);
+        tile.loading = tile.loading || fetchQuadMesh(THREE, `${base}/${tile.dir}`, tile.file);
         const mesh = await tile.loading;
-        // The listener may have left the room while this was in flight; the
-        // tile is kept, but it is not put on screen.
-        if (selected === null || state[selected] !== entry) return;
-        tile.mesh = mesh;
-        group.add(mesh);
+        tile.loading = null;
+        if (!tile.mesh) {
+          tile.mesh = mesh;
+          mesh.visible = false;
+          group.add(mesh);
+        }
+        // The listener may have moved on while this was in flight: the tile
+        // is kept, and the latest pass decides whether it goes on screen.
+        if (mine !== pass) return;
       }
       tile.mesh.visible = true;
       tile.drawn = true;
+      carve();
     }
-    drawnQuads = spent;
-    entry.coarse.visible = false;
+    drawnQuads = quads;
     say();
   };
 
-  /** Draw one room at the grid's own step, and everything else coarse. */
-  const select = async (name, at) => {
-    const next = state.findIndex((entry) => entry.room.name === name);
-    if (next === selected) return;
-    if (selected !== null) {
-      const previous = state[selected];
-      previous.coarse.visible = true;
-      for (const tile of previous.tiles) {
-        if (tile.mesh) tile.mesh.visible = false;
-        tile.drawn = false;
-      }
-    }
-    selected = next < 0 ? null : next;
-    drawnQuads = 0;
-    say();
-    if (selected !== null) await refresh(at);
-  };
-
-  const bounds = new THREE.Box3();
-  const corner = new THREE.Vector3();
-  for (const entry of state) {
-    for (const tier of [entry.room.fine, entry.room.coarse]) {
-      for (const file of tier.tiles) {
-        for (const point of file.bounds) bounds.expandByPoint(corner.fromArray(point));
-      }
-    }
-  }
-
-  const rooms = index.rooms.map((room) => room.name);
   let lastAt = null;
-  let lastRoom = null;
   return {
     group,
-    rooms,
-    bounds,
-    index,
-    hasRoom: (name) => rooms.includes(name),
     say,
-    /** Called every frame with the listener's position and room. */
-    follow(at, room) {
-      if (room !== lastRoom) {
-        lastRoom = room;
-        lastAt = at.clone();
-        select(room, at);
-      } else if (!lastAt || lastAt.distanceTo(at) > 0.5) {
+    /** Called on every move with the listener's position; `force` redraws in place. */
+    follow(at, force = false) {
+      if (force || !lastAt || lastAt.distanceTo(at) > 0.5) {
         lastAt = at.clone();
         refresh(at);
       }
@@ -231,7 +300,7 @@ export function matchRoom(payloadRooms, room) {
 }
 
 /** The mesh views of one run, one per band limit, loaded when first drawn. */
-export function createMeshViews(THREE, run, onStatus) {
+export function createMeshViews(THREE, run, near, onStatus) {
   const views = new Map();
   const bands = Object.keys(run.meshes || {}).sort((a, b) => Number(a) - Number(b));
   return {
@@ -240,13 +309,9 @@ export function createMeshViews(THREE, run, onStatus) {
     availableFor(room) {
       return bands.filter((band) => matchRoom(run.meshes[band].rooms, room) !== null);
     },
-    /** The payload room's own name for a room of the plan, in one band. */
-    roomIn(band, room) {
-      return matchRoom(run.meshes[band].rooms, room);
-    },
     async view(band) {
       if (!views.has(band)) {
-        views.set(band, loadGridView(THREE, `${run.baseUrl}/${run.meshes[band].url}`, onStatus));
+        views.set(band, loadGridView(THREE, `${run.baseUrl}/${run.meshes[band].url}`, near, onStatus));
       }
       return views.get(band);
     },

@@ -74,6 +74,7 @@
                 <label class="field"><span>glide</span><input data-setting="glideMs" /><em>ms</em></label>
                 <label class="field switch"><span>points</span><input type="checkbox" data-setting="showPoints" /><em></em></label>
                 <label class="field switch"><span>grab</span><input type="checkbox" data-setting="grabDrag" /><em></em></label>
+                <label class="field"><span>near</span><input data-setting="nearM" /><em>m</em></label>
                 <label class="field"><span>split</span><input data-setting="earlyMs" /><em>ms</em></label>
                 <label class="field"><span>still</span><input data-setting="stillMs" /><em>ms</em></label>
                 <label class="field"><span>fade</span><input data-setting="fadeMs" /><em>ms</em></label>
@@ -100,7 +101,7 @@
           <div class="stack">
             <p class="label">Head</p>
             <select id="head"></select>
-            <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="0" /><em id="level-read">0 dB</em></label>
+            <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="40" /><em id="level-read">40 dB</em></label>
 
           </div>
           <div>
@@ -116,6 +117,11 @@
             <p class="label">Energy decay</p>
             <canvas class="plot" id="decay" width="600" height="236"></canvas>
             <div class="plot-cap" id="decay-cap"></div>
+          </div>
+          <div>
+            <p class="label">Direction</p>
+            <canvas class="plot round" id="direction" width="320" height="320"></canvas>
+            <div class="plot-cap" id="direction-cap"></div>
           </div>
           <div class="status"><span id="audio-format"></span><span id="audio-update"></span></div>
         </div>

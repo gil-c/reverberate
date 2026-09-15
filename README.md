@@ -34,7 +34,7 @@ The app stands you in an apartment, draws the solver's own grid around you
 and plays the sources of a run through your head as you walk and turn.
 
     PYTHONPATH=src python -m reverberate.viz.voices            # once: the anechoic voices
-    PYTHONPATH=src python -m reverberate.viz.app_payload data/runs/synthetic_walk_mock  # a mock run
+    PYTHONPATH=src python -m reverberate.viz.app_payload data/runs/mock_walk  # a mock run, without any simulation
     python src/reverberate/viz/serve_room.py                   # or the run button on that file
 
 The app reads `walk.toml` (paths, the run and apartment to open on, the port),

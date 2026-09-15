@@ -193,8 +193,6 @@ export function createViewport(canvas, pane) {
 
   // Drag to look, deliberately not pointer lock: the cursor stays visible and
   // the page never captures the mouse, so the panels stay usable.
-  // Drag to look, deliberately not pointer lock: the cursor stays visible and
-  // the page never captures the mouse, so the panels stay usable.
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
@@ -351,11 +349,7 @@ export function createViewport(canvas, pane) {
         glide.from.y + (glide.to.y - glide.from.y) * w,
         glide.from.z + (glide.to.z - glide.from.z) * w
       );
-      if (t >= 1) {
-        const done = glide.onDone;
-        glide = null;
-        if (done) done();
-      }
+      if (t >= 1) glide = null;
     }
     if (stepX !== 0 || stepZ !== 0) {
       const { x, z } = camera.position;
@@ -388,24 +382,19 @@ export function createViewport(canvas, pane) {
 
   return {
     THREE,
-    scene,
-    camera,
-    renderer,
     overlays,
-    canStandAt,
     pose,
     onMove: (handler) => moveHandlers.push(handler),
     onResize: (handler) => resizeHandlers.push(handler),
 
     /** Glide the listener to a point over `ms`, easing in and out; any
      *  walking key, drag or `moveTo` interrupts it. */
-    glideTo({ x, y, z }, ms, onDone) {
+    glideTo({ x, y, z }, ms) {
       glide = {
         from: camera.position.clone(),
         to: new THREE.Vector3(x, y, z),
         started: performance.now() / 1000,
         seconds: Math.max(0.05, ms / 1000),
-        onDone,
       };
     },
     isGliding: () => glide !== null,

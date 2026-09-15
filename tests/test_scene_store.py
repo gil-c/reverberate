@@ -133,6 +133,6 @@ def test_the_viewer_lists_the_catalogue_when_the_dataset_is_absent(tmp_path: Pat
             {"local": "hssd_0001_2", "scene_id": "102343992", "storey_index": 1, "key": "k1"},
         ],
     )
-    listed = list_apartments(tmp_path / "no-hssd", first="hssd_0002", store=store)
-    assert [a["local"] for a in listed] == ["hssd_0002", "hssd_0001_2"]
-    assert listed[1]["storey_index"] == "1"
+    listed = list_apartments(tmp_path / "no-hssd", store=store)
+    assert sorted(str(a["local"]) for a in listed) == ["hssd_0001_2", "hssd_0002"]
+    assert all(a["ready"] for a in listed)

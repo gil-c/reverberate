@@ -218,10 +218,10 @@ input[type=range].slide::-moz-range-thumb {
 .player .pb.playing { background: var(--src); color: #1a1104; }
 .player .pb:disabled { border-color: var(--src-dim); color: var(--src-dim); cursor: not-allowed; }
 .player .ttl { grid-column: 2; grid-row: 1; display: flex; justify-content: space-between; align-items: baseline; }
-.player .vol-box { grid-column: 2; grid-row: 3; }
 .player .ttl b { font-weight: 500; }
 .player .ttl span { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
 .player .vol {
+  grid-column: 2; grid-row: 3;
   -webkit-appearance: none; appearance: none; width: 100%; height: 2px; background: var(--line-2); margin: 6px 0;
 }
 .player .vol::-webkit-slider-thumb {
@@ -233,12 +233,11 @@ input[type=range].slide::-moz-range-thumb {
   border: 1px solid var(--line-2); background: transparent; color: var(--dim); cursor: pointer; font: 12px var(--mono);
 }
 .player .loop.on { color: var(--text); border-color: var(--text); }
-.meter { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.meter i { display: block; height: 100%; width: 0; background: var(--ok); }
 .plot {
   width: 100%; height: 118px; display: block; background: #0e1217; border: 1px solid var(--line);
   border-radius: 4px;
 }
+.plot.round { width: 160px; height: 160px; margin: 0 auto; }
 .status { font: 12px var(--mono); color: var(--muted); display: flex; justify-content: space-between; min-height: 1.3em; }
 .status b { color: var(--ok); font-weight: 500; }
 .plot-cap { font: 12px var(--mono); color: var(--muted); margin-top: 4px; min-height: 1.3em; }

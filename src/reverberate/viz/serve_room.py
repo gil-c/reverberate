@@ -57,15 +57,13 @@ from reverberate.viz.walk_config import CONFIG_NAME, WalkConfig, find_config, lo
 STATIC_DIR = Path(__file__).parent / "app"
 
 
-def list_apartments(
-    hssd_root: Path, first: str | None = None, store: ObjectStore | None = None
-) -> list[dict[str, object]]:
+def list_apartments(hssd_root: Path, store: ObjectStore | None = None) -> list[dict[str, object]]:
     """Every storey, by the project's name, with whether it opens without assembling.
 
     ``local`` is the short name the page asks the server for; ``scene_id`` is
     what runs are keyed by. ``ready`` means an entry exists in the published
     catalogue or on this disk; assembling takes minutes, so the page offers
-    only what is ready. ``first`` goes to the head of the list.
+    only what is ready.
     """
     rows = every_storey()
     if not (hssd_root / "semantics" / "scenes").is_dir():
@@ -75,18 +73,14 @@ def list_apartments(
             for r in rows
             if store is not None and published_key(store, r.scene_id, r.storey_index)
         ]
-    apartments: list[dict[str, object]] = [
+    return [
         {
             "local": row.local,
             "scene_id": row.scene_id,
-            "storey_index": str(row.storey_index),
             "ready": _ready(hssd_root, store, row.scene_id, row.storey_index),
         }
         for row in rows
     ]
-    if first is not None:
-        apartments.sort(key=lambda a: first not in (a["local"], a["scene_id"]))
-    return apartments
 
 
 def _ready(hssd_root: Path, store: ObjectStore | None, scene_id: str, storey: int) -> bool:
@@ -110,20 +104,24 @@ def _resolve(name: str) -> tuple[str, int]:
 
 
 def attach_runs(
-    apartments: Sequence[Mapping[str, object]], runs: Sequence[WalkRun]
+    apartments: Sequence[Mapping[str, object]], runs: Sequence[WalkRun], first: str | None = None
 ) -> list[dict[str, object]]:
-    """Tell each apartment which solver runs exist for it.
+    """Tell each apartment which solver runs exist for it, and order the list.
 
     The selector needs this before any apartment is opened, so that a run is
-    discoverable rather than something you have to already know about.
+    discoverable rather than something you have to already know about. The
+    page opens the first apartment: ``first`` (a short name or a scene id),
+    then those with a run, then the rest.
     """
     by_scene: dict[str, list[str]] = {}
     for run in runs:
         by_scene.setdefault(run.scene_id, []).append(run.name)
-    return [
+    attached = [
         {**apartment, "runs": by_scene.get(str(apartment["scene_id"]), [])}
         for apartment in apartments
     ]
+    attached.sort(key=lambda a: (first not in (a["local"], a["scene_id"]), not a["runs"]))
+    return attached
 
 
 class SiteBuilder:
@@ -176,17 +174,24 @@ class SiteBuilder:
         # Runs are built up front, unlike apartments: there are a handful of
         # them and the payload is a link and a small file, so paying for it
         # here keeps the failure visible at startup.
+        built = []
         for run in self.runs:
-            record = build_run(run, target / "runs" / run.name)
+            try:
+                record = build_run(run, target / "runs" / run.name)
+            except (OSError, ValueError) as error:
+                # One broken run must not take the whole app down at start.
+                print(f"{run.name}: not offered, {error}")
+                continue
             meshes = ", ".join(f"{k} Hz" for k in record["meshes"]) or "no mesh"
             print(f"{run.name}: {len(run.sources)} sources, {meshes} (scene {run.scene_id})")
+            built.append(run)
+        self.runs = built
         (target / "runs.json").write_text(
             json.dumps(
                 [
                     {
                         "name": r.name,
                         "scene_id": r.scene_id,
-                        "room": r.room,
                         "url": f"runs/{r.name}",
                         # Which run the app opens on. Whoever started the
                         # server had a run in mind and it is rarely the one
@@ -198,7 +203,9 @@ class SiteBuilder:
             )
         )
 
-        apartments = attach_runs(list_apartments(hssd_root, first, self.store), self.runs)
+        lead_run = next((r for r in self.runs if r.name == self.lead), None)
+        first = first or (lead_run.scene_id if lead_run else None)
+        apartments = attach_runs(list_apartments(hssd_root, self.store), self.runs, first)
         (target / "apartments.json").write_text(json.dumps(apartments))
 
     def ensure(self, name: str) -> SceneEntry:
@@ -390,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     port = arguments.port or config.port
     voices = arguments.voices or config.voices
     head = arguments.measured_head or config.measured_head
-    rebuild = arguments.rebuild or config.rebuild
+    rebuild = arguments.rebuild
     open_browser = config.open_browser and not arguments.no_browser
     if found is not None:
         print(f"config: {found}")

@@ -26,8 +26,8 @@ computed in the page.** Python still builds every input, once: the decoder
 filters (`reverberate.viz.decoders`, from the library's own
 `spatial.binaural.design_decoder`), the field unpacked into raw chunks
 (`reverberate.viz.field_payload`), the voices (`reverberate.viz.voices`).
-The page does the yaw rotation (`audio/sh.js`, a port of `spatial.sh.rotate_yaw`),
-the decode to two ears and the plots of the response (`audio/brir.worker.js`),
+The page does the rotation (`audio/sh.js`), the decode to two ears
+(`audio/brir.worker.js`), the plots of the response (`audio/plots.worker.js`),
 and plays through the browser's own convolvers (`audio/engine.js`).
 
 **The decode is done in the frequency domain, per cell and per head
@@ -60,9 +60,13 @@ neighbouring cells cannot be averaged above about a kilohertz, so the listener
 hears the nearest cell, and a new cell or a new yaw arrives on an idle
 `ConvolverNode` and takes over by a 50 ms equal-power crossfade.
 
-**The plots are of the response, not of the voice.** Spectrogram and Schroeder
-decay of the selected source's response at the listener, rebuilt with every
-render; changing the voice changes nothing in them.
+**The plots are of the response at the cell, not of the voice and not of
+the decode.** The omnidirectional channel of the cell the listener stands in
+gives the spectrogram and the Schroeder decay, in absolute decibels against
+the cell nearest the source, so walking away plots lower; the covariance of
+all channels gives where the early and the whole energy arrive from, drawn in
+the head's frame. Rebuilt when the cell changes, in a worker of their own;
+changing the voice or turning the head changes nothing in the levels.
 
 ## What was rejected
 
@@ -80,11 +84,11 @@ which the measured update time supports.
 
 ## Consequences
 
-The tests cannot run the page. What they pin is the arithmetic it copies:
-`tests/test_walk_conventions.py` asserts, through the library's own decoder,
-that a source on the camera's left is louder in the left ear under the exact
-yaw formula `audio/sh.js` uses. The page exposes `window.reverberate` so the
-same check can be run in a browser against the live worker, and it was.
+The tests cannot run the page, but node runs its modules: `tests/test_sh_js.py`
+checks the harmonics, the rotation and the head convention against the
+library, `tests/test_analysis_js.py` the direction diagram and the absolute
+levels, `tests/test_grid_js.py` the admission of grid tiles. The page exposes
+`window.reverberate` so the rest can be driven in a browser, and it was.
 
-`run_view.py`, the build-time analysis of ADR 0006, is left in place with its
-tests; nothing in the app calls it.
+`run_view.py`, the build-time analysis of ADR 0006, is gone with the page
+that read it.

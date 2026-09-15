@@ -112,7 +112,6 @@ export async function loadField(url) {
     describe: (position) => ({
       room: index.rooms ? index.rooms[position] : null,
       solvedToHz: index.solved_to_hz ? index.solved_to_hz[position] : null,
-      hasHigh: index.has_high ? index.has_high[position] : null,
     }),
     /** Fetch a cell without waiting for it. */
     prefetch: (position) => {

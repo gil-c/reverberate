@@ -64,7 +64,6 @@ class WalkRun:
     #: The project's name for the scene or storey, `hssd_0011`; empty when the
     #: scene is not in the table.
     dwelling: str
-    room: str
     sources: list[dict[str, Any]]
     #: Band limit in hertz, as text because it is a JSON key, to the payload
     #: directory relative to ``path``.
@@ -98,7 +97,6 @@ class WalkRun:
             path=path,
             scene_id=scene_id,
             dwelling=dwelling,
-            room=str(manifest.get("room", "")),
             sources=sources,
             meshes={str(k): str(v) for k, v in (manifest.get("meshes") or {}).items()},
         )
@@ -113,7 +111,7 @@ def discover_walk_runs(runs_root: Path) -> list[WalkRun]:
     return runs
 
 
-def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[str, Any]:
+def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[str, Any] | None:
     """Link one mesh payload into the site and say which rooms it holds.
 
     The room list is what lets the page grey out a band limit before the
@@ -125,6 +123,11 @@ def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[s
     if not rooms_file.is_file():
         raise FileNotFoundError(f"{run.name}: mesh {fmax} Hz names {relative}, no rooms.json there")
     index = json.loads(rooms_file.read_text())
+    if str(index.get("scene_id", run.scene_id)) != run.scene_id:
+        # A payload of another flat would draw that flat's walls around this
+        # one's sources: left out, and said so; the checker names it too.
+        print(f"{run.name}: mesh {fmax} Hz at {relative} is of scene {index['scene_id']}, left out")
+        return None
     link = target / "meshes" / fmax
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink() or link.is_file():
@@ -176,7 +179,6 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
         "name": run.name,
         "scene_id": run.scene_id,
         "dwelling": run.dwelling,
-        "room": run.room,
         "sources": [
             {
                 "id": str(source.get("id", f"S{i + 1}")),
@@ -188,8 +190,9 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
             for i, source in enumerate(run.sources)
         ],
         "meshes": {
-            fmax: _mesh_record(run, fmax, relative, target)
+            fmax: record
             for fmax, relative in sorted(run.meshes.items(), key=lambda item: float(item[0]))
+            if (record := _mesh_record(run, fmax, relative, target)) is not None
         },
     }
     (target / "run.json").write_text(json.dumps(record))
@@ -259,28 +262,6 @@ def _tier(
     }
 
 
-#: The sources the producer session announced for `hssd_0002` on 2026-09-10,
-#: in the scene frame. Its lattice: one height, 1.70 m, 0.40 m step, 524
-#: cells over 85.6 m2 of free floor.
-PRODUCER_SOURCES: tuple[tuple[str, str, str, tuple[float, float, float]], ...] = (
-    (
-        "S1",
-        "voice, living room by the sofa",
-        "living room-hallway-dining room-kitchen",
-        (-6.054, 1.695, -3.887),
-    ),
-    (
-        "S2",
-        "voice, living room by the kitchen",
-        "living room-hallway-dining room-kitchen",
-        (-2.9, 1.695, -3.9),
-    ),
-    ("S3", "voice, bedroom", "bedroom-closet.001", (-18.1, 1.642, 1.979)),
-    ("S4", "voice, bathroom", "bathroom.001", (-8.467, 1.696, 0.33)),
-    ("S5", "voice, small bedroom", "bedroom.001-closet.005-closet.003", (-1.13, 1.695, -1.107)),
-)
-
-
 def write_synthetic_run(
     target: Path,
     scene_id: str = "102344022",
@@ -297,11 +278,11 @@ def write_synthetic_run(
 
     A box room of ``size`` centred on ``centre`` (its floor at ``centre[1]``),
     with one block of furniture in it, drawn at two cell sizes as two tiers of
-    one mesh at a nominal 4000 Hz; the producer's five omnidirectional sources
-    at their announced positions, each with a mock field over a box of
-    ``field_box_m`` around it (``fields``), one listening height, the whole
-    response per cell. Every file has the shape the real payload will have,
-    and nothing in it is a measurement of anything.
+    one mesh at a nominal 4000 Hz; two omnidirectional sources in the room,
+    each with a mock field over a box of ``field_box_m`` around it
+    (``fields``), one listening height, the whole response per cell. Every
+    file has the shape the real payload will have, and nothing in it is a
+    measurement of anything.
     """
     target = Path(target)
     centre_a = np.asarray(centre, dtype=np.float64)
@@ -348,8 +329,10 @@ def write_synthetic_run(
             }
         )
     )
+    ear = float(lo[1]) + 1.695
     sources = [
-        (source_id, name, list(position)) for source_id, name, _, position in PRODUCER_SOURCES
+        ("S1", "voice, near the table", [float(lo[0] + 1.6), ear, float(lo[2] + 1.4)]),
+        ("S2", "voice, far corner", [float(hi[0] - 1.2), ear, float(hi[2] - 1.2)]),
     ]
     if fields:
         for index, (source_id, _, position) in enumerate(sources):
@@ -364,12 +347,11 @@ def write_synthetic_run(
                 margin_m=0.0,
                 scene_id=scene_id,
                 dwelling=local_name(scene_id, 1),
-                room_name=PRODUCER_SOURCES[index][2],
+                room_name=room,
                 seed=index,
             )
     manifest = {
         "dwelling": local_name(scene_id, 1),
-        "room": room,
         "synthetic": True,
         "sources": [
             {
@@ -415,12 +397,14 @@ def check_run(path: Path) -> list[str]:
         if not field.is_file():
             problems.append(f"source {source_id}: field {relative} is absent")
             continue
-        for problem in field_payload.check(field):
-            problems.append(f"source {source_id}: {problem}")
-        header = field_payload.read_header(field) if not problems else None
-        if header and header.source_id != source_id:
+        unreadable = field_payload.check(field)
+        problems.extend(f"source {source_id}: {problem}" for problem in unreadable)
+        if unreadable:
+            continue
+        header = field_payload.read_header(field)
+        if header.source_id != source_id:
             problems.append(f"source {source_id}: its field says source_id {header.source_id!r}")
-        if header and header.scene_id != run.scene_id:
+        if header.scene_id != run.scene_id:
             problems.append(f"source {source_id}: its field is of scene {header.scene_id}")
     if not run.meshes:
         problems.append("no meshes: the acoustic view will be disabled")
@@ -428,6 +412,12 @@ def check_run(path: Path) -> list[str]:
         rooms = path / relative / "rooms.json"
         if not rooms.is_file():
             problems.append(f"mesh {fmax} Hz: no rooms.json under {relative}")
+            continue
+        scene = str(json.loads(rooms.read_text()).get("scene_id", run.scene_id))
+        if scene != run.scene_id:
+            problems.append(
+                f"mesh {fmax} Hz: {relative} is of scene {scene}, the run is of {run.scene_id}"
+            )
     return problems
 
 
