@@ -34,6 +34,7 @@ import json
 import shlex
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -417,7 +418,9 @@ class RemoteVoxelisation:
         )
 
 
-def provision(machine: Machine, script: Path, timeout: float = 3600.0) -> float:
+def provision(
+    machine: Machine, script: Path, timeout: float = 3600.0, beside: Sequence[Path] = ()
+) -> float:
     """Build PFFDTD and its interpreter on ``machine``. Returns seconds taken.
 
     ``scripts/build_pffdtd.sh`` unchanged and idempotent, so a machine that is
@@ -425,9 +428,17 @@ def provision(machine: Machine, script: Path, timeout: float = 3600.0) -> float:
     which this path does not need; that is left alone rather than special-cased,
     because a second build script that drifts from the first is worse than a few
     wasted minutes of nvcc.
+
+    ``beside`` are files the script reads next to itself (its engine patches),
+    put in ``/root`` under their own names.
     """
     started = time.time()
     _run(machine.scp_command([script], "/root/build_pffdtd.sh", download=False), what="send build")
+    for extra in beside:
+        _run(
+            machine.scp_command([Path(extra)], f"/root/{Path(extra).name}", download=False),
+            what=f"send {Path(extra).name}",
+        )
     _run(
         machine.ssh_command("bash /root/build_pffdtd.sh 2>&1 | tail -40"),
         what="build pffdtd",
