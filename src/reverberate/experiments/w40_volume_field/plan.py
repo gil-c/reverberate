@@ -13,7 +13,6 @@ set by the host's RAM, and :mod:`.solve` slices a band that does not fit.
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 from typing import Any
@@ -24,24 +23,25 @@ from shapely.geometry import MultiPolygon, Point, Polygon
 
 from reverberate.experiments.engine import sim_consts, write_record
 from reverberate.experiments.run import entry_from_key, sound_speed
-from reverberate.experiments.w10_ambisonic import COMMS_NAME, cost_record
+from reverberate.experiments.w10_ambisonic import cost_record
 from reverberate.experiments.w38_ambisonic_bands import outer_radius_for
 from reverberate.spatial.array import ArrayDesign, design_array
 from reverberate.spatial.encode import EncoderSettings
-from reverberate.wave.comms import Grid, engine_indices, load_grid, write_comms
+from reverberate.wave.comms import Grid, engine_indices, load_grid
 from reverberate.wave.voxelise import CacheEntry
 
 __all__ = [
-    "COMMS_NAME",
     "DELIVERY_RATE_HZ",
     "bands_of_source",
+    "dwelling_of",
     "free_floor",
     "grid_points",
     "pitch_for",
     "place_arrays",
+    "plan_arrays",
     "plan_field",
+    "plan_points",
     "points_per_run",
-    "prepare_field",
     "slug",
 ]
 
@@ -234,6 +234,19 @@ def _settings(order: int, fit_order: int, fmax_hz: float) -> EncoderSettings:
     return EncoderSettings(order=order, fit_order=fit_order, max_frequency_hz=fmax_hz)
 
 
+def plan_points(
+    hssd_root: Path, scene_id: str, *, height_m: float, pitch_m: float
+) -> tuple[np.ndarray, list[str], float]:
+    """The listening grid alone: the points, their rooms and the free floor's area.
+
+    The half of :func:`plan_field` that reads HSSD, so a machine without the
+    download can run the other half.
+    """
+    _, area, rooms = free_floor(hssd_root, scene_id)
+    points, labels = grid_points(area, rooms, pitch_m=pitch_m, height_m=height_m)
+    return points, labels, float(area.area)
+
+
 def plan_field(
     out: Path,
     *,
@@ -256,8 +269,51 @@ def plan_field(
     ``sources`` are ``{"name", "room", "position"}``; ``room_keys`` maps a room
     name to its high band cache key; ``storey_keys`` holds ``low`` and ``mid``.
     """
+    _, area, rooms = free_floor(hssd_root, scene_id)
+    return plan_arrays(
+        out,
+        area=area,
+        rooms=rooms,
+        scene_id=scene_id,
+        sources=sources,
+        storey_keys=storey_keys,
+        room_keys=room_keys,
+        durations_s=durations_s,
+        height_m=height_m,
+        ram_gb=ram_gb,
+        pitch_m=pitch_m,
+        order=order,
+        fit_order=fit_order,
+        outer_radius_m=outer_radius_m,
+        high_key=high_key,
+    )
+
+
+def plan_arrays(
+    out: Path,
+    *,
+    area: Any,
+    rooms: list[Any] | None,
+    scene_id: str,
+    sources: list[dict[str, Any]],
+    storey_keys: dict[str, str],
+    room_keys: dict[str, str],
+    durations_s: dict[str, float],
+    height_m: float,
+    ram_gb: float,
+    pitch_m: float | None = None,
+    order: int = 7,
+    fit_order: int = 10,
+    outer_radius_m: float = 0.16,
+    high_key: str | None = None,
+    points_and_labels: tuple[np.ndarray, list[str]] | None = None,
+) -> dict[str, Any]:
+    """The half of :func:`plan_field` after HSSD: arrays on every grid, the plan written.
+
+    ``area`` is the free floor polygon, or its area in square metres when
+    ``points_and_labels`` supplies the grid already chosen.
+    """
     out.mkdir(parents=True, exist_ok=True)
-    storey, area, rooms = free_floor(hssd_root, scene_id)
     nodes_estimate = 6 * int(math.ceil(1.4 * (fit_order + 1) ** 2)) + 1
     entries = {name: entry_from_key(key) for name, key in storey_keys.items()}
     steps = {
@@ -265,9 +321,15 @@ def plan_field(
         for name in ("low", "mid")
     }
     cap = min(points_per_run(ram_gb, nodes_estimate, steps[name]) for name in ("low", "mid"))
+    area_m2 = float(area) if isinstance(area, int | float) else float(area.area)
     if pitch_m is None:
-        pitch_m = pitch_for(float(area.area), cap)
-    points, labels = grid_points(area, rooms, pitch_m=pitch_m, height_m=height_m)
+        pitch_m = pitch_for(area_m2, cap)
+    if points_and_labels is not None:
+        points, labels = points_and_labels
+    else:
+        if rooms is None:
+            raise ValueError("rooms are needed to label the grid points")
+        points, labels = grid_points(area, rooms, pitch_m=pitch_m, height_m=height_m)
     if points.shape[0] > cap:
         raise ValueError(
             f"{points.shape[0]} points at {pitch_m:.2f} m exceed the {cap} the RAM budget "
@@ -360,14 +422,14 @@ def plan_field(
     plan = {
         "run": out.name,
         "scene_id": scene_id,
-        "dwelling": _dwelling(scene_id),
+        "dwelling": dwelling_of(scene_id),
         "kind": "ambisonic field over the walkable volume",
         "trick": TRICK,
         "height_m": height_m,
         "pitch_m": pitch_m,
         "ram_budget_gb": ram_gb,
         "points_cap": cap,
-        "free_floor_m2": round(float(area.area), 2),
+        "free_floor_m2": round(area_m2, 2),
         "points": points.tolist(),
         "rooms": labels,
         "sources": sources,
@@ -410,7 +472,8 @@ def _band_record(
     }
 
 
-def _dwelling(scene_id: str) -> str:
+def dwelling_of(scene_id: str) -> str:
+    """This project's name for a scene, or the id itself when it has none."""
     try:
         from reverberate.geometry.scene_ids import local_name
 
@@ -428,28 +491,3 @@ def bands_of_source(plan: dict[str, Any], source: dict[str, Any]) -> list[str]:
         return ["low", "mid", "high"]
     high = f"high:{source['room']}"
     return ["low", "mid"] + ([high] if high in plan["bands"] else [])
-
-
-def prepare_field(out: Path) -> list[Path]:
-    """One comms file per source and band, from the plan."""
-    plan = json.loads((out / "plan.json").read_text())
-    written = []
-    for source in plan["sources"]:
-        for band in bands_of_source(plan, source):
-            record = plan["bands"][band]
-            entry = entry_from_key(record["cache_key"])
-            positions = np.load(out / f"array_positions_{slug(band)}.npy")
-            comms_dir = out / source["name"] / slug(band) / "comms"
-            comms_dir.mkdir(parents=True, exist_ok=True)
-            path = write_comms(
-                entry.path,
-                np.asarray(source["position"], dtype=float),
-                positions,
-                record["samples"] / record["sample_rate_hz"],
-                diff_source=True,
-                out_path=comms_dir / COMMS_NAME,
-                interpolation="nearest",
-            )
-            written.append(path)
-            print(f"{source['name']} {band}: {positions.shape[0]} receivers -> {path}")
-    return written

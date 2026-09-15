@@ -374,7 +374,43 @@ def partition_of_scene(hssd_root: Path, scene_id: str, xv: np.ndarray, zv: np.nd
     rooms = [room for room in rooms_of_scene(hssd_root, scene_id) if not room.outdoor]
     if not rooms:
         raise ValueError(f"{scene_id} has no interior regions to partition")
-    raster = _fill_unclaimed(_rasterise(rooms, np.asarray(xv), np.asarray(zv)))
+    return partition_of_rooms(rooms, xv, zv)
+
+
+def partition_of_rooms(rooms: list[RoomPartition], xv: np.ndarray, zv: np.ndarray) -> Partition:
+    """:func:`partition_of_scene` from rooms already in hand, on a machine without HSSD."""
+    interior = [room for room in rooms if not room.outdoor]
+    if not interior:
+        raise ValueError("no interior room to partition")
+    raster = _fill_unclaimed(_rasterise(interior, np.asarray(xv), np.asarray(zv)))
     if int(raster.min()) < 0:
         raise AssertionError("the room partition left cells with no owner")
-    return Partition(rooms=tuple(rooms), raster=raster, xv=np.asarray(xv), zv=np.asarray(zv))
+    return Partition(rooms=tuple(interior), raster=raster, xv=np.asarray(xv), zv=np.asarray(zv))
+
+
+def rooms_record(rooms: list[RoomPartition]) -> list[dict[str, Any]]:
+    """The rooms as JSON, polygons as WKT, so a rented machine can partition without HSSD."""
+    return [
+        {
+            "name": room.name,
+            "label": room.label,
+            "regions": list(room.regions),
+            "outdoor": bool(room.outdoor),
+            "polygon": shapely.to_wkt(room.polygon, rounding_precision=-1),
+        }
+        for room in rooms
+    ]
+
+
+def rooms_from_record(record: list[dict[str, Any]]) -> list[RoomPartition]:
+    """The inverse of :func:`rooms_record`."""
+    return [
+        RoomPartition(
+            name=str(item["name"]),
+            label=str(item["label"]),
+            polygon=shapely.from_wkt(item["polygon"]),
+            regions=tuple(str(r) for r in item["regions"]),
+            outdoor=bool(item.get("outdoor", False)),
+        )
+        for item in record
+    ]

@@ -40,7 +40,13 @@ import h5py
 import numpy as np
 
 from reverberate.experiments.run import entry_from_key
-from reverberate.geometry.rooms import Partition, _rasterise, partition_of_scene
+from reverberate.geometry.rooms import (
+    Partition,
+    RoomPartition,
+    _rasterise,
+    partition_of_rooms,
+    partition_of_scene,
+)
 from reverberate.viz.vox_view import (
     blocks_from_nodes,
     scene_subs,
@@ -383,7 +389,7 @@ def _write_tier(
 
 def build(
     cache_key: str,
-    hssd_root: Path,
+    hssd_root: Path | None,
     scene_id: str,
     out: Path,
     coarse_span: int = COARSE_SPAN,
@@ -391,6 +397,7 @@ def build(
     only: list[str] | None = None,
     index_only: bool = False,
     publish: bool = False,
+    partition_rooms: list[RoomPartition] | None = None,
 ) -> dict[str, Any]:
     """Build both tiers for every room and write them under ``out``.
 
@@ -413,7 +420,14 @@ def build(
         axes = [np.asarray(handle[k][:], dtype=np.float64) for k in ("xv", "yv", "zv")]
     shape = (axes[0].size, axes[1].size, axes[2].size)
 
-    partition = partition_of_scene(Path(hssd_root), scene_id, axes[0], axes[2])
+    # A machine without the HSSD download is handed the rooms it needs; the
+    # raster is still built on this grid's own axes.
+    if partition_rooms is not None:
+        partition = partition_of_rooms(partition_rooms, axes[0], axes[2])
+    elif hssd_root is not None:
+        partition = partition_of_scene(Path(hssd_root), scene_id, axes[0], axes[2])
+    else:
+        raise ValueError("the audit view needs the HSSD root or the rooms themselves")
     mask = membership_mask(partition, halo_for(coarse_span))
     labels = sorted(json.loads((cache_dir / "manifest.json").read_text()).get("materials") or {})
     standing = stand_points(cache_dir, partition, axes, ny, nz, shape)
