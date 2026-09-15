@@ -1,0 +1,105 @@
+--- a/c_cuda/fdtd_data.h
++++ b/c_cuda/fdtd_data.h
+@@ -28,6 +28,13 @@
+ #ifndef _HDF5_H
+ #include "hdf5.h"
+ #endif
++//REVERBERATE PATCH 8: the receiver records are kept and written as Real, so a
++//single precision build holds and writes float32 (half the host RAM and the file).
++#if PRECISION==2
++   #define H5T_REAL H5T_NATIVE_DOUBLE
++#else
++   #define H5T_REAL H5T_NATIVE_FLOAT
++#endif
+ 
+ //maximum number of RLC branches in freq-dep (FD) boundaries (needed at compile-time for CUDA kernels)
+ #define MMb 12 //change as necssary
+@@ -49,7 +56,7 @@
+    int8_t *mat_bnl; //material indices for lossy boundary nodes
+    int8_t *K_bn; //number of adjacent neighbours, boundary nodesa
+    double *in_sigs; //input signals
+-   double *u_out; //for output signals
++   Real *u_out; //for output signals (REVERBERATE PATCH 8: the engine's own precision)
+    int64_t Ns; //number of input grid points
+    int64_t Nr; //number of output grid points
+    int64_t Nt; //number of samples simulation
+@@ -115,7 +122,7 @@
+    double *saf_bn;
+    Real *ssaf_bn,*ssaf_bnl;
+    double *in_sigs;
+-   double *u_out;
++   Real *u_out; //REVERBERATE PATCH 8
+    double l;
+    double l2;
+    int8_t fcc_flag;
+@@ -675,7 +682,7 @@
+    }
+ 
+    //for outputs
+-   mymalloc((void **)&u_out, Nr*Nt*sizeof(double));
++   mymalloc((void **)&u_out, Nr*Nt*sizeof(Real)); //REVERBERATE PATCH 8
+    /*------------------------
+     * ATTACH 
+    ------------------------*/
+@@ -863,7 +870,7 @@
+ void print_last_samples(struct SimData *sd) {
+    int64_t Nt = sd->Nt;
+    int64_t Nr = sd->Nr;
+-   double *u_out = sd->u_out;
++   Real *u_out = sd->u_out; //REVERBERATE PATCH 8
+    int64_t *out_reorder = sd->out_reorder;
+    //print last samples
+    printf("RAW OUTPUTS\n");
+@@ -910,7 +917,7 @@
+ 
+ //undo that scaling
+ void rescale_output(struct SimData *sd) {
+-   double *u_out = sd->u_out;
++   Real *u_out = sd->u_out; //REVERBERATE PATCH 8
+    int64_t Nt = sd->Nt;
+    int64_t Nr = sd->Nr;
+    double infac = sd->infac;
+@@ -936,8 +943,8 @@
+    herr_t status;
+    hid_t file, space, dset;
+ 
+-   double *u_out;
+-   mymalloc((void **)&u_out, Nt*Nr*sizeof(double));
++   Real *u_out; //REVERBERATE PATCH 8
++   mymalloc((void **)&u_out, Nt*Nr*sizeof(Real)); //REVERBERATE PATCH 8
+    for (int64_t nr=0; nr<Nr; nr++) {
+       for (int64_t n=0; n<Nt; n++) {
+          u_out[nr*Nt + n] = sd->u_out[out_reorder[nr]*Nt + n];
+@@ -950,8 +957,8 @@
+    strcpy(dset_str, "u_out");
+    file = H5Fcreate (filename, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+    space = H5Screate_simple (2, dims, NULL);
+-   dset = H5Dcreate (file, dset_str, H5T_NATIVE_DOUBLE, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+-   status = H5Dwrite (dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, u_out);
++   dset = H5Dcreate (file, dset_str, H5T_REAL, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT); //REVERBERATE PATCH 8
++   status = H5Dwrite (dset, H5T_REAL, H5S_ALL, H5S_ALL, H5P_DEFAULT, u_out); //REVERBERATE PATCH 8
+    if (status != 0) {
+       printf("error writing dataset\n");
+       assert(true==false);
+--- a/c_cuda/gpu_engine.h
++++ b/c_cuda/gpu_engine.h
+@@ -115,7 +115,7 @@
+ struct gpuHostData { //arrays on host (for copy), mirrors gpu local data 
+    double *in_sigs; //aliased
+    Real *u_out_buf; //aliased
+-   double *u_out; //aliased 
++   Real *u_out; //aliased (REVERBERATE PATCH 8) 
+    Real *ssaf_bnl; //aliased
+    int64_t *in_ixyz; //recomputed
+    int64_t *out_ixyz; //recomputed
+--- a/c_cuda/cpu_engine.h
++++ b/c_cuda/cpu_engine.h
+@@ -75,7 +75,7 @@
+    int8_t *mat_bnl    = sd->mat_bnl;
+    int8_t *Q_bna      = sd->Q_bna;
+    double *in_sigs    = sd->in_sigs;
+-   double *u_out      = sd->u_out;
++   Real *u_out        = sd->u_out; //REVERBERATE PATCH 8
+    int8_t fcc_flag    = sd->fcc_flag;
+    Real *ssaf_bnl   = sd->ssaf_bnl;
+    Real *mat_beta   = sd->mat_beta;

@@ -29,6 +29,7 @@ different question about an approximation:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,12 @@ def band_centres(fs: int) -> tuple[int, ...]:
     return tuple(int(round(float(value))) for value in bank.centers)
 
 
+@functools.lru_cache(maxsize=8)
+def octave_bank(fs: int) -> Any:
+    """The filter bank of this rate, built once: a thousand rebuilds a point added up."""
+    return pra.acoustics.OctaveBandsFactory(fs=fs, base_frequency=OCTAVE_BANDS[0], n_fft=512)
+
+
 def octave_filter(rir: np.ndarray, fs: int) -> np.ndarray:
     """Split a response into its octave bands.
 
@@ -67,11 +74,26 @@ def octave_filter(rir: np.ndarray, fs: int) -> np.ndarray:
     array shaped ``(bands, samples)``. See :func:`band_centres` for why that
     first axis can be longer than :data:`~reverberate.acoustics.OCTAVE_BANDS`.
     """
-    bands = pra.acoustics.OctaveBandsFactory(fs=fs, base_frequency=OCTAVE_BANDS[0], n_fft=512)
-    filtered = bands.analysis(np.asarray(rir, dtype=float))
+    filtered = octave_bank(fs).analysis(np.asarray(rir, dtype=float))
     if filtered.ndim == 1:
         filtered = filtered[:, None]
     return np.asarray(filtered).T
+
+
+def octave_filter_rows(signals: np.ndarray, fs: int, bands: np.ndarray) -> np.ndarray:
+    """Row ``k`` of ``signals`` through octave band ``bands[k]`` alone, all rows at once.
+
+    The bank's own filters and the same ``fftconvolve`` in ``same`` mode, so
+    each row is what :func:`octave_filter` would return for that band, to the
+    rounding of a batched transform (about 1e-14 of the signal). One transform
+    for the whole block rather than a full bank per row: the tail synthesis
+    draws one noise per band and needs that band of it, nothing else.
+    """
+    from scipy.signal import fftconvolve
+
+    block = np.atleast_2d(np.asarray(signals, dtype=float))
+    kernels = np.asarray(octave_bank(fs).filters, dtype=float).T[np.asarray(bands, dtype=int)]
+    return np.asarray(fftconvolve(block, kernels, mode="same", axes=1))
 
 
 def energy_decay_curve(band: np.ndarray) -> np.ndarray:

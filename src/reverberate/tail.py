@@ -38,6 +38,7 @@ from reverberate.audio import Atmosphere
 from reverberate.metrics import (
     band_centres,
     octave_filter,
+    octave_filter_rows,
 )
 
 __all__ = [
@@ -345,6 +346,21 @@ def synthesise(
     weight[fade_start:window] = np.linspace(0.0, 1.0, fade, endpoint=False)
     weight[window:] = 1.0
 
+    # A band with no decay to imitate stops where the solver stopped, rather
+    # than being invented.
+    imitated = np.asarray([np.isfinite(d) and d > 0.0 for d in decay], dtype=bool)
+    chosen = np.flatnonzero(imitated)
+    envelopes = (
+        np.stack(
+            [
+                10.0 ** (-60.0 * (times - fade_start / sample_rate_hz) / (20.0 * decay[band]))
+                for band in chosen
+            ]
+        )
+        if chosen.size
+        else np.zeros((0, total_samples))
+    )
+
     out = np.zeros((signals.shape[0], total_samples))
     for receiver in range(signals.shape[0]):
         # The computed part is carried through as the solver wrote it, never
@@ -354,21 +370,17 @@ def synthesise(
         # half of the response that carries the spatial information.
         bands = octave_filter(signals[receiver], sample_rate_hz)
         tail = np.zeros(total_samples)
-        for band in range(len(centres)):
-            if not np.isfinite(decay[band]) or decay[band] <= 0.0:
-                # No decay to imitate: the band stops where the solver stopped,
-                # rather than being invented.
-                continue
-            noise = octave_filter(rng.standard_normal(total_samples), sample_rate_hz)[band]
-            envelope = 10.0 ** (
-                -60.0 * (times - fade_start / sample_rate_hz) / (20.0 * decay[band])
-            )
-            noise = noise * envelope
-            reference = float(np.sqrt((bands[band, fade_start:window] ** 2).mean()))
-            level = float(np.sqrt((noise[fade_start:window] ** 2).mean()))
-            if level > 0.0:
-                noise *= reference / level
-            tail += noise
+        if chosen.size:
+            # One white draw per imitated band, in band order, as it always was;
+            # each draw through its own band's filter alone, the block in one
+            # transform. The full bank was run on every draw and one band kept,
+            # which was nine transforms for one and the whole cost of a point.
+            draws = np.stack([rng.standard_normal(total_samples) for _ in chosen])
+            noises = octave_filter_rows(draws, sample_rate_hz, chosen) * envelopes
+            reference = np.sqrt((bands[chosen, fade_start:window] ** 2).mean(axis=1))
+            level = np.sqrt((noises[:, fade_start:window] ** 2).mean(axis=1))
+            scale = np.where(level > 0.0, reference / np.where(level > 0.0, level, 1.0), 1.0)
+            tail = (noises * scale[:, None]).sum(axis=0)
 
         computed = np.zeros(total_samples)
         computed[:window] = signals[receiver]

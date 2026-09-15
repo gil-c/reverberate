@@ -202,3 +202,16 @@ def test_no_comb_is_reported_on_a_plain_diffuse_tail() -> None:
     found = metrics.axial_modes(rir, fs, height_m=3.0)
     assert found["found"] and not found["flutter"]
     assert abs(found["contrast_db"]) < 2
+
+
+def test_a_band_of_the_bank_filtered_alone_is_that_band_of_the_bank() -> None:
+    """The tail synthesis filters one draw through one band; same numbers as the bank."""
+    from reverberate.metrics import octave_filter, octave_filter_rows
+
+    rng = np.random.default_rng(5)
+    rows = rng.standard_normal((3, 4000))
+    bands = np.array([1, 4, 7])
+    alone = octave_filter_rows(rows, 48000, bands)
+    for k, band in enumerate(bands):
+        whole = octave_filter(rows[k], 48000)[band]
+        assert np.abs(alone[k] - whole).max() < 1e-12 * np.abs(whole).max()

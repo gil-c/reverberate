@@ -35,7 +35,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -714,3 +714,69 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main())
+
+
+# --------------------------------------------------------------------------
+# renting one machine that answers
+# --------------------------------------------------------------------------
+
+
+def enough_credit(credit: float, *, remaining_usd: float) -> bool:
+    """Whether the account can pay the rest of the plan, not just one hour.
+
+    The night of 2026-09-13 started with 12.5 USD, spent 10 before the encode
+    and ran out under it. ``credit`` is NaN when the API did not answer; then
+    the rental goes ahead, since a status read must not end a campaign.
+    """
+    return credit != credit or credit >= remaining_usd
+
+
+def credit_of(client: Any) -> float:
+    """The account's credit in USD, or NaN when the API does not answer."""
+    try:
+        return float(client.request("GET", "/users/current/").get("credit") or 0.0)
+    except Exception:  # noqa: BLE001 - a status read must never end a campaign
+        return float("nan")
+
+
+def rent_one(
+    client: Any,
+    identity: Any,
+    offers: list[Any],
+    *,
+    hours: float,
+    disk_gb: int,
+    image: str,
+    remaining_usd: float = 0.0,
+    say: Callable[[str], None] = print,
+) -> tuple[Any, int]:
+    """Down the list until one rents and answers; the machine and its id.
+
+    Every offer tried is removed from ``offers`` in place, rented or not, so a
+    caller renting several boxes from one list never returns to a host that
+    stayed silent (two did on 2026-09-12). The credit is read before each
+    rental against ``remaining_usd``.
+    """
+    for candidate in list(offers[:8]):
+        offers.remove(candidate)
+        credit = credit_of(client)
+        if not enough_credit(credit, remaining_usd=max(remaining_usd, candidate.dph_total + 0.5)):
+            raise SystemExit(
+                f"credit {credit:.2f} USD is under the {remaining_usd:.2f} USD"
+                " the rest of the plan needs"
+            )
+        say(f"  credit {credit:.2f} USD before renting {candidate.id}")
+        try:
+            rental = rent(client, candidate, hours=hours, image=image, disk_gb=disk_gb)
+        except VastError as refusal:
+            say(f"  {candidate.id} would not rent ({refusal})")
+            continue
+        say(f"rented {rental.instance_id} on {candidate.describe()}")
+        try:
+            machine = wait_for_ssh(client, rental.instance_id, identity, timeout=420.0)
+        except (TimeoutError, VastError) as silence:
+            say(f"  {rental.instance_id} never answered ({silence}); destroying, next")
+            teardown(client, rental.instance_id)
+            continue
+        return machine, rental.instance_id
+    raise SystemExit("no offer produced a machine that answered")

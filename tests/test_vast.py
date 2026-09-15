@@ -457,3 +457,100 @@ class TestCpuSpeedIsVisible:
         offer = Offer.from_api({"id": 8, "cpu_ghz": None, "cpu_name": None})
         assert offer.cpu_ghz == 0.0
         assert offer.cpu_name == ""
+
+
+# --------------------------------------------------------------------------
+# renting one machine that answers
+# --------------------------------------------------------------------------
+
+
+class RentOffer:
+    def __init__(self, id: int, dph_total: float = 0.2) -> None:
+        self.id = id
+        self.dph_total = dph_total
+
+    def describe(self) -> str:
+        return f"offer {self.id}"
+
+
+class RentClient:
+    """Answers the calls :func:`vast.rent_one` makes; scripts the outcome per offer."""
+
+    def __init__(
+        self,
+        credit: float,
+        silent: frozenset[int] = frozenset(),
+        refused: frozenset[int] = frozenset(),
+    ) -> None:
+        self.credit = credit
+        self.silent = silent
+        self.refused = refused
+        self.destroyed: list[int] = []
+
+    def request(self, method: str, path: str, payload: object = None) -> dict[str, float]:
+        assert (method, path) == ("GET", "/users/current/")
+        return {"credit": self.credit}
+
+
+class TestCredit:
+    def test_the_whole_remaining_plan_must_be_payable(self) -> None:
+        assert not vast.enough_credit(2.2, remaining_usd=4.0)
+        assert vast.enough_credit(5.0, remaining_usd=4.0)
+
+    def test_an_unanswered_api_does_not_end_a_campaign(self) -> None:
+        assert vast.enough_credit(float("nan"), remaining_usd=100.0)
+        assert vast.credit_of(RentClient(credit=3.5)) == 3.5
+
+
+class TestRentOne:
+    @pytest.fixture
+    def fake_vast(self, monkeypatch: pytest.MonkeyPatch) -> RentClient:
+        client = RentClient(credit=10.0, silent=frozenset({2}), refused=frozenset({1}))
+
+        class Rented:
+            def __init__(self, instance_id: int) -> None:
+                self.instance_id = instance_id
+
+        def rent(c: RentClient, offer: RentOffer, **_: object) -> Rented:
+            if offer.id in c.refused:
+                raise vast.VastError("PUT /asks failed: HTTP 400")
+            return Rented(1000 + offer.id)
+
+        def wait_for_ssh(
+            c: RentClient, instance_id: int, identity: object, timeout: float = 0.0
+        ) -> str:
+            if instance_id - 1000 in c.silent:
+                raise TimeoutError("never answered on ssh")
+            return f"machine-{instance_id}"
+
+        monkeypatch.setattr(vast, "rent", rent)
+        monkeypatch.setattr(vast, "wait_for_ssh", wait_for_ssh)
+        monkeypatch.setattr(vast, "teardown", lambda c, i: c.destroyed.append(i))
+        return client
+
+    def test_a_refused_then_a_silent_offer_are_consumed_and_the_third_rents(
+        self, fake_vast: RentClient
+    ) -> None:
+        offers = [RentOffer(1), RentOffer(2), RentOffer(3), RentOffer(4)]
+        said: list[str] = []
+        machine, instance = vast.rent_one(
+            fake_vast, None, offers, hours=1.0, disk_gb=10, image="img", say=said.append
+        )
+        assert (machine, instance) == ("machine-1003", 1003)
+        assert [o.id for o in offers] == [4], "tried offers leave the list, rented or not"
+        assert fake_vast.destroyed == [1002], "the silent host is destroyed, not left billing"
+
+    def test_too_little_credit_for_the_rest_of_the_plan_stops_before_renting(
+        self, fake_vast: RentClient
+    ) -> None:
+        fake_vast.credit = 3.0
+        with pytest.raises(SystemExit, match="rest of the plan"):
+            vast.rent_one(
+                fake_vast,
+                None,
+                [RentOffer(3)],
+                hours=1.0,
+                disk_gb=10,
+                image="img",
+                remaining_usd=8.0,
+            )
