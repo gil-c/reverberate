@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-diffraction", action="store_true", help="no diffracted onset where no direct path"
     )
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
+    p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
     p.add_argument(
         "--phase",
         choices=("card", "host", "all"),
@@ -172,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                 band_limit_hz=args.band_limit,
                 air_absorption=not args.no_air,
                 tail_from_s=args.tail_from,
+                tail_bursts=args.bursts,
             ),
         )
         report = run_mirror(

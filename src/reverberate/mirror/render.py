@@ -79,6 +79,8 @@ class RenderSettings:
     #: two bins instead, which also hold the floor and ceiling reflections
     #: arriving within 4 ms: +2 dB median, +4.7 dB at p90 on 0076.
     analytic_direct: bool = True
+    #: Noise bursts per histogram bin, each from its own sampled direction.
+    tail_bursts: int = 6
     #: The histogram tail's band energies go through the inverse of what the
     #: bank reads of shaped noise (``bank_reading``), so they read as meant.
     bank_corrected: bool = True
@@ -101,6 +103,7 @@ class RenderSettings:
             "lead_s": self.lead_s,
             "analytic_direct": self.analytic_direct,
             "bank_corrected": self.bank_corrected,
+            "tail_bursts": self.tail_bursts,
         }
 
 

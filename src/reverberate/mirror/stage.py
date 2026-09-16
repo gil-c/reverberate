@@ -339,6 +339,7 @@ def _render_point(
             sound_speed_m_s=sound_speed_m_s,
             start_s=distance / sound_speed_m_s,
             seed=settings.seed + index,
+            bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
             scale_per_band=analytic,
         )
@@ -373,6 +374,7 @@ def _render_point(
             sound_speed_m_s=sound_speed_m_s,
             start_s=start_s,
             seed=settings.seed + index,
+            bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
             scale_per_band=scale,
         )
