@@ -50,6 +50,8 @@ __all__ = [
     "calibrate",
     "calibrate_fixed_point",
     "cost_of",
+    "image_scene",
+    "mean_absorption",
     "regain",
 ]
 
@@ -62,6 +64,10 @@ class Parameters:
     scattering_scale: float = 1.0
     tail_gain_db: tuple[float, ...] = tuple(0.0 for _ in OCTAVE_BANDS)
     note: str = "catalogue values, nothing calibrated"
+    #: The absorption scale the image sources' gains use, per band; ``None``
+    #: uses ``absorption_scale``. The rays set the decay and the images the
+    #: reflections' levels; one scale for both traded one against the other.
+    image_absorption_scale: tuple[float, ...] | None = None
 
     @property
     def key(self) -> str:
@@ -69,13 +75,19 @@ class Parameters:
         return digest.hexdigest()[:16]
 
     def record(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "bands_hz": list(OCTAVE_BANDS),
             "absorption_scale": [round(float(v), 6) for v in self.absorption_scale],
             "scattering_scale": round(float(self.scattering_scale), 6),
             "tail_gain_db": [round(float(v), 4) for v in self.tail_gain_db],
             "note": self.note,
         }
+        if self.image_absorption_scale is not None:
+            # Only when set, so the keys of the files written before stay theirs.
+            record["image_absorption_scale"] = [
+                round(float(v), 6) for v in self.image_absorption_scale
+            ]
+        return record
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Parameters:
@@ -84,6 +96,11 @@ class Parameters:
             scattering_scale=float(record["scattering_scale"]),
             tail_gain_db=tuple(float(v) for v in record["tail_gain_db"]),
             note=str(record.get("note", "")),
+            image_absorption_scale=(
+                tuple(float(v) for v in record["image_absorption_scale"])
+                if record.get("image_absorption_scale") is not None
+                else None
+            ),
         )
 
     def to_vector(self, *, tied: bool = False) -> np.ndarray:
@@ -141,6 +158,24 @@ def apply_parameters(scene: DerivedScene, parameters: Parameters) -> DerivedScen
         scene.materials.source,
     )
     return replace(scene, materials=materials)
+
+
+def image_scene(scene: DerivedScene, parameters: Parameters) -> DerivedScene:
+    """The catalogue scene with the materials the image sources' gains read."""
+    if parameters.image_absorption_scale is None:
+        return apply_parameters(scene, parameters)
+    return apply_parameters(
+        scene, replace(parameters, absorption_scale=parameters.image_absorption_scale)
+    )
+
+
+def mean_absorption(scene: DerivedScene) -> np.ndarray:
+    """The area weighted absorption per band of the catalogue scene's reflecting facets."""
+    areas = np.zeros(len(scene.materials.labels))
+    for f in scene.facets:
+        areas[f.label] += f.area
+    total = max(float(areas.sum()), 1e-9)
+    return np.asarray((areas[:, None] * scene.materials.absorption).sum(axis=0) / total)
 
 
 def regain(paths: Paths, scene: DerivedScene) -> Paths:
@@ -266,10 +301,11 @@ def calibrate(
         parameters = Parameters.from_vector(vector, note="candidate", tied=tied)
         candidate_scene = apply_parameters(scene, parameters)
         histogram = trace(candidate_scene)
+        images = image_scene(scene, parameters)
         jobs = []
         for index, point_paths in paths.items():
             response = render_point(
-                index, regain(point_paths, candidate_scene), histogram, candidate_scene, parameters
+                index, regain(point_paths, images), histogram, candidate_scene, parameters
             )
             jobs.append((references[index], response, criteria_settings))
         if workers > 1:
@@ -342,6 +378,26 @@ def _band_residuals(reports: list[PointReport]) -> tuple[dict[int, float], dict[
     )
 
 
+def _reflection_gaps(reports: list[PointReport]) -> dict[int, float]:
+    """Per band: the median level gap of the matched reflections, reference minus mirror, dB.
+
+    Both lists are relative to their own direct sound, band by band, so the
+    signature and the air cancel and what remains is the reflections' loss.
+    """
+    gaps: dict[int, list[float]] = {}
+    for r in reports:
+        for i, j in r.matching.pairs:
+            ref = r.reference[i]
+            cand = r.candidate[j]
+            if ref.index == 0 or cand.index == 0:
+                continue
+            for k, band in enumerate(ref.bands.centres_hz):
+                a, b = float(ref.bands.levels_db[k]), float(cand.bands.levels_db[k])
+                if np.isfinite(a) and np.isfinite(b):
+                    gaps.setdefault(int(band), []).append(a - b)
+    return {band: float(np.median(v)) for band, v in gaps.items()}
+
+
 def _weighted(values: np.ndarray, weight: np.ndarray) -> float:
     return float(np.sum(weight * values) / np.sum(weight))
 
@@ -396,6 +452,7 @@ def calibrate_fixed_point(
     iterations: int = 8,
     damping: float = 0.8,
     scattering: tuple[float, ...] = (),
+    images_apart: bool = True,
     workers: int = 1,
     say: Any = print,
 ) -> tuple[Parameters, list[Evaluation]]:
@@ -410,22 +467,28 @@ def calibrate_fixed_point(
     of one of fifteen: a handful of evaluations instead of forty. The 125 Hz
     band is not judged; it follows 250 Hz. ``scattering`` lists the
     scattering scales to try after the fixed point, each followed by two
-    more steps. The best evaluation by ``band_cost`` is returned.
+    more steps. With ``images_apart`` the image sources get their own
+    absorption scale, moved by the matched reflections' level gap. The best
+    evaluation by ``band_cost`` is returned.
     """
     weights = weights or CostWeights()
     parameters = start or Parameters()
     criteria_settings = criteria or CriteriaSettings()
     evaluations: list[Evaluation] = []
     bands = list(OCTAVE_BANDS)
+    alpha = mean_absorption(scene)
+    if images_apart and parameters.image_absorption_scale is None:
+        parameters = replace(parameters, image_absorption_scale=parameters.absorption_scale)
 
     def evaluate(candidate: Parameters) -> list[PointReport]:
         t0 = time.time()
         candidate_scene = apply_parameters(scene, candidate)
         histogram = trace(candidate_scene)
+        images = image_scene(scene, candidate)
         jobs = []
         for index, point_paths in paths.items():
             response = render_point(
-                index, regain(point_paths, candidate_scene), histogram, candidate_scene, candidate
+                index, regain(point_paths, images), histogram, candidate_scene, candidate
             )
             jobs.append((references[index], response, criteria_settings))
         if workers > 1:
@@ -437,6 +500,7 @@ def calibrate_fixed_point(
         total, early, late = band_cost(reports, weights)
         evaluations.append(Evaluation(candidate, total, early, late, reports, time.time() - t0))
         ratios, gaps = _band_residuals(reports)
+        levels = _reflection_gaps(reports)
         say(
             f"fixed point {len(evaluations):3d}: cost {total:8.3f}"
             f" (early {early:7.3f}, late {late:7.3f})"
@@ -445,22 +509,36 @@ def calibrate_fixed_point(
             f" gain {np.round(candidate.tail_gain_db, 2).tolist()}"
             f" | t30 ratio {[round(ratios.get(b, float('nan')), 3) for b in bands]}"
             f" colour gap {[round(gaps.get(b, float('nan')), 2) for b in bands]}"
+            f" reflection gap {[round(levels.get(b, float('nan')), 2) for b in bands]}"
+            f" image abs {np.round(candidate.image_absorption_scale or (), 3).tolist()}"
             f" in {time.time() - t0:.0f} s"
         )
         return reports
 
     def step(candidate: Parameters, reports: list[PointReport]) -> Parameters:
         ratios, gaps = _band_residuals(reports)
+        levels = _reflection_gaps(reports)
         scale = list(candidate.absorption_scale)
         gain = list(candidate.tail_gain_db)
+        image = list(candidate.image_absorption_scale or candidate.absorption_scale)
         for k, band in enumerate(bands):
             judged = band if band in ratios else 250
             if judged in ratios:
                 scale[k] = float(np.clip(scale[k] * ratios[judged] ** damping, 0.05, 20.0))
             if judged in gaps:
                 gain[k] = float(np.clip(gain[k] + damping * gaps[judged], -30.0, 30.0))
+            if images_apart and (band if band in levels else 250) in levels:
+                # A matched reflection has about two bounces: its energy goes as
+                # (1 - s a)^2, so a gap of g dB asks (1 - s a) to move by g / 20 dB.
+                gap = levels[band if band in levels else 250]
+                kept = (1.0 - image[k] * alpha[k]) * 10.0 ** (damping * gap / 20.0)
+                image[k] = float(np.clip((1.0 - kept) / max(alpha[k], 1e-6), 0.05, 20.0))
         return replace(
-            candidate, absorption_scale=tuple(scale), tail_gain_db=tuple(gain), note="candidate"
+            candidate,
+            absorption_scale=tuple(scale),
+            tail_gain_db=tuple(gain),
+            image_absorption_scale=tuple(image) if images_apart else None,
+            note="candidate",
         )
 
     for _ in range(iterations):

@@ -45,7 +45,7 @@ from scipy.signal import butter, sosfilt
 from reverberate.audio import apply_air_absorption, lowpass
 from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.audit import write_geometry_layers, write_paths
-from reverberate.mirror.calibrate import Parameters, apply_parameters
+from reverberate.mirror.calibrate import Parameters, apply_parameters, image_scene, regain
 from reverberate.mirror.criteria import (
     Criteria,
     CriteriaSettings,
@@ -533,6 +533,10 @@ def _card_phase(
             scene, tree, positions, ism, devices=devices, grid=grid, say=s.say
         ),
     )
+    if settings.parameters.image_absorption_scale is not None:
+        # The images' gains read their own absorption scale.
+        images = image_scene(catalogue, settings.parameters)
+        every = [regain(p, images) for p in every]
     s.report["paths"] = {
         "median": float(np.median([p.count for p in every])),
         "max": int(max(p.count for p in every)),
