@@ -187,18 +187,23 @@ def _field_record(
     }
 
 
-def _metrics_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[str, Any] | None:
-    """Copy a source's mirror metrics into the site, when the run has them."""
-    relative = source.get("metrics")
+def _metrics_record(
+    run: WalkRun, source: dict[str, Any], target: Path, *, key: str = "metrics"
+) -> dict[str, Any] | None:
+    """Copy a source's mirror metrics into the site, when the run has them.
+
+    ``key`` is ``metrics`` for the mirror, ``metrics_c`` for the newer one.
+    """
+    relative = source.get(key)
     if not relative:
         return None
     metrics = (run.path / relative).resolve()
     if not metrics.is_file():
         raise FileNotFoundError(f"{run.name}: source {source.get('id')!r} names {relative}, absent")
-    site = target / "metrics"
+    site = target / key
     site.mkdir(parents=True, exist_ok=True)
     shutil.copy2(metrics, site / f"{source.get('id')}.json")
-    return {"url": f"metrics/{source.get('id')}.json"}
+    return {"url": f"{key}/{source.get('id')}.json"}
 
 
 def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
@@ -244,7 +249,11 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
                 "directivity": str(source.get("directivity", "omni")),
                 "field": _field_record(run, source, target),
                 "mirror": _field_record(run, source, target, key="field_mirror", folder="mirrors"),
+                "mirror_c": _field_record(
+                    run, source, target, key="field_mirror_c", folder="mirrors_c"
+                ),
                 "metrics": _metrics_record(run, source, target),
+                "metrics_c": _metrics_record(run, source, target, key="metrics_c"),
             }
             for i, source in enumerate(run.sources)
         ],

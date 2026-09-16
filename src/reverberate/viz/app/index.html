@@ -115,9 +115,10 @@
             <p class="label">Head</p>
             <select id="head"></select>
             <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="40" /><em id="level-read">40 dB</em></label>
-            <div class="seg" id="ab" title="A: the wave solver's field. B: the geometric mirror of it, same cell, same level.">
+            <div class="seg" id="ab" title="A: the wave solver's field. B: the geometric mirror of it. C: the newer mirror. Same cell, same level.">
               <button type="button" class="on" data-ab="wave">A · wave</button>
               <button type="button" data-ab="mirror" disabled>B · mirror</button>
+              <button type="button" data-ab="mirror_c" disabled>C · new</button>
             </div>
           </div>
           <div>

@@ -49,7 +49,8 @@ const TARGET_KEYS = {
 };
 
 export function createDashboard(root, { table, summary, caption }) {
-  const metrics = new Map(); // source id -> parsed metrics json
+  const metrics = new Map(); // "source id/variant" -> parsed metrics json
+  let variant = ""; // "" for the mirror B, "c" for the newer mirror C
   let shown = { id: null, point: null };
 
   function targetsOf(record) {
@@ -97,28 +98,33 @@ export function createDashboard(root, { table, summary, caption }) {
 
   return {
     /** The metrics of a source, fetched once from the run's site. */
-    async load(id, url) {
+    async load(id, url, which = "") {
+      const key = `${id}/${which}`;
       if (!url) {
-        metrics.set(id, null);
+        metrics.set(key, null);
         return;
       }
       try {
         const record = await fetch(url).then((r) => (r.ok ? r.json() : null));
-        metrics.set(id, record);
+        metrics.set(key, record);
       } catch {
-        metrics.set(id, null);
+        metrics.set(key, null);
       }
-      if (shown.id === id) this.show(id, shown.point);
+      if (shown.id === id && which === variant) this.show(id, shown.point);
+    },
+    /** Which mirror the panel judges: "" for B, "c" for the newer mirror C. */
+    select(which) {
+      variant = which || "";
     },
     /** The judgement at a point of a source's field; `point` is the field's position index. */
     show(id, point) {
       shown = { id, point };
-      const record = metrics.get(id) || null;
+      const record = metrics.get(`${id}/${variant}`) || null;
       renderSummary(record);
       renderPoint(record, point);
       root.classList.toggle("hidden", !record);
     },
-    has: (id) => Boolean(metrics.get(id)),
+    has: (id) => Boolean(metrics.get(`${id}/${variant}`)),
     clear() {
       shown = { id: null, point: null };
       table.replaceChildren();

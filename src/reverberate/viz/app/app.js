@@ -88,7 +88,9 @@ function audioStatus() {
   const source = sourceById(state.selected);
   const parts = [];
   parts.push(source && source.cell !== null && source.cell !== undefined ? `cell ${source.cell}` : "no cell");
-  if (source && source.mirrorField) parts.push(state.ab === "mirror" ? "<b>B mirror</b>" : "A wave");
+  if (source && (source.mirrorField || source.mirrorFieldC)) {
+    parts.push(state.ab === "mirror" ? "<b>B mirror</b>" : state.ab === "mirror_c" ? "<b>C new</b>" : "A wave");
+  }
   if (source && source.solvedToHz) parts.push(`solved to ${(source.solvedToHz / 1000).toFixed(1)} kHz`);
   if (lastRender) parts.push(`update <b>${lastRender.ms.toFixed(1)} ms</b>`);
   if (source && source.late) parts.push(source.late === "exact" ? "late exact" : "late at entry");
@@ -182,16 +184,20 @@ function selectSource(id) {
 // --- A against B: the wave solver's field, or the geometric mirror of it -----------
 /** The field a source is heard through under the A-B choice. */
 function activeField(source) {
-  return state.ab === "mirror" && source.mirrorField ? source.mirrorField : source.waveField;
+  if (state.ab === "mirror" && source.mirrorField) return source.mirrorField;
+  if (state.ab === "mirror_c" && source.mirrorFieldC) return source.mirrorFieldC;
+  return source.waveField;
 }
 
 function refreshAb() {
   const anyMirror = state.sources.some((s) => s.mirrorField);
+  const anyC = state.sources.some((s) => s.mirrorFieldC);
   for (const button of $("#ab").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.ab === state.ab);
     if (button.dataset.ab === "mirror") button.disabled = !anyMirror;
+    if (button.dataset.ab === "mirror_c") button.disabled = !anyC;
   }
-  $("#ab").style.opacity = anyMirror ? 1 : 0.45;
+  $("#ab").style.opacity = anyMirror || anyC ? 1 : 0.45;
 }
 
 function setAb(mode) {
@@ -205,6 +211,9 @@ function setAb(mode) {
   plots.clear();
   spatial.update(viewport.pose(), audibleIds());
   audioStatus();
+  dashboard.select(mode === "mirror_c" ? "c" : "");
+  const source = sourceById(state.selected);
+  if (source && source.cell !== null && source.cell !== undefined) dashboard.show(source.id, source.cell);
 }
 $("#ab").addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -432,6 +441,7 @@ async function openRun(run) {
       cell: null,
       waveField: null,
       mirrorField: null,
+      mirrorFieldC: null,
     }));
     dashboard.clear();
     state.selected = state.sources.length ? state.sources[0].id : null;
@@ -467,7 +477,21 @@ async function openRun(run) {
           })
           .catch((error) => busy(`${source.id} mirror: ${error.message}`));
       }
+      if (source.mirror_c) {
+        loadField(`${run.url}/${source.mirror_c.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.mirrorFieldC = field;
+            refreshAb();
+            if (state.ab === "mirror_c") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} mirror C: ${error.message}`));
+      }
       dashboard.load(source.id, source.metrics ? `${run.url}/${source.metrics.url}` : null);
+      dashboard.load(source.id, source.metrics_c ? `${run.url}/${source.metrics_c.url}` : null, "c");
     }
     refreshAb();
     // Opening a run is a choice of what to listen to: stand a metre from its
