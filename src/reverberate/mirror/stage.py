@@ -54,6 +54,7 @@ from reverberate.mirror.criteria import (
     direct_arrival,
     judge,
 )
+from reverberate.mirror.diffract import diffracted_paths
 from reverberate.mirror.engine import device_count, histogram_on_devices, paths_on_devices
 from reverberate.mirror.field import align_to_reference, write_mirror_field
 from reverberate.mirror.geometry import (
@@ -129,6 +130,8 @@ class MirrorSettings:
     signature: bool = True
     #: Points the signature is read on.
     signature_points: int = 48
+    #: Give a point without a direct path its diffracted onset (``mirror.diffract``).
+    diffraction: bool = True
 
     def record(self) -> dict[str, Any]:
         return {
@@ -143,6 +146,7 @@ class MirrorSettings:
             "seed": self.seed,
             "signature": self.signature,
             "signature_points": self.signature_points,
+            "diffraction": self.diffraction,
         }
 
 
@@ -280,7 +284,7 @@ def _render_point(
     scene_path: Path | DerivedScene,
     settings: MirrorSettings,
     sound_speed_m_s: float,
-    fallback: tuple[np.ndarray, float] | None = None,
+    fallback: tuple[Any, ...] | None = None,
     signature: np.ndarray | None = None,
 ) -> tuple[int, Ambisonic, dict[str, Any]]:
     """One point: the discrete part, then the histogram's tail when there is one.
@@ -289,7 +293,9 @@ def _render_point(
     already in them; the tail gain of ``settings.parameters`` applies here.
     ``fallback`` is ``(scale_per_band, straight_line_s)`` for a point without
     a direct path: the tail's scale as the other points read it, and the
-    straight line time the tail's clock starts from.
+    straight line time the tail's clock starts from; a third item, when
+    there, is the point's diffracted onset (a one-path ``Paths``), rendered
+    with the early part, whose arrival is where the tail's clock starts.
     """
     scene = scene_path if isinstance(scene_path, DerivedScene) else load_derived(scene_path)
     if histogram is None:
@@ -339,12 +345,26 @@ def _render_point(
         signals = early.signals + tail
         record["tail"] = tail_record
     elif fallback is not None and not direct.any() and histogram.hits[index].sum() > 0:
-        scale, straight_s = fallback
+        scale, straight_s = fallback[0], fallback[1]
+        onset = fallback[2] if len(fallback) > 2 else None
         # The rays' own first arrival, round the doorway, is where the tail starts:
         # the straight line through the wall is not a clock here.
         arrived = np.any(histogram.energy[index] > 0.0, axis=1)
         first_s = float(np.argmax(arrived)) * histogram.bin_s
         start_s = max(first_s - settings.render.tail_from_s, straight_s)
+        if onset is not None:
+            # The diffracted onset is the first arrival: the tail starts after it.
+            start_s = float(onset.length_m[0]) / sound_speed_m_s
+            early = Ambisonic(
+                early.signals + render_paths(onset, settings.render, sound_speed_m_s).signals,
+                early.sample_rate_hz,
+                early.order,
+                early.centre,
+            )
+            record["diffracted"] = {
+                "length_m": round(float(onset.length_m[0]), 4),
+                "gain_db": [round(float(v), 2) for v in 20.0 * np.log10(onset.gain[0])],
+            }
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
@@ -616,6 +636,20 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     source_position = np.asarray(card.get("source_position") or [np.nan] * 3, dtype=float)
     with_direct = [i for i in range(len(every)) if bool(np.any(every[i].order == 0))]
     without = sorted(set(range(len(every))) - set(with_direct))
+    onsets: dict[int, Paths] = {}
+    if settings.diffraction and without and bool(np.all(np.isfinite(source_position))):
+        onsets, diffraction_record = s.stage(
+            "diffraction",
+            lambda: diffracted_paths(
+                scene,
+                source_position,
+                positions,
+                without,
+                sound_speed_m_s=s.sound_speed_m_s,
+                say=s.say,
+            ),
+        )
+        s.report["diffraction"] = diffraction_record
     signature = None
     if settings.signature:
         step = max(1, len(with_direct) // max(1, settings.signature_points))
@@ -665,7 +699,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
                 fallback = None
                 if fallback_scale is not None and bool(np.all(np.isfinite(source_position))):
                     straight = float(np.linalg.norm(positions[i] - source_position))
-                    fallback = (fallback_scale, straight / s.sound_speed_m_s)
+                    fallback = (fallback_scale, straight / s.sound_speed_m_s, onsets.get(i))
                     s.report["points_tail_only"] += 1
                 jobs.append(submit(pool, i, fallback))
             for job in jobs:
@@ -674,11 +708,18 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         return energies
 
     direct_energy = s.stage("render", render_all)
+    direct_set = set(with_direct)
 
     criteria_settings = settings.criteria
     alignment = s.stage(
         "align",
-        lambda: align_to_reference(s.reference, direct_energy, sound_speed_m_s=s.sound_speed_m_s),
+        # On the points with a direct path only: elsewhere the first arrival is
+        # a diffracted or reflected one, whose level says nothing of the scale.
+        lambda: align_to_reference(
+            s.reference,
+            {i: e for i, e in direct_energy.items() if i in direct_set},
+            sound_speed_m_s=s.sound_speed_m_s,
+        ),
     )
     s.report["alignment"] = alignment.record()
     lead = int(round(alignment.lead_s * rate))

@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-signature", action="store_true", help="flat pulses, no source signature")
     p.add_argument("--no-air", action="store_true", help="no air absorption")
+    p.add_argument(
+        "--no-diffraction", action="store_true", help="no diffracted onset where no direct path"
+    )
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
     p.add_argument(
         "--phase",
@@ -164,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             judge_every=args.judge_every,
             parameters=_parameters_of(args.parameters),
             signature=not args.no_signature,
+            diffraction=not args.no_diffraction,
             render=RenderSettings(
                 band_limit_hz=args.band_limit,
                 air_absorption=not args.no_air,
