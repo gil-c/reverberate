@@ -65,22 +65,19 @@ def a_run(tmp_path: Path) -> tuple[Path, Path]:
     return run, models
 
 
-def test_the_stage_writes_the_mirror_field_the_metrics_and_the_report(tmp_path: Path) -> None:
+def test_the_stage_writes_everything_and_its_two_phases_equal_it(tmp_path: Path) -> None:
+    """One run in one place writes every file a campaign expects; then the card phase on a
+    box with only the lattice, and the host phase at home, give the same field and summary."""
     run, models = a_run(tmp_path)
     settings = MirrorSettings(
-        # The box's one label is not the shell, so its facets count as furniture.
         ism=IsmSettings(max_order=2, flutter_order=2, furniture_bounces=2),
         rays=RaySettings(rays=300, duration_s=0.15, bin_s=0.002, receiver_radius_m=0.15),
         workers=2,
     )
-    report = run_mirror(
-        run,
-        models=models,
-        source={"name": "S1", "position": [0.3, 0.5, 0.4]},
-        settings=settings,
-        say=lambda _: None,
-    )
-    assert report["tree"]["images"] == 1 + 6 + 30
+    source = {"name": "S1", "position": [0.3, 0.5, 0.4]}
+    whole = run_mirror(run, models=models, source=source, settings=settings, say=lambda _: None)
+    whole_field = (run / "field_mirror" / "S1.h5").read_bytes()
+    assert whole["tree"]["images"] == 1 + 6 + 30
     assert (run / "mirror" / "scene.json").is_file()
     mirror = run / "field_mirror" / "S1.h5"
     assert check(mirror) == []
@@ -92,23 +89,10 @@ def test_the_stage_writes_the_mirror_field_the_metrics_and_the_report(tmp_path: 
     manifest = json.loads((run / "walk.json").read_text())
     assert manifest["sources"][0]["field_mirror"] == "field_mirror/S1.h5"
     assert manifest["sources"][0]["metrics"] == "mirror/metrics/S1.json"
-    assert manifest["mirror"]["key"] == report["scene"]["key"]
+    assert manifest["mirror"]["key"] == whole["scene"]["key"]
     assert (run / "mirror" / "report_S1.json").is_file()
-    assert report["alignment"]["points_used"] > 0
-    assert report["paths"]["median"] >= 7
-
-
-def test_the_card_phase_then_the_host_phase_equal_the_stage_in_one_place(tmp_path: Path) -> None:
-    """The lattice file stands in for the field on the card; the host reads what the card wrote."""
-    run, models = a_run(tmp_path)
-    settings = MirrorSettings(
-        ism=IsmSettings(max_order=2, flutter_order=2, furniture_bounces=2),
-        rays=RaySettings(rays=300, duration_s=0.15, bin_s=0.002, receiver_radius_m=0.15),
-        workers=2,
-    )
-    source = {"name": "S1", "position": [0.3, 0.5, 0.4]}
-    whole = run_mirror(run, models=models, source=source, settings=settings, say=lambda _: None)
-    whole_field = (run / "field_mirror" / "S1.h5").read_bytes()
+    assert whole["alignment"]["points_used"] > 0
+    assert whole["paths"]["median"] >= 7
 
     # The card, somewhere without the field: only the lattice travels.
     box = tmp_path / "box"
