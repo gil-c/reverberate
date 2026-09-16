@@ -166,6 +166,7 @@ def calibrate_run(
         criteria=settings.criteria,
         iterations=iterations,
         tied=tied,
+        workers=settings.workers,
         say=say,
     )
     best = replace(

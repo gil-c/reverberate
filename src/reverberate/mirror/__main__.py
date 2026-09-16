@@ -57,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
     p.add_argument("--rays", type=int, default=100_000)
     p.add_argument("--start", type=Path, default=None, help="a calibration json to start from")
+    p.add_argument("--workers", type=int, default=4, help="judges in parallel")
     p.add_argument("--sound-speed", type=float, default=343.2)
     p.add_argument("--cpu", action="store_true")
 
@@ -131,7 +132,9 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.mirror.tune import calibrate_run
 
         settings = MirrorSettings(
-            rays=RaySettings(rays=args.rays), parameters=_parameters_of(args.start)
+            rays=RaySettings(rays=args.rays),
+            parameters=_parameters_of(args.start),
+            workers=args.workers,
         )
         best, evaluations, target = calibrate_run(
             args.run,

@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -207,6 +208,15 @@ def cost_of(reports: list[PointReport], weights: CostWeights) -> tuple[float, fl
     return early + late, early, late
 
 
+def _judge_one(args: tuple[Ambisonic, Ambisonic, CriteriaSettings]) -> PointReport | None:
+    """One judgement in a worker; ``None`` where the criteria cannot read the response."""
+    reference, response, settings = args
+    try:
+        return judge(reference, response, Criteria(settings=settings))
+    except ValueError:
+        return None
+
+
 def calibrate(
     scene: DerivedScene,
     paths: dict[int, Paths],
@@ -220,12 +230,14 @@ def calibrate(
     iterations: int = 40,
     step: float = 0.3,
     tied: bool = False,
+    workers: int = 1,
     say: Any = print,
 ) -> tuple[Parameters, list[Evaluation]]:
     """Nelder-Mead over the parameters, on the points of ``paths``.
 
     ``tied`` searches three coordinates (one absorption scale, the scattering
-    scale, one tail gain) instead of fifteen: the coarse pass.
+    scale, one tail gain) instead of fifteen: the coarse pass. ``workers``
+    judges the points in parallel on the host's cores.
 
     ``render_point(index, paths, histogram, scene, parameters) -> Ambisonic``
     renders one point for a candidate scene and histogram, applying the
@@ -238,7 +250,7 @@ def calibrate(
 
     weights = weights or CostWeights()
     start = start or Parameters()
-    judge_with = Criteria(settings=criteria or CriteriaSettings())
+    criteria_settings = criteria or CriteriaSettings()
     evaluations: list[Evaluation] = []
 
     def evaluate(vector: np.ndarray) -> float:
@@ -246,15 +258,18 @@ def calibrate(
         parameters = Parameters.from_vector(vector, note="candidate", tied=tied)
         candidate_scene = apply_parameters(scene, parameters)
         histogram = trace(candidate_scene)
-        reports = []
+        jobs = []
         for index, point_paths in paths.items():
             response = render_point(
                 index, regain(point_paths, candidate_scene), histogram, candidate_scene, parameters
             )
-            try:
-                reports.append(judge(references[index], response, judge_with))
-            except ValueError:
-                continue
+            jobs.append((references[index], response, criteria_settings))
+        if workers > 1:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                judged = list(pool.map(_judge_one, jobs))
+        else:
+            judged = [_judge_one(job) for job in jobs]
+        reports = [r for r in judged if r is not None]
         total, early, late = cost_of(reports, weights)
         evaluation = Evaluation(parameters, total, early, late, reports, time.time() - t0)
         evaluations.append(evaluation)
