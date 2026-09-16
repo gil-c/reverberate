@@ -66,6 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--points", type=int, default=24)
     p.add_argument("--iterations", type=int, default=40)
     p.add_argument("--tied", action="store_true", help="three coordinates instead of fifteen")
+    p.add_argument(
+        "--method",
+        choices=("nelder", "fixed"),
+        default="nelder",
+        help="fixed: band by band, T30 to absorption and colour to tail gain",
+    )
+    p.add_argument(
+        "--scattering", type=float, nargs="*", default=(), help="fixed: scattering scales to try"
+    )
     p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
     p.add_argument("--rays", type=int, default=100_000)
     p.add_argument("--start", type=Path, default=None, help="a calibration json to start from")
@@ -176,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
             tied=args.tied,
             order=args.order,
             sound_speed_m_s=args.sound_speed,
+            method=args.method,
+            scattering=tuple(args.scattering),
         )
         print(json.dumps(best.record(), indent=1))
         print("wrote", target, "after", len(evaluations), "evaluations")

@@ -31,6 +31,7 @@ from reverberate.mirror.calibrate import (
     Evaluation,
     Parameters,
     calibrate,
+    calibrate_fixed_point,
     write_calibration,
 )
 from reverberate.mirror.engine import histogram_on_devices
@@ -116,6 +117,8 @@ def calibrate_run(
     weights: CostWeights | None = None,
     sound_speed_m_s: float = 343.2,
     devices: list[int] | None = None,
+    method: str = "nelder",
+    scattering: tuple[float, ...] = (),
     say: Any = print,
 ) -> tuple[Parameters, list[Evaluation], Path]:
     """Calibrate on ``points`` of the run's card phase; returns the best, the trail, the file."""
@@ -163,24 +166,41 @@ def calibrate_run(
         )
         return response
 
-    best, evaluations = calibrate(
-        catalogue,
-        {i: every[i] for i in chosen},
-        references,
-        render_point,
-        tracer,
-        start=settings.parameters,
-        weights=weights,
-        criteria=settings.criteria,
-        iterations=iterations,
-        tied=tied,
-        workers=settings.workers,
-        say=say,
-    )
+    if method == "fixed":
+        best, evaluations = calibrate_fixed_point(
+            catalogue,
+            {i: every[i] for i in chosen},
+            references,
+            render_point,
+            tracer,
+            start=settings.parameters,
+            weights=weights,
+            criteria=settings.criteria,
+            iterations=iterations,
+            scattering=scattering,
+            workers=settings.workers,
+            say=say,
+        )
+    else:
+        best, evaluations = calibrate(
+            catalogue,
+            {i: every[i] for i in chosen},
+            references,
+            render_point,
+            tracer,
+            start=settings.parameters,
+            weights=weights,
+            criteria=settings.criteria,
+            iterations=iterations,
+            tied=tied,
+            workers=settings.workers,
+            say=say,
+        )
     best = replace(
         best,
         note=f"{best.note}; {len(chosen)} points of {name}, order {order}, "
-        f"{rays.rays} rays, {'tied' if tied else 'full'}",
+        f"{rays.rays} rays, {method if method == 'fixed' else ('tied' if tied else 'full')}, "
+        f"skip specular {rays.skip_specular_order}",
     )
     target = write_calibration(mirror_dir / "calibration", best, evaluations)
     (mirror_dir / "calibration" / "latest.json").write_text(

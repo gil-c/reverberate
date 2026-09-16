@@ -43,7 +43,15 @@ from reverberate.mirror.geometry import DerivedScene, MaterialTable
 from reverberate.mirror.ism import Paths, _gains
 from reverberate.spatial.encode import Ambisonic
 
-__all__ = ["Parameters", "apply_parameters", "calibrate", "cost_of", "regain"]
+__all__ = [
+    "Parameters",
+    "apply_parameters",
+    "band_cost",
+    "calibrate",
+    "calibrate_fixed_point",
+    "cost_of",
+    "regain",
+]
 
 
 @dataclass(frozen=True)
@@ -307,6 +315,169 @@ def calibrate(
         f"calibrate: best cost {best.cost:.3f} after {len(evaluations)} evaluations"
         f" ({result.message})"
     )
+    return best_parameters, evaluations
+
+
+def _band_residuals(reports: list[PointReport]) -> tuple[dict[int, float], dict[int, float]]:
+    """Per judged band: the median T30 ratio and the median colour gap.
+
+    The ratio is the mirror's T30 over the reference's; the gap is the
+    reference's colour minus the mirror's, in dB.
+    """
+    ratios: dict[int, list[float]] = {}
+    gaps: dict[int, list[float]] = {}
+    for r in reports:
+        ref = r.reference_tail
+        cand = r.candidate_tail
+        for k, band in enumerate(ref.bands_hz):
+            a, b = float(ref.t30_s[k]), float(cand.t30_s[k])
+            if np.isfinite(a) and np.isfinite(b) and a > 0.0 and b > 0.0:
+                ratios.setdefault(int(band), []).append(b / a)
+            c, d = float(ref.colour_db[k]), float(cand.colour_db[k])
+            if np.isfinite(c) and np.isfinite(d):
+                gaps.setdefault(int(band), []).append(c - d)
+    return (
+        {band: float(np.median(v)) for band, v in ratios.items()},
+        {band: float(np.median(v)) for band, v in gaps.items()},
+    )
+
+
+def _weighted(values: np.ndarray, weight: np.ndarray) -> float:
+    return float(np.sum(weight * values) / np.sum(weight))
+
+
+def band_cost(reports: list[PointReport], weights: CostWeights) -> tuple[float, float, float]:
+    """The cost with the colour and decay read band by band, not at the worst band.
+
+    ``cost_of`` takes the largest colour error of a point, which on 0076 is
+    always 250 Hz (the reference's room modes), so the search never saw the
+    tail missing 4 to 6 dB above 1 kHz. Here each band counts, the bands at
+    and above 500 Hz fully and 250 Hz at half weight, since the low end will
+    come from the wave solver.
+    """
+    if not reports:
+        return float("inf"), float("inf"), float("inf")
+    early_terms = []
+    late_terms = []
+    for r in reports:
+        echogram = float(np.mean(r.echogram_distance_db))
+        recall_gap = max(0.0, 1.0 - r.errors["recall"])
+        early_terms.append(weights.echogram_db * echogram + weights.recall * recall_gap)
+        ref, cand = r.reference_tail, r.candidate_tail
+        band_weight = np.asarray([0.5 if b < 500 else 1.0 for b in ref.bands_hz])
+        t30 = np.abs(np.asarray(cand.t30_s) / np.asarray(ref.t30_s) - 1.0)
+        edt = np.abs(np.asarray(cand.edt_s) / np.asarray(ref.edt_s) - 1.0)
+        colour = np.abs(np.asarray(ref.colour_db) - np.asarray(cand.colour_db))
+        t30 = np.where(np.isfinite(t30), t30, 1.0)
+        edt = np.where(np.isfinite(edt), edt, 1.0)
+        colour = np.where(np.isfinite(colour), colour, 30.0)
+        sector = r.errors["sector_energy_db"] if np.isfinite(r.errors["sector_energy_db"]) else 10.0
+        late_terms.append(
+            weights.t30_relative * _weighted(t30, band_weight)
+            + 0.5 * weights.t30_relative * _weighted(edt, band_weight)
+            + 2.0 * weights.tail_colour_db * _weighted(colour, band_weight)
+            + weights.sector_energy_db * sector
+        )
+    early = float(np.mean(early_terms))
+    late = float(np.mean(late_terms))
+    return early + late, early, late
+
+
+def calibrate_fixed_point(
+    scene: DerivedScene,
+    paths: dict[int, Paths],
+    references: dict[int, Ambisonic],
+    render_point: Any,
+    trace: Any,
+    *,
+    start: Parameters | None = None,
+    weights: CostWeights | None = None,
+    criteria: CriteriaSettings | None = None,
+    iterations: int = 8,
+    damping: float = 0.8,
+    scattering: tuple[float, ...] = (),
+    workers: int = 1,
+    say: Any = print,
+) -> tuple[Parameters, list[Evaluation]]:
+    """A band by band fixed point: the decay sets the absorption, the colour sets the tail gain.
+
+    Each band's reverberation time goes as the inverse of its absorption
+    (Sabine; Eyring is close at these coefficients), so the absorption scale
+    of a band is multiplied by the median ratio of the mirror's T30 to the
+    reference's, raised to ``damping``. The tail gain moves the tail's
+    energy and nothing else, so the band's gain gets the median colour gap
+    in dB, times ``damping``. Seven searches of one coordinate each instead
+    of one of fifteen: a handful of evaluations instead of forty. The 125 Hz
+    band is not judged; it follows 250 Hz. ``scattering`` lists the
+    scattering scales to try after the fixed point, each followed by two
+    more steps. The best evaluation by ``band_cost`` is returned.
+    """
+    weights = weights or CostWeights()
+    parameters = start or Parameters()
+    criteria_settings = criteria or CriteriaSettings()
+    evaluations: list[Evaluation] = []
+    bands = list(OCTAVE_BANDS)
+
+    def evaluate(candidate: Parameters) -> list[PointReport]:
+        t0 = time.time()
+        candidate_scene = apply_parameters(scene, candidate)
+        histogram = trace(candidate_scene)
+        jobs = []
+        for index, point_paths in paths.items():
+            response = render_point(
+                index, regain(point_paths, candidate_scene), histogram, candidate_scene, candidate
+            )
+            jobs.append((references[index], response, criteria_settings))
+        if workers > 1:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                judged = list(pool.map(_judge_one, jobs))
+        else:
+            judged = [_judge_one(job) for job in jobs]
+        reports = [r for r in judged if r is not None]
+        total, early, late = band_cost(reports, weights)
+        evaluations.append(Evaluation(candidate, total, early, late, reports, time.time() - t0))
+        ratios, gaps = _band_residuals(reports)
+        say(
+            f"fixed point {len(evaluations):3d}: cost {total:8.3f}"
+            f" (early {early:7.3f}, late {late:7.3f})"
+            f" abs {np.round(candidate.absorption_scale, 3).tolist()}"
+            f" scat {candidate.scattering_scale:.3f}"
+            f" gain {np.round(candidate.tail_gain_db, 2).tolist()}"
+            f" | t30 ratio {[round(ratios.get(b, float('nan')), 3) for b in bands]}"
+            f" colour gap {[round(gaps.get(b, float('nan')), 2) for b in bands]}"
+            f" in {time.time() - t0:.0f} s"
+        )
+        return reports
+
+    def step(candidate: Parameters, reports: list[PointReport]) -> Parameters:
+        ratios, gaps = _band_residuals(reports)
+        scale = list(candidate.absorption_scale)
+        gain = list(candidate.tail_gain_db)
+        for k, band in enumerate(bands):
+            judged = band if band in ratios else 250
+            if judged in ratios:
+                scale[k] = float(np.clip(scale[k] * ratios[judged] ** damping, 0.05, 20.0))
+            if judged in gaps:
+                gain[k] = float(np.clip(gain[k] + damping * gaps[judged], -30.0, 30.0))
+        return replace(
+            candidate, absorption_scale=tuple(scale), tail_gain_db=tuple(gain), note="candidate"
+        )
+
+    for _ in range(iterations):
+        reports = evaluate(parameters)
+        parameters = step(parameters, reports)
+    for value in scattering:
+        best = min(evaluations, key=lambda e: e.cost).parameters
+        candidate = replace(best, scattering_scale=float(value))
+        for _ in range(3):
+            reports = evaluate(candidate)
+            candidate = step(candidate, reports)
+    best_evaluation = min(evaluations, key=lambda e: e.cost)
+    best_parameters = replace(
+        best_evaluation.parameters,
+        note=f"fixed point, {len(evaluations)} evaluations, band cost {best_evaluation.cost:.3f}",
+    )
+    say(f"fixed point: best band cost {best_evaluation.cost:.3f} of {len(evaluations)}")
     return best_parameters, evaluations
 
 
