@@ -266,7 +266,7 @@ extern "C" __global__ void rays(
     const double* __restrict__ absorption, const double* __restrict__ scattering, int bands,
     int channels, double floor_energy,
     const int* __restrict__ tri_reflector, const int* __restrict__ tri_furniture,
-    int skip_order, int skip_furniture,
+    int skip_order, int skip_furniture, double skip_reach,
     long long* __restrict__ energy_out, long long* __restrict__ moments_out, long long* __restrict__ hits_out)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -335,7 +335,9 @@ extern "C" __global__ void rays(
         /* The twin's ``covered``: what the image tree renders already is not counted. */
         bool covered = specular_only && bounce >= 1 && bounce <= skip_order
             && furniture_bounces <= skip_furniture;
-        if (!covered) walk_cells(g, pos, seg_end, [&](long long cell, double) {
+        /* ... within the tree's window only: a later arrival the tree prunes is counted. */
+        bool skip_all = covered && travelled + segment <= skip_reach;
+        if (!skip_all) walk_cells(g, pos, seg_end, [&](long long cell, double) {
             long long start = rec_offsets[cell], stop = rec_offsets[cell + 1];
             for (long long m = start; m < stop; ++m) {
                 int r = rec_members[m];
@@ -351,6 +353,7 @@ extern "C" __global__ void rays(
                 if (starts_inside) entry = 0.0;
                 bool crossed = inside_r && entry >= 0.0 && entry <= segment && !(starts_inside && along < 0.0);
                 if (!crossed) continue;
+                if (covered && travelled + entry <= skip_reach) continue;
                 /* Once per segment: in the cell of the entry point only. */
                 double e[3] = {pos[0] + dir[0] * entry, pos[1] + dir[1] * entry, pos[2] + dir[2] * entry};
                 int ec[3];

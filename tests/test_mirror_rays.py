@@ -186,3 +186,23 @@ def test_covered_rays_leave_the_direct_and_lose_the_specular_reflections() -> No
     )
     assert less.hits.sum() < full.hits.sum()
     assert less.energy.sum() < full.energy.sum()
+
+
+def test_covered_rays_count_again_after_the_tree_s_window() -> None:
+    """A covered ray that arrives after the tree's window is one the tree pruned: counted."""
+    common = dict(rays=1500, duration_s=0.04, bin_s=0.001, receiver_radius_m=0.4, seed=5)
+    scene = box_scene(alpha=0.3, scattering=0.0)
+    full = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(**common))
+    windowed = trace(
+        scene,
+        SOURCE,
+        RECEIVER[None, :],
+        RaySettings(**common, skip_specular_order=3, skip_window_s=0.012),
+    )
+    always = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(**common, skip_specular_order=3))
+    # From a bin past the window on, the windowed skip keeps what the full trace has
+    # of the covered rays; before it, it drops them as the plain skip does.
+    after = 14
+    assert windowed.hits[0, after:].sum() > always.hits[0, after:].sum()
+    np.testing.assert_array_equal(windowed.hits[0, :11], always.hits[0, :11])
+    assert windowed.hits[0, after:].sum() <= full.hits[0, after:].sum()

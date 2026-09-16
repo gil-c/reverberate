@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rays", type=int, default=1_000_000)
     p.add_argument("--order", type=int, default=3)
     p.add_argument("--flutter", type=int, default=6)
+    p.add_argument("--max-images", type=int, default=500_000)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--judge-every", type=int, default=1)
     p.add_argument("--sound-speed", type=float, default=343.2)
@@ -49,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="rays whose bounces are all specular up to this order are left to the images",
     )
     p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
+    p.add_argument(
+        "--window",
+        type=float,
+        default=0.080,
+        help="s; the image tree's window, past which the rays count every arrival again",
+    )
     p.add_argument("--no-signature", action="store_true", help="flat pulses, no source signature")
     p.add_argument("--no-air", action="store_true", help="no air absorption")
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
@@ -85,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="rays whose bounces are all specular up to this order are left to the images",
     )
     p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
+    p.add_argument(
+        "--window",
+        type=float,
+        default=0.080,
+        help="s; the image tree's window, past which the rays count every arrival again",
+    )
     p.add_argument("--no-signature", action="store_true")
     p.add_argument("--workers", type=int, default=4, help="judges in parallel")
     p.add_argument("--sound-speed", type=float, default=343.2)
@@ -136,8 +149,17 @@ def main(argv: list[str] | None = None) -> int:
 
         position = _position_of(args)
         settings = MirrorSettings(
-            ism=IsmSettings(max_order=args.order, flutter_order=args.flutter),
-            rays=RaySettings(rays=args.rays, skip_specular_order=args.skip_specular),
+            ism=IsmSettings(
+                max_order=args.order,
+                flutter_order=args.flutter,
+                window_s=args.window,
+                max_images=args.max_images,
+            ),
+            rays=RaySettings(
+                rays=args.rays,
+                skip_specular_order=args.skip_specular,
+                skip_window_s=args.window if args.skip_specular else 0.0,
+            ),
             workers=args.workers,
             judge_every=args.judge_every,
             parameters=_parameters_of(args.parameters),
@@ -170,7 +192,11 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.mirror.tune import calibrate_run
 
         settings = MirrorSettings(
-            rays=RaySettings(rays=args.rays, skip_specular_order=args.skip_specular),
+            rays=RaySettings(
+                rays=args.rays,
+                skip_specular_order=args.skip_specular,
+                skip_window_s=args.window if args.skip_specular else 0.0,
+            ),
             render=RenderSettings(tail_from_s=args.tail_from),
             parameters=_parameters_of(args.start),
             workers=args.workers,

@@ -388,6 +388,11 @@ def histogram_on_device(
                     a["tri_furniture"],
                     np.int32(settings.skip_specular_order),
                     np.int32(settings.skip_furniture_bounces),
+                    np.float64(
+                        settings.sound_speed_m_s * settings.skip_window_s
+                        if settings.skip_window_s > 0
+                        else 1e300
+                    ),
                     energy,
                     moments,
                     hits,

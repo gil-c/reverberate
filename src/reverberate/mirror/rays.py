@@ -79,6 +79,9 @@ class RaySettings:
     #: ... and with at most this many of those bounces on furniture, as the
     #: tree's ``furniture_bounces`` rule.
     skip_furniture_bounces: int = 1
+    #: ... and arriving within this many seconds, the image tree's window;
+    #: zero skips them whenever they arrive.
+    skip_window_s: float = 0.0
 
     def record(self) -> dict[str, Any]:
         return {
@@ -93,6 +96,7 @@ class RaySettings:
             "seed": self.seed,
             "skip_specular_order": self.skip_specular_order,
             "skip_furniture_bounces": self.skip_furniture_bounces,
+            "skip_window_s": self.skip_window_s,
         }
 
 
@@ -517,6 +521,9 @@ def trace(
     floor = settings.energy_floor / settings.rays
     one = np.array([0])
     tri_reflector, tri_furniture = reflector_of_triangles(scene)
+    skip_reach = (
+        settings.sound_speed_m_s * settings.skip_window_s if settings.skip_window_s > 0 else np.inf
+    )
     for ray in range(settings.rays):
         position = source.copy()
         direction = directions[ray]
@@ -543,6 +550,13 @@ def trace(
                     position, direction, segment, receivers, settings.receiver_radius_m
                 )
             )
+            if covered and skip_reach < np.inf:
+                # A covered ray arriving after the tree's window is the rays' again.
+                which, entries = _sphere_crossings(
+                    position, direction, segment, receivers, settings.receiver_radius_m
+                )
+                keep = travelled + entries > skip_reach
+                which, entries = which[keep], entries[keep]
             if which.size:
                 arrival = scene_to_ambisonic((-direction)[None, :])[0]
                 harmonics = (

@@ -76,7 +76,8 @@ def test_the_rays_kernel_counts_what_the_twin_counts() -> None:
 
 
 @gpu
-def test_the_rays_kernel_skips_the_covered_rays_as_the_twin_does() -> None:
+@pytest.mark.parametrize("window_s", [0.0, 0.02])
+def test_the_rays_kernel_skips_the_covered_rays_as_the_twin_does(window_s: float) -> None:
     scene = box_scene(alpha=0.4, scattering=0.3)
     settings = RaySettings(
         rays=2000,
@@ -85,6 +86,7 @@ def test_the_rays_kernel_skips_the_covered_rays_as_the_twin_does() -> None:
         receiver_radius_m=0.3,
         seed=11,
         skip_specular_order=3,
+        skip_window_s=window_s,
     )
     histogram = histogram_on_devices(scene, SOURCE, RECEIVERS, settings)
     twin = trace(scene, SOURCE, RECEIVERS, settings)
