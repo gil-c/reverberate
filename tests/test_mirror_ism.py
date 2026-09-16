@@ -112,7 +112,7 @@ def oracle(alpha: float, max_order: int) -> pra.Room:
 
 
 def test_the_tree_lands_on_the_shoebox_images_of_pyroomacoustics() -> None:
-    tree = grow_tree(box_scene(), SOURCE, IsmSettings(max_order=2))
+    tree = grow_tree(box_scene(), SOURCE, IsmSettings(max_order=2, flutter_order=2))
     ours = np.unique(np.round(tree.positions, 9), axis=0)
     theirs = np.unique(np.round(oracle(0.2, 2).sources[0].images.T, 9), axis=0)
     assert ours.shape == theirs.shape == (25, 3)
@@ -124,8 +124,9 @@ def test_the_tree_lands_on_the_shoebox_images_of_pyroomacoustics() -> None:
 def test_every_shoebox_image_is_heard_once_with_the_oracle_s_reflection_factor() -> None:
     alpha = 0.2
     scene = box_scene(alpha)
-    tree = grow_tree(scene, SOURCE, IsmSettings(max_order=2))
-    paths = paths_for(scene, tree, RECEIVER, IsmSettings(max_order=2))
+    settings = IsmSettings(max_order=2, flutter_order=2)
+    tree = grow_tree(scene, SOURCE, settings)
+    paths = paths_for(scene, tree, RECEIVER, settings)
     # Of the 37 sequences, exactly the 25 distinct images validate: one order
     # of the two commuting mirrors is geometrically consistent, never both.
     positions = np.unique(np.round(tree.positions[paths.image], 9), axis=0)
@@ -231,3 +232,36 @@ def test_images_beyond_the_window_are_pruned_with_their_descendants() -> None:
     assert 1 < pruned.count < whole.count
     reach = settings.sound_speed_m_s * settings.window_s
     assert np.all(np.linalg.norm(pruned.positions[1:] - RECEIVER, axis=1) <= reach + 0.2)
+
+
+def test_the_flutter_goes_on_between_facing_facets_past_the_general_order() -> None:
+    scene = box_scene()
+    settings = IsmSettings(max_order=2, flutter_order=4)
+    tree = grow_tree(scene, SOURCE, settings)
+    # Six facing pairs continue at orders 3 and 4; nothing else does.
+    assert list(np.bincount(tree.order)) == [1, 6, 30, 6, 6]
+    chains = tree.sequence[tree.order == 4]
+    for chain in chains:
+        assert chain[0] == chain[2] and chain[1] == chain[3] and chain[0] != chain[1]
+    paths = paths_for(scene, tree, RECEIVER, settings)
+    # The vertical flutter (floor 4, ceiling 5) validates at every order in an
+    # empty box, and its image sits where four mirrors put it.
+    fourth = [k for k in range(paths.count) if paths.order[k] == 4 and paths.sequence[k, 0] == 4]
+    assert len(fourth) == 1
+    image = tree.positions[paths.image[fourth[0]]]
+    # Floor, ceiling, floor, ceiling: each pair of mirrors lifts the image by
+    # twice the height, so four bounces put it four heights up.
+    assert image[2] == pytest.approx(SOURCE[2] + 4 * SIZE[2])
+    assert paths.length_m[fourth[0]] == pytest.approx(float(np.linalg.norm(image - RECEIVER)))
+
+
+def test_an_apex_inside_a_facet_s_sphere_is_not_pruned_by_its_cone() -> None:
+    """The ceiling of hssd_0076 holds every image made under it inside its
+    bounding sphere; a cone from there must not cut off the walls behind."""
+    scene = box_scene()
+    tree = grow_tree(scene, SOURCE, IsmSettings(max_order=2, flutter_order=2))
+    # From the ceiling image (order 1 on facet 5), every wall is reachable.
+    ceiling_images = np.flatnonzero((tree.order == 1) & (tree.sequence[:, 0] == 5))
+    children = tree.sequence[(tree.order == 2) & (tree.sequence[:, 0] == 5), 1]
+    assert ceiling_images.size == 1
+    assert set(children.tolist()) == {0, 1, 2, 3, 4}

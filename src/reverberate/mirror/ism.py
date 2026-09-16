@@ -54,6 +54,12 @@ class IsmSettings:
     #: pruned with their descendants: a descendant's unfolded path passes
     #: through its parent's image and can only be longer.
     window_s: float = 0.080
+    #: Beyond ``max_order``, a sequence that ends on two parallel facets
+    #: facing each other goes on alternating between them up to this order:
+    #: the flutter between floor and ceiling, or two walls, whose fourth and
+    #: fifth bounces the reference still holds above -15 dB while the
+    #: general tree at that order would be millions of images.
+    flutter_order: int = 6
 
     def record(self) -> dict[str, Any]:
         return {
@@ -63,6 +69,7 @@ class IsmSettings:
             "epsilon_m": self.epsilon_m,
             "max_images": self.max_images,
             "window_s": self.window_s,
+            "flutter_order": self.flutter_order,
         }
 
 
@@ -162,7 +169,15 @@ def _through_the_beam(
     axis = centres[last] - parents  # [parent, 3]
     distance = np.linalg.norm(axis, axis=1)
     axis = axis / np.maximum(distance, 1e-12)[:, None]
-    half_angle = np.arcsin(np.clip(radii[last] / np.maximum(distance, 1e-12), 0.0, 1.0))
+    # An apex inside the sphere sees the facet in every direction of its air
+    # side: the cone is the whole space and only the air side test prunes.
+    # The ceiling of hssd_0076 is one 175 m2 facet whose sphere holds every
+    # image made under it, and a cone drawn from inside it pointed at the
+    # sphere's centre and cut off the near wall behind the image.
+    inside = distance <= radii[last]
+    half_angle = np.where(
+        inside, np.pi, np.arcsin(np.clip(radii[last] / np.maximum(distance, 1e-12), 0.0, 1.0))
+    )
     to_facet = centres[None, :, :] - parents[:, None, :]  # [parent, facet, 3]
     reach = np.linalg.norm(to_facet, axis=2)
     cosine = np.einsum("pfk,pk->pf", to_facet, axis) / np.maximum(reach, 1e-12)
@@ -200,10 +215,12 @@ def grow_tree(
     positions = [source[None, :]]
     orders = [np.zeros(1, dtype=np.int32)]
     parents = [np.full(1, -1, dtype=np.int32)]
-    sequences = [np.full((1, settings.max_order), -1, dtype=np.int32)]
+    width = max(settings.max_order, settings.flutter_order)
+    sequences = [np.full((1, width), -1, dtype=np.int32)]
     furniture_used = [np.zeros(1, dtype=np.int32)]
     level_start = 0
     total = 1
+    level_done = 0
     for level in range(1, settings.max_order + 1):
         parent_pos = positions[-1]
         parent_seq = sequences[-1]
@@ -243,11 +260,50 @@ def grow_tree(
         furniture_used.append(parent_furn[rows] + furniture[cols].astype(np.int32))
         level_start = total
         total += rows.size
+        level_done = level
         if total > settings.max_images:
             raise ValueError(
                 f"the image tree passes {settings.max_images} images at order {level};"
                 " lower the order or the reflector count"
             )
+    # The flutter: past the general tree, a sequence ending on two shell
+    # facets that face each other keeps alternating between them.
+    while level_done >= 2 and level_done < settings.flutter_order:
+        parent_pos = positions[-1]
+        parent_seq = sequences[-1]
+        last = parent_seq[:, level_done - 1]
+        before = parent_seq[:, level_done - 2]
+        facing = (last >= 0) & (before >= 0)
+        facing &= ~furniture[np.maximum(last, 0)] & ~furniture[np.maximum(before, 0)]
+        facing &= (
+            np.einsum("ij,ij->i", normals[np.maximum(last, 0)], normals[np.maximum(before, 0)])
+            < -0.99
+        )
+        rows = np.flatnonzero(facing)
+        if rows.size == 0:
+            break
+        cols = np.asarray(before[rows], dtype=np.int64)
+        height = np.einsum("ij,ij->i", parent_pos[rows], normals[cols]) - offsets[cols]
+        keep = (height > 0.0) | both[cols]
+        rows, cols, height = rows[keep], cols[keep], height[keep]
+        if rows.size == 0:
+            break
+        mirrored = parent_pos[rows] - 2.0 * height[:, None] * normals[cols]
+        if region is not None:
+            within = _box_distance(mirrored, region[0], region[1]) <= reach
+            rows, cols, mirrored = rows[within], cols[within], mirrored[within]
+            if rows.size == 0:
+                break
+        level_done += 1
+        seq = parent_seq[rows].copy()
+        seq[:, level_done - 1] = cols
+        positions.append(mirrored)
+        orders.append(np.full(rows.size, level_done, dtype=np.int32))
+        parents.append((rows + level_start).astype(np.int32))
+        sequences.append(seq)
+        furniture_used.append(furniture_used[-1][rows])
+        level_start = total
+        total += rows.size
     return ImageTree(
         source=source,
         positions=np.concatenate(positions),

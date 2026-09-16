@@ -33,6 +33,7 @@ from reverberate.audio import lowpass
 from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import Paths
+from reverberate.mirror.rays import Histogram
 from reverberate.spatial.encode import Ambisonic
 from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
 
@@ -44,6 +45,7 @@ __all__ = [
     "render",
     "render_paths",
     "storey_volume_m3",
+    "tail_from_histogram",
 ]
 
 
@@ -191,6 +193,99 @@ def barron_reflected_ratio(distance_m: float, t60_s: np.ndarray, volume_m3: floa
     reflected = 31200.0 * t / volume_m3 * np.exp(-0.04 * distance_m / t)
     direct = 100.0 / max(distance_m, 1e-3) ** 2
     return np.asarray(reflected / direct)
+
+
+def tail_from_histogram(
+    histogram: Histogram,
+    receiver: int,
+    direct_energy: np.ndarray,
+    settings: RenderSettings,
+    *,
+    sound_speed_m_s: float,
+    start_s: float,
+    seed: int,
+    bursts: int = 6,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """The tail as noise shaped by a receiver's histogram, band by band, with its anisotropy.
+
+    Per band and per time bin the histogram gives the energy and its
+    directional moments to the histogram's order. The energy is drawn as
+    ``bursts`` independent noise bursts per bin, each from a direction
+    sampled with the probability the moments give it (the moments'
+    expansion, clipped at zero, on a quadrature of the sphere), each encoded
+    on the harmonics of its direction at the output order. Channels are
+    therefore decorrelated as a diffuse field is, and where the histogram
+    is anisotropic the tail is too.
+
+    ``direct_energy`` is the rendered direct pulse's energy per band; the
+    histogram's own direct bin is what it is scaled against, so the tail
+    sits at the level the rays give it relative to the direct sound.
+    """
+    from reverberate.spatial.sh import quadrature
+
+    rate = settings.sample_rate_hz
+    length = int(round(settings.duration_s * rate))
+    channels = channel_count(settings.order)
+    centres, picks = _band_map(rate)
+    energy = histogram.energy[receiver]  # [bin, band]
+    moments = histogram.moments[receiver]  # [bin, band, channel]
+    bins = energy.shape[0]
+    bin_samples = int(round(histogram.bin_s * rate))
+    rng = np.random.default_rng(seed)
+    grid, weights = quadrature(2 * histogram.order + 2)
+    basis_low = real_sh(histogram.order, grid)  # [direction, low channel]
+    basis_out = real_sh(settings.order, grid)  # [direction, out channel]
+    # The histogram's direct bin: the first bin with energy, its scale.
+    first = int(np.argmax(np.any(energy > 0.0, axis=1))) if np.any(energy > 0.0) else -1
+    from_bin = int(np.ceil((start_s + settings.tail_from_s) / histogram.bin_s))
+    scale = np.zeros(len(picks))
+    if first >= 0:
+        for band, pick in enumerate(picks):
+            reference = float(np.sum(energy[first : first + 2, pick]))
+            scale[band] = direct_energy[band] / reference if reference > 0.0 else 0.0
+    draws = rng.standard_normal((len(picks), bursts, length))
+    per_band = np.zeros((len(picks), channels, length))
+    for b in range(from_bin, bins):
+        at = b * bin_samples
+        if at >= length:
+            break
+        stop = min(at + bin_samples, length)
+        for band, pick in enumerate(picks):
+            total = float(energy[b, pick]) * scale[band]
+            if total <= 0.0:
+                continue
+            density = np.maximum(basis_low @ moments[b, pick], 0.0) * weights
+            if density.sum() <= 0.0:
+                density = weights.copy()
+            probability = density / density.sum()
+            chosen = rng.choice(grid.shape[0], size=bursts, p=probability)
+            burst = draws[band, :, at:stop]
+            # Each burst carries an equal share of the bin's energy.
+            have = np.sum(burst**2, axis=1)
+            gain = np.sqrt(total / bursts / np.maximum(have, 1e-30))
+            per_band[band, :, at:stop] += basis_out[chosen].T @ (burst * gain[:, None])
+    # Band limit each band's noise to its octave: the bursts were white, so
+    # each band's rows go through their own filter and the bands are summed;
+    # the filter keeps a fraction of a white burst's energy, restored here
+    # band by band on the omni channel so the histogram's energy is kept.
+    rows = per_band.reshape(len(picks) * channels, length)
+    row_bands = np.repeat(np.arange(len(picks)), channels)
+    shaped = octave_filter_rows(rows, int(round(rate)), row_bands).reshape(
+        len(picks), channels, length
+    )
+    for band in range(len(picks)):
+        wanted = float(np.sum(per_band[band, 0] ** 2))
+        kept = float(np.sum(shaped[band, 0] ** 2))
+        if kept > 0.0 and wanted > 0.0:
+            shaped[band] *= np.sqrt(wanted / kept)
+    tail = shaped.sum(axis=0)
+    record = {
+        "kind": "histogram of the rays, noise bursts per bin from sampled directions",
+        "bursts_per_bin": bursts,
+        "scale_per_band": [round(float(v), 6) for v in scale],
+        "seed": seed,
+    }
+    return tail, record
 
 
 def render(

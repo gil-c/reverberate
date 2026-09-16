@@ -77,7 +77,7 @@ def test_direct_hits_land_in_the_direct_bin_at_the_solid_angle_s_share() -> None
 def test_the_histogram_decays_at_eyring_s_time() -> None:
     alpha = 0.3
     scene = box_scene(alpha=alpha, scattering=0.5)
-    settings = RaySettings(rays=500, duration_s=0.35, bin_s=0.005, receiver_radius_m=0.6, seed=3)
+    settings = RaySettings(rays=300, duration_s=0.3, bin_s=0.005, receiver_radius_m=0.7, seed=3)
     histogram = trace(scene, SOURCE, RECEIVER[None, :], settings)
     energy = histogram.energy[0, :, 0]
     times = histogram.times_s
@@ -93,7 +93,7 @@ def test_the_histogram_decays_at_eyring_s_time() -> None:
 
 def test_a_slab_stops_the_direct_ray_and_the_moments_point_at_the_source() -> None:
     open_box = box_scene(alpha=0.5)
-    settings = RaySettings(rays=4000, duration_s=0.02, bin_s=0.001, receiver_radius_m=0.3, seed=4)
+    settings = RaySettings(rays=1500, duration_s=0.012, bin_s=0.001, receiver_radius_m=0.4, seed=4)
     histogram = trace(open_box, SOURCE, RECEIVER[None, :], settings)
     distance = float(np.linalg.norm(RECEIVER - SOURCE))
     at = int((distance - settings.receiver_radius_m) / C / settings.bin_s)

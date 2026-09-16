@@ -81,9 +81,14 @@ class GeometryRules:
     max_triangles: int = 20000
     #: trimesh's flatness ratio for the facet merge: two adjacent faces are
     #: one facet when the radius of the cylinder through them, over the span
-    #: of their shared edge, exceeds this. Five is trimesh's own default; a
-    #: box's faces group by it and its edges do not.
-    facet_threshold: float = 5.0
+    #: of their shared edge, exceeds this. trimesh's own default of five let
+    #: a curved wall of hssd_0076 merge into one 156 m2 "plane" whose normal
+    #: matched none of its triangles; a thousand keeps the merge to faces
+    #: that are coplanar to rounding.
+    facet_threshold: float = 1000.0
+    #: A merged group whose vertices stray farther than this from its mean
+    #: plane is not a facet and is split back into single triangles.
+    planar_m: float = 0.002
 
     def record(self) -> dict[str, Any]:
         return {
@@ -93,6 +98,7 @@ class GeometryRules:
             "min_triangles": self.min_triangles,
             "max_triangles": self.max_triangles,
             "facet_threshold": self.facet_threshold,
+            "planar_m": self.planar_m,
         }
 
 
@@ -272,26 +278,66 @@ def _mesh_of(scene: Scene, label_index: int) -> tuple[trimesh.Trimesh, np.ndarra
     return mesh, indices
 
 
-def _facets_of(mesh: trimesh.Trimesh, threshold: float) -> list[np.ndarray]:
-    """Groups of coplanar adjacent faces, plus every face left alone as its own group."""
+def _facets_of(
+    mesh: trimesh.Trimesh, threshold: float, planar_m: float
+) -> tuple[list[np.ndarray], int]:
+    """Groups of coplanar adjacent faces, plus every face left alone as its own group.
+
+    A group whose vertices stray from its area weighted plane by more than
+    ``planar_m`` is not planar whatever the grouping said, and is split back
+    into single faces; the count of such groups is returned beside the list.
+    """
     grouped_faces = trimesh.graph.facets(mesh, facet_threshold=threshold)
-    groups = [np.asarray(g, dtype=int) for g in grouped_faces]
+    normals = np.asarray(mesh.face_normals)
+    areas = np.asarray(mesh.area_faces)
+    groups: list[np.ndarray] = []
+    split = 0
+    for raw in grouped_faces:
+        group = np.asarray(raw, dtype=int)
+        normal = (normals[group] * areas[group][:, None]).sum(axis=0)
+        norm = float(np.linalg.norm(normal))
+        vertices = mesh.vertices[mesh.faces[group]].reshape(-1, 3)
+        if norm > 0.0:
+            normal = normal / norm
+            heights = vertices @ normal
+            if float(heights.max() - heights.min()) <= planar_m:
+                groups.append(group)
+                continue
+        split += 1
+        groups.extend(np.array([i]) for i in group)
     grouped = np.zeros(len(mesh.faces), dtype=bool)
     for g in groups:
         grouped[g] = True
     groups.extend(np.array([i]) for i in np.flatnonzero(~grouped))
-    return groups
+    return groups, split
 
 
 def _decimate(
     mesh: trimesh.Trimesh, rules: GeometryRules, rng: np.random.Generator
 ) -> tuple[trimesh.Trimesh, dict[str, Any]]:
-    """The label's outer surface under a triangle budget, and the distance it strayed."""
+    """The label's outer surface under a triangle budget, and the distance it strayed.
+
+    Only a closed mesh is decimated. Edge collapse on a surface with open
+    edges throws triangles across the openings: the shell of hssd_0076, six
+    bodies with doorways, came back with a triangle cutting the living room
+    in two, and every wall reflection died on it. An open mesh keeps its
+    triangles and says so.
+    """
     import fast_simplification
 
+    from reverberate.geometry.orientation import is_closed
+
     area = float(mesh.area)
-    budget = int(np.clip(area / (0.5 * rules.edge_m**2), rules.min_triangles, rules.max_triangles))
     before = len(mesh.faces)
+    if not is_closed(mesh):
+        return mesh, {
+            "triangles_before": before,
+            "triangles_after": before,
+            "distance_m": 0.0,
+            "max_distance_m": 0.0,
+            "kept_open": True,
+        }
+    budget = int(np.clip(area / (0.5 * rules.edge_m**2), rules.min_triangles, rules.max_triangles))
     if before <= budget:
         return mesh, {
             "triangles_before": before,
@@ -382,7 +428,9 @@ def derive(
         if area >= rules.reflector_area_m2:
             normals = np.asarray(mesh.face_normals)
             areas = np.asarray(mesh.area_faces)
-            for group in _facets_of(mesh, rules.facet_threshold):
+            groups, split = _facets_of(mesh, rules.facet_threshold, rules.planar_m)
+            row["groups_split_as_not_planar"] = split
+            for group in groups:
                 facet_area = float(areas[group].sum())
                 if facet_area < rules.reflector_area_m2:
                     continue
@@ -454,6 +502,12 @@ def derive(
         ),
         "labels_over_bound": sorted(
             label for label, r in census["labels"].items() if r.get("over_bound")
+        ),
+        "labels_kept_open": sorted(
+            label for label, r in census["labels"].items() if r.get("kept_open")
+        ),
+        "groups_split_as_not_planar": int(
+            sum(int(r.get("groups_split_as_not_planar", 0)) for r in census["labels"].values())
         ),
         "facets_by_kind": {
             kind: sum(1 for f in facets if f.kind == kind)
