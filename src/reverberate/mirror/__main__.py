@@ -40,6 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="a calibration json (mirror/calibration/<key>.json) to render with",
     )
+    p.add_argument("--tag", default="", help="a second mirror beside the first, e.g. c")
+    p.add_argument("--no-signature", action="store_true", help="flat pulses, no source signature")
+    p.add_argument("--no-air", action="store_true", help="no air absorption")
+    p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
     p.add_argument(
         "--phase",
         choices=("card", "host", "all"),
@@ -102,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["REVERBERATE_NO_GPU"] = "1"
         from reverberate.mirror.ism import IsmSettings
         from reverberate.mirror.rays import RaySettings
+        from reverberate.mirror.render import RenderSettings
         from reverberate.mirror.stage import MirrorSettings, run_mirror
 
         position = _position_of(args)
@@ -111,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             judge_every=args.judge_every,
             parameters=_parameters_of(args.parameters),
+            signature=not args.no_signature,
+            render=RenderSettings(band_limit_hz=args.band_limit, air_absorption=not args.no_air),
         )
         report = run_mirror(
             args.run,
@@ -119,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
             sound_speed_m_s=args.sound_speed,
             phase=args.phase,
+            tag=args.tag,
         )
         print(
             json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=1, default=str)

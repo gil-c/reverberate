@@ -42,7 +42,7 @@ import h5py
 import numpy as np
 from scipy.signal import butter, sosfilt
 
-from reverberate.audio import lowpass
+from reverberate.audio import apply_air_absorption, lowpass
 from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.audit import write_geometry_layers, write_paths
 from reverberate.mirror.calibrate import Parameters, apply_parameters
@@ -66,6 +66,7 @@ from reverberate.mirror.geometry import (
 from reverberate.mirror.ism import IsmSettings, Paths, grow_tree, occluder_grid
 from reverberate.mirror.rays import Histogram, RaySettings
 from reverberate.mirror.render import RenderSettings, render, render_paths, tail_from_histogram
+from reverberate.mirror.signature import apply_signature, measure_signature, write_signature
 from reverberate.spatial.encode import Ambisonic
 
 __all__ = [
@@ -117,6 +118,10 @@ class MirrorSettings:
     seed: int = 0
     #: The calibration applied: scales on the materials, gains on the tail.
     parameters: Parameters = field(default_factory=Parameters)
+    #: Give the mirror the reference's direct pulse spectrum (``mirror.signature``).
+    signature: bool = True
+    #: Points the signature is read on.
+    signature_points: int = 48
 
     def record(self) -> dict[str, Any]:
         return {
@@ -129,6 +134,8 @@ class MirrorSettings:
             "workers": self.workers,
             "judge_every": self.judge_every,
             "seed": self.seed,
+            "signature": self.signature,
+            "signature_points": self.signature_points,
         }
 
 
@@ -267,6 +274,7 @@ def _render_point(
     settings: MirrorSettings,
     sound_speed_m_s: float,
     fallback: tuple[np.ndarray, float] | None = None,
+    signature: np.ndarray | None = None,
 ) -> tuple[int, Ambisonic, dict[str, Any]]:
     """One point: the discrete part, then the histogram's tail when there is one.
 
@@ -313,22 +321,37 @@ def _render_point(
         record["tail"] = tail_record
     elif fallback is not None and not direct.any() and histogram.hits[index].sum() > 0:
         scale, straight_s = fallback
+        # The rays' own first arrival, round the doorway, is where the tail starts:
+        # the straight line through the wall is not a clock here.
+        arrived = np.any(histogram.energy[index] > 0.0, axis=1)
+        first_s = float(np.argmax(arrived)) * histogram.bin_s
+        start_s = max(first_s - settings.render.tail_from_s, straight_s)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
             np.zeros(len(scale)),
             settings.render,
             sound_speed_m_s=sound_speed_m_s,
-            start_s=straight_s,
+            start_s=start_s,
             seed=settings.seed + index,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
             scale_per_band=scale,
         )
         signals = early.signals + tail
-        record["tail"] = {**tail_record, "scale_from": "the other points, no direct path here"}
+        record["tail"] = {
+            **tail_record,
+            "scale_from": "the other points, no direct path here",
+            "starts_s": round(start_s, 4),
+        }
     else:
         signals = early.signals
         record["tail"] = None if not direct.any() else "no ray reached this receiver"
+    if settings.render.air_absorption:
+        signals = apply_air_absorption(
+            signals, settings.render.sample_rate_hz, sound_speed_m_s=sound_speed_m_s
+        )
+    if signature is not None and signature.size:
+        signals = apply_signature(signals, signature)
     if settings.render.lowcut_hz > 0.0:
         sos = butter(
             settings.render.lowcut_order,
@@ -338,7 +361,8 @@ def _render_point(
             output="sos",
         )
         signals = np.asarray(sosfilt(sos, signals, axis=-1))
-    signals = lowpass(signals, settings.render.sample_rate_hz, settings.render.band_limit_hz)
+    if settings.render.band_limit_hz > 0.0:
+        signals = lowpass(signals, settings.render.sample_rate_hz, settings.render.band_limit_hz)
     return index, Ambisonic(signals, early.sample_rate_hz, early.order, early.centre), record
 
 
@@ -348,9 +372,10 @@ def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
     A storey of 437 points at order 7 is 13 GB of responses; they go through
     the disk one at a time and only the direct energy comes back.
     """
-    index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch, fallback = args
+    index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch, fallback = args[:8]
+    signature = args[8] if len(args) > 8 else None
     _, response, record = _render_point(
-        index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback
+        index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback, signature
     )
     np.save(Path(scratch) / f"{index}.npy", response.signals.astype(np.float32))
     return index, _direct_energy(response, settings.criteria), record
@@ -418,10 +443,18 @@ class _Stage:
     """The run's paths and the report under construction, shared by the phases."""
 
     def __init__(
-        self, run: Path, name: str, settings: MirrorSettings, sound_speed_m_s: float, say: Any
+        self,
+        run: Path,
+        name: str,
+        settings: MirrorSettings,
+        sound_speed_m_s: float,
+        say: Any,
+        tag: str = "",
     ) -> None:
         self.run = Path(run)
         self.name = name
+        self.tag = tag
+        self.suffix = f"_{tag}" if tag else ""
         self.settings = settings
         self.sound_speed_m_s = sound_speed_m_s
         self.say = say
@@ -432,6 +465,7 @@ class _Stage:
         self.card_report_path = self.mirror_dir / f"card_{name}.json"
         self.report: dict[str, Any] = {
             "source": name,
+            "tag": tag,
             "settings": settings.record(),
             "timings_s": {},
         }
@@ -551,7 +585,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     )
     settings_render = replace(settings, render=render_settings)
 
-    scratch = s.mirror_dir / f"render_{name}"
+    scratch = s.mirror_dir / f"render_{name}{s.suffix}"
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True)
 
@@ -559,6 +593,16 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     source_position = np.asarray(card.get("source_position") or [np.nan] * 3, dtype=float)
     with_direct = [i for i in range(len(every)) if bool(np.any(every[i].order == 0))]
     without = sorted(set(range(len(every))) - set(with_direct))
+    signature = None
+    if settings.signature:
+        step = max(1, len(with_direct) // max(1, settings.signature_points))
+        taps, signature_record = s.stage(
+            "signature",
+            lambda: measure_signature(s.reference, with_direct[::step], settings=settings.criteria),
+        )
+        write_signature(s.mirror_dir / f"signature_{name}", taps, signature_record)
+        s.report["signature"] = signature_record
+        signature = taps
 
     def render_all() -> dict[int, float]:
         """Points with a direct path first, so their tail scales serve the rest."""
@@ -577,6 +621,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
                     s.sound_speed_m_s,
                     scratch,
                     fallback,
+                    signature,
                 ),
             )
 
@@ -618,7 +663,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     field_path = s.stage(
         "field",
         lambda: write_mirror_field(
-            s.run / "field_mirror" / f"{name}.h5",
+            s.run / f"field_mirror{s.suffix}" / f"{name}.h5",
             s.reference,
             aligned,
             provenance={
@@ -675,7 +720,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
 
     metrics = s.stage("judge", judge_all)
     shutil.rmtree(scratch, ignore_errors=True)
-    metrics_dir = s.mirror_dir / "metrics"
+    metrics_dir = s.mirror_dir / f"metrics{s.suffix}"
     metrics_dir.mkdir(exist_ok=True)
     (metrics_dir / f"{name}.json").write_text(json.dumps(metrics, indent=1, default=str))
     s.report["summary"] = metrics["summary"]
@@ -685,8 +730,8 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         manifest = json.loads(walk.read_text())
         for entry in manifest.get("sources", []):
             if str(entry.get("id")) == name or str(entry.get("name")) == name:
-                entry["field_mirror"] = str(field_path.relative_to(s.run))
-                entry["metrics"] = str((metrics_dir / f"{name}.json").relative_to(s.run))
+                entry[f"field_mirror{s.suffix}"] = str(field_path.relative_to(s.run))
+                entry[f"metrics{s.suffix}"] = str((metrics_dir / f"{name}.json").relative_to(s.run))
         manifest["mirror"] = {
             "scene": "mirror/scene.json",
             "key": scene.key,
@@ -709,13 +754,20 @@ def run_mirror(
     sound_speed_m_s: float = 343.2,
     devices: list[int] | None = None,
     phase: str = "all",
+    tag: str = "",
     say: Any = print,
 ) -> dict[str, Any]:
-    """The stage for one source of one run, or one of its phases; returns the report written."""
+    """The stage for one source of one run, or one of its phases; returns the report written.
+
+    ``tag`` names a second mirror beside the first: its field goes to
+    ``field_mirror_<tag>``, its metrics to ``mirror/metrics_<tag>``, its report
+    to ``mirror/report_<S>_<tag>.json`` and ``walk.json`` gains the keys with
+    the same suffix, so the app can offer A, B and C at one cell.
+    """
     if phase not in PHASES:
         raise ValueError(f"phase {phase!r} is not one of {PHASES}")
     settings = settings or MirrorSettings()
-    s = _Stage(Path(run), str(source["name"]), settings, sound_speed_m_s, say)
+    s = _Stage(Path(run), str(source["name"]), settings, sound_speed_m_s, say, tag=tag)
     started = time.time()
     if phase in ("card", "all"):
         _card_phase(s, models=Path(models), source=source, devices=devices)
@@ -723,7 +775,9 @@ def run_mirror(
         _host_phase(s)
     s.report["phase"] = phase
     s.report["total_s"] = round(time.time() - started, 1)
-    target = s.mirror_dir / (f"report_{s.name}.json" if phase != "card" else f"card_{s.name}.json")
+    target = s.mirror_dir / (
+        f"report_{s.name}{s.suffix}.json" if phase != "card" else f"card_{s.name}.json"
+    )
     target.write_text(json.dumps(s.report, indent=1, default=str))
     say(f"mirror {s.name} ({phase}): done in {s.report['total_s'] / 60:.1f} min")
     return s.report

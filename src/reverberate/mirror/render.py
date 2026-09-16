@@ -56,8 +56,12 @@ class RenderSettings:
     sample_rate_hz: float = 48000.0
     order: int = 7
     duration_s: float = 1.2
-    #: The response is band limited here, where the reference is solved to.
-    band_limit_hz: float = 8000.0
+    #: The response is band limited here; zero keeps the whole band, which is
+    #: what the reference carries (its direct pulse reaches 20 kHz at -10 dB).
+    band_limit_hz: float = 0.0
+    #: Air absorption over the response's own time axis, as the reference's
+    #: encoding chain applies it (``accel.encode``): the default atmosphere.
+    air_absorption: bool = True
     #: The chain's own low cut, 40 Hz at order 8 (``w40_volume_field.plan``).
     lowcut_hz: float = 40.0
     lowcut_order: int = 8
@@ -76,6 +80,7 @@ class RenderSettings:
             "order": self.order,
             "duration_s": self.duration_s,
             "band_limit_hz": self.band_limit_hz,
+            "air_absorption": self.air_absorption,
             "lowcut_hz": self.lowcut_hz,
             "lowcut_order": self.lowcut_order,
             "delay_half_taps": self.delay_half_taps,
@@ -367,5 +372,6 @@ def render(
     if settings.lowcut_hz > 0.0:
         sos = butter(settings.lowcut_order, settings.lowcut_hz, btype="high", fs=rate, output="sos")
         signals = np.asarray(sosfilt(sos, signals, axis=-1))
-    signals = lowpass(signals, rate, settings.band_limit_hz)
+    if settings.band_limit_hz > 0.0:
+        signals = lowpass(signals, rate, settings.band_limit_hz)
     return Ambisonic(signals, rate, settings.order, paths.receiver), record
