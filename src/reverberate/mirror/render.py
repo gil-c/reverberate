@@ -41,6 +41,7 @@ from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
 __all__ = [
     "RenderSettings",
     "band_pulse_energy",
+    "bank_reading",
     "barron_reflected_ratio",
     "eyring_t60_s",
     "label_areas_m2",
@@ -78,6 +79,9 @@ class RenderSettings:
     #: two bins instead, which also hold the floor and ceiling reflections
     #: arriving within 4 ms: +2 dB median, +4.7 dB at p90 on 0076.
     analytic_direct: bool = True
+    #: The histogram tail's band energies go through the inverse of what the
+    #: bank reads of shaped noise (``bank_reading``), so they read as meant.
+    bank_corrected: bool = True
     #: The direct sound is placed this long after the start, as the
     #: reference's own chain does; the criteria align on it anyway.
     lead_s: float = 0.0
@@ -96,6 +100,7 @@ class RenderSettings:
             "tail_fade_s": self.tail_fade_s,
             "lead_s": self.lead_s,
             "analytic_direct": self.analytic_direct,
+            "bank_corrected": self.bank_corrected,
         }
 
 
@@ -138,6 +143,29 @@ def band_pulse_energy(rate: float) -> np.ndarray:
     energy = np.asarray(np.sum(rows**2, axis=1), dtype=float)
     energy.setflags(write=False)
     return energy
+
+
+@lru_cache(maxsize=8)
+def bank_reading(rate: float) -> np.ndarray:
+    """``M[b, k]``: what the bank's band b reads of unit energy synthesised in band k.
+
+    The tail is noise shaped by band k's filter, so a reading through the
+    same bank applies that filter twice and leaks into the neighbours: a flat
+    synthesis reads 1 dB low in every band and 4.6 dB low at 125 Hz. The
+    tail's energies go through the inverse of this matrix first.
+    """
+    centres, _ = _band_map(rate)
+    count = len(centres)
+    fs = int(round(rate))
+    noise = np.random.default_rng(12345).standard_normal(2 * fs)
+    shaped = octave_filter_rows(np.repeat(noise[None, :], count, 0), fs, np.arange(count))
+    shaped /= np.sqrt(np.sum(shaped**2, axis=1, keepdims=True))
+    reading = np.zeros((count, count))
+    for k in range(count):
+        read = octave_filter_rows(np.repeat(shaped[k][None, :], count, 0), fs, np.arange(count))
+        reading[:, k] = np.sum(read**2, axis=1)
+    reading.setflags(write=False)
+    return reading
 
 
 def render_paths(paths: Paths, settings: RenderSettings, sound_speed_m_s: float) -> Ambisonic:
@@ -286,6 +314,11 @@ def tail_from_histogram(
     band_power = np.ones(len(OCTAVE_BANDS))
     if band_gain_db is not None:
         band_power = 10.0 ** (np.asarray(band_gain_db, dtype=float) / 10.0)
+    # The energy each bin should read per band, then what to synthesise so the
+    # bank reads it: the inverse of the bank's own reading, clipped at zero.
+    wanted = energy[:, picks] * (scale * band_power[picks])[None, :]  # [bin, band]
+    if settings.bank_corrected:
+        wanted = np.maximum(np.linalg.solve(bank_reading(rate), wanted.T).T, 0.0)
     draws = rng.standard_normal((len(picks), bursts, length))
     per_band = np.zeros((len(picks), channels, length))
     for b in range(from_bin, bins):
@@ -294,7 +327,7 @@ def tail_from_histogram(
             break
         stop = min(at + bin_samples, length)
         for band, pick in enumerate(picks):
-            total = float(energy[b, pick]) * scale[band] * band_power[pick]
+            total = float(wanted[b, band])
             if total <= 0.0:
                 continue
             density = np.maximum(basis_low @ moments[b, pick], 0.0) * weights

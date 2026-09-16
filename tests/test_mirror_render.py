@@ -105,3 +105,46 @@ def test_rendering_is_deterministic_for_a_seed() -> None:
     a, _ = render(paths, scene, settings, sound_speed_m_s=C, seed=3)
     b, _ = render(paths, scene, settings, sound_speed_m_s=C, seed=3)
     np.testing.assert_array_equal(a.signals, b.signals)
+
+
+def test_the_histogram_tail_reads_through_the_bank_at_the_energy_asked() -> None:
+    """A flat histogram tail, read back through the bank the criteria use, per band."""
+    from reverberate.metrics import band_centres, octave_filter_rows
+    from reverberate.mirror.rays import Histogram
+    from reverberate.mirror.render import tail_from_histogram
+
+    rate = 48000.0
+    bins, bands, channels = 300, 7, 16
+    energy = np.zeros((1, bins, bands))
+    energy[0, 50:250] = 1e-4
+    moments = np.zeros((1, bins, bands, channels))
+    moments[0, :, :, 0] = energy[0]
+    histogram = Histogram(
+        energy=energy,
+        moments=moments,
+        hits=np.ones((1, bins), dtype=np.int64),
+        bin_s=0.002,
+        bands_hz=(125, 250, 500, 1000, 2000, 4000, 8000),
+        order=3,
+        rays=1,
+    )
+    centres = band_centres(int(rate))
+    settings = RenderSettings(order=3, duration_s=0.6, tail_from_s=0.0)
+    scale = np.ones(len(centres))
+    tail, _ = tail_from_histogram(
+        histogram,
+        0,
+        np.zeros(len(centres)),
+        settings,
+        sound_speed_m_s=343.2,
+        start_s=0.0,
+        seed=3,
+        scale_per_band=scale,
+    )
+    read = octave_filter_rows(
+        np.repeat(tail[0:1], len(centres), 0), int(rate), np.arange(len(centres))
+    )
+    got = np.sum(read**2, axis=1)
+    asked = 200 * 1e-4
+    # Every band from 250 Hz up reads what was asked within half a decibel.
+    np.testing.assert_allclose(10 * np.log10(got[1:7] / asked), 0.0, atol=0.5)
