@@ -462,7 +462,7 @@ class _Stage:
         self.mirror_dir.mkdir(parents=True, exist_ok=True)
         self.scene_path = self.mirror_dir / "scene"
         self.reference = self.run / "field" / f"{name}.h5"
-        self.card_report_path = self.mirror_dir / f"card_{name}.json"
+        self.card_report_path = self.mirror_dir / f"card_{name}{self.suffix}.json"
         self.report: dict[str, Any] = {
             "source": name,
             "tag": tag,
@@ -531,7 +531,7 @@ def _card_phase(
         "max": int(max(p.count for p in every)),
         "without_direct": int(sum(1 for p in every if not np.any(p.order == 0))),
     }
-    write_every(every, s.mirror_dir / f"paths_{s.name}.npz")
+    write_every(every, s.mirror_dir / f"paths_{s.name}{s.suffix}.npz")
     s.stage(
         "audit paths",
         lambda: write_paths(
@@ -552,7 +552,7 @@ def _card_phase(
         "hits_total": int(histogram.hits.sum()),
         "hits_per_receiver_median": float(np.median(histogram.hits.sum(axis=1))),
     }
-    write_histogram(histogram, s.mirror_dir / f"histogram_{s.name}.npz")
+    write_histogram(histogram, s.mirror_dir / f"histogram_{s.name}{s.suffix}.npz")
     s.card_report_path.write_text(json.dumps(s.report, indent=1, default=str))
     return s.report
 
@@ -576,8 +576,8 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         s.settings = settings
     s.report["parameters"] = settings.parameters.record()
     scene = load_derived(s.scene_path)
-    every = load_every(s.mirror_dir / f"paths_{name}.npz")
-    histogram = load_histogram(s.mirror_dir / f"histogram_{name}.npz")
+    every = load_every(s.mirror_dir / f"paths_{name}{s.suffix}.npz")
+    histogram = load_histogram(s.mirror_dir / f"histogram_{name}{s.suffix}.npz")
     _, rate, order = _lattice_of(s.run, name)
 
     render_settings = RenderSettings(
@@ -600,7 +600,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
             "signature",
             lambda: measure_signature(s.reference, with_direct[::step], settings=settings.criteria),
         )
-        write_signature(s.mirror_dir / f"signature_{name}", taps, signature_record)
+        write_signature(s.mirror_dir / f"signature_{name}{s.suffix}", taps, signature_record)
         s.report["signature"] = signature_record
         signature = taps
 
@@ -759,7 +759,9 @@ def run_mirror(
 ) -> dict[str, Any]:
     """The stage for one source of one run, or one of its phases; returns the report written.
 
-    ``tag`` names a second mirror beside the first: its field goes to
+    ``tag`` names a second mirror beside the first: its card outputs are
+    ``mirror/paths_<S>_<tag>.npz``, ``histogram_<S>_<tag>.npz`` and
+    ``card_<S>_<tag>.json``, its field goes to
     ``field_mirror_<tag>``, its metrics to ``mirror/metrics_<tag>``, its report
     to ``mirror/report_<S>_<tag>.json`` and ``walk.json`` gains the keys with
     the same suffix, so the app can offer A, B and C at one cell.
@@ -776,7 +778,7 @@ def run_mirror(
     s.report["phase"] = phase
     s.report["total_s"] = round(time.time() - started, 1)
     target = s.mirror_dir / (
-        f"report_{s.name}{s.suffix}.json" if phase != "card" else f"card_{s.name}.json"
+        f"report_{s.name}{s.suffix}.json" if phase != "card" else f"card_{s.name}{s.suffix}.json"
     )
     target.write_text(json.dumps(s.report, indent=1, default=str))
     say(f"mirror {s.name} ({phase}): done in {s.report['total_s'] / 60:.1f} min")

@@ -2,10 +2,11 @@
 
 python -m reverberate.mirror run --run DIR --models DIR --source S1 [--position x y z]
     [--rays N] [--order K] [--workers W] [--judge-every N] [--cpu] [--phase card|host|all]
+    [--tag c] [--skip-specular 3] [--tail-from 0.005]
 python -m reverberate.mirror derive --model apartment_full.json --out DIR/scene
     [--manifest manifest.json]
 python -m reverberate.mirror calibrate --run DIR --source S1 [--points 24] [--iterations 40]
-    [--tied] [--order 3] [--rays 100000] [--start FILE.json]
+    [--tied] [--order 3] [--rays 100000] [--start FILE.json] [--skip-specular 3]
 python -m reverberate.mirror subset --run DIR --source S1 --points 24 [--order 3]
 """
 
@@ -41,6 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="a calibration json (mirror/calibration/<key>.json) to render with",
     )
     p.add_argument("--tag", default="", help="a second mirror beside the first, e.g. c")
+    p.add_argument(
+        "--skip-specular",
+        type=int,
+        default=0,
+        help="rays whose bounces are all specular up to this order are left to the images",
+    )
+    p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
     p.add_argument("--no-signature", action="store_true", help="flat pulses, no source signature")
     p.add_argument("--no-air", action="store_true", help="no air absorption")
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
@@ -61,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
     p.add_argument("--rays", type=int, default=100_000)
     p.add_argument("--start", type=Path, default=None, help="a calibration json to start from")
+    p.add_argument(
+        "--skip-specular",
+        type=int,
+        default=0,
+        help="rays whose bounces are all specular up to this order are left to the images",
+    )
+    p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
+    p.add_argument("--no-signature", action="store_true")
     p.add_argument("--workers", type=int, default=4, help="judges in parallel")
     p.add_argument("--sound-speed", type=float, default=343.2)
     p.add_argument("--cpu", action="store_true")
@@ -112,12 +128,16 @@ def main(argv: list[str] | None = None) -> int:
         position = _position_of(args)
         settings = MirrorSettings(
             ism=IsmSettings(max_order=args.order, flutter_order=args.flutter),
-            rays=RaySettings(rays=args.rays),
+            rays=RaySettings(rays=args.rays, skip_specular_order=args.skip_specular),
             workers=args.workers,
             judge_every=args.judge_every,
             parameters=_parameters_of(args.parameters),
             signature=not args.no_signature,
-            render=RenderSettings(band_limit_hz=args.band_limit, air_absorption=not args.no_air),
+            render=RenderSettings(
+                band_limit_hz=args.band_limit,
+                air_absorption=not args.no_air,
+                tail_from_s=args.tail_from,
+            ),
         )
         report = run_mirror(
             args.run,
@@ -136,13 +156,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.cpu:
             os.environ["REVERBERATE_NO_GPU"] = "1"
         from reverberate.mirror.rays import RaySettings
+        from reverberate.mirror.render import RenderSettings
         from reverberate.mirror.stage import MirrorSettings
         from reverberate.mirror.tune import calibrate_run
 
         settings = MirrorSettings(
-            rays=RaySettings(rays=args.rays),
+            rays=RaySettings(rays=args.rays, skip_specular_order=args.skip_specular),
+            render=RenderSettings(tail_from_s=args.tail_from),
             parameters=_parameters_of(args.start),
             workers=args.workers,
+            signature=not args.no_signature,
         )
         best, evaluations, target = calibrate_run(
             args.run,

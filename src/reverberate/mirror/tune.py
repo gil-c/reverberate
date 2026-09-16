@@ -135,7 +135,15 @@ def calibrate_run(
     rays = RaySettings(**{**settings.rays.record(), "sound_speed_m_s": sound_speed_m_s})
     render_settings = replace(settings.render, order=order, sample_rate_hz=rate)
     local = {index: k for k, index in enumerate(chosen)}
-    say(f"calibrate {name}: {len(chosen)} points, {rays.rays} rays per candidate, order {order}")
+    # The source signature the host phase measured, so the colour is judged as rendered.
+    signature = None
+    signature_path = mirror_dir / f"signature_{name}.npy"
+    if settings.signature and signature_path.is_file():
+        signature = np.load(signature_path)
+    say(
+        f"calibrate {name}: {len(chosen)} points, {rays.rays} rays per candidate, order {order}, "
+        f"skip specular {rays.skip_specular_order}, signature {signature is not None}"
+    )
 
     def tracer(scene: DerivedScene) -> Histogram:
         return histogram_on_devices(
@@ -151,7 +159,7 @@ def calibrate_run(
     ) -> Ambisonic:
         candidate = replace(settings, render=render_settings, parameters=parameters)
         _, response, _ = _render_point(
-            local[index], paths, histogram, scene, candidate, sound_speed_m_s
+            local[index], paths, histogram, scene, candidate, sound_speed_m_s, None, signature
         )
         return response
 
