@@ -307,6 +307,12 @@ def _render_point(
             np.arange(len(centres)),
         )
         direct_energy = np.sum(rows**2, axis=1)
+        analytic = None
+        if settings.render.analytic_direct:
+            # What a sphere of radius r at distance d catches of rays of energy 1/N.
+            radius = settings.rays.receiver_radius_m
+            expected = radius**2 / (4.0 * max(distance, 1.05 * radius) ** 2)
+            analytic = np.asarray(direct_energy / expected, dtype=float)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
@@ -316,6 +322,7 @@ def _render_point(
             start_s=distance / sound_speed_m_s,
             seed=settings.seed + index,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
+            scale_per_band=analytic,
         )
         signals = early.signals + tail
         record["tail"] = tail_record

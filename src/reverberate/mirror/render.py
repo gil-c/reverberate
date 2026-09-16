@@ -70,6 +70,12 @@ class RenderSettings:
     #: Where the statistical tail starts and how long it fades in.
     tail_from_s: float = 0.020
     tail_fade_s: float = 0.010
+    #: The tail's scale divides the direct energy by what the histogram's
+    #: direct bin holds in expectation, ``r^2 / (4 d^2)`` per band for a sphere
+    #: of radius r at distance d and rays of energy 1/N. False reads the first
+    #: two bins instead, which also hold the floor and ceiling reflections
+    #: arriving within 4 ms: +2 dB median, +4.7 dB at p90 on 0076.
+    analytic_direct: bool = True
     #: The direct sound is placed this long after the start, as the
     #: reference's own chain does; the criteria align on it anyway.
     lead_s: float = 0.0
@@ -87,6 +93,7 @@ class RenderSettings:
             "tail_from_s": self.tail_from_s,
             "tail_fade_s": self.tail_fade_s,
             "lead_s": self.lead_s,
+            "analytic_direct": self.analytic_direct,
         }
 
 
