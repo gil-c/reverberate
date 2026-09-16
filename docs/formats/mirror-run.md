@@ -3,7 +3,12 @@
 What the geometric mirror (ADR 0014) writes beside a wave field, so a run
 that holds a field can also hold its mirror, its audit and its judgement.
 Paths are relative to the run directory; `<S>` is the source's id as in
-`walk.json`.
+`walk.json`. A second mirror beside the first (`--tag c`) writes the same
+files with the suffix `_<tag>` after `<S>` or after the directory's name
+(`paths_S1_c.npz`, `card_S1_c.json`, `field_mirror_c/S1.h5`,
+`mirror/metrics_c/S1.json`, `report_S1_c.json`, `signature_S1_c.npy`), and
+`walk.json` gains `field_mirror_<tag>` and `metrics_<tag>`: the app offers it
+as the third field.
 
 ## Written by the card phase (where the GPU is)
 
@@ -24,14 +29,15 @@ Paths are relative to the run directory; `<S>` is the source's id as in
 | --- | --- |
 | `field_mirror/<S>.h5` | The mirror field in the reference's format (`ambisonic-field.md`): same lattice datasets and attributes, `ir` rendered by the mirror, aligned to the reference's clock and scale; `mirror_silent` lists the points with no response; `provenance_json` holds the scene key, the settings, the alignment and the tree. |
 | `mirror/metrics/<S>.json` | The criteria's record, the solver's floor, the summary over the storey (medians and percentiles of every error, verdict rates) and one judgement per point. |
-| `mirror/report_<S>.json` | The whole stage's report: the card's part, the alignment, the summary, the timings. |
+| `mirror/report_<S>.json` | The whole stage's report: the card's part, the alignment, the summary, the timings, the diffraction record (`asked`, `found`, grid, median detour). |
+| `mirror/signature_<S>.npy`, `.json` | The source signature: minimum phase FIR taps from the reference's median direct spectrum, and the record of how it was read. |
 | `walk.json` | Updated: the source's entry gains `field_mirror` and `metrics`; a top level `mirror` entry names the scene, its key, the audit directory and the paths file per source. |
 
 ## Written by the calibration (where the card and the references are)
 
 | Path | What |
 | --- | --- |
-| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. |
+| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band, and when set the image sources' own absorption scale per band) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. The key of a file without an image scale is what it was before that field existed. |
 | `mirror/calibration/latest.json` | The key and the file of the last calibration, and the points it read. |
 | `mirror/reference_subset_<S>.h5` | Only where the field is not: `ir [n, channels, samples]` of the chosen points at a low order, `point_index`, the rate and the order. |
 

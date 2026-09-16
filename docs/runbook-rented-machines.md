@@ -252,6 +252,18 @@ references of a few dozen points at order 3 (88 MB for 24 points).
   thread each and the merge is in share order. A 2080 Ti is about half a 3090
   on the paths kernel.
 
+### Mirror C on hssd_0076, 2 x RTX 3090 (0.27 USD/h), night of 2026-09-16 to 17
+
+- Card phase with the covered rays (`--skip-specular 3`, window 80 ms): paths
+  345 s and rays about 7 min on the two cards while a calibration shared them.
+- The fixed point calibration (`calibrate --method fixed`, 24 points, 1e5
+  rays, 32 judges): **35 s an evaluation** once the judges ran one BLAS thread
+  each; seven evaluations bring the medians within 1 % of T30 and 0.2 dB of
+  colour. Nelder-Mead in fifteen coordinates took 135 s an evaluation and
+  forty of them.
+- The diffracted onsets of the 185 points without a direct path: 2.5 s at
+  home on a 10 cm grid.
+
 ### Transfer rule, learned the expensive way
 
 The laptop uploads to a Vast box at about 0.65 MB/s and downloads at 0.2 to
@@ -266,6 +278,13 @@ reference subset. The stage's two phases exist for this.
   a scratch file and reads them back for the field and the judges.
 - `dataclasses.asdict` turned the nested settings into dictionaries when the
   render settings were overridden; `dataclasses.replace` keeps them.
+- A calibration with 32 judge processes, each opening one OpenBLAS thread
+  per core (64), hit the container's process limit (`pids.max` 3840):
+  `pthread_create failed`, and the search hung between two evaluations.
+  Set `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1` for every
+  mirror job on a box; read `/sys/fs/cgroup/pids.current` when a job stalls.
+- `pkill -f 'mirror calibrate'` over ssh matches its own shell and kills the
+  connection; kill by pid from a script on the box.
 - Python's stdout is buffered when redirected: a remote stage's log stays
   empty until it ends. Run with `PYTHONUNBUFFERED=1`.
 
