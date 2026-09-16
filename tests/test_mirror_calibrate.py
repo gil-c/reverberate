@@ -8,6 +8,7 @@ absorption scale within a handful of evaluations. Small, on the twins.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from reverberate.mirror.calibrate import (
     CostWeights,
@@ -43,6 +44,7 @@ def test_parameters_round_trip_through_their_record_and_vector() -> None:
     assert tied.to_vector(tied=True).shape == (3,)
 
 
+@pytest.mark.slow
 def test_the_search_lowers_the_cost_towards_the_planted_absorption(tmp_path) -> None:  # type: ignore[no-untyped-def]
     truth = box_scene(alpha=0.25, scattering=0.1)
     settings = IsmSettings(max_order=2, flutter_order=2)

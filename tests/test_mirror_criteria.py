@@ -199,6 +199,7 @@ print(hashlib.sha256(json.dumps(judge(a, b).record(), sort_keys=True).encode()).
 """
 
 
+@pytest.mark.slow
 def test_the_judgement_is_the_same_in_two_processes() -> None:
     """Constraint 1: byte identical across processes, not merely within one."""
     tests = os.path.dirname(os.path.abspath(__file__))

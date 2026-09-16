@@ -206,6 +206,7 @@ def tail_from_histogram(
     seed: int,
     bursts: int = 6,
     band_gain_db: np.ndarray | None = None,
+    scale_per_band: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """The tail as noise shaped by a receiver's histogram, band by band, with its anisotropy.
 
@@ -222,7 +223,9 @@ def tail_from_histogram(
     histogram's own direct bin is what it is scaled against, so the tail
     sits at the level the rays give it relative to the direct sound.
     ``band_gain_db``, one value per octave band, is the calibration's tail
-    gain on top of that.
+    gain on top of that. ``scale_per_band`` replaces the reading of the
+    direct bin where there is no direct sound to read it from (a room the
+    rays reach round a doorway): the scale the other points gave.
     """
     from reverberate.spatial.sh import quadrature
 
@@ -242,7 +245,9 @@ def tail_from_histogram(
     first = int(np.argmax(np.any(energy > 0.0, axis=1))) if np.any(energy > 0.0) else -1
     from_bin = int(np.ceil((start_s + settings.tail_from_s) / histogram.bin_s))
     scale = np.zeros(len(picks))
-    if first >= 0:
+    if scale_per_band is not None:
+        scale = np.asarray(scale_per_band, dtype=float)[: len(picks)]
+    elif first >= 0:
         for band, pick in enumerate(picks):
             reference = float(np.sum(energy[first : first + 2, pick]))
             scale[band] = direct_energy[band] / reference if reference > 0.0 else 0.0

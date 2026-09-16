@@ -266,11 +266,15 @@ def _render_point(
     scene_path: Path | DerivedScene,
     settings: MirrorSettings,
     sound_speed_m_s: float,
+    fallback: tuple[np.ndarray, float] | None = None,
 ) -> tuple[int, Ambisonic, dict[str, Any]]:
     """One point: the discrete part, then the histogram's tail when there is one.
 
     ``paths`` carry their gains, so the calibration's material scales are
     already in them; the tail gain of ``settings.parameters`` applies here.
+    ``fallback`` is ``(scale_per_band, straight_line_s)`` for a point without
+    a direct path: the tail's scale as the other points read it, and the
+    straight line time the tail's clock starts from.
     """
     scene = scene_path if isinstance(scene_path, DerivedScene) else load_derived(scene_path)
     if histogram is None:
@@ -307,6 +311,21 @@ def _render_point(
         )
         signals = early.signals + tail
         record["tail"] = tail_record
+    elif fallback is not None and not direct.any() and histogram.hits[index].sum() > 0:
+        scale, straight_s = fallback
+        tail, tail_record = tail_from_histogram(
+            histogram,
+            index,
+            np.zeros(len(scale)),
+            settings.render,
+            sound_speed_m_s=sound_speed_m_s,
+            start_s=straight_s,
+            seed=settings.seed + index,
+            band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
+            scale_per_band=scale,
+        )
+        signals = early.signals + tail
+        record["tail"] = {**tail_record, "scale_from": "the other points, no direct path here"}
     else:
         signals = early.signals
         record["tail"] = None if not direct.any() else "no ray reached this receiver"
@@ -329,9 +348,9 @@ def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
     A storey of 437 points at order 7 is 13 GB of responses; they go through
     the disk one at a time and only the direct energy comes back.
     """
-    index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch = args
+    index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch, fallback = args
     _, response, record = _render_point(
-        index, paths, histogram, scene_path, settings, sound_speed_m_s
+        index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback
     )
     np.save(Path(scratch) / f"{index}.npy", response.signals.astype(np.float32))
     return index, _direct_energy(response, settings.criteria), record
@@ -457,6 +476,7 @@ def _card_phase(
         "census": catalogue.census["totals"],
     }
     s.report["parameters"] = settings.parameters.record()
+    s.report["source_position"] = [float(v) for v in np.asarray(source["position"])]
 
     positions, _, _ = _lattice_of(s.run, s.name)
     position = np.asarray(source["position"], dtype=float)
@@ -535,24 +555,51 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True)
 
+    positions, _, _ = _lattice_of(s.run, name)
+    source_position = np.asarray(card.get("source_position") or [np.nan] * 3, dtype=float)
+    with_direct = [i for i in range(len(every)) if bool(np.any(every[i].order == 0))]
+    without = sorted(set(range(len(every))) - set(with_direct))
+
     def render_all() -> dict[int, float]:
+        """Points with a direct path first, so their tail scales serve the rest."""
         energies: dict[int, float] = {}
+        scales: list[np.ndarray] = []
+
+        def submit(pool: ProcessPoolExecutor, i: int, fallback: Any) -> Any:
+            return pool.submit(
+                _render_to_disk,
+                (
+                    i,
+                    every[i],
+                    histogram,
+                    s.scene_path,
+                    settings_render,
+                    s.sound_speed_m_s,
+                    scratch,
+                    fallback,
+                ),
+            )
+
         with ProcessPoolExecutor(max_workers=settings.workers) as pool:
-            jobs = [
-                pool.submit(
-                    _render_to_disk,
-                    (
-                        i,
-                        every[i],
-                        histogram,
-                        s.scene_path,
-                        settings_render,
-                        s.sound_speed_m_s,
-                        scratch,
-                    ),
-                )
-                for i in range(len(every))
-            ]
+            for job in [submit(pool, i, None) for i in with_direct]:
+                index, energy, record = job.result()
+                energies[index] = energy
+                tail = record.get("tail")
+                if isinstance(tail, dict) and "scale_per_band" in tail:
+                    scales.append(np.asarray(tail["scale_per_band"], dtype=float))
+            fallback_scale = np.median(np.stack(scales), axis=0) if scales else None
+            s.report["tail_scale_fallback"] = (
+                None if fallback_scale is None else [float(v) for v in fallback_scale]
+            )
+            s.report["points_tail_only"] = 0
+            jobs = []
+            for i in without:
+                fallback = None
+                if fallback_scale is not None and bool(np.all(np.isfinite(source_position))):
+                    straight = float(np.linalg.norm(positions[i] - source_position))
+                    fallback = (fallback_scale, straight / s.sound_speed_m_s)
+                    s.report["points_tail_only"] += 1
+                jobs.append(submit(pool, i, fallback))
             for job in jobs:
                 index, energy, _ = job.result()
                 energies[index] = energy

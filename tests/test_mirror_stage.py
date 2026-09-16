@@ -15,6 +15,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 from reverberate.mirror.ism import IsmSettings
 from reverberate.mirror.rays import RaySettings
@@ -65,6 +66,7 @@ def a_run(tmp_path: Path) -> tuple[Path, Path]:
     return run, models
 
 
+@pytest.mark.slow
 def test_the_stage_writes_everything_and_its_two_phases_equal_it(tmp_path: Path) -> None:
     """One run in one place writes every file a campaign expects; then the card phase on a
     box with only the lattice, and the host phase at home, give the same field and summary."""

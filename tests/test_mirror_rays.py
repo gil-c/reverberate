@@ -62,6 +62,7 @@ def test_the_grid_finds_every_triangle_a_segment_meets() -> None:
     assert {8, 9} <= along_floor
 
 
+@pytest.mark.slow
 def test_direct_hits_land_in_the_direct_bin_at_the_solid_angle_s_share() -> None:
     scene = box_scene(alpha=0.99)
     settings = RaySettings(rays=3000, duration_s=0.02, bin_s=0.001, receiver_radius_m=0.5, seed=2)
@@ -80,6 +81,7 @@ def test_direct_hits_land_in_the_direct_bin_at_the_solid_angle_s_share() -> None
     assert histogram.hits[0, :first].sum() == 0
 
 
+@pytest.mark.slow
 def test_the_histogram_decays_at_eyring_s_time() -> None:
     alpha = 0.3
     scene = box_scene(alpha=alpha, scattering=0.5)
@@ -97,6 +99,7 @@ def test_the_histogram_decays_at_eyring_s_time() -> None:
     assert measured_t60 == pytest.approx(eyring, rel=0.2)
 
 
+@pytest.mark.slow
 def test_a_slab_stops_the_direct_ray_and_the_moments_point_at_the_source() -> None:
     open_box = box_scene(alpha=0.5)
     settings = RaySettings(rays=3000, duration_s=0.012, bin_s=0.001, receiver_radius_m=0.4, seed=4)
@@ -128,6 +131,7 @@ print(hashlib.sha256(h.energy.tobytes() + h.moments.tobytes() + h.hits.tobytes()
 """
 
 
+@pytest.mark.slow
 def test_the_same_seed_gives_the_same_histogram_in_two_processes() -> None:
     tests = os.path.dirname(os.path.abspath(__file__))
     digests = []

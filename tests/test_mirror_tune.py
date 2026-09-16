@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from reverberate.mirror.ism import IsmSettings
 from reverberate.mirror.rays import RaySettings
@@ -19,6 +20,7 @@ from reverberate.mirror.tune import (
 from test_mirror_stage import a_run
 
 
+@pytest.mark.slow
 def test_the_calibration_run_reads_the_card_phase_and_writes_its_file(tmp_path: Path) -> None:
     run, models = a_run(tmp_path)
     settings = MirrorSettings(
