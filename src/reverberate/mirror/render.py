@@ -23,6 +23,7 @@ transposition of the tail's decay), and the mirror reproduces the reference.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,7 @@ from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
 
 __all__ = [
     "RenderSettings",
+    "band_pulse_energy",
     "barron_reflected_ratio",
     "eyring_t60_s",
     "label_areas_m2",
@@ -118,6 +120,24 @@ def _fractional_pulses(
     taps = offsets[None, :] - fraction[:, None]
     kernel = np.sinc(taps) * np.hanning(2 * half + 3)[1:-1][None, :]
     return np.asarray(kernel * amplitudes[:, None]), np.asarray(base[:, None] + offsets[None, :])
+
+
+@lru_cache(maxsize=8)
+def band_pulse_energy(rate: float) -> np.ndarray:
+    """The energy per band of a unit pulse through the bank, over its whole response.
+
+    A 1 ms window around the direct pulse keeps only part of it where the
+    band filter rings longer than the window: -4.5, -3.9, -3.7 and -0.7 dB at
+    125, 250, 500 and 1000 Hz at 48 kHz. The tail's scale reads this instead.
+    """
+    centres, _ = _band_map(rate)
+    length = int(round(0.2 * rate))
+    impulse = np.zeros((len(centres), length))
+    impulse[:, length // 2] = 1.0
+    rows = octave_filter_rows(impulse, int(round(rate)), np.arange(len(centres)))
+    energy = np.asarray(np.sum(rows**2, axis=1), dtype=float)
+    energy.setflags(write=False)
+    return energy
 
 
 def render_paths(paths: Paths, settings: RenderSettings, sound_speed_m_s: float) -> Ambisonic:

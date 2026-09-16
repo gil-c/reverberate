@@ -65,7 +65,14 @@ from reverberate.mirror.geometry import (
 )
 from reverberate.mirror.ism import IsmSettings, Paths, grow_tree, occluder_grid
 from reverberate.mirror.rays import Histogram, RaySettings
-from reverberate.mirror.render import RenderSettings, render, render_paths, tail_from_histogram
+from reverberate.mirror.render import (
+    RenderSettings,
+    _band_map,
+    band_pulse_energy,
+    render,
+    render_paths,
+    tail_from_histogram,
+)
 from reverberate.mirror.signature import apply_signature, measure_signature, write_signature
 from reverberate.spatial.encode import Ambisonic
 
@@ -309,10 +316,15 @@ def _render_point(
         direct_energy = np.sum(rows**2, axis=1)
         analytic = None
         if settings.render.analytic_direct:
-            # What a sphere of radius r at distance d catches of rays of energy 1/N.
+            # What a sphere of radius r at distance d catches of rays of energy 1/N,
+            # against the direct pulse's whole energy per band (gain squared times
+            # the bank's energy for a unit pulse), not what a 1 ms window keeps.
             radius = settings.rays.receiver_radius_m
             expected = radius**2 / (4.0 * max(distance, 1.05 * radius) ** 2)
-            analytic = np.asarray(direct_energy / expected, dtype=float)
+            _, picks = _band_map(rate)
+            amplitude = paths.gain[np.flatnonzero(direct)[0]][picks]
+            whole = amplitude**2 * band_pulse_energy(rate)
+            analytic = np.asarray(whole / expected, dtype=float)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
