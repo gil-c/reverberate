@@ -76,6 +76,25 @@ def test_the_rays_kernel_counts_what_the_twin_counts() -> None:
 
 
 @gpu
+def test_the_rays_kernel_skips_the_covered_rays_as_the_twin_does() -> None:
+    scene = box_scene(alpha=0.4, scattering=0.3)
+    settings = RaySettings(
+        rays=2000,
+        duration_s=0.15,
+        bin_s=0.002,
+        receiver_radius_m=0.3,
+        seed=11,
+        skip_specular_order=3,
+    )
+    histogram = histogram_on_devices(scene, SOURCE, RECEIVERS, settings)
+    twin = trace(scene, SOURCE, RECEIVERS, settings)
+    assert twin.hits.sum() > 100
+    np.testing.assert_array_equal(histogram.hits, twin.hits)
+    assert np.max(np.abs(histogram.energy - twin.energy) * 2**40) <= 2.0
+    assert np.max(np.abs(histogram.moments - twin.moments) * 2**40) <= 2.0
+
+
+@gpu
 def test_one_card_and_every_card_give_the_same_field() -> None:
     if device_count() < 2:
         pytest.skip("needs two cards")

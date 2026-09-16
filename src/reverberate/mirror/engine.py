@@ -35,7 +35,14 @@ from reverberate.mirror.ism import (
     paths_for,
 )
 from reverberate.mirror.kernels import PATHS_KERNEL, RAYS_KERNEL
-from reverberate.mirror.rays import Histogram, RaySettings, UniformGrid, grid_like, trace
+from reverberate.mirror.rays import (
+    Histogram,
+    RaySettings,
+    UniformGrid,
+    grid_like,
+    reflector_of_triangles,
+    trace,
+)
 from reverberate.spatial.sh import channel_count
 
 __all__ = ["DeviceScene", "device_count", "histogram_on_devices", "paths_on_devices", "upload"]
@@ -82,6 +89,7 @@ def upload(
     grid = grid or occluder_grid(scene)
     normals, offsets, _, _ = _facet_arrays(scene)
     facet_start, facet_count = _facet_ranges(scene)
+    tri_reflector, tri_furniture = reflector_of_triangles(scene)
     with cupy.cuda.Device(device):
         arrays = {
             "tree_pos": cupy.asarray(np.ascontiguousarray(tree.positions, dtype=np.float64)),
@@ -99,6 +107,8 @@ def upload(
                 np.ascontiguousarray(scene.occluder_vertices.reshape(-1, 9), dtype=np.float64)
             ),
             "tri_label": cupy.asarray(np.ascontiguousarray(scene.occluder_label, dtype=np.int16)),
+            "tri_reflector": cupy.asarray(np.ascontiguousarray(tri_reflector, dtype=np.int32)),
+            "tri_furniture": cupy.asarray(np.ascontiguousarray(tri_furniture, dtype=np.int32)),
             "grid_origin": cupy.asarray(np.asarray(grid.origin, dtype=np.float64)),
             "grid_shape": cupy.asarray(np.asarray(grid.shape, dtype=np.int32)),
             "cell_offsets": cupy.asarray(np.asarray(grid.offsets, dtype=np.int64)),
@@ -374,6 +384,10 @@ def histogram_on_device(
                     np.int32(bands),
                     np.int32(channels),
                     np.float64(settings.energy_floor / settings.rays),
+                    a["tri_reflector"],
+                    a["tri_furniture"],
+                    np.int32(settings.skip_specular_order),
+                    np.int32(settings.skip_furniture_bounces),
                     energy,
                     moments,
                     hits,

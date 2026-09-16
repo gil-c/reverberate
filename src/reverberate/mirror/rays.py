@@ -72,6 +72,13 @@ class RaySettings:
     #: Cell edge of the uniform grid.
     cell_m: float = 0.25
     seed: int = 0
+    #: A ray whose bounces so far are all specular, on reflector facets, at
+    #: most this many, is what the image tree renders already: it is not
+    #: counted when it crosses a receiver. Zero counts everything.
+    skip_specular_order: int = 0
+    #: ... and with at most this many of those bounces on furniture, as the
+    #: tree's ``furniture_bounces`` rule.
+    skip_furniture_bounces: int = 1
 
     def record(self) -> dict[str, Any]:
         return {
@@ -84,6 +91,8 @@ class RaySettings:
             "energy_floor": self.energy_floor,
             "cell_m": self.cell_m,
             "seed": self.seed,
+            "skip_specular_order": self.skip_specular_order,
+            "skip_furniture_bounces": self.skip_furniture_bounces,
         }
 
 
@@ -443,6 +452,38 @@ def _sphere_crossings(
     return np.flatnonzero(crossed), entry[crossed]
 
 
+def reflector_of_triangles(
+    scene: DerivedScene, *, planar_m: float = 0.005
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per occluder triangle: the reflector facet it lies on (or -1), and whether it is furniture.
+
+    A triangle belongs to a facet when it carries the facet's label, its
+    centroid is within ``planar_m`` of the facet's plane and its normal is
+    parallel to it. What the image tree can mirror on is exactly this set.
+    """
+    tris = scene.occluder_vertices.reshape(-1, 3, 3)
+    if tris.shape[0] == 0:
+        return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
+    centroids = tris.mean(axis=1)
+    normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    norms = np.linalg.norm(normals, axis=1)
+    normals = normals / np.maximum(norms, 1e-12)[:, None]
+    labels = np.asarray(scene.occluder_label, dtype=int)
+    reflector = np.full(tris.shape[0], -1, dtype=np.int32)
+    furniture = np.zeros(tris.shape[0], dtype=np.int32)
+    for k, facet in enumerate(scene.facets):
+        n = np.asarray(facet.normal, dtype=float)
+        on = (
+            (labels == facet.label)
+            & (np.abs(centroids @ n - facet.offset) <= planar_m)
+            & (np.abs(normals @ n) >= 0.99)
+        )
+        reflector[on & (reflector < 0)] = k
+        if facet.kind == "furniture":
+            furniture[on] = 1
+    return reflector, furniture
+
+
 def trace(
     scene: DerivedScene,
     source: np.ndarray,
@@ -475,20 +516,32 @@ def trace(
     directions = ray_directions(settings.rays, settings.seed)
     floor = settings.energy_floor / settings.rays
     one = np.array([0])
+    tri_reflector, tri_furniture = reflector_of_triangles(scene)
     for ray in range(settings.rays):
         position = source.copy()
         direction = directions[ray]
         carried = np.full(bands, 1.0 / settings.rays)
         travelled = 0.0
         last_triangle = -1
+        specular_only = True
+        furniture_bounces = 0
         for bounce in range(100_000):
             candidates = grid.candidates(position, position + direction * (reach - travelled))
             distance, triangle = _nearest_hit(
                 position, direction, triangles, candidates, last_triangle
             )
             segment = min(distance, reach - travelled)
-            which, entries = _sphere_crossings(
-                position, direction, segment, receivers, settings.receiver_radius_m
+            covered = (
+                specular_only
+                and 1 <= bounce <= settings.skip_specular_order
+                and furniture_bounces <= settings.skip_furniture_bounces
+            )
+            which, entries = (
+                (np.zeros(0, dtype=int), np.zeros(0))
+                if covered
+                else _sphere_crossings(
+                    position, direction, segment, receivers, settings.receiver_radius_m
+                )
             )
             if which.size:
                 arrival = scene_to_ambisonic((-direction)[None, :])[0]
@@ -521,10 +574,15 @@ def trace(
             kind = float(
                 hash_uniform(settings.seed, np.array([ray]), np.array([bounce + 1]), one)[0]
             )
+            if tri_furniture[triangle]:
+                furniture_bounces += 1
             if kind < scattering[label]:
                 direction = _lambert(normal, settings.seed, ray, bounce + 1)
+                specular_only = False
             else:
                 direction = direction - 2.0 * float(direction @ normal) * normal
+                if tri_reflector[triangle] < 0:
+                    specular_only = False
             last_triangle = triangle
     return Histogram.from_counts(
         energy,

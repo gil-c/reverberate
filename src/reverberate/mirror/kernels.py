@@ -265,6 +265,8 @@ extern "C" __global__ void rays(
     const long long* __restrict__ cell_offsets, const int* __restrict__ cell_members,
     const double* __restrict__ absorption, const double* __restrict__ scattering, int bands,
     int channels, double floor_energy,
+    const int* __restrict__ tri_reflector, const int* __restrict__ tri_furniture,
+    int skip_order, int skip_furniture,
     long long* __restrict__ energy_out, long long* __restrict__ moments_out, long long* __restrict__ hits_out)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -294,6 +296,8 @@ extern "C" __global__ void rays(
     for (int b = 0; b < bands; ++b) carried[b] = 1.0 / (double)total_rays;
     double travelled = 0.0;
     int last_triangle = -1;
+    bool specular_only = true;
+    int furniture_bounces = 0;
     for (int bounce = 0; bounce < 100000; ++bounce) {
         double remaining = reach - travelled;
         double end[3];
@@ -328,7 +332,10 @@ extern "C" __global__ void rays(
         bool have_harmonics = false;
         double seg_end[3];
         for (int k = 0; k < 3; ++k) seg_end[k] = pos[k] + dir[k] * segment;
-        walk_cells(g, pos, seg_end, [&](long long cell, double) {
+        /* The twin's ``covered``: what the image tree renders already is not counted. */
+        bool covered = specular_only && bounce >= 1 && bounce <= skip_order
+            && furniture_bounces <= skip_furniture;
+        if (!covered) walk_cells(g, pos, seg_end, [&](long long cell, double) {
             long long start = rec_offsets[cell], stop = rec_offsets[cell + 1];
             for (long long m = start; m < stop; ++m) {
                 int r = rec_members[m];
@@ -389,7 +396,9 @@ extern "C" __global__ void rays(
         for (int k = 0; k < 3; ++k) n[k] = n[k] / nn;
         if (dot3(n, dir) > 0.0) for (int k = 0; k < 3; ++k) n[k] = -n[k];
         double kind = uniform_of(seed, ray, bounce + 1, 0);
+        if (tri_furniture[best_tri]) furniture_bounces += 1;
         if (kind < scattering[label]) {
+            specular_only = false;
             /* The twin's ``_lambert``. */
             double helper[3] = {1.0, 0.0, 0.0};
             if (fabs(n[0]) >= 0.9) { helper[0] = 0.0; helper[1] = 1.0; }
@@ -414,6 +423,7 @@ extern "C" __global__ void rays(
         } else {
             double dn = dot3(dir, n);
             for (int k = 0; k < 3; ++k) dir[k] = dir[k] - 2.0 * dn * n[k];
+            if (tri_reflector[best_tri] < 0) specular_only = false;
         }
         last_triangle = best_tri;
     }

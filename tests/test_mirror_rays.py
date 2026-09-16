@@ -159,3 +159,30 @@ def test_the_explicit_harmonics_are_the_library_s_to_rounding() -> None:
         np.testing.assert_allclose(
             harmonics3(direction), real_sh(3, direction[None, :])[0], atol=1e-12
         )
+
+
+def test_covered_rays_leave_the_direct_and_lose_the_specular_reflections() -> None:
+    """On a box with no scattering, every bounce up to the tree's order is a specular
+    reflection on a reflector facet, which the images render: with the skip, the
+    histogram keeps the direct bins and empties the bins the first reflections filled."""
+    scene = box_scene(alpha=0.3, scattering=0.0)
+    kept = RaySettings(rays=1500, duration_s=0.04, bin_s=0.001, receiver_radius_m=0.4, seed=5)
+    skipped = RaySettings(
+        rays=1500,
+        duration_s=0.04,
+        bin_s=0.001,
+        receiver_radius_m=0.4,
+        seed=5,
+        skip_specular_order=3,
+    )
+    full = trace(scene, SOURCE, RECEIVER[None, :], kept)
+    less = trace(scene, SOURCE, RECEIVER[None, :], skipped)
+    distance = float(np.linalg.norm(RECEIVER - SOURCE))
+    last_direct = int(distance / C / kept.bin_s) + 1
+    np.testing.assert_array_equal(full.hits[0, : last_direct + 1], less.hits[0, : last_direct + 1])
+    assert full.hits[0, last_direct + 2 : last_direct + 12].sum() > 0
+    assert less.hits[0, last_direct + 2 : last_direct + 12].sum() < (
+        full.hits[0, last_direct + 2 : last_direct + 12].sum() / 4
+    )
+    assert less.hits.sum() < full.hits.sum()
+    assert less.energy.sum() < full.energy.sum()
