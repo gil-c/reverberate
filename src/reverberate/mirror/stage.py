@@ -45,6 +45,7 @@ from scipy.signal import butter, sosfilt
 from reverberate.audio import lowpass
 from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.audit import write_geometry_layers, write_paths
+from reverberate.mirror.calibrate import Parameters, apply_parameters
 from reverberate.mirror.criteria import (
     Criteria,
     CriteriaSettings,
@@ -55,7 +56,13 @@ from reverberate.mirror.criteria import (
 )
 from reverberate.mirror.engine import device_count, histogram_on_devices, paths_on_devices
 from reverberate.mirror.field import align_to_reference, write_mirror_field
-from reverberate.mirror.geometry import GeometryRules, derive, load_derived, write_derived
+from reverberate.mirror.geometry import (
+    DerivedScene,
+    GeometryRules,
+    derive,
+    load_derived,
+    write_derived,
+)
 from reverberate.mirror.ism import IsmSettings, Paths, grow_tree, occluder_grid
 from reverberate.mirror.rays import Histogram, RaySettings
 from reverberate.mirror.render import RenderSettings, render, render_paths, tail_from_histogram
@@ -108,9 +115,12 @@ class MirrorSettings:
     #: Judge only every n-th point, for a quick look; 1 judges them all.
     judge_every: int = 1
     seed: int = 0
+    #: The calibration applied: scales on the materials, gains on the tail.
+    parameters: Parameters = field(default_factory=Parameters)
 
     def record(self) -> dict[str, Any]:
         return {
+            "parameters": self.parameters.record(),
             "rules": self.rules.record(),
             "ism": self.ism.record(),
             "rays": self.rays.record(),
@@ -253,12 +263,16 @@ def _render_point(
     index: int,
     paths: Paths,
     histogram: Histogram | None,
-    scene_path: Path,
+    scene_path: Path | DerivedScene,
     settings: MirrorSettings,
     sound_speed_m_s: float,
 ) -> tuple[int, Ambisonic, dict[str, Any]]:
-    """One point: the discrete part, then the histogram's tail when there is one."""
-    scene = load_derived(scene_path)
+    """One point: the discrete part, then the histogram's tail when there is one.
+
+    ``paths`` carry their gains, so the calibration's material scales are
+    already in them; the tail gain of ``settings.parameters`` applies here.
+    """
+    scene = scene_path if isinstance(scene_path, DerivedScene) else load_derived(scene_path)
     if histogram is None:
         response, plain = render(
             paths, scene, settings.render, sound_speed_m_s=sound_speed_m_s, seed=settings.seed
@@ -289,6 +303,7 @@ def _render_point(
             sound_speed_m_s=sound_speed_m_s,
             start_s=distance / sound_speed_m_s,
             seed=settings.seed + index,
+            band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
         )
         signals = early.signals + tail
         record["tail"] = tail_record
@@ -433,13 +448,15 @@ def _card_phase(
         write_derived(derived, s.scene_path)
         return derived
 
-    scene = s.stage("derive", derive_scene)
-    s.stage("audit layers", lambda: write_geometry_layers(scene, s.mirror_dir / "audit"))
+    catalogue = s.stage("derive", derive_scene)
+    s.stage("audit layers", lambda: write_geometry_layers(catalogue, s.mirror_dir / "audit"))
+    scene = apply_parameters(catalogue, settings.parameters)
     s.report["scene"] = {
-        "key": scene.key,
-        "summary": scene.summary(),
-        "census": scene.census["totals"],
+        "key": catalogue.key,
+        "summary": catalogue.summary(),
+        "census": catalogue.census["totals"],
     }
+    s.report["parameters"] = settings.parameters.record()
 
     positions, _, _ = _lattice_of(s.run, s.name)
     position = np.asarray(source["position"], dtype=float)
@@ -499,6 +516,11 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         s.report[key] = card.get(key)
     s.report["timings_s"] = {**card.get("timings_s", {}), **s.report["timings_s"]}
     s.report["card_settings"] = card.get("settings")
+    if card.get("parameters"):
+        # The card's gains carry its parameters; the tail gain must be the same ones.
+        settings = replace(settings, parameters=Parameters.from_record(card["parameters"]))
+        s.settings = settings
+    s.report["parameters"] = settings.parameters.record()
     scene = load_derived(s.scene_path)
     every = load_every(s.mirror_dir / f"paths_{name}.npz")
     histogram = load_histogram(s.mirror_dir / f"histogram_{name}.npz")

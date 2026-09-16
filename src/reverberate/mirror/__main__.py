@@ -4,6 +4,9 @@ python -m reverberate.mirror run --run DIR --models DIR --source S1 [--position 
     [--rays N] [--order K] [--workers W] [--judge-every N] [--cpu] [--phase card|host|all]
 python -m reverberate.mirror derive --model apartment_full.json --out DIR/scene
     [--manifest manifest.json]
+python -m reverberate.mirror calibrate --run DIR --source S1 [--points 24] [--iterations 40]
+    [--tied] [--order 3] [--rays 100000] [--start FILE.json]
+python -m reverberate.mirror subset --run DIR --source S1 --points 24 [--order 3]
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,17 +35,63 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sound-speed", type=float, default=343.2)
     p.add_argument("--cpu", action="store_true", help="the twins, no card")
     p.add_argument(
+        "--parameters",
+        type=Path,
+        default=None,
+        help="a calibration json (mirror/calibration/<key>.json) to render with",
+    )
+    p.add_argument(
         "--phase",
         choices=("card", "host", "all"),
         default="all",
         help="card: paths and rays where the card is; host: the rest where the field is",
     )
 
+    p = sub.add_parser("calibrate", help="the calibration on a few points, where the card is")
+    p.add_argument("--run", type=Path, required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--position", type=float, nargs=3, default=None, help="else from walk.json")
+    p.add_argument("--points", type=int, default=24)
+    p.add_argument("--iterations", type=int, default=40)
+    p.add_argument("--tied", action="store_true", help="three coordinates instead of fifteen")
+    p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
+    p.add_argument("--rays", type=int, default=100_000)
+    p.add_argument("--start", type=Path, default=None, help="a calibration json to start from")
+    p.add_argument("--sound-speed", type=float, default=343.2)
+    p.add_argument("--cpu", action="store_true")
+
+    p = sub.add_parser("subset", help="the references of the calibration points, to travel")
+    p.add_argument("--run", type=Path, required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--points", type=int, default=24)
+    p.add_argument("--order", type=int, default=3)
+
     p = sub.add_parser("derive", help="the derived geometry of a solver model, with its census")
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True, help="path without suffix")
     p.add_argument("--manifest", type=Path, default=None)
     return parser
+
+
+def _position_of(args: argparse.Namespace) -> list[float]:
+    if args.position is not None:
+        return [float(v) for v in args.position]
+    manifest = json.loads((args.run / "walk.json").read_text())
+    entry = next(
+        s
+        for s in manifest["sources"]
+        if str(s.get("id")) == args.source or str(s.get("name")) == args.source
+    )
+    return [float(v) for v in entry["position"]]
+
+
+def _parameters_of(path: Path | None) -> Any:
+    from reverberate.mirror.calibrate import Parameters
+
+    if path is None:
+        return Parameters()
+    record = json.loads(path.read_text())
+    return Parameters.from_record(record.get("parameters", record))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,20 +103,13 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.mirror.rays import RaySettings
         from reverberate.mirror.stage import MirrorSettings, run_mirror
 
-        position = args.position
-        if position is None:
-            manifest = json.loads((args.run / "walk.json").read_text())
-            entry = next(
-                s
-                for s in manifest["sources"]
-                if str(s.get("id")) == args.source or str(s.get("name")) == args.source
-            )
-            position = [float(v) for v in entry["position"]]
+        position = _position_of(args)
         settings = MirrorSettings(
             ism=IsmSettings(max_order=args.order, flutter_order=args.flutter),
             rays=RaySettings(rays=args.rays),
             workers=args.workers,
             judge_every=args.judge_every,
+            parameters=_parameters_of(args.parameters),
         )
         report = run_mirror(
             args.run,
@@ -79,6 +122,43 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=1, default=str)
         )
+        return 0
+    if args.command == "calibrate":
+        if args.cpu:
+            os.environ["REVERBERATE_NO_GPU"] = "1"
+        from reverberate.mirror.rays import RaySettings
+        from reverberate.mirror.stage import MirrorSettings
+        from reverberate.mirror.tune import calibrate_run
+
+        settings = MirrorSettings(
+            rays=RaySettings(rays=args.rays), parameters=_parameters_of(args.start)
+        )
+        best, evaluations, target = calibrate_run(
+            args.run,
+            source={"name": args.source, "position": _position_of(args)},
+            settings=settings,
+            points=args.points,
+            iterations=args.iterations,
+            tied=args.tied,
+            order=args.order,
+            sound_speed_m_s=args.sound_speed,
+        )
+        print(json.dumps(best.record(), indent=1))
+        print("wrote", target, "after", len(evaluations), "evaluations")
+        return 0
+    if args.command == "subset":
+        from reverberate.mirror.stage import load_every
+        from reverberate.mirror.tune import choose_points, write_reference_subset
+
+        every = load_every(args.run / "mirror" / f"paths_{args.source}.npz")
+        chosen = choose_points(every, args.points)
+        target = write_reference_subset(
+            args.run / "field" / f"{args.source}.h5",
+            args.run / "mirror" / f"reference_subset_{args.source}.h5",
+            chosen,
+            args.order,
+        )
+        print("wrote", target, "points", chosen)
         return 0
     if args.command == "derive":
         from reverberate.mirror.geometry import derive, write_derived

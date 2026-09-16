@@ -205,6 +205,7 @@ def tail_from_histogram(
     start_s: float,
     seed: int,
     bursts: int = 6,
+    band_gain_db: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """The tail as noise shaped by a receiver's histogram, band by band, with its anisotropy.
 
@@ -220,6 +221,8 @@ def tail_from_histogram(
     ``direct_energy`` is the rendered direct pulse's energy per band; the
     histogram's own direct bin is what it is scaled against, so the tail
     sits at the level the rays give it relative to the direct sound.
+    ``band_gain_db``, one value per octave band, is the calibration's tail
+    gain on top of that.
     """
     from reverberate.spatial.sh import quadrature
 
@@ -243,6 +246,9 @@ def tail_from_histogram(
         for band, pick in enumerate(picks):
             reference = float(np.sum(energy[first : first + 2, pick]))
             scale[band] = direct_energy[band] / reference if reference > 0.0 else 0.0
+    band_power = np.ones(len(OCTAVE_BANDS))
+    if band_gain_db is not None:
+        band_power = 10.0 ** (np.asarray(band_gain_db, dtype=float) / 10.0)
     draws = rng.standard_normal((len(picks), bursts, length))
     per_band = np.zeros((len(picks), channels, length))
     for b in range(from_bin, bins):
@@ -251,7 +257,7 @@ def tail_from_histogram(
             break
         stop = min(at + bin_samples, length)
         for band, pick in enumerate(picks):
-            total = float(energy[b, pick]) * scale[band]
+            total = float(energy[b, pick]) * scale[band] * band_power[pick]
             if total <= 0.0:
                 continue
             density = np.maximum(basis_low @ moments[b, pick], 0.0) * weights
