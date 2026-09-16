@@ -491,11 +491,7 @@ def calibrate_fixed_point(
                 index, regain(point_paths, images), histogram, candidate_scene, candidate
             )
             jobs.append((references[index], response, criteria_settings))
-        if workers > 1:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                judged = list(pool.map(_judge_one, jobs))
-        else:
-            judged = [_judge_one(job) for job in jobs]
+        judged = list(pool.map(_judge_one, jobs)) if pool else [_judge_one(j) for j in jobs]
         reports = [r for r in judged if r is not None]
         total, early, late = band_cost(reports, weights)
         evaluations.append(Evaluation(candidate, total, early, late, reports, time.time() - t0))
@@ -541,15 +537,21 @@ def calibrate_fixed_point(
             note="candidate",
         )
 
-    for _ in range(iterations):
-        reports = evaluate(parameters)
-        parameters = step(parameters, reports)
-    for value in scattering:
-        best = min(evaluations, key=lambda e: e.cost).parameters
-        candidate = replace(best, scattering_scale=float(value))
-        for _ in range(3):
-            reports = evaluate(candidate)
-            candidate = step(candidate, reports)
+    # One pool for the whole search: starting workers costs more than judging.
+    pool = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        for _ in range(iterations):
+            reports = evaluate(parameters)
+            parameters = step(parameters, reports)
+        for value in scattering:
+            best = min(evaluations, key=lambda e: e.cost).parameters
+            candidate = replace(best, scattering_scale=float(value))
+            for _ in range(3):
+                reports = evaluate(candidate)
+                candidate = step(candidate, reports)
+    finally:
+        if pool is not None:
+            pool.shutdown()
     best_evaluation = min(evaluations, key=lambda e: e.cost)
     best_parameters = replace(
         best_evaluation.parameters,

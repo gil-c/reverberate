@@ -15,6 +15,9 @@ from reverberate.mirror.calibrate import (
     Parameters,
     apply_parameters,
     calibrate,
+    calibrate_fixed_point,
+    image_scene,
+    mean_absorption,
     regain,
     write_calibration,
 )
@@ -90,3 +93,52 @@ def test_the_search_lowers_the_cost_towards_the_planted_absorption(tmp_path) -> 
     path = write_calibration(tmp_path, best, evaluations)
     assert path.name == f"{best.key}.json"
     assert render_paths(paths, render_settings, C).signals.shape[0] == 16
+
+
+def test_the_image_scale_travels_in_the_record_and_leaves_older_keys_alone() -> None:
+    plain = Parameters()
+    assert "image_absorption_scale" not in plain.record()
+    apart = Parameters(image_absorption_scale=tuple(0.5 for _ in range(7)))
+    again = Parameters.from_record(apart.record())
+    assert again.image_absorption_scale == apart.image_absorption_scale
+    assert again.key == apart.key != plain.key
+    scene = box_scene(alpha=0.2)
+    assert np.allclose(image_scene(scene, apart).materials.absorption, 0.1)
+    assert np.allclose(image_scene(scene, plain).materials.absorption, 0.2)
+    assert np.allclose(mean_absorption(scene), 0.2)
+
+
+@pytest.mark.slow
+def test_the_fixed_point_brings_the_decay_back_to_the_planted_absorption() -> None:
+    truth = box_scene(alpha=0.25, scattering=0.1)
+    settings = IsmSettings(max_order=2, flutter_order=2)
+    tree = grow_tree(truth, SOURCE, settings)
+    paths = paths_for(truth, tree, RECEIVER, settings)
+    render_settings = RenderSettings(order=3, duration_s=0.6, tail_from_s=0.015)
+    reference, _ = render(paths, truth, render_settings, sound_speed_m_s=C, seed=1)
+
+    def render_point(index, point_paths, histogram, scene, parameters):  # type: ignore[no-untyped-def]
+        del index, histogram, parameters
+        response, _ = render(point_paths, scene, render_settings, sound_speed_m_s=C, seed=1)
+        return response
+
+    def tracer(scene):  # type: ignore[no-untyped-def]
+        return trace(scene, SOURCE, RECEIVER[None, :], RaySettings(rays=30, duration_s=0.05))
+
+    # Half the absorption: the statistical tail rings twice as long, and the
+    # band by band step must raise the scale back towards one.
+    start = Parameters(absorption_scale=tuple(0.5 for _ in range(7)))
+    best, evaluations = calibrate_fixed_point(
+        truth,
+        {0: paths},
+        {0: reference},
+        render_point,
+        tracer,
+        start=start,
+        iterations=4,
+        say=lambda _: None,
+    )
+    assert len(evaluations) == 4
+    assert evaluations[-1].cost < evaluations[0].cost
+    assert np.median(evaluations[1].parameters.absorption_scale) > 0.7
+    assert best.image_absorption_scale is not None
