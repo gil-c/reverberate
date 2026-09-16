@@ -30,9 +30,11 @@ reproducible.
 from __future__ import annotations
 
 import json
+import shutil
 import time
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -306,9 +308,59 @@ def _render_point(
     return index, Ambisonic(signals, early.sample_rate_hz, early.order, early.centre), record
 
 
+def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
+    """The render worker of the host phase: the response to ``scratch/<index>.npy``.
+
+    A storey of 437 points at order 7 is 13 GB of responses; they go through
+    the disk one at a time and only the direct energy comes back.
+    """
+    index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch = args
+    _, response, record = _render_point(
+        index, paths, histogram, scene_path, settings, sound_speed_m_s
+    )
+    np.save(Path(scratch) / f"{index}.npy", response.signals.astype(np.float32))
+    return index, _direct_energy(response, settings.criteria), record
+
+
+def _shifted(signals: np.ndarray, lead: int) -> np.ndarray:
+    """``signals`` delayed by ``lead`` samples (advanced when negative), same length."""
+    out = np.zeros_like(signals)
+    if lead >= 0:
+        out[:, lead:] = signals[:, : signals.shape[1] - lead]
+    else:
+        out[:, : lead or None] = signals[:, -lead:]
+    return out
+
+
+class _Cached(Mapping[int, Ambisonic]):
+    """The rendered responses on disk, aligned on access: what the field writer reads."""
+
+    def __init__(
+        self, scratch: Path, indices: list[int], rate: float, order: int, lead: int
+    ) -> None:
+        self.scratch = Path(scratch)
+        self.indices = indices
+        self.rate = rate
+        self.order = order
+        self.lead = lead
+
+    def __getitem__(self, index: int) -> Ambisonic:
+        if index not in self.indices:
+            raise KeyError(index)
+        signals = np.load(self.scratch / f"{index}.npy").astype(np.float64)
+        return Ambisonic(_shifted(signals, self.lead), self.rate, self.order, np.zeros(3))
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
 def _judge_point(args: tuple[Any, ...]) -> tuple[int, dict[str, Any] | None, PointReport | None]:
     """One point's judgement, in a worker: the reference read from the field on disk."""
-    index, reference_path, signals, rate, order, settings = args
+    index, reference_path, cached, lead, gain, rate, order, settings = args
+    signals = _shifted(np.load(Path(cached)).astype(np.float64), lead) * gain
     with h5py.File(reference_path, "r") as handle:
         reference = Ambisonic(
             np.asarray(handle["ir"][index], dtype=float), rate, order, np.zeros(3)
@@ -455,46 +507,45 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     render_settings = RenderSettings(
         **{**settings.render.record(), "order": order, "sample_rate_hz": rate}
     )
-    settings_render = MirrorSettings(**{**asdict(settings), "render": render_settings})
+    settings_render = replace(settings, render=render_settings)
 
-    def render_all() -> dict[int, tuple[Ambisonic, dict[str, Any]]]:
-        out: dict[int, tuple[Ambisonic, dict[str, Any]]] = {}
+    scratch = s.mirror_dir / f"render_{name}"
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True)
+
+    def render_all() -> dict[int, float]:
+        energies: dict[int, float] = {}
         with ProcessPoolExecutor(max_workers=settings.workers) as pool:
-            futures = [
+            jobs = [
                 pool.submit(
-                    _render_point,
-                    i,
-                    every[i],
-                    histogram,
-                    s.scene_path,
-                    settings_render,
-                    s.sound_speed_m_s,
+                    _render_to_disk,
+                    (
+                        i,
+                        every[i],
+                        histogram,
+                        s.scene_path,
+                        settings_render,
+                        s.sound_speed_m_s,
+                        scratch,
+                    ),
                 )
                 for i in range(len(every))
             ]
-            for future in futures:
-                index, response, record = future.result()
-                out[index] = (response, record)
-        return out
+            for job in jobs:
+                index, energy, _ = job.result()
+                energies[index] = energy
+        return energies
 
-    rendered = s.stage("render", render_all)
+    direct_energy = s.stage("render", render_all)
 
     criteria_settings = settings.criteria
-    direct_energy = {i: _direct_energy(r, criteria_settings) for i, (r, _) in rendered.items()}
     alignment = s.stage(
         "align",
         lambda: align_to_reference(s.reference, direct_energy, sound_speed_m_s=s.sound_speed_m_s),
     )
     s.report["alignment"] = alignment.record()
     lead = int(round(alignment.lead_s * rate))
-    aligned: dict[int, Ambisonic] = {}
-    for i, (response, _) in rendered.items():
-        signals = np.zeros_like(response.signals)
-        if lead >= 0:
-            signals[:, lead:] = response.signals[:, : response.signals.shape[1] - lead]
-        else:
-            signals[:, : lead or None] = response.signals[:, -lead:]
-        aligned[i] = Ambisonic(signals, rate, order, response.centre)
+    aligned = _Cached(scratch, list(range(len(every))), rate, order, lead)
     field_path = s.stage(
         "field",
         lambda: write_mirror_field(
@@ -523,7 +574,9 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
                     (
                         i,
                         s.reference,
-                        aligned[i].signals * alignment.gain,
+                        scratch / f"{i}.npy",
+                        lead,
+                        alignment.gain,
                         rate,
                         order,
                         criteria_settings,
@@ -552,6 +605,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         }
 
     metrics = s.stage("judge", judge_all)
+    shutil.rmtree(scratch, ignore_errors=True)
     metrics_dir = s.mirror_dir / "metrics"
     metrics_dir.mkdir(exist_ok=True)
     (metrics_dir / f"{name}.json").write_text(json.dumps(metrics, indent=1, default=str))

@@ -19,6 +19,7 @@ two does.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -114,7 +115,7 @@ def read_lattice(reference: Path) -> dict[str, Any]:
 def write_mirror_field(
     target: Path,
     reference: Path,
-    responses: dict[int, Ambisonic],
+    responses: Mapping[int, Ambisonic],
     *,
     provenance: dict[str, Any],
     gain: float = 1.0,
@@ -122,8 +123,9 @@ def write_mirror_field(
     """The mirror field: the reference's lattice with the mirror's responses.
 
     ``responses`` maps a point index to its response at the reference's rate
-    and order; a point with none is written silent and listed in
-    ``/mirror_silent``. ``gain`` scales every response.
+    and order, and may be lazy (a mapping that reads from disk on access);
+    a point with none is written silent and listed in ``/mirror_silent``.
+    ``gain`` scales every response.
     """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
