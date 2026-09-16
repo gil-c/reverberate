@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The scene cache key covers the material tables, which it did not: a coefficient
   edited in place was served stale from every entry.
 - **The viewer is a first-person walk-through app** (`src/reverberate/viz/app/`,
-  ADR 0012), and `viz/web/` and `viz/run_view` are gone with the page that read
+  ADR 0013), and `viz/web/` and `viz/run_view` are gone with the page that read
   them. A run the app opens is a directory carrying `walk.json`
   (`viz.app_payload`): sources, one impulse response field each
   (`viz.field_payload`, `docs/formats/response-field.md`), one tiered mesh
