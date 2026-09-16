@@ -32,4 +32,4 @@ At order 7 a second of response is 12.3 MB per cell.
 `index.json` (everything above except the samples, plus every cell's byte
 offset) beside a link to the file. The page splits a response at 150 ms: the
 part before turns with the head at every update, the rest when a cell is
-entered and again, exactly, once the head has been still (ADR 0012).
+entered and again, exactly, once the head has been still (ADR 0013).
