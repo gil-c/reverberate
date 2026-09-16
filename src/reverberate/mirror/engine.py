@@ -17,6 +17,7 @@ the field is the same with one card or eight.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -273,14 +274,30 @@ def paths_on_devices(
     devices = devices if devices is not None else list(range(device_count()))
     shares = np.array_split(np.arange(receivers.shape[0]), len(devices))
     results: list[Paths | None] = [None] * receivers.shape[0]
-    for device, share in zip(devices, shares, strict=True):
-        if share.size == 0:
-            continue
+
+    def on_device(device: int, share: np.ndarray) -> list[Paths]:
         held = upload(scene, tree, device=device, grid=grid)
-        found = paths_on_device(scene, tree, receivers[share], settings, held, say=say)
+        return paths_on_device(scene, tree, receivers[share], settings, held, say=say)
+
+    for share, found in zip(shares, _on_each_device(devices, shares, on_device), strict=True):
         for index, paths in zip(share, found, strict=True):
             results[int(index)] = paths
     return [p for p in results if p is not None]
+
+
+def _on_each_device(devices: list[int], shares: list[np.ndarray], work: Any) -> list[Any]:
+    """``work(device, share)`` on every device at once, one thread each; results in share order.
+
+    The cards run concurrently and the merge that follows is in the order of
+    the shares, never of completion, so two cards give the one card's numbers.
+    An empty share gives ``None``.
+    """
+    with ThreadPoolExecutor(max_workers=max(1, len(devices))) as pool:
+        futures = [
+            pool.submit(work, device, share) if share.size else None
+            for device, share in zip(devices, shares, strict=True)
+        ]
+        return [None if f is None else f.result() for f in futures]
 
 
 # --------------------------------------------------------------------------
@@ -403,11 +420,10 @@ def histogram_on_devices(
         parent=np.full(1, -1, dtype=np.int32),
         sequence=np.full((1, 1), -1, dtype=np.int32),
     )
-    for device, share in zip(devices, shares, strict=True):
-        if share.size == 0:
-            continue
+
+    def on_device(device: int, share: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         held = upload(scene, tree, device=device, grid=grid)
-        e, m, h = histogram_on_device(
+        return histogram_on_device(
             scene,
             source,
             receivers,
@@ -417,6 +433,11 @@ def histogram_on_devices(
             ray_count=int(share.size),
             say=say,
         )
+
+    for part in _on_each_device(devices, shares, on_device):
+        if part is None:
+            continue
+        e, m, h = part
         energy += e
         moments += m
         hits += h
