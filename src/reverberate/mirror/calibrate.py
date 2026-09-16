@@ -378,6 +378,16 @@ def _band_residuals(reports: list[PointReport]) -> tuple[dict[int, float], dict[
     )
 
 
+def _edt_ratios(reports: list[PointReport]) -> list[float]:
+    """Per judged band: the median EDT ratio, mirror over reference."""
+    if not reports:
+        return []
+    ratios = np.asarray(
+        [np.divide(r.candidate_tail.edt_s, r.reference_tail.edt_s) for r in reports], dtype=float
+    )
+    return [float(v) for v in np.nanmedian(ratios, axis=0)]
+
+
 def _reflection_gaps(reports: list[PointReport]) -> dict[int, float]:
     """Per band: the median level gap of the matched reflections, reference minus mirror, dB.
 
@@ -506,6 +516,7 @@ def calibrate_fixed_point(
             f" | t30 ratio {[round(ratios.get(b, float('nan')), 3) for b in bands]}"
             f" colour gap {[round(gaps.get(b, float('nan')), 2) for b in bands]}"
             f" reflection gap {[round(levels.get(b, float('nan')), 2) for b in bands]}"
+            f" edt ratio {[round(v, 3) for v in _edt_ratios(reports)]}"
             f" image abs {np.round(candidate.image_absorption_scale or (), 3).tolist()}"
             f" in {time.time() - t0:.0f} s"
         )
