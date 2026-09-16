@@ -18,6 +18,43 @@ const GROUND = "#0e1217";
 const LINE = "#262e38";
 const EARLY = "#e8a33d";
 const WHOLE = "#7c8796";
+const LABEL = "rgba(216,222,230,.75)";
+//: Seconds between the time ticks, chosen from the response's length.
+const timeStep = (seconds) => (seconds > 2 ? 0.5 : seconds > 0.6 ? 0.2 : 0.1);
+//: Label size in CSS pixels; the canvases draw at a larger backing size.
+const LABEL_PX = 10;
+
+/** A label on a canvas, kept inside it, with a dark backing for contrast. */
+function label(g, text, x, y, align = "left", base = "top") {
+  const scale = g.canvas.width / Math.max(1, g.canvas.clientWidth || g.canvas.width);
+  const size = Math.round(LABEL_PX * scale);
+  g.font = `${size}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  g.textAlign = align;
+  g.textBaseline = base;
+  const width = g.measureText(text).width;
+  const left = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
+  const top = base === "bottom" ? y - size : base === "middle" ? y - size / 2 : y;
+  g.fillStyle = "rgba(14,18,23,.7)";
+  g.fillRect(left - scale, top - scale, width + 2 * scale, size + 2 * scale);
+  g.fillStyle = LABEL;
+  g.fillText(text, x, y);
+}
+
+/** Vertical lines and labels every ``timeStep`` along a plot of ``seconds``. */
+function timeAxis(g, w, h, seconds, colour) {
+  if (!(seconds > 0)) return;
+  const step = timeStep(seconds);
+  g.strokeStyle = colour;
+  g.lineWidth = 1;
+  for (let s = step; s < seconds - step / 4; s += step) {
+    const x = (s / seconds) * w;
+    g.beginPath();
+    g.moveTo(x, 0);
+    g.lineTo(x, h);
+    g.stroke();
+    label(g, `${s.toFixed(1)} s`, x + 2, h - 2, "left", "bottom");
+  }
+}
 
 export function createPlots({ spectrogram, decay, direction, captions, workerUrl }) {
   const sg = spectrogram.getContext("2d");
@@ -74,13 +111,16 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
     const nyquist = sampleRate / 2;
     sg.strokeStyle = "rgba(216,222,230,.3)";
     sg.lineWidth = 1;
-    for (const hz of [4000, 8000, 16000]) {
+    for (const hz of [4000, 8000, 12000, 16000, 20000]) {
+      if (hz >= nyquist) continue;
       const y = spectrogram.height * (1 - hz / nyquist);
       sg.beginPath();
       sg.moveTo(0, y);
       sg.lineTo(spectrogram.width, y);
       sg.stroke();
+      label(sg, `${hz / 1000} kHz`, 2, y, "left", "middle");
     }
+    timeAxis(sg, spectrogram.width, spectrogram.height, seconds, "rgba(216,222,230,.18)");
     captions.spectrogram.textContent =
       `0 – ${seconds.toFixed(2)} s · 0 – ${(nyquist / 1000).toFixed(0)} kHz · ` +
       `${RANGE_DB} dB · peak ${shown.peakDb.toFixed(1)} dB`;
@@ -93,12 +133,17 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
     dg.fillRect(0, 0, w, h);
     dg.strokeStyle = LINE;
     dg.lineWidth = 1;
-    for (const db of [10, 30, 60]) {
-      const y = (h * db) / RANGE_DB;
+    for (const db of [10, 30, 60, 90]) {
+      const y = Math.min((h * db) / RANGE_DB, h - 1);
       dg.beginPath();
       dg.moveTo(0, y);
       dg.lineTo(w, y);
       dg.stroke();
+    }
+    timeAxis(dg, w, h, seconds, LINE);
+    // The level scale is absolute: 0 dB is the energy at the cell nearest the source.
+    for (const db of [10, 30, 60]) {
+      label(dg, `-${db} dB`, w - 2, (h * db) / RANGE_DB, "right", "middle");
     }
     dg.strokeStyle = "#6fd18a";
     dg.lineWidth = 2;
@@ -144,6 +189,13 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
     pg.moveTo(cx - radius, cy);
     pg.lineTo(cx + radius, cy);
     pg.stroke();
+    for (const db of [10, 20]) {
+      label(pg, `-${db} dB`, cx + 2, cy - radius * (1 - db / POLAR_DB), "left", "middle");
+    }
+    label(pg, "front", cx, 1, "center", "top");
+    label(pg, "back", cx, h - 1, "center", "bottom");
+    label(pg, "left", 1, cy, "left", "middle");
+    label(pg, "right", w - 1, cy, "right", "middle");
     if (!shown) return;
     const psi = headYawOfCamera(cameraYaw);
     const curve = (levels, colour, width) => {
