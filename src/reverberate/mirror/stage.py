@@ -8,11 +8,19 @@ the reference's clock and scale, judges every point against the reference
 by the criteria, and writes:
 
 - ``mirror/scene.{npz,json}``: the derived geometry and its census;
+- ``mirror/paths_<source>.npz`` and ``mirror/histogram_<source>.npz``: what
+  the card computed, small enough to travel;
 - ``field_mirror/<source>.h5``: the mirror field in the reference's format;
 - ``mirror/metrics/<source>.json``: the criteria, the summary over the
   storey, the solver's own floor and one judgement per point;
 - ``mirror/report_<source>.json``: timings, settings, alignment;
 - ``walk.json`` updated so the app finds the mirror beside the reference.
+
+The stage has two phases, so the card's work and the host's work can run on
+different machines without the reference field travelling: the **card**
+phase needs the derived geometry and the lattice's positions and writes the
+paths and the histogram; the **host** phase needs those and the reference
+field and writes the rest. ``phase="all"`` runs both in one place.
 
 Everything that is a choice is in :class:`MirrorSettings` and written to
 the report; the derived scene's key and the settings' record make a run
@@ -51,7 +59,17 @@ from reverberate.mirror.rays import Histogram, RaySettings
 from reverberate.mirror.render import RenderSettings, render, render_paths, tail_from_histogram
 from reverberate.spatial.encode import Ambisonic
 
-__all__ = ["MirrorSettings", "SolverFloor", "run_mirror"]
+__all__ = [
+    "MirrorSettings",
+    "SolverFloor",
+    "load_every",
+    "load_histogram",
+    "run_mirror",
+    "write_every",
+    "write_histogram",
+]
+
+PHASES = ("card", "host", "all")
 
 
 @dataclass(frozen=True)
@@ -100,6 +118,121 @@ class MirrorSettings:
             "judge_every": self.judge_every,
             "seed": self.seed,
         }
+
+
+# --------------------------------------------------------------------------
+# what the card hands to the host
+# --------------------------------------------------------------------------
+
+
+def write_every(every: list[Paths], target: Path) -> Path:
+    """The paths of every point in one ``.npz``: concatenated, with offsets."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    counts = np.asarray([p.count for p in every], dtype=np.int64)
+    offsets = np.concatenate([[0], np.cumsum(counts)])
+
+    def stack(name: str, empty_shape: tuple[int, ...], dtype: Any) -> np.ndarray:
+        rows = [getattr(p, name) for p in every if p.count]
+        if not rows:
+            return np.zeros((0, *empty_shape), dtype=dtype)
+        return np.concatenate([np.asarray(r) for r in rows], axis=0)
+
+    bands = int(every[0].gain.shape[1]) if every and every[0].gain.ndim == 2 else 7
+    width = max((int(p.sequence.shape[1]) for p in every if p.count), default=1)
+    rows = max((int(p.points.shape[1]) for p in every if p.count), default=2)
+    np.savez_compressed(
+        target,
+        offsets=offsets,
+        receiver=stack("receiver", (), np.int64),
+        image=stack("image", (), np.int64),
+        order=stack("order", (), np.int64),
+        length_m=stack("length_m", (), float),
+        direction=stack("direction", (3,), float),
+        gain=stack("gain", (bands,), float),
+        points=stack("points", (rows, 3), float),
+        sequence=stack("sequence", (width,), np.int64),
+    )
+    return target if target.suffix == ".npz" else target.with_suffix(".npz")
+
+
+def load_every(target: Path) -> list[Paths]:
+    """The inverse of :func:`write_every`."""
+    with np.load(Path(target)) as arrays:
+        offsets = arrays["offsets"]
+        names = (
+            "receiver",
+            "image",
+            "order",
+            "length_m",
+            "direction",
+            "gain",
+            "points",
+            "sequence",
+        )
+        columns = {name: arrays[name] for name in names}
+    return [
+        Paths(**{name: columns[name][offsets[i] : offsets[i + 1]] for name in names})
+        for i in range(len(offsets) - 1)
+    ]
+
+
+def write_histogram(histogram: Histogram, target: Path) -> Path:
+    target = Path(target)
+    np.savez_compressed(
+        target,
+        energy=histogram.energy,
+        moments=histogram.moments,
+        hits=histogram.hits,
+        bin_s=histogram.bin_s,
+        bands_hz=np.asarray(histogram.bands_hz, dtype=np.int64),
+        order=histogram.order,
+        rays=histogram.rays,
+    )
+    return target if target.suffix == ".npz" else target.with_suffix(".npz")
+
+
+def load_histogram(target: Path) -> Histogram:
+    with np.load(Path(target)) as arrays:
+        return Histogram(
+            arrays["energy"],
+            arrays["moments"],
+            arrays["hits"],
+            float(arrays["bin_s"]),
+            tuple(int(v) for v in arrays["bands_hz"]),
+            int(arrays["order"]),
+            int(arrays["rays"]),
+        )
+
+
+def _lattice_of(run: Path, name: str) -> tuple[np.ndarray, float, int]:
+    """The positions, rate and order: from the reference field, else its lattice file.
+
+    The card phase runs where the field may not be; ``mirror/lattice_<S>.npz``
+    with ``positions``, ``sample_rate_hz`` and ``order`` stands in for it.
+    """
+    reference = run / "field" / f"{name}.h5"
+    if reference.is_file():
+        with h5py.File(reference, "r") as handle:
+            return (
+                np.asarray(handle["positions"][...], dtype=float),
+                float(handle.attrs["sample_rate_hz"]),
+                int(handle.attrs["order"]),
+            )
+    lattice = run / "mirror" / f"lattice_{name}.npz"
+    if not lattice.is_file():
+        raise FileNotFoundError(f"neither {reference} nor {lattice}: no lattice to mirror")
+    with np.load(lattice) as arrays:
+        return (
+            np.asarray(arrays["positions"], dtype=float),
+            float(arrays["sample_rate_hz"]),
+            int(arrays["order"]),
+        )
+
+
+# --------------------------------------------------------------------------
+# the host's workers
+# --------------------------------------------------------------------------
 
 
 def _direct_energy(response: Ambisonic, settings: CriteriaSettings) -> float:
@@ -190,47 +323,51 @@ def _judge_point(args: tuple[Any, ...]) -> tuple[int, dict[str, Any] | None, Poi
     return index, None, report
 
 
-def run_mirror(
-    run: Path,
-    *,
-    models: Path,
-    source: dict[str, Any],
-    settings: MirrorSettings | None = None,
-    sound_speed_m_s: float = 343.2,
-    devices: list[int] | None = None,
-    say: Any = print,
-) -> dict[str, Any]:
-    """The whole stage for one source of one run; returns the report written."""
-    settings = settings or MirrorSettings()
-    run = Path(run)
-    models = Path(models)
-    name = str(source["name"])
-    reference = run / "field" / f"{name}.h5"
-    if not reference.is_file():
-        raise FileNotFoundError(f"{reference}: the wave field of {name} is not there")
-    report: dict[str, Any] = {
-        "source": name,
-        "settings": settings.record(),
-        "devices": device_count(),
-        "timings_s": {},
-    }
-    started = time.time()
+# --------------------------------------------------------------------------
+# the stage
+# --------------------------------------------------------------------------
 
-    def stage(label: str, work: Any) -> Any:
+
+class _Stage:
+    """The run's paths and the report under construction, shared by the phases."""
+
+    def __init__(
+        self, run: Path, name: str, settings: MirrorSettings, sound_speed_m_s: float, say: Any
+    ) -> None:
+        self.run = Path(run)
+        self.name = name
+        self.settings = settings
+        self.sound_speed_m_s = sound_speed_m_s
+        self.say = say
+        self.mirror_dir = self.run / "mirror"
+        self.mirror_dir.mkdir(parents=True, exist_ok=True)
+        self.scene_path = self.mirror_dir / "scene"
+        self.reference = self.run / "field" / f"{name}.h5"
+        self.card_report_path = self.mirror_dir / f"card_{name}.json"
+        self.report: dict[str, Any] = {
+            "source": name,
+            "settings": settings.record(),
+            "timings_s": {},
+        }
+
+    def stage(self, label: str, work: Any) -> Any:
         t0 = time.time()
         result = work()
-        report["timings_s"][label] = round(time.time() - t0, 1)
-        say(f"mirror {name} | {label}: {time.time() - t0:.1f} s")
+        self.report["timings_s"][label] = round(time.time() - t0, 1)
+        self.say(f"mirror {self.name} | {label}: {time.time() - t0:.1f} s")
         return result
 
-    # 1. The derived geometry, once per run and rules.
-    mirror_dir = run / "mirror"
-    mirror_dir.mkdir(parents=True, exist_ok=True)
-    scene_path = mirror_dir / "scene"
+
+def _card_phase(
+    s: _Stage, *, models: Path, source: dict[str, Any], devices: list[int] | None
+) -> dict[str, Any]:
+    """Derive, tree, paths and rays on the card(s); writes what the host needs."""
+    settings = s.settings
+    s.report["devices"] = device_count()
 
     def derive_scene() -> Any:
-        if scene_path.with_suffix(".json").is_file():
-            found = load_derived(scene_path)
+        if s.scene_path.with_suffix(".json").is_file():
+            found = load_derived(s.scene_path)
             if found.rules == settings.rules:
                 return found
         manifest_path = models / "manifest.json"
@@ -241,64 +378,80 @@ def run_mirror(
             manifest=manifest,
             seed=settings.seed,
         )
-        write_derived(derived, scene_path)
+        write_derived(derived, s.scene_path)
         return derived
 
-    scene = stage("derive", derive_scene)
-    stage("audit layers", lambda: write_geometry_layers(scene, mirror_dir / "audit"))
-    report["scene"] = {
+    scene = s.stage("derive", derive_scene)
+    s.stage("audit layers", lambda: write_geometry_layers(scene, s.mirror_dir / "audit"))
+    s.report["scene"] = {
         "key": scene.key,
         "summary": scene.summary(),
         "census": scene.census["totals"],
     }
 
-    # 2. The points and the tree.
-    with h5py.File(reference, "r") as handle:
-        positions = np.asarray(handle["positions"][...], dtype=float)
-        rate = float(handle.attrs["sample_rate_hz"])
-        order = int(handle.attrs["order"])
+    positions, _, _ = _lattice_of(s.run, s.name)
     position = np.asarray(source["position"], dtype=float)
     region = (positions.min(axis=0) - 0.5, positions.max(axis=0) + 0.5)
-    ism = IsmSettings(**{**settings.ism.record(), "sound_speed_m_s": sound_speed_m_s})
-    tree = stage("tree", lambda: grow_tree(scene, position, ism, region=region))
-    report["tree"] = {"images": tree.count, "orders": np.bincount(tree.order).tolist()}
-    grid = stage("grid", lambda: occluder_grid(scene, settings.rays.cell_m))
+    ism = IsmSettings(**{**settings.ism.record(), "sound_speed_m_s": s.sound_speed_m_s})
+    tree = s.stage("tree", lambda: grow_tree(scene, position, ism, region=region))
+    s.report["tree"] = {"images": tree.count, "orders": np.bincount(tree.order).tolist()}
+    grid = s.stage("grid", lambda: occluder_grid(scene, settings.rays.cell_m))
 
-    # 3. The card: paths of every point, then the rays.
-    every = stage(
+    every = s.stage(
         "paths",
-        lambda: paths_on_devices(scene, tree, positions, ism, devices=devices, grid=grid, say=say),
+        lambda: paths_on_devices(
+            scene, tree, positions, ism, devices=devices, grid=grid, say=s.say
+        ),
     )
-    report["paths"] = {
+    s.report["paths"] = {
         "median": float(np.median([p.count for p in every])),
         "max": int(max(p.count for p in every)),
         "without_direct": int(sum(1 for p in every if not np.any(p.order == 0))),
     }
-    stage(
+    write_every(every, s.mirror_dir / f"paths_{s.name}.npz")
+    s.stage(
         "audit paths",
         lambda: write_paths(
-            every, scene, mirror_dir / "paths" / f"{name}.json", sound_speed_m_s=sound_speed_m_s
+            every,
+            scene,
+            s.mirror_dir / "paths" / f"{s.name}.json",
+            sound_speed_m_s=s.sound_speed_m_s,
         ),
     )
-    rays = RaySettings(**{**settings.rays.record(), "sound_speed_m_s": sound_speed_m_s})
-    histogram = stage(
+    rays = RaySettings(**{**settings.rays.record(), "sound_speed_m_s": s.sound_speed_m_s})
+    histogram = s.stage(
         "rays",
         lambda: histogram_on_devices(
-            scene, position, positions, rays, devices=devices, grid=grid, say=say
+            scene, position, positions, rays, devices=devices, grid=grid, say=s.say
         ),
     )
-    report["rays"] = {
+    s.report["rays"] = {
         "hits_total": int(histogram.hits.sum()),
         "hits_per_receiver_median": float(np.median(histogram.hits.sum(axis=1))),
     }
-    np.savez_compressed(
-        mirror_dir / f"histogram_{name}.npz",
-        energy=histogram.energy,
-        moments=histogram.moments,
-        hits=histogram.hits,
-    )
+    write_histogram(histogram, s.mirror_dir / f"histogram_{s.name}.npz")
+    s.card_report_path.write_text(json.dumps(s.report, indent=1, default=str))
+    return s.report
 
-    # 4. Every point rendered on the host's cores.
+
+def _host_phase(s: _Stage) -> dict[str, Any]:
+    """Render, align, write the field, judge, update walk.json; needs the reference."""
+    settings = s.settings
+    name = s.name
+    if not s.reference.is_file():
+        raise FileNotFoundError(f"{s.reference}: the wave field of {name} is not there")
+    if not s.card_report_path.is_file():
+        raise FileNotFoundError(f"{s.card_report_path}: the card phase did not run here")
+    card = json.loads(s.card_report_path.read_text())
+    for key in ("devices", "scene", "tree", "paths", "rays"):
+        s.report[key] = card.get(key)
+    s.report["timings_s"] = {**card.get("timings_s", {}), **s.report["timings_s"]}
+    s.report["card_settings"] = card.get("settings")
+    scene = load_derived(s.scene_path)
+    every = load_every(s.mirror_dir / f"paths_{name}.npz")
+    histogram = load_histogram(s.mirror_dir / f"histogram_{name}.npz")
+    _, rate, order = _lattice_of(s.run, name)
+
     render_settings = RenderSettings(
         **{**settings.render.record(), "order": order, "sample_rate_hz": rate}
     )
@@ -313,9 +466,9 @@ def run_mirror(
                     i,
                     every[i],
                     histogram,
-                    scene_path,
+                    s.scene_path,
                     settings_render,
-                    sound_speed_m_s,
+                    s.sound_speed_m_s,
                 )
                 for i in range(len(every))
             ]
@@ -324,16 +477,15 @@ def run_mirror(
                 out[index] = (response, record)
         return out
 
-    rendered = stage("render", render_all)
+    rendered = s.stage("render", render_all)
 
-    # 5. Alignment to the reference, then the field.
     criteria_settings = settings.criteria
     direct_energy = {i: _direct_energy(r, criteria_settings) for i, (r, _) in rendered.items()}
-    alignment = stage(
+    alignment = s.stage(
         "align",
-        lambda: align_to_reference(reference, direct_energy, sound_speed_m_s=sound_speed_m_s),
+        lambda: align_to_reference(s.reference, direct_energy, sound_speed_m_s=s.sound_speed_m_s),
     )
-    report["alignment"] = alignment.record()
+    s.report["alignment"] = alignment.record()
     lead = int(round(alignment.lead_s * rate))
     aligned: dict[int, Ambisonic] = {}
     for i, (response, _) in rendered.items():
@@ -343,23 +495,22 @@ def run_mirror(
         else:
             signals[:, : lead or None] = response.signals[:, -lead:]
         aligned[i] = Ambisonic(signals, rate, order, response.centre)
-    field_path = stage(
+    field_path = s.stage(
         "field",
         lambda: write_mirror_field(
-            run / "field_mirror" / f"{name}.h5",
-            reference,
+            s.run / "field_mirror" / f"{name}.h5",
+            s.reference,
             aligned,
             provenance={
                 "scene_key": scene.key,
                 "settings": settings.record(),
                 "alignment": alignment.record(),
-                "tree": report["tree"],
+                "tree": s.report["tree"],
             },
             gain=alignment.gain,
         ),
     )
 
-    # 6. The judgement, point by point, in parallel.
     chosen = list(range(0, len(every), max(1, settings.judge_every)))
 
     def judge_all() -> dict[str, Any]:
@@ -371,7 +522,7 @@ def run_mirror(
                     _judge_point,
                     (
                         i,
-                        reference,
+                        s.reference,
                         aligned[i].signals * alignment.gain,
                         rate,
                         order,
@@ -400,20 +551,19 @@ def run_mirror(
             "points": points,
         }
 
-    metrics = stage("judge", judge_all)
-    metrics_dir = mirror_dir / "metrics"
+    metrics = s.stage("judge", judge_all)
+    metrics_dir = s.mirror_dir / "metrics"
     metrics_dir.mkdir(exist_ok=True)
     (metrics_dir / f"{name}.json").write_text(json.dumps(metrics, indent=1, default=str))
-    report["summary"] = metrics["summary"]
+    s.report["summary"] = metrics["summary"]
 
-    # 7. walk.json, so the app finds the mirror.
-    walk = run / "walk.json"
+    walk = s.run / "walk.json"
     if walk.is_file():
         manifest = json.loads(walk.read_text())
         for entry in manifest.get("sources", []):
             if str(entry.get("id")) == name or str(entry.get("name")) == name:
-                entry["field_mirror"] = str(field_path.relative_to(run))
-                entry["metrics"] = str((metrics_dir / f"{name}.json").relative_to(run))
+                entry["field_mirror"] = str(field_path.relative_to(s.run))
+                entry["metrics"] = str((metrics_dir / f"{name}.json").relative_to(s.run))
         manifest["mirror"] = {
             "scene": "mirror/scene.json",
             "key": scene.key,
@@ -424,7 +574,33 @@ def run_mirror(
             },
         }
         walk.write_text(json.dumps(manifest, indent=1))
-    report["total_s"] = round(time.time() - started, 1)
-    (mirror_dir / f"report_{name}.json").write_text(json.dumps(report, indent=1, default=str))
-    say(f"mirror {name}: done in {report['total_s'] / 60:.1f} min")
-    return report
+    return s.report
+
+
+def run_mirror(
+    run: Path,
+    *,
+    models: Path,
+    source: dict[str, Any],
+    settings: MirrorSettings | None = None,
+    sound_speed_m_s: float = 343.2,
+    devices: list[int] | None = None,
+    phase: str = "all",
+    say: Any = print,
+) -> dict[str, Any]:
+    """The stage for one source of one run, or one of its phases; returns the report written."""
+    if phase not in PHASES:
+        raise ValueError(f"phase {phase!r} is not one of {PHASES}")
+    settings = settings or MirrorSettings()
+    s = _Stage(Path(run), str(source["name"]), settings, sound_speed_m_s, say)
+    started = time.time()
+    if phase in ("card", "all"):
+        _card_phase(s, models=Path(models), source=source, devices=devices)
+    if phase in ("host", "all"):
+        _host_phase(s)
+    s.report["phase"] = phase
+    s.report["total_s"] = round(time.time() - started, 1)
+    target = s.mirror_dir / (f"report_{s.name}.json" if phase != "card" else f"card_{s.name}.json")
+    target.write_text(json.dumps(s.report, indent=1, default=str))
+    say(f"mirror {s.name} ({phase}): done in {s.report['total_s'] / 60:.1f} min")
+    return s.report

@@ -1,7 +1,7 @@
 """The mirror's command line.
 
 python -m reverberate.mirror run --run DIR --models DIR --source S1 [--position x y z]
-    [--rays N] [--order K] [--workers W] [--judge-every N] [--cpu]
+    [--rays N] [--order K] [--workers W] [--judge-every N] [--cpu] [--phase card|host|all]
 python -m reverberate.mirror derive --model apartment_full.json --out DIR/scene
     [--manifest manifest.json]
 """
@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-every", type=int, default=1)
     p.add_argument("--sound-speed", type=float, default=343.2)
     p.add_argument("--cpu", action="store_true", help="the twins, no card")
+    p.add_argument(
+        "--phase",
+        choices=("card", "host", "all"),
+        default="all",
+        help="card: paths and rays where the card is; host: the rest where the field is",
+    )
 
     p = sub.add_parser("derive", help="the derived geometry of a solver model, with its census")
     p.add_argument("--model", type=Path, required=True)
@@ -68,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             source={"name": args.source, "position": position},
             settings=settings,
             sound_speed_m_s=args.sound_speed,
+            phase=args.phase,
         )
         print(
             json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=1, default=str)

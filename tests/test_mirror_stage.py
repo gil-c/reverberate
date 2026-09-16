@@ -10,13 +10,15 @@ needed because every kernel has its twin.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from reverberate.mirror.ism import IsmSettings
 from reverberate.mirror.rays import RaySettings
-from reverberate.mirror.stage import MirrorSettings, run_mirror
+from reverberate.mirror.stage import MirrorSettings, load_every, run_mirror, write_every
 from reverberate.viz.field_payload import check, mock_field
 from test_accel_scene import write_scene
 
@@ -94,3 +96,52 @@ def test_the_stage_writes_the_mirror_field_the_metrics_and_the_report(tmp_path: 
     assert (run / "mirror" / "report_S1.json").is_file()
     assert report["alignment"]["points_used"] > 0
     assert report["paths"]["median"] >= 7
+
+
+def test_the_card_phase_then_the_host_phase_equal_the_stage_in_one_place(tmp_path: Path) -> None:
+    """The lattice file stands in for the field on the card; the host reads what the card wrote."""
+    run, models = a_run(tmp_path)
+    settings = MirrorSettings(
+        ism=IsmSettings(max_order=2, flutter_order=2, furniture_bounces=2),
+        rays=RaySettings(rays=300, duration_s=0.15, bin_s=0.002, receiver_radius_m=0.15),
+        workers=2,
+    )
+    source = {"name": "S1", "position": [0.3, 0.5, 0.4]}
+    whole = run_mirror(run, models=models, source=source, settings=settings, say=lambda _: None)
+    whole_field = (run / "field_mirror" / "S1.h5").read_bytes()
+
+    # The card, somewhere without the field: only the lattice travels.
+    box = tmp_path / "box"
+    (box / "mirror").mkdir(parents=True)
+    with h5py.File(run / "field" / "S1.h5", "r") as handle:
+        np.savez(
+            box / "mirror" / "lattice_S1.npz",
+            positions=handle["positions"][...],
+            sample_rate_hz=handle.attrs["sample_rate_hz"],
+            order=handle.attrs["order"],
+        )
+    card = run_mirror(
+        box, models=models, source=source, settings=settings, phase="card", say=lambda _: None
+    )
+    assert card["phase"] == "card" and "alignment" not in card
+    assert (box / "mirror" / "card_S1.json").is_file()
+    assert not (box / "field_mirror").exists()
+    every = load_every(box / "mirror" / "paths_S1.npz")
+    assert [p.count for p in every] == [
+        p.count for p in load_every(run / "mirror" / "paths_S1.npz")
+    ]
+    again = tmp_path / "again.npz"
+    write_every(every, again)
+    np.testing.assert_array_equal(load_every(again)[0].points, every[0].points)
+
+    # Home: the card's files beside the field, then the host phase.
+    for name in ("card_S1.json", "paths_S1.npz", "histogram_S1.npz", "scene.npz", "scene.json"):
+        shutil.copy(box / "mirror" / name, run / "mirror" / name)
+    (run / "field_mirror" / "S1.h5").unlink()
+    host = run_mirror(
+        run, models=models, source=source, settings=settings, phase="host", say=lambda _: None
+    )
+    assert host["phase"] == "host"
+    assert host["tree"] == whole["tree"] and host["alignment"] == whole["alignment"]
+    assert host["summary"] == whole["summary"]
+    assert (run / "field_mirror" / "S1.h5").read_bytes() == whole_field
