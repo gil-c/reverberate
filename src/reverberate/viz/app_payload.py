@@ -151,24 +151,49 @@ def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[s
     }
 
 
-def _field_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[str, Any] | None:
-    """Index a source's field into the site: a small index and a link to the file."""
-    relative = source.get("field")
+def _field_record(
+    run: WalkRun,
+    source: dict[str, Any],
+    target: Path,
+    *,
+    key: str = "field",
+    folder: str = "fields",
+) -> dict[str, Any] | None:
+    """Index a source's field into the site: a small index and a link to the file.
+
+    ``key`` names the source's entry: ``field`` for the reference, ``field_mirror``
+    for the geometric mirror of it, which the page can switch to at a cell.
+    """
+    relative = source.get(key)
     if not relative:
         return None
     field = (run.path / relative).resolve()
     if not field.is_file():
         raise FileNotFoundError(f"{run.name}: source {source.get('id')!r} names {relative}, absent")
-    site = target / "fields" / str(source.get("id"))
+    site = target / folder / str(source.get("id"))
     if site.is_symlink():
         site.unlink()
     index = field_payload.build_site(field, site)
     return {
-        "url": f"fields/{source.get('id')}",
+        "url": f"{folder}/{source.get('id')}",
         "cells": len(index["cell_index"]),
         "order": index["order"],
         "samples": index["samples"],
     }
+
+
+def _metrics_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[str, Any] | None:
+    """Copy a source's mirror metrics into the site, when the run has them."""
+    relative = source.get("metrics")
+    if not relative:
+        return None
+    metrics = (run.path / relative).resolve()
+    if not metrics.is_file():
+        raise FileNotFoundError(f"{run.name}: source {source.get('id')!r} names {relative}, absent")
+    site = target / "metrics"
+    site.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(metrics, site / f"{source.get('id')}.json")
+    return {"url": f"metrics/{source.get('id')}.json"}
 
 
 def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
@@ -186,6 +211,8 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
                 "position": [float(v) for v in source["position"]],
                 "directivity": str(source.get("directivity", "omni")),
                 "field": _field_record(run, source, target),
+                "mirror": _field_record(run, source, target, key="field_mirror", folder="mirrors"),
+                "metrics": _metrics_record(run, source, target),
             }
             for i, source in enumerate(run.sources)
         ],

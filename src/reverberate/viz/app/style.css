@@ -243,3 +243,12 @@ input[type=range].slide::-moz-range-thumb {
 .plot-cap { font: 12px var(--mono); color: var(--muted); margin-top: 4px; min-height: 1.3em; }
 .player select.voice { grid-column: 2; grid-row: 2; }
 .status { flex-wrap: wrap; gap: 4px 12px; }
+
+/* The mirror: the A-B switch and the criteria at the cell. */
+#ab { margin-top: 6px; }
+.mirror.hidden { display: none; }
+.metrics { width: 100%; border-collapse: collapse; font: 12px var(--mono); margin-top: 4px; }
+.metrics td { padding: 2px 4px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.metrics td:first-child { color: var(--text); }
+.metrics tr.ok td:nth-child(2) { color: var(--ok); }
+.metrics tr.bad td:nth-child(2) { color: #e06c5a; }

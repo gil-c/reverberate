@@ -7,6 +7,7 @@ import { createListenerTab } from "./listener.js";
 import { createPlayers, createSourceList } from "./players.js";
 import { setupPanels } from "./panels.js";
 import { createPlots } from "./plots.js";
+import { createDashboard } from "./dashboard.js";
 import { createPoints } from "./points.js";
 import { bindSettings, loadSettings } from "./settings.js";
 import { setupFolds } from "./folds.js";
@@ -45,6 +46,11 @@ const plots = createPlots({
   captions: { spectrogram: $("#spectrogram-cap"), decay: $("#decay-cap"), direction: $("#direction-cap") },
   workerUrl: new URL("./audio/plots.worker.js", import.meta.url),
 });
+const dashboard = createDashboard($("#mirror"), {
+  table: $("#mirror-table"),
+  summary: $("#mirror-summary"),
+  caption: $("#mirror-cap"),
+});
 let lastRender = null;
 const spatial = createSpatial({
   engine,
@@ -55,7 +61,10 @@ const spatial = createSpatial({
     audioStatus();
   },
   onCell: (id, position) => {
-    if (id === state.selected) showPlots(id, position);
+    if (id === state.selected) {
+      showPlots(id, position);
+      dashboard.show(id, position);
+    }
   },
   onStatus: (id, status) => {
     const source = sourceById(id);
@@ -70,6 +79,7 @@ function audioStatus() {
   const source = sourceById(state.selected);
   const parts = [];
   parts.push(source && source.cell !== null && source.cell !== undefined ? `cell ${source.cell}` : "no cell");
+  if (source && source.mirrorField) parts.push(state.ab === "mirror" ? "<b>B mirror</b>" : "A wave");
   if (source && source.solvedToHz) parts.push(`solved to ${(source.solvedToHz / 1000).toFixed(1)} kHz`);
   if (lastRender) parts.push(`update <b>${lastRender.ms.toFixed(1)} ms</b>`);
   if (source && source.late) parts.push(source.late === "exact" ? "late exact" : "late at entry");
@@ -148,10 +158,46 @@ function selectSource(id) {
   state.selected = id;
   renderSources();
   plots.clear();
+  dashboard.clear();
   const source = sourceById(id);
-  if (source && source.cell !== null && source.cell !== undefined) showPlots(id, source.cell);
+  if (source && source.cell !== null && source.cell !== undefined) {
+    showPlots(id, source.cell);
+    dashboard.show(id, source.cell);
+  }
   spatial.update(viewport.pose(), audibleIds());
 }
+
+// --- A against B: the wave solver's field, or the geometric mirror of it -----------
+/** The field a source is heard through under the A-B choice. */
+function activeField(source) {
+  return state.ab === "mirror" && source.mirrorField ? source.mirrorField : source.waveField;
+}
+
+function refreshAb() {
+  const anyMirror = state.sources.some((s) => s.mirrorField);
+  for (const button of $("#ab").querySelectorAll("button")) {
+    button.classList.toggle("on", button.dataset.ab === state.ab);
+    if (button.dataset.ab === "mirror") button.disabled = !anyMirror;
+  }
+  $("#ab").style.opacity = anyMirror ? 1 : 0.45;
+}
+
+function setAb(mode) {
+  if (mode === state.ab) return;
+  state.ab = mode;
+  refreshAb();
+  for (const source of state.sources) {
+    const field = activeField(source);
+    if (field) spatial.setField(source.id, field);
+  }
+  plots.clear();
+  spatial.update(viewport.pose(), audibleIds());
+  audioStatus();
+}
+$("#ab").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (button && !button.disabled) setAb(button.dataset.ab);
+});
 
 /** The plots of one source's response at a cell, from the field itself. */
 function showPlots(id, position) {
@@ -371,7 +417,10 @@ async function openRun(run) {
       loop: true,
       voice: voices.length ? voices[i % voices.length].url : null,
       cell: null,
+      waveField: null,
+      mirrorField: null,
     }));
+    dashboard.clear();
     state.selected = state.sources.length ? state.sources[0].id : null;
     meshViews = createMeshViews(THREE, data, () => settings.nearM, (status) => {
       $("#hud-tier").textContent = state.view === "acoustic" ? tierText(status) : "";
@@ -383,14 +432,30 @@ async function openRun(run) {
       loadField(`${run.url}/${source.field.url}`)
         .then((field) => {
           if (mine !== generation) return;
-          spatial.setField(source.id, field);
+          source.waveField = field;
+          spatial.setField(source.id, activeField(source));
           plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
           minimap.setPoints(points.positions());
           spatial.update(viewport.pose(), [source.id]);
         })
         .catch((error) => busy(`${source.id} field: ${error.message}`));
+      if (source.mirror) {
+        loadField(`${run.url}/${source.mirror.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.mirrorField = field;
+            refreshAb();
+            if (state.ab === "mirror") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} mirror: ${error.message}`));
+      }
+      dashboard.load(source.id, source.metrics ? `${run.url}/${source.metrics.url}` : null);
     }
+    refreshAb();
     // Opening a run is a choice of what to listen to: stand a metre from its
     // first source, facing it, rather than wherever the apartment left us.
     // Not between two runs of one apartment: those are compared from where

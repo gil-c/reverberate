@@ -102,7 +102,10 @@
             <p class="label">Head</p>
             <select id="head"></select>
             <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="40" /><em id="level-read">40 dB</em></label>
-
+            <div class="seg" id="ab" title="A: the wave solver's field. B: the geometric mirror of it, same cell, same level.">
+              <button type="button" class="on" data-ab="wave">A · wave</button>
+              <button type="button" data-ab="mirror" disabled>B · mirror</button>
+            </div>
           </div>
           <div>
             <p class="label">Sources</p>
@@ -122,6 +125,11 @@
             <p class="label">Direction</p>
             <canvas class="plot round" id="direction" width="320" height="320"></canvas>
             <div class="plot-cap" id="direction-cap"></div>
+          </div>
+          <div class="mirror hidden" id="mirror">
+            <p class="label">Mirror · <span id="mirror-summary" class="amber"></span></p>
+            <div class="plot-cap" id="mirror-cap"></div>
+            <table class="metrics"><tbody id="mirror-table"></tbody></table>
           </div>
           <div class="status"><span id="audio-format"></span><span id="audio-update"></span></div>
         </div>
