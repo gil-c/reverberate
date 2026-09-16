@@ -80,8 +80,9 @@ export function createDashboard(root, { table, summary, caption }) {
       return;
     }
     const targets = targetsOf(record);
+    const count = (v) => (Array.isArray(v) ? v.length : v === undefined || v === null ? "—" : v);
     caption.textContent =
-      `point ${point} · ${row.reference_reflections} reference, ${row.candidate_reflections} mirror reflections` +
+      `point ${point} · ${count(row.reference_reflections)} reference, ${count(row.candidate_reflections)} mirror reflections` +
       ` · ${row.passed}/${row.of} criteria` + (row.silent ? " · mirror silent here" : "");
     for (const [key, label, format, sense] of ROWS) {
       const value = row.errors ? row.errors[key] : null;
