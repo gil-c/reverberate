@@ -97,18 +97,30 @@ class Driven(Campaign):
         (self.out / "field" / "S1.h5").write_bytes(b"field")
         return [self.out / "field" / "S1.h5"]
 
+    def mirror(self, fields: list[Path]) -> list[dict[str, Any]]:
+        self.calls.append("mirror")
+        return [{"source": f.stem, "summary": {}} for f in fields]
+
 
 class TestTheDriver:
     def test_every_stage_runs_in_order_and_the_run_is_marked_done(self, tmp_path: Path) -> None:
         write_bundle(tmp_path / "bundle")
         run = Driven(bundle=tmp_path / "bundle", out=tmp_path / "out", pffdtd_dir=tmp_path)
         report = run.run()
-        assert run.calls == ["voxelise", "audit", "plan", "solve", "assemble"]
+        assert run.calls == ["voxelise", "audit", "plan", "solve", "assemble", "mirror"]
         assert (tmp_path / "out" / "campaign.done").is_file()
         assert not (tmp_path / "out" / "campaign.failed").exists()
         status = json.loads((tmp_path / "out" / "status.json").read_text())
         assert status["stage"] == "done"
-        assert set(report["timings_s"]) == {"voxelise", "audit", "plan", "solve", "assemble"}
+        assert set(report["timings_s"]) == {
+            "voxelise",
+            "audit",
+            "plan",
+            "solve",
+            "assemble",
+            "mirror",
+        }
+        assert report["mirrors"][0]["source"] == "S1"
         assert "voxelise" in (tmp_path / "out" / "campaign.log").read_text()
         assert json.loads((tmp_path / "out" / "report.json").read_text())["dwelling"] == "hssd_0076"
 

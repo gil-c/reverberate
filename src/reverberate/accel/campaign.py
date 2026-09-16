@@ -73,6 +73,11 @@ class Campaign:
     solve_bands: tuple[str, ...] | None = None
     #: Whether to assemble the field; only when every band is solved.
     assemble_field: bool = True
+    #: Whether to run the geometric mirror beside each assembled field (ADR 0014):
+    #: the card phase and the host phase on this machine, the field never moving.
+    mirror_field: bool = True
+    #: A calibration json (``mirror/calibration/<key>.json``) to render the mirror with.
+    mirror_parameters: Path | None = None
     #: Points of each band encoded again on the host's CPU path, in the
     #: background, and compared with the card's numbers: the card's own
     #: evidence, per campaign and per card. Zero disables it.
@@ -498,6 +503,36 @@ class Campaign:
         self.say(f"assemble: {workers} workers")
         return assemble_field(self.out, workers=workers, meshes=meshes or None)
 
+    def mirror(self, fields: list[Path]) -> list[dict[str, Any]]:
+        """The geometric mirror of every assembled field, both phases here; the reports."""
+        from reverberate.mirror.calibrate import Parameters
+        from reverberate.mirror.stage import MirrorSettings, run_mirror
+
+        parameters = Parameters()
+        if self.mirror_parameters is not None:
+            record = json.loads(Path(self.mirror_parameters).read_text())
+            parameters = Parameters.from_record(record.get("parameters", record))
+        workers = self.workers or max(1, (os.cpu_count() or 2) - 1)
+        settings = MirrorSettings(workers=workers, parameters=parameters)
+        reports = []
+        names = {Path(f).stem for f in fields}
+        for source in self.spec["sources"]:
+            name = str(source["name"])
+            if name not in names:
+                continue
+            report = run_mirror(
+                self.out,
+                models=self.models,
+                source={"name": name, "position": [float(v) for v in source["position"]]},
+                settings=settings,
+                phase="all",
+                say=self.say,
+            )
+            summary = report.get("summary") or {}
+            self.say(f"mirror {name}: {json.dumps(summary.get('medians', summary))[:300]}")
+            reports.append({k: v for k, v in report.items() if k != "settings"})
+        return reports
+
     def run(self) -> dict[str, Any]:
         """Every stage in order; ``campaign.done`` or ``campaign.failed`` at the end."""
         for marker in ("campaign.done", "campaign.failed"):
@@ -517,6 +552,11 @@ class Campaign:
                 if self.assemble_field and self.solve_bands is None
                 else []
             )
+            mirrors = (
+                self.stage("mirror", lambda: self.mirror(fields))
+                if self.mirror_field and fields
+                else []
+            )
             selfchecks = self.wait_selfchecks()
             report = {
                 "dwelling": self.spec.get("dwelling"),
@@ -528,6 +568,7 @@ class Campaign:
                 "voxelise": vox,
                 "solves": solves,
                 "fields": [str(f) for f in fields],
+                "mirrors": mirrors,
                 "meshes": meshes,
                 "selfcheck": selfchecks,
             }
@@ -553,6 +594,8 @@ def run_campaign(
     workers: int | None = None,
     solve_bands: tuple[str, ...] | None = None,
     selfcheck_points: int = 2,
+    mirror_field: bool = True,
+    mirror_parameters: Path | None = None,
 ) -> dict[str, Any]:
     return Campaign(
         bundle=bundle,
@@ -563,4 +606,6 @@ def run_campaign(
         workers=workers,
         solve_bands=solve_bands,
         selfcheck_points=selfcheck_points,
+        mirror_field=mirror_field,
+        mirror_parameters=mirror_parameters,
     ).run()
