@@ -220,3 +220,47 @@ on 31 workers: **the campaign in 68 min** against 105 min the day before, the fi
 45 min for 21 GB, of which the field and the audit view are 6.6 GB: the rest was the encodings,
 the self-check samples and grids already installed on the laptop. The renter now brings home
 what `take_home` keeps and only the grids the laptop lacks.
+
+## 6. The mirror beside the field (ADR 0014)
+
+The geometric mirror runs on the machine that solved the field, after the
+assembly, in two phases (`python -m reverberate.mirror run --phase card|host|all`).
+The card phase needs the derived geometry and the lattice's positions; the host
+phase needs the reference field. Where both are on one machine, `--phase all`.
+When they are not, what travels is small: the positions (11 KB), the paths of
+every point (0.7 MB), the histogram (60 MB), and for a calibration the
+references of a few dozen points at order 3 (88 MB for 24 points).
+
+### Measured on hssd_0076, one source, 437 points, RTX 3090 (0.155 USD/h billed), 2026-09-16
+
+- Derived geometry: 41 labels, reflectors from planar facets of 0.4 m2 and up
+  (exact coplanar merge), occluders from closed meshes decimated to 2 cm; the
+  tree at order 3 with the flutter to 6 holds 116 662 images (2 s).
+- Paths of the whole storey on the card: **435 s**, in batches of 68 receivers
+  (7.9 M image-receiver pairs, 62 to 72 s each); median 10 paths a point, at
+  most 49; 185 points have no direct path (rooms without a line of sight).
+  The numpy twin takes 92 to 98 s a point: the card is 100 times faster and
+  finds the same images, the same hit points to 1e-14 m.
+- Rays: **1e5 rays in 33 s, 1e6 in 323 s** (26 M sphere crossings, median
+  73 000 a receiver); the histograms' counts are equal to the twin's.
+- The card phase in all: **13.2 min, 0.03 USD**. The host phase at home on
+  10 cores: the render of 437 points at order 7 and the judgement, streamed
+  through the disk one point at a time (13 GB of responses would not fit).
+
+### Transfer rule, learned the expensive way
+
+The laptop uploads to a Vast box at about 0.65 MB/s and downloads at 0.2 to
+0.8 MB/s through the ssh proxy. A 6 GB field would take three hours either
+way: never move a field; move the positions, the paths, the histogram, the
+reference subset. The stage's two phases exist for this.
+
+### Failures seen
+
+- The host phase held every rendered response in memory: 437 points at order
+  7 are 13 GB, twice with the aligned copies. It now writes each response to
+  a scratch file and reads them back for the field and the judges.
+- `dataclasses.asdict` turned the nested settings into dictionaries when the
+  render settings were overridden; `dataclasses.replace` keeps them.
+- Python's stdout is buffered when redirected: a remote stage's log stays
+  empty until it ends. Run with `PYTHONUNBUFFERED=1`.
+
