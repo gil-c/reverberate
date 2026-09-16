@@ -34,6 +34,7 @@ from scipy.signal import butter, sosfilt
 
 from reverberate.audio import lowpass
 from reverberate.metrics import band_centres, octave_filter_rows
+from reverberate.mirror.audit import write_geometry_layers, write_paths
 from reverberate.mirror.criteria import (
     Criteria,
     CriteriaSettings,
@@ -244,6 +245,7 @@ def run_mirror(
         return derived
 
     scene = stage("derive", derive_scene)
+    stage("audit layers", lambda: write_geometry_layers(scene, mirror_dir / "audit"))
     report["scene"] = {
         "key": scene.key,
         "summary": scene.summary(),
@@ -272,6 +274,12 @@ def run_mirror(
         "max": int(max(p.count for p in every)),
         "without_direct": int(sum(1 for p in every if not np.any(p.order == 0))),
     }
+    stage(
+        "audit paths",
+        lambda: write_paths(
+            every, scene, mirror_dir / "paths" / f"{name}.json", sound_speed_m_s=sound_speed_m_s
+        ),
+    )
     rays = RaySettings(**{**settings.rays.record(), "sound_speed_m_s": sound_speed_m_s})
     histogram = stage(
         "rays",
@@ -406,7 +414,15 @@ def run_mirror(
             if str(entry.get("id")) == name or str(entry.get("name")) == name:
                 entry["field_mirror"] = str(field_path.relative_to(run))
                 entry["metrics"] = str((metrics_dir / f"{name}.json").relative_to(run))
-        manifest["mirror"] = {"scene": "mirror/scene.json", "key": scene.key}
+        manifest["mirror"] = {
+            "scene": "mirror/scene.json",
+            "key": scene.key,
+            "audit": "mirror/audit",
+            "paths": {
+                **(manifest.get("mirror") or {}).get("paths", {}),
+                name: f"mirror/paths/{name}.json",
+            },
+        }
         walk.write_text(json.dumps(manifest, indent=1))
     report["total_s"] = round(time.time() - started, 1)
     (mirror_dir / f"report_{name}.json").write_text(json.dumps(report, indent=1, default=str))
