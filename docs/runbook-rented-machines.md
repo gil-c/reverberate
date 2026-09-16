@@ -246,6 +246,11 @@ references of a few dozen points at order 3 (88 MB for 24 points).
 - The card phase in all: **13.2 min, 0.03 USD**. The host phase at home on
   10 cores: the render of 437 points at order 7 and the judgement, streamed
   through the disk one point at a time (13 GB of responses would not fit).
+- Two cards (2 x RTX 2080 Ti, 0.169 USD/h, 2026-09-16): the same images, hit
+  points, gains and integer histograms as one card; 136 receivers' paths in
+  78 s against 153 s, 200 000 rays in 47 s against 80 s. The devices run one
+  thread each and the merge is in share order. A 2080 Ti is about half a 3090
+  on the paths kernel.
 
 ### Transfer rule, learned the expensive way
 
