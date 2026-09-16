@@ -124,8 +124,11 @@ class CriteriaSettings:
     #: Reflections below this level relative to the direct sound are neither
     #: counted nor expected.
     level_floor_db: float = -15.0
-    #: Two peaks closer than this in time and angle are one reflection.
-    merge_time_s: float = 0.0003
+    #: Two peaks closer than this in time and angle are one reflection. Half
+    #: a millisecond is the energy window: a coloured pulse read through it
+    #: can show two humps that far apart, and two arrivals closer than that
+    #: are one arrival at 8 kHz anyway.
+    merge_time_s: float = 0.0005
     merge_angle_deg: float = 20.0
     #: Matching gates: a pair farther apart than either is never matched.
     gate_time_s: float = 0.0002
@@ -647,14 +650,17 @@ def detect_reflections(
         unit = weights @ grid
         norm = float(np.linalg.norm(unit))
         unit = unit / norm if norm > 0 else grid[k]
-        # Time: parabolic interpolation of the window energy around the peak.
-        row = smoothed[k]
-        refined = float(n)
-        if 0 < n < span - 1:
-            y0, y1, y2 = row[n - 1], row[n], row[n + 1]
-            denominator = y0 - 2.0 * y1 + y2
-            if denominator < 0.0:
-                refined = n + 0.5 * (y0 - y2) / denominator
+        # Time: the energy centroid of the beam's own energy over one window
+        # either side of the peak. The bank's pulses are symmetric, so the
+        # centroid is the arrival; a coloured pulse whose window energy shows
+        # two humps still centres where it arrived.
+        energy_t = steered[k, max(n - window, 0) : min(n + window + 1, span)] ** 2
+        samples_t = np.arange(max(n - window, 0), min(n + window + 1, span))
+        refined = (
+            float(np.sum(energy_t * samples_t) / np.sum(energy_t))
+            if energy_t.sum() > 0.0
+            else float(n)
+        )
         # Levels: the beam toward the refined direction, energy over the
         # window, broadband on the detection band and per octave. On the
         # refined direction rather than the grid point, because the grid is
@@ -662,7 +668,8 @@ def detect_reflections(
         # decibel low; the direct sound is read the same way, so the ratio
         # carries no such loss.
         beam = beam_weights(ambisonic.order, unit[None, :])[0]
-        a, b = max(n - half, 0), min(n + half + 1, span)
+        centre_n = int(round(refined))
+        a, b = max(centre_n - half, 0), min(centre_n + half + 1, span)
         broadband = float(np.sum((beam @ detection[:, offset + a : offset + b]) ** 2))
         levels = []
         for band in range(len(bands_hz)):
@@ -684,7 +691,9 @@ def detect_reflections(
     reflections = [direct]
     for index, (n, k, _) in enumerate(kept, start=1):
         reflections.append(describe(n, k, index))
-    # Every level relative to the direct sound's own, so a gain cancels.
+    # Every level relative to the direct sound's own, so a gain cancels, and
+    # every time relative to the direct sound's refined arrival, so the two
+    # responses are read with the same clock.
     reference = np.asarray(direct.bands.levels_db, dtype=float)
     out = []
     for r in reflections:
@@ -692,7 +701,7 @@ def detect_reflections(
         relative = 10.0 * np.log10(np.maximum(levels, 1e-30) / np.maximum(reference, 1e-30))
         out.append(
             Reflection(
-                r.time_s,
+                r.time_s - direct.time_s,
                 r.unit_vector,
                 r.azimuth_deg,
                 r.elevation_deg,
