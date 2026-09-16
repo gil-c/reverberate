@@ -11,3 +11,7 @@ extend-exclude = [
 
 [lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+# The mirror's CUDA sources are strings; a kernel line is not a Python line.
+[lint.per-file-ignores]
+"src/reverberate/mirror/kernels.py" = ["E501"]

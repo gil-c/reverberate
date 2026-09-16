@@ -30,8 +30,17 @@ from typing import Any
 import numpy as np
 
 from reverberate.mirror.geometry import DerivedScene
+from reverberate.mirror.rays import UniformGrid, triangle_grid
 
-__all__ = ["ImageTree", "IsmSettings", "Paths", "grow_tree", "paths_for", "ray_triangles"]
+__all__ = [
+    "ImageTree",
+    "IsmSettings",
+    "Paths",
+    "grow_tree",
+    "occluder_grid",
+    "paths_for",
+    "ray_triangles",
+]
 
 #: A facet that reflects on both sides, PFFDTD's ``3``.
 BOTH_SIDES = 3
@@ -354,17 +363,24 @@ def _segment_hits(
     origins: np.ndarray,
     ends: np.ndarray,
     triangles: np.ndarray,
-    tri_min: np.ndarray,
-    tri_max: np.ndarray,
+    grid: UniformGrid,
     *,
-    strict: float,
+    epsilon_m: float,
 ) -> np.ndarray:
-    """Occlusion of many segments, each tested against the triangles whose box it meets."""
+    """Occlusion of many segments, each tested against the triangles of the cells it crosses.
+
+    Every segment is shrunk by ``epsilon_m`` at both ends, so a surface it
+    starts or ends on does not cut it; a segment shorter than twice that
+    has nothing left to test and is clear. The card does the same, leg by
+    leg.
+    """
     out = np.zeros(origins.shape[0], dtype=bool)
     for i in range(origins.shape[0]):
-        lo = np.minimum(origins[i], ends[i])
-        hi = np.maximum(origins[i], ends[i])
-        near = np.flatnonzero(np.all(tri_max >= lo, axis=1) & np.all(tri_min <= hi, axis=1))
+        length = float(np.linalg.norm(ends[i] - origins[i]))
+        if length <= 2.0 * epsilon_m:
+            continue
+        strict = epsilon_m / length
+        near = grid.candidates(origins[i], ends[i])
         if near.size == 0:
             continue
         # In blocks, so the [segment, triangle] product stays in memory.
@@ -396,19 +412,30 @@ def _plane_crossing(
 # --------------------------------------------------------------------------
 
 
+def occluder_grid(scene: DerivedScene, cell_m: float = 0.25) -> UniformGrid:
+    """The uniform grid of the scene's occluders, built once and handed to every receiver."""
+    return triangle_grid(scene.occluder_vertices, cell_m, scene.bmin, scene.bmax)
+
+
 def paths_for(
     scene: DerivedScene,
     tree: ImageTree,
     receiver: np.ndarray,
     settings: IsmSettings | None = None,
+    *,
+    grid: UniformGrid | None = None,
 ) -> Paths:
-    """The reflections of ``receiver`` from the tree, each validated leg by leg."""
+    """The reflections of ``receiver`` from the tree, each validated leg by leg.
+
+    ``grid`` is :func:`occluder_grid` of the scene; built here when not given,
+    which a caller with many receivers should not let happen.
+    """
     settings = settings or IsmSettings()
     receiver = np.asarray(receiver, dtype=float).reshape(3)
     normals, offsets, _, _ = _facet_arrays(scene)
     occluders = scene.occluder_vertices
-    occ_min = occluders.min(axis=1) if occluders.shape[0] else np.zeros((0, 3))
-    occ_max = occluders.max(axis=1) if occluders.shape[0] else np.zeros((0, 3))
+    if grid is None:
+        grid = occluder_grid(scene)
     n_images = tree.count
     max_order = tree.sequence.shape[1]
     # Points of every candidate path: [image, max_order + 2, 3], receiver-filled.
@@ -450,14 +477,7 @@ def paths_for(
             break
         # The leg from the near end to the hit point must be clear.
         hits = hit_points[alive[idx]]
-        blocked = _segment_hits(
-            near[still],
-            hits,
-            occluders,
-            occ_min,
-            occ_max,
-            strict=_strict(near[still], hits, settings),
-        )
+        blocked = _segment_hits(near[still], hits, occluders, grid, epsilon_m=settings.epsilon_m)
         alive[still[blocked]] = False
         kept = still[~blocked]
         hits = hits[~blocked]
@@ -473,12 +493,7 @@ def paths_for(
     kept = np.flatnonzero(alive)
     if kept.size:
         blocked = _segment_hits(
-            near[kept],
-            far[kept],
-            occluders,
-            occ_min,
-            occ_max,
-            strict=_strict(near[kept], far[kept], settings),
+            near[kept], far[kept], occluders, grid, epsilon_m=settings.epsilon_m
         )
         alive[kept[blocked]] = False
     kept = np.flatnonzero(alive)
@@ -495,19 +510,6 @@ def paths_for(
         points=points[kept],
         sequence=tree.sequence[kept],
     )
-
-
-def _strict(a: np.ndarray, b: np.ndarray, settings: IsmSettings) -> float:
-    """The parameter margin that shrinks every leg by ``epsilon_m`` at both ends.
-
-    One value for the batch, from its shortest leg, so no leg is shrunk by
-    less than epsilon; a very short leg is not tested at all.
-    """
-    lengths = np.linalg.norm(b - a, axis=1)
-    shortest = float(lengths.min()) if lengths.size else 1.0
-    if shortest <= 2.0 * settings.epsilon_m:
-        return 0.5
-    return float(settings.epsilon_m / shortest)
 
 
 def _gains(scene: DerivedScene, sequences: np.ndarray, lengths: np.ndarray) -> np.ndarray:

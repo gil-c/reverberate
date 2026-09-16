@@ -14,11 +14,15 @@ The direct ray hits are in the histogram too, and they are its scale: the
 renderer sets the tail so that the histogram's direct energy equals the
 rendered direct pulse's, band by band, which needs no detector theory.
 
-The surfaces are looked up through a uniform grid of cells, each holding the
-triangles whose box meets it, walked cell by cell along a segment. The same
-grid serves the image source model's occlusion tests. The twin here traces
-one ray at a time in Python and exists to test the kernel and to run the
-small scenes of the test suite; the storey runs on the card.
+**Everything here is written so the card can reproduce it to the bit.** The
+generator is an integer hash of (seed, ray, bounce, draw); directions come
+from rejection sampling with nothing but products, sums and square roots;
+and the histogram accumulates in 64 bit integers at a fixed scale, so the
+order in which rays add to a bin does not change the sum. The surfaces and
+the receivers are looked up through a uniform grid of cells walked cell by
+cell along a segment. The twin here traces one ray at a time in Python and
+exists to test the kernel and to run the small scenes of the test suite;
+the storey runs on the card.
 """
 
 from __future__ import annotations
@@ -32,13 +36,21 @@ from reverberate.mirror.geometry import DerivedScene
 from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
 
 __all__ = [
+    "HISTOGRAM_SCALE",
     "Histogram",
     "RaySettings",
     "UniformGrid",
     "build_grid",
-    "philox_directions",
+    "harmonics3",
+    "hash_uniform",
+    "ray_directions",
     "trace",
+    "triangle_grid",
 ]
+
+#: Energies are accumulated as integers of this scale: 2^40 per unit of the
+#: source's energy, so a ray of one millionth carries a million counts.
+HISTOGRAM_SCALE = float(2**40)
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,116 @@ class Histogram:
     def times_s(self) -> np.ndarray:
         return np.asarray((np.arange(self.energy.shape[1]) + 0.5) * self.bin_s)
 
+    @classmethod
+    def from_counts(
+        cls,
+        energy_counts: np.ndarray,
+        moment_counts: np.ndarray,
+        hits: np.ndarray,
+        *,
+        bin_s: float,
+        bands_hz: tuple[int, ...],
+        order: int,
+        rays: int,
+    ) -> Histogram:
+        """The integer accumulators back to energies."""
+        return cls(
+            energy=np.asarray(energy_counts, dtype=np.float64) / HISTOGRAM_SCALE,
+            moments=np.asarray(moment_counts, dtype=np.float64) / HISTOGRAM_SCALE,
+            hits=np.asarray(hits, dtype=np.int64),
+            bin_s=bin_s,
+            bands_hz=bands_hz,
+            order=order,
+            rays=rays,
+        )
+
+
+# --------------------------------------------------------------------------
+# the generator
+# --------------------------------------------------------------------------
+
+_M1 = np.uint64(0xFF51AFD7ED558CCD)
+_M2 = np.uint64(0xC4CEB9FE1A85EC53)
+_GOLDEN = np.uint64(0x9E3779B97F4A7C15)
+_BOUNCE = np.uint64(0xD6E8FEB86659FD93)
+_DRAW = np.uint64(0xA0761D6478BD642F)
+
+
+def _mix(x: np.ndarray) -> np.ndarray:
+    """MurmurHash3's 64 bit finaliser, on unsigned arrays that wrap."""
+    with np.errstate(over="ignore"):
+        x = x ^ (x >> np.uint64(33))
+        x = x * _M1
+        x = x ^ (x >> np.uint64(33))
+        x = x * _M2
+        x = x ^ (x >> np.uint64(33))
+    return np.asarray(x, dtype=np.uint64)
+
+
+def hash_uniform(seed: int, ray: np.ndarray, bounce: np.ndarray, draw: np.ndarray) -> np.ndarray:
+    """Uniforms in ``[0, 1)`` for (ray, bounce, draw) triples, the same on every machine.
+
+    53 bits of the hash over ``2^53``, so the value is exactly representable
+    and the card's integer arithmetic gives the same double.
+    """
+    ray_u = np.asarray(ray, dtype=np.uint64)
+    bounce_u = np.asarray(bounce, dtype=np.uint64)
+    draw_u = np.asarray(draw, dtype=np.uint64)
+    with np.errstate(over="ignore"):
+        key = _mix(np.uint64(seed) * _GOLDEN + ray_u)
+        state = _mix(key ^ (bounce_u * _BOUNCE) ^ (draw_u * _DRAW))
+    return np.asarray((state >> np.uint64(11)).astype(np.float64) / float(2**53))
+
+
+def ray_directions(count: int, seed: int, start: int = 0, *, bounce: int = 0) -> np.ndarray:
+    """Unit vectors for rays ``start`` to ``start + count``, by rejection in the cube.
+
+    Draws 0, 1, 2 of the ray's stream are one candidate; a candidate outside
+    the unit ball, or too close to its centre to normalise, moves to the
+    next three draws. Nothing but products, sums and one square root.
+    """
+    rays = np.arange(start, start + count, dtype=np.uint64)
+    out = np.zeros((count, 3))
+    pending = np.ones(count, dtype=bool)
+    for attempt in range(64):
+        idx = np.flatnonzero(pending)
+        if idx.size == 0:
+            break
+        base = 3 * attempt
+        bounces = np.full(idx.size, bounce)
+        u = hash_uniform(seed, rays[idx], bounces, np.full(idx.size, base))
+        v = hash_uniform(seed, rays[idx], bounces, np.full(idx.size, base + 1))
+        w = hash_uniform(seed, rays[idx], bounces, np.full(idx.size, base + 2))
+        p = np.stack([2.0 * u - 1.0, 2.0 * v - 1.0, 2.0 * w - 1.0], axis=1)
+        norm2 = p[:, 0] * p[:, 0] + p[:, 1] * p[:, 1] + p[:, 2] * p[:, 2]
+        ok = (norm2 <= 1.0) & (norm2 > 1e-8)
+        out[idx[ok]] = p[ok] / np.sqrt(norm2[ok])[:, None]
+        pending[idx[ok]] = False
+    return out
+
+
+def _lambert(normal: np.ndarray, seed: int, ray: int, bounce: int) -> np.ndarray:
+    """A direction about ``normal`` with a cosine distribution: a point of the disk, lifted.
+
+    Draws 1, 2, 3, 4 ... of the bounce (draw 0 decides the bounce's kind); a
+    point outside the disk moves to the next two draws.
+    """
+    helper = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    t1 = np.cross(normal, helper)
+    t1 = t1 / np.sqrt(t1[0] * t1[0] + t1[1] * t1[1] + t1[2] * t1[2])
+    t2 = np.cross(normal, t1)
+    one = np.array([ray])
+    at = np.array([bounce])
+    for attempt in range(64):
+        base = 1 + 2 * attempt
+        a = 2.0 * float(hash_uniform(seed, one, at, np.array([base]))[0]) - 1.0
+        b = 2.0 * float(hash_uniform(seed, one, at, np.array([base + 1]))[0]) - 1.0
+        r2 = a * a + b * b
+        if r2 <= 1.0:
+            z = np.sqrt(1.0 - r2)
+            return np.asarray(a * t1 + b * t2 + z * normal)
+    return np.asarray(normal)
+
 
 # --------------------------------------------------------------------------
 # the uniform grid
@@ -103,7 +225,7 @@ class Histogram:
 
 @dataclass(frozen=True)
 class UniformGrid:
-    """Triangles binned by the cells their boxes meet, in compressed rows."""
+    """Items binned by the cells their boxes meet, in compressed rows."""
 
     origin: np.ndarray
     cell_m: float
@@ -121,8 +243,11 @@ class UniformGrid:
             (index[..., 0] * self.shape[1] + index[..., 1]) * self.shape[2] + index[..., 2]
         )
 
-    def triangles_in(self, flat: int) -> np.ndarray:
+    def members_in(self, flat: int) -> np.ndarray:
         return np.asarray(self.members[self.offsets[flat] : self.offsets[flat + 1]])
+
+    def triangles_in(self, flat: int) -> np.ndarray:
+        return self.members_in(flat)
 
     def cells_along(self, a: np.ndarray, b: np.ndarray) -> list[int]:
         """The flat indices of the cells a segment passes through, in order (3D DDA)."""
@@ -156,25 +281,28 @@ class UniformGrid:
         return out
 
     def candidates(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """The union of the triangles in every cell a segment crosses."""
+        """The union of the members of every cell a segment crosses."""
         cells = self.cells_along(a, b)
         if not cells:
             return np.zeros(0, dtype=int)
-        return np.unique(np.concatenate([self.triangles_in(c) for c in cells]))
+        return np.unique(np.concatenate([self.members_in(c) for c in cells]))
 
 
-def build_grid(triangles: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndarray) -> UniformGrid:
-    """Bin ``triangles`` (``[n, 3, 3]``) into cells of ``cell_m`` covering ``lo`` to ``hi``."""
+def build_grid(
+    boxes_min: np.ndarray, boxes_max: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndarray
+) -> UniformGrid:
+    """Bin items by their boxes (``[n, 3]`` each) into cells of ``cell_m`` from ``lo`` to ``hi``."""
     lo = np.asarray(lo, dtype=float) - cell_m
     hi = np.asarray(hi, dtype=float) + cell_m
     counts_per_axis = np.maximum(np.ceil((hi - lo) / cell_m), 1).astype(int)
     shape = (int(counts_per_axis[0]), int(counts_per_axis[1]), int(counts_per_axis[2]))
-    if triangles.shape[0] == 0:
+    cells = int(np.prod(shape))
+    if boxes_min.shape[0] == 0:
         return UniformGrid(
-            lo, cell_m, shape, np.zeros(int(np.prod(shape)) + 1, dtype=int), np.zeros(0, dtype=int)
+            lo, cell_m, shape, np.zeros(cells + 1, dtype=int), np.zeros(0, dtype=int)
         )
-    tmin = np.floor((triangles.min(axis=1) - lo) / cell_m).astype(int)
-    tmax = np.floor((triangles.max(axis=1) - lo) / cell_m).astype(int)
+    tmin = np.floor((boxes_min - lo) / cell_m).astype(int)
+    tmax = np.floor((boxes_max - lo) / cell_m).astype(int)
     limit = np.asarray(shape) - 1
     tmin = np.clip(tmin, 0, limit)
     tmax = np.clip(tmax, 0, limit)
@@ -182,30 +310,51 @@ def build_grid(triangles: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndar
     counts = np.prod(spans, axis=1)
     total = int(counts.sum())
     cell_ids = np.empty(total, dtype=int)
-    tri_ids = np.empty(total, dtype=int)
+    item_ids = np.empty(total, dtype=int)
+    single = counts == 1
+    n_single = int(single.sum())
     cursor = 0
-    # Most triangles fit one cell; the loop is over the few that span many.
-    for t in np.argsort(counts, kind="stable"):
-        n = int(counts[t])
-        if n == 1:
-            cell_ids[cursor] = (tmin[t, 0] * shape[1] + tmin[t, 1]) * shape[2] + tmin[t, 2]
-            tri_ids[cursor] = t
-            cursor += 1
-            continue
-        xs = np.arange(tmin[t, 0], tmax[t, 0] + 1)
-        ys = np.arange(tmin[t, 1], tmax[t, 1] + 1)
-        zs = np.arange(tmin[t, 2], tmax[t, 2] + 1)
+    if n_single:
+        t = np.flatnonzero(single)
+        cell_ids[:n_single] = (tmin[t, 0] * shape[1] + tmin[t, 1]) * shape[2] + tmin[t, 2]
+        item_ids[:n_single] = t
+        cursor = n_single
+    for item in np.flatnonzero(~single):
+        n = int(counts[item])
+        xs = np.arange(tmin[item, 0], tmax[item, 0] + 1)
+        ys = np.arange(tmin[item, 1], tmax[item, 1] + 1)
+        zs = np.arange(tmin[item, 2], tmax[item, 2] + 1)
         grid_x, grid_y, grid_z = np.meshgrid(xs, ys, zs, indexing="ij")
         cell_ids[cursor : cursor + n] = ((grid_x * shape[1] + grid_y) * shape[2] + grid_z).ravel()
-        tri_ids[cursor : cursor + n] = t
+        item_ids[cursor : cursor + n] = int(item)
         cursor += n
-    order = np.lexsort((tri_ids, cell_ids))
+    order = np.lexsort((item_ids, cell_ids))
     cell_ids = cell_ids[order]
-    tri_ids = tri_ids[order]
-    offsets = np.zeros(int(np.prod(shape)) + 1, dtype=int)
+    item_ids = item_ids[order]
+    offsets = np.zeros(cells + 1, dtype=int)
     np.add.at(offsets, cell_ids + 1, 1)
     offsets = np.cumsum(offsets)
-    return UniformGrid(lo, cell_m, shape, offsets, tri_ids)
+    return UniformGrid(lo, cell_m, shape, offsets, item_ids)
+
+
+def grid_like(grid: UniformGrid, boxes_min: np.ndarray, boxes_max: np.ndarray) -> UniformGrid:
+    """Other items binned into the cells of an existing grid: same origin, cell and shape."""
+    cell = grid.cell_m
+    lo = grid.origin + cell
+    hi = grid.origin + cell * (np.asarray(grid.shape, dtype=float) - 1.0)
+    other = build_grid(boxes_min, boxes_max, cell, lo, hi)
+    if other.shape != grid.shape or not np.allclose(other.origin, grid.origin):
+        raise RuntimeError(f"grid_like built {other.shape} at {other.origin}, not {grid.shape}")
+    return other
+
+
+def triangle_grid(
+    triangles: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndarray
+) -> UniformGrid:
+    """The grid of ``[n, 3, 3]`` triangles."""
+    if triangles.shape[0] == 0:
+        return build_grid(np.zeros((0, 3)), np.zeros((0, 3)), cell_m, lo, hi)
+    return build_grid(triangles.min(axis=1), triangles.max(axis=1), cell_m, lo, hi)
 
 
 # --------------------------------------------------------------------------
@@ -213,27 +362,36 @@ def build_grid(triangles: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndar
 # --------------------------------------------------------------------------
 
 
-def philox_directions(count: int, seed: int, start: int = 0) -> np.ndarray:
-    """Unit vectors for rays ``start`` to ``start + count``, each from its own counter.
+def harmonics3(direction: np.ndarray) -> np.ndarray:
+    """N3D real harmonics to order 3 of one unit vector, ACN order, as the kernel evaluates them.
 
-    numpy's Philox with the ray index as the key: ray ``i`` draws the same
-    two uniforms whichever batch it is traced in.
+    The same polynomials in the same order of operations as the CUDA source,
+    so a deposit rounds to the same integer on the card and on the host.
+    Checked against :func:`reverberate.spatial.sh.real_sh` by the tests.
     """
-    out = np.empty((count, 3))
-    for i in range(count):
-        gen = np.random.Generator(np.random.Philox(key=seed + 0, counter=[start + i, 0, 0, 0]))
-        u, v = gen.random(2)
-        z = 1.0 - 2.0 * u
-        r = np.sqrt(max(0.0, 1.0 - z * z))
-        phi = 2.0 * np.pi * v
-        out[i] = (r * np.cos(phi), r * np.sin(phi), z)
+    x, y, z = float(direction[0]), float(direction[1]), float(direction[2])
+    s3 = np.sqrt(3.0)
+    s5 = np.sqrt(5.0)
+    s7 = np.sqrt(7.0)
+    s15 = np.sqrt(15.0)
+    out = np.empty(16)
+    out[0] = 1.0
+    out[1] = s3 * y
+    out[2] = s3 * z
+    out[3] = s3 * x
+    out[4] = s15 * x * y
+    out[5] = s15 * y * z
+    out[6] = s5 * 0.5 * (3.0 * z * z - 1.0)
+    out[7] = s15 * x * z
+    out[8] = s15 * 0.5 * (x * x - y * y)
+    out[9] = s7 * np.sqrt(5.0 / 8.0) * y * (3.0 * x * x - y * y)
+    out[10] = s7 * np.sqrt(15.0) * x * y * z
+    out[11] = s7 * np.sqrt(3.0 / 8.0) * y * (5.0 * z * z - 1.0)
+    out[12] = s7 * 0.5 * z * (5.0 * z * z - 3.0)
+    out[13] = s7 * np.sqrt(3.0 / 8.0) * x * (5.0 * z * z - 1.0)
+    out[14] = s7 * np.sqrt(15.0) * 0.5 * z * (x * x - y * y)
+    out[15] = s7 * np.sqrt(5.0 / 8.0) * x * (x * x - 3.0 * y * y)
     return out
-
-
-def _ray_uniforms(seed: int, ray: int, bounce: int, count: int) -> np.ndarray:
-    """The uniforms of one bounce of one ray, from the same counter family."""
-    gen = np.random.Generator(np.random.Philox(key=seed, counter=[ray, bounce + 1, 0, 0]))
-    return np.asarray(gen.random(count))
 
 
 def _nearest_hit(
@@ -265,18 +423,6 @@ def _nearest_hit(
         return np.inf, -1
     best = int(np.argmin(np.where(hit, t, np.inf)))
     return float(t[best]), int(candidates[best])
-
-
-def _lambert(normal: np.ndarray, u: float, v: float) -> np.ndarray:
-    """A direction about ``normal`` with a cosine distribution."""
-    z = np.sqrt(u)
-    r = np.sqrt(max(0.0, 1.0 - u))
-    phi = 2.0 * np.pi * v
-    helper = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    t1 = np.cross(normal, helper)
-    t1 /= np.linalg.norm(t1)
-    t2 = np.cross(normal, t1)
-    return np.asarray(r * np.cos(phi) * t1 + r * np.sin(phi) * t2 + z * normal)
 
 
 def _sphere_crossings(
@@ -317,18 +463,18 @@ def trace(
     scattering = scene.materials.scattering
     bands = absorption.shape[1]
     if grid is None:
-        pad = settings.sound_speed_m_s * settings.duration_s
-        lo = np.minimum(scene.bmin, np.minimum(receivers.min(axis=0), source)) - 0.0
-        hi = np.maximum(scene.bmax, np.maximum(receivers.max(axis=0), source)) + 0.0
-        del pad
-        grid = build_grid(triangles, settings.cell_m, lo, hi)
+        lo = np.minimum(scene.bmin, np.minimum(receivers.min(axis=0), source))
+        hi = np.maximum(scene.bmax, np.maximum(receivers.max(axis=0), source))
+        grid = triangle_grid(triangles, settings.cell_m, lo, hi)
     reach = settings.sound_speed_m_s * settings.duration_s
     bins = int(np.ceil(settings.duration_s / settings.bin_s))
     channels = channel_count(settings.order)
-    energy = np.zeros((receivers.shape[0], bins, bands))
-    moments = np.zeros((receivers.shape[0], bins, bands, channels))
+    energy = np.zeros((receivers.shape[0], bins, bands), dtype=np.int64)
+    moments = np.zeros((receivers.shape[0], bins, bands, channels), dtype=np.int64)
     hits = np.zeros((receivers.shape[0], bins), dtype=np.int64)
-    directions = philox_directions(settings.rays, settings.seed)
+    directions = ray_directions(settings.rays, settings.seed)
+    floor = settings.energy_floor / settings.rays
+    one = np.array([0])
     for ray in range(settings.rays):
         position = source.copy()
         direction = directions[ray]
@@ -345,13 +491,21 @@ def trace(
                 position, direction, segment, receivers, settings.receiver_radius_m
             )
             if which.size:
-                arrival = scene_to_ambisonic((-direction)[None, :])
-                harmonics = real_sh(settings.order, arrival)[0]
+                arrival = scene_to_ambisonic((-direction)[None, :])[0]
+                harmonics = (
+                    harmonics3(arrival)[:channels]
+                    if settings.order <= 3
+                    else real_sh(settings.order, arrival[None, :])[0]
+                )
+                counts = np.rint(carried * HISTOGRAM_SCALE).astype(np.int64)
+                weighted = np.rint(carried[:, None] * harmonics[None, :] * HISTOGRAM_SCALE).astype(
+                    np.int64
+                )
                 for r, entry in zip(which, entries, strict=True):
                     at = int((travelled + entry) / settings.sound_speed_m_s / settings.bin_s)
                     if at < bins:
-                        energy[r, at] += carried
-                        moments[r, at] += carried[:, None] * harmonics[None, :]
+                        energy[r, at] += counts
+                        moments[r, at] += weighted
                         hits[r, at] += 1
             if triangle < 0 or travelled + distance >= reach:
                 break
@@ -359,21 +513,23 @@ def trace(
             position = position + direction * distance
             label = int(labels[triangle])
             carried = carried * (1.0 - absorption[label])
-            if np.all(carried < settings.energy_floor / settings.rays):
+            if np.all(carried < floor):
                 break
             normal = normals[triangle]
             if float(normal @ direction) > 0.0:
                 normal = -normal
-            u, v, w = _ray_uniforms(settings.seed, ray, bounce, 3)
-            if w < scattering[label]:
-                direction = _lambert(normal, u, v)
+            kind = float(
+                hash_uniform(settings.seed, np.array([ray]), np.array([bounce + 1]), one)[0]
+            )
+            if kind < scattering[label]:
+                direction = _lambert(normal, settings.seed, ray, bounce + 1)
             else:
                 direction = direction - 2.0 * float(direction @ normal) * normal
             last_triangle = triangle
-    return Histogram(
-        energy=energy,
-        moments=moments,
-        hits=hits,
+    return Histogram.from_counts(
+        energy,
+        moments,
+        hits,
         bin_s=settings.bin_s,
         bands_hz=scene.materials.bands_hz,
         order=settings.order,
