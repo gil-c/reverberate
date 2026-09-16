@@ -8,6 +8,7 @@ import { createPlayers, createSourceList } from "./players.js";
 import { setupPanels } from "./panels.js";
 import { createPlots } from "./plots.js";
 import { createDashboard } from "./dashboard.js";
+import { createMirrorLayers } from "./mirror.js";
 import { createPoints } from "./points.js";
 import { bindSettings, loadSettings } from "./settings.js";
 import { setupFolds } from "./folds.js";
@@ -31,6 +32,13 @@ setupFolds($("#left"));
 const glyphs = createSourceGlyphs(THREE, viewport);
 viewport.overlays.add(glyphs.group);
 const points = createPoints(viewport);
+const mirrorLayers = createMirrorLayers(THREE, viewport, {
+  facts: $("#mirror-facts"),
+  note: $("#mirror-note"),
+});
+for (const box of document.querySelectorAll("[data-mirror]")) {
+  box.addEventListener("change", () => mirrorLayers.setWanted(box.dataset.mirror, box.checked));
+}
 const minimap = createMinimap($("#map"), {
   onMove: (x, z) => viewport.moveTo({ x, z }),
   onSelectSource: (id) => selectSource(id),
@@ -64,6 +72,7 @@ const spatial = createSpatial({
     if (id === state.selected) {
       showPlots(id, position);
       dashboard.show(id, position);
+      mirrorLayers.showCell(id, position);
     }
   },
   onStatus: (id, status) => {
@@ -163,6 +172,9 @@ function selectSource(id) {
   if (source && source.cell !== null && source.cell !== undefined) {
     showPlots(id, source.cell);
     dashboard.show(id, source.cell);
+    mirrorLayers.showCell(id, source.cell);
+  } else {
+    mirrorLayers.showCell(null, null);
   }
   spatial.update(viewport.pose(), audibleIds());
 }
@@ -400,6 +412,7 @@ async function openRun(run) {
   points.set([]);
   minimap.setPoints([]);
   viewport.setAcoustic(null);
+  mirrorLayers.clear();
   plots.clear();
   lastRender = null;
   $("#hud-tier").textContent = "";
@@ -422,6 +435,7 @@ async function openRun(run) {
     }));
     dashboard.clear();
     state.selected = state.sources.length ? state.sources[0].id : null;
+    mirrorLayers.load(data).catch((error) => busy(`mirror audit: ${error.message}`));
     meshViews = createMeshViews(THREE, data, () => settings.nearM, (status) => {
       $("#hud-tier").textContent = state.view === "acoustic" ? tierText(status) : "";
     });

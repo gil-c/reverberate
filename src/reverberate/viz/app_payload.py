@@ -68,6 +68,10 @@ class WalkRun:
     #: Band limit in hertz, as text because it is a JSON key, to the payload
     #: directory relative to ``path``.
     meshes: dict[str, str] = field(default_factory=dict)
+    #: The mirror's audit, when the run carries one: ``audit`` names the
+    #: directory of the derived geometry's layers, ``paths`` maps a source id
+    #: to the paths file, both relative to ``path``.
+    mirror: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def read(cls, path: Path) -> WalkRun:
@@ -99,6 +103,7 @@ class WalkRun:
             dwelling=dwelling,
             sources=sources,
             meshes={str(k): str(v) for k, v in (manifest.get("meshes") or {}).items()},
+            mirror=dict(manifest.get("mirror") or {}),
         )
 
 
@@ -196,6 +201,33 @@ def _metrics_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[
     return {"url": f"metrics/{source.get('id')}.json"}
 
 
+def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
+    """Link the mirror's audit layers and paths files into the site."""
+    if not run.mirror:
+        return None
+    record: dict[str, Any] = {"key": run.mirror.get("key")}
+    audit = run.mirror.get("audit")
+    if audit and (run.path / audit / "layers.json").is_file():
+        link = target / "mirror" / "audit"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        elif link.exists():
+            shutil.rmtree(link)
+        link.symlink_to((run.path / audit).resolve(), target_is_directory=True)
+        record["audit"] = "mirror/audit"
+    paths: dict[str, str] = {}
+    for source_id, relative in (run.mirror.get("paths") or {}).items():
+        source_file = run.path / str(relative)
+        if source_file.is_file():
+            site = target / "mirror" / "paths"
+            site.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, site / f"{source_id}.json")
+            paths[str(source_id)] = f"mirror/paths/{source_id}.json"
+    record["paths"] = paths
+    return record
+
+
 def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
     """Write ``run.json`` under ``target`` and link the payloads it names."""
     target = Path(target)
@@ -221,6 +253,7 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
             for fmax, relative in sorted(run.meshes.items(), key=lambda item: float(item[0]))
             if (record := _mesh_record(run, fmax, relative, target)) is not None
         },
+        "mirror": _mirror_record(run, target),
     }
     (target / "run.json").write_text(json.dumps(record))
     return record
