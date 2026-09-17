@@ -224,10 +224,11 @@ PERCEPTUAL = Targets()
 
 #: What one point resolves, measured 2026-09-18 on hssd_0076 by judging one
 #: mirror against another that differs only in its ray seed (24 points,
-#: 3e5 rays, criteria from 1 kHz). The medians of that judgement are the
-#: floor: reverberation time 0.080, early decay time 0.102, colour 0.81 dB,
-#: seam 3.12 dB, sector energy 1.61 dB, order energy 0.36 dB, late
-#: coherence 0.024, mixing time 0.087. Three targets sat under their own
+#: 3e5 rays, criteria from 1 kHz, the settings the field was rendered
+#: with). The medians of that judgement are the floor: reverberation time
+#: 0.084, early decay time 0.088, colour 1.06 dB, seam 3.03 dB, sector
+#: energy 1.58 dB, order energy 0.30 dB, late coherence 0.016, early
+#: coherence 0.030, mixing time 0.083. Four targets sat under their own
 #: floor and move here to the next round number above it; the rest already
 #: stood over it and keep the perceptual number.
 #:
@@ -248,7 +249,7 @@ PER_POINT = Targets(
     mixing_time_relative=0.20,
     t30_relative=0.10,
     edt_relative=0.15,
-    tail_colour_db=1.0,
+    tail_colour_db=1.5,
     order_energy_db=1.0,
     sector_energy_db=2.0,
     late_coherence_error=0.05,
