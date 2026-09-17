@@ -255,3 +255,21 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   The likeliest cause is that a shorter geodesic flips which paths survive
   the "shorter than every edge" test and changes the whole set. That is a
   session of its own; `snap_corners` stays off until it has had one.
+- **What snapping cost was a counting rule, and it is fixed.** Pulling the
+  chain tight takes the kink out of a bend, and a bend was counted by the
+  kink it had left (`min_detour_m`, there to reject corners the grid
+  invented). 115 of the 185 shadowed points lost at least one bend that way:
+  the median count fell from 2 to 1 and the loss at 2 kHz from 28.7 to
+  18.2 dB, while the loss per counted bend held at 15 to 18 dB. A corner
+  that stands on a selected edge is a bend whatever kink is left, and with
+  that rule `snap_corners` is on: on 32 shadowed points the onset's
+  direction error goes from 4.31 to 1.40 degrees, its level error from 1.61
+  to 0.92 dB, the interaural level error from 2.12 to 1.49 dB, the tail's
+  colour from 8.53 to 8.40 dB, and the share of criteria met and the early
+  decay time do not move (0.3164 and 0.186).
+- **Which detour the loss is read from** (`loss_from`) was measured too:
+  keeping the grid's own slack for a snapped bend reads 0.3164 of the
+  criteria, using what is left after tightening 0.3105, and one loss from
+  the whole way round against the straight line 0.3008 (early decay time
+  0.186, 0.200, 0.375). The grid's slack wins because it is the only one of
+  the three that still knows how deep in the shadow the receiver is.

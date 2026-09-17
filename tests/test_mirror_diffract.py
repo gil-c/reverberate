@@ -179,8 +179,10 @@ def test_a_corner_snaps_onto_the_edge_it_stands_near() -> None:
     middle = 0.5 * (edges.a[edge] + edges.b[edge])
     off = np.array([0.12, 0.0, 0.0])
     corners = [middle + np.array([1.0, 0.0, 1.0]), middle + off, middle - np.array([1.0, 0.0, 1.0])]
-    moved = snap_to_edges([c.copy() for c in corners], edges, settings)
+    moved, on_edge = snap_to_edges([c.copy() for c in corners], edges, settings)
     assert len(moved) == 3
+    # The corner that moved is the one reported as standing on an edge.
+    assert on_edge == [False, True, False]
     np.testing.assert_allclose(moved[0], corners[0])
     np.testing.assert_allclose(moved[2], corners[2])
     # The middle point now lies on an edge, and the way round is no longer.
@@ -199,6 +201,7 @@ def test_a_corner_snaps_onto_the_edge_it_stands_near() -> None:
     assert walk(moved) <= walk(corners) + 1e-9
 
     # With no edge within reach the corners are left exactly where they were.
-    far = snap_to_edges([c.copy() for c in corners], edges, DiffractionSettings(snap_m=1e-6))
+    far, none = snap_to_edges([c.copy() for c in corners], edges, DiffractionSettings(snap_m=1e-6))
+    assert not any(none)
     for a, b in zip(far, corners, strict=True):
         np.testing.assert_allclose(a, b)
