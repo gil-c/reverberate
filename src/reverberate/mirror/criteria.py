@@ -231,12 +231,15 @@ PERCEPTUAL = Targets()
 #: mirror against another that differs only in its ray seed (24 points,
 #: 3e5 rays, criteria from 1 kHz, the settings the field was rendered
 #: with). The medians of that judgement are the floor: reverberation time
-#: 0.084, early decay time 0.088, colour 1.06 dB, seam 1.09 dB (on the 80 ms
+#: 0.040 and early decay time 0.049 (on the median over bands that replaced
+#: the worst of them), colour 1.06 dB, seam 1.09 dB (on the 80 ms
 #: window and the median over bands that replaced the 10 ms maximum), sector
 #: energy 1.58 dB, order energy 0.30 dB, late coherence 0.016, early
 #: coherence 0.030, mixing time 0.083. Four targets sat under their own
 #: floor and move here to the next round number above it; the rest already
-#: stood over it and keep the perceptual number.
+#: stood over it and keep the perceptual number. The reverberation time is
+#: back at the 5 per cent a listener hears, because its floor came down to
+#: 0.040 when the reading stopped being the worst band.
 #:
 #: The early criteria have no floor of this kind at all: the image tree is
 #: the same in both runs, so recall, precision, time, level and the two
@@ -253,8 +256,8 @@ PER_POINT = Targets(
     ild_error_db=1.0,
     early_coherence_error=0.075,
     mixing_time_relative=0.20,
-    t30_relative=0.10,
-    edt_relative=0.15,
+    t30_relative=0.05,
+    edt_relative=0.075,
     tail_colour_db=1.5,
     order_energy_db=1.0,
     sector_energy_db=2.0,
@@ -1026,11 +1029,21 @@ def focus_bands(
 
 
 def _relative(a: np.ndarray, b: np.ndarray) -> float:
-    """Largest relative error over the bands where both are finite."""
+    """The median relative error over the bands where both are finite.
+
+    A decay time is not a colour. Nobody hears "the worst octave's
+    reverberation time"; ISO 3382 reports one per band and a room is quoted
+    by the middle of them. Taking the worst of four put the noise of all
+    four into the reading: on 0076 two mirrors that differ only in their ray
+    seed read reverberation times 8.4 per cent apart on the worst band and
+    4.0 on the median, and the mirror's own distance to the reference 10.2
+    against 5.5. Halving the floor is what lets the 5 per cent a listener
+    hears be asked of one point at all.
+    """
     mask = np.isfinite(a) & np.isfinite(b) & (a > 0)
     if not mask.any():
         return float("nan")
-    return float(np.max(np.abs(a[mask] - b[mask]) / a[mask]))
+    return float(np.median(np.abs(a[mask] - b[mask]) / a[mask]))
 
 
 def _median_abs(a: np.ndarray, b: np.ndarray) -> float:

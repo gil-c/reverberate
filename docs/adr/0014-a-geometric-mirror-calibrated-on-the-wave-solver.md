@@ -296,3 +296,22 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   1.5. The worst band is the right reading for a colour, where one band out
   of place is heard; it is the wrong one for a step, where the worst of
   four bands carries the noise of all four.
+- **The decay times were read on the worst band, and a decay time is not a
+  colour.** Nobody hears "the worst octave's reverberation time"; ISO 3382
+  reports one per band and a room is quoted by the middle of them. Taking
+  the worst of four put the noise of all four into the reading. Measured on
+  24 points, floor then distance to the reference:
+
+  | statistic | floor | error | ratio |
+  | --- | --- | --- | --- |
+  | reverberation time, worst band | 0.084 | 0.102 | 1.21 |
+  | reverberation time, median band | **0.040** | 0.055 | 1.37 |
+  | early decay time, worst band | 0.088 | 0.260 | 2.95 |
+  | early decay time, median band | **0.049** | 0.132 | 2.71 |
+
+  Both read the median from now on. What that buys is the threshold: with
+  the worst band the 5 per cent a listener hears sat under a floor of 8.4
+  per cent and could not be asked of one point at all; on the median the
+  floor is 4.0 per cent and **the per point target for the reverberation
+  time goes back to the perceptual 0.05**, with the early decay time at
+  0.075, the next round number over its own 0.049.
