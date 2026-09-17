@@ -286,10 +286,18 @@ vectorised grid build and the render on the card, one source of hssd_0076
 | render and float32 write of 437 points | 68.0 s | 67.6 s | 64.7 s | 61.8 s |
 | **total** | **126 s** | **109 s** | **102 s** | **96 s** |
 
+The same day, after laying the pulses on the host, drawing the tail's
+directions on the card and applying the low cut as a spectrum (1e-13 of
+the peak from the recursion), on an RTX 3090 with a 4.4 GHz host
+(0.133 USD/h quoted): **68 s with 1e5 rays, 90 s with 3e5**; the render
+and write of the 437 points 42 s (66 ms a point: early part 12 ms, tail
+37 ms, air 7 ms, write 16 to 26 ms), paths 7.6 s, diffraction 4.4 s.
+
 Deriving the scene from the export takes 4.8 s on the laptop; writing the
 field in the reference's layout 8.5 s. At the billed rate a campaign is 0.4
 to 0.6 US cents, against 1.06 USD of machine time for the optimised wave
-campaign of the same storey (68 min on 2 x A100): 1/260 to 1/300. The card
+campaign of the same storey (68 min on 2 x A100): 1/260 to 1/300, and
+about 1/350 after the render changes above. The card
 phase alone, through the CLI with 3e5 rays, took 1.1 min. Before these
 changes the paths alone took 435 s and the rays 323 s (1e6).
 
