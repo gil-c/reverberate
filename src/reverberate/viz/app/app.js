@@ -1,6 +1,6 @@
 /** Boot: wire the panels, the viewport, the plan, the sound and the run. */
 import { createViewport, roomAt } from "./viewport.js";
-import { createMeshViews } from "./grid.js";
+import { clippedAt, createMeshViews } from "./grid.js";
 import { createSourceGlyphs } from "./sources.js";
 import { createMinimap } from "./minimap.js";
 import { createListenerTab } from "./listener.js";
@@ -9,6 +9,7 @@ import { setupPanels } from "./panels.js";
 import { createPlots } from "./plots.js";
 import { createDashboard } from "./dashboard.js";
 import { createMirrorLayers } from "./mirror.js";
+import { createAuditPanel } from "./audit.js";
 import { createPoints } from "./points.js";
 import { bindSettings, loadSettings } from "./settings.js";
 import { setupFolds } from "./folds.js";
@@ -32,12 +33,68 @@ setupFolds($("#left"));
 const glyphs = createSourceGlyphs(THREE, viewport);
 viewport.overlays.add(glyphs.group);
 const points = createPoints(viewport);
-const mirrorLayers = createMirrorLayers(THREE, viewport, {
-  facts: $("#mirror-facts"),
-  note: $("#mirror-note"),
+// The mirror's audit is a view of its own, beside colour and wave.
+const mirrorLayers = createMirrorLayers(THREE, { onLoaded: () => viewport.invalidate() });
+mirrorLayers.onRedraw(() => viewport.invalidate());
+viewport.setMirror(mirrorLayers.group);
+viewport.onResize((width, height) => mirrorLayers.setSize(width, height));
+viewport.resize();
+const audit = createAuditPanel($("#audit"), THREE, {
+  onHighlight: () => viewport.invalidate(),
+  onMirrorSwitch: (name, on) => {
+    mirrorLayers.setWanted(name, on);
+    if (on && (name === "reflectors" || name === "occluders") && !mirrorLayers.loaded(name)) {
+      busy(`loading mirror ${name}`);
+      mirrorLayers.ensure().then(() => busy(""));
+    }
+  },
+  onColourBy: (mode) => mirrorLayers.setColourBy(mode),
 });
-for (const box of document.querySelectorAll("[data-mirror]")) {
-  box.addEventListener("change", () => mirrorLayers.setWanted(box.dataset.mirror, box.checked));
+// A click without a drag on an audit view names the face under the cursor.
+const pickRay = new THREE.Raycaster();
+let downAt = null;
+viewport.canvas.addEventListener("pointerdown", (event) => {
+  downAt = [event.clientX, event.clientY];
+});
+viewport.canvas.addEventListener("pointerup", (event) => {
+  const start = downAt;
+  downAt = null;
+  if (!start || Math.hypot(event.clientX - start[0], event.clientY - start[1]) > 4) return;
+  if (state.view !== "acoustic" && state.view !== "mirror") return;
+  const rect = viewport.canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  pickRay.setFromCamera(ndc, viewport.camera);
+  const meshes =
+    state.view === "mirror" ? mirrorLayers.pickable() : grid ? grid.group.children.filter((m) => m.visible) : [];
+  const hit = pickRay
+    .intersectObjects(meshes, false)
+    .find((h) => !clippedAt(h.object.userData.clip, h.point));
+  if (!hit) {
+    audit.pick(null);
+    return;
+  }
+  const value = hit.object.geometry.attributes.aLabel.getX(hit.face.a);
+  const label = value >= 0 ? audit.labels()[value] : null;
+  if (label === null || label === undefined) {
+    busy(value === -2 ? "a sealed inside" : "a rigid face, no material");
+    audit.pick(null);
+    return;
+  }
+  busy("");
+  if (state.view === "mirror" && mirrorLayers.isReflectors(hit.object)) {
+    audit.pick({ label, layer: "reflectors", facet: mirrorLayers.facetOf(Math.floor(hit.faceIndex / 2)) });
+  } else {
+    audit.pick({ label, layer: state.view === "mirror" ? "occluders" : "grid" });
+  }
+});
+
+/** The mirror's paths at the selected source's cell, drawn and counted. */
+function showMirrorCell(id, position) {
+  mirrorLayers.showCell(id, position);
+  audit.setCell(id, position, mirrorLayers.pathsAt(id, position));
 }
 const minimap = createMinimap($("#map"), {
   onMove: (x, z) => viewport.moveTo({ x, z }),
@@ -72,7 +129,7 @@ const spatial = createSpatial({
     if (id === state.selected) {
       showPlots(id, position);
       dashboard.show(id, position);
-      mirrorLayers.showCell(id, position);
+      showMirrorCell(id, position);
     }
   },
   onStatus: (id, status) => {
@@ -174,9 +231,9 @@ function selectSource(id) {
   if (source && source.cell !== null && source.cell !== undefined) {
     showPlots(id, source.cell);
     dashboard.show(id, source.cell);
-    mirrorLayers.showCell(id, source.cell);
+    showMirrorCell(id, source.cell);
   } else {
-    mirrorLayers.showCell(null, null);
+    showMirrorCell(null, null);
   }
   spatial.update(viewport.pose(), audibleIds());
 }
@@ -278,6 +335,7 @@ function armSettle() {
 // --- view and mesh selectors ----------------------------------------------------
 let meshViews = null;
 let grid = null;
+let runData = null; // run.json of the run open
 // Bumped on every run change, so a grid or a field still loading for the
 // old run is dropped rather than attached to the new one.
 let generation = 0;
@@ -291,6 +349,8 @@ const tierText = (status) => {
 function renderViewButtons() {
   for (const button of $("#view").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.view === state.view);
+    if (button.dataset.view === "acoustic") button.disabled = !meshViews || !meshViews.bands.length;
+    if (button.dataset.view === "mirror") button.disabled = !mirrorLayers.record();
   }
   $("#fmax").replaceChildren(
     ...(meshViews ? meshViews.bands : []).map((band) => {
@@ -303,7 +363,9 @@ function renderViewButtons() {
       return button;
     })
   );
-  $("#fmax").style.opacity = state.view === "acoustic" ? 1 : 0.45;
+  // The band limits belong to the wave view alone.
+  $("#fmax").hidden = state.view !== "acoustic";
+  $("#fmax-note").hidden = state.view !== "acoustic";
 }
 $("#view").addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -312,10 +374,18 @@ $("#view").addEventListener("click", (event) => {
 
 function setView(view) {
   if (view === "acoustic" && !meshViews) return;
+  if (view === "mirror" && !mirrorLayers.record()) return;
   state.view = view;
   if (view === "acoustic") reconcileMesh();
   else $("#hud-tier").textContent = "";
+  if (view === "mirror") {
+    if (["reflectors", "occluders"].some((n) => mirrorLayers.wanted[n] && !mirrorLayers.loaded(n))) {
+      busy("loading the mirror's scene");
+      mirrorLayers.ensure().then(() => busy(""), (error) => busy(`mirror audit: ${error.message}`));
+    }
+  }
   viewport.show(state.view);
+  audit.setMode(view);
   renderViewButtons();
 }
 
@@ -334,6 +404,7 @@ async function setFmax(band) {
   if (mine !== generation || state.fmax !== band) return;
   busy("");
   viewport.setAcoustic(grid.group);
+  audit.setWave(runData ? runData.meshes[band] : null, band);
   followGrid(viewport.pose(), true);
 }
 
@@ -425,13 +496,17 @@ async function openRun(run) {
   plots.clear();
   lastRender = null;
   $("#hud-tier").textContent = "";
-  if (state.view === "acoustic") setView("colour");
+  if (state.view !== "colour") setView("colour");
+  runData = null;
+  audit.setWave(null);
+  audit.setMirror(null);
   state.sources = [];
   state.selected = null;
   if (run) {
     const data = await fetch(`${run.url}/run.json`).then((r) => r.json());
     if (state.run !== run) return;
     data.baseUrl = run.url;
+    runData = data;
     state.sources = data.sources.map((source, i) => ({
       ...source,
       on: true,
@@ -445,11 +520,18 @@ async function openRun(run) {
     }));
     dashboard.clear();
     state.selected = state.sources.length ? state.sources[0].id : null;
-    mirrorLayers.load(data).catch((error) => busy(`mirror audit: ${error.message}`));
+    const mine = generation;
+    mirrorLayers
+      .load(data)
+      .then((check) => {
+        if (mine !== generation) return;
+        audit.setMirror(check);
+        renderViewButtons();
+      })
+      .catch((error) => busy(`mirror audit: ${error.message}`));
     meshViews = createMeshViews(THREE, data, () => settings.nearM, (status) => {
       $("#hud-tier").textContent = state.view === "acoustic" ? tierText(status) : "";
     });
-    const mine = generation;
     for (const source of state.sources.filter((s) => s.field)) {
       engine.setLoop(source.id, true);
       engine.setVolume(source.id, source.volume);
@@ -457,6 +539,8 @@ async function openRun(run) {
         .then((field) => {
           if (mine !== generation) return;
           source.waveField = field;
+          // The mirror was handed the reference field's lattice as its receivers.
+          if (source.mirror || source.mirror_c) mirrorLayers.setReceivers(field.index.positions);
           for (const mirror of [source.mirrorField, source.mirrorFieldC]) {
             if (mirror) plots.shareReference(mirror, field);
           }

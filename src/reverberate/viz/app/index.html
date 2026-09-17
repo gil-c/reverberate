@@ -33,25 +33,37 @@
           <section class="fold" data-fold="view">
             <button type="button" class="fold-head"><span class="label">View</span><i></i></button>
             <div class="fold-body stack">
-              <div class="seg" id="view">
+              <div class="seg" id="view" title="Colour: the furnished model. Wave: the grid the wave solver read. Mirror: the scene the mirror read.">
                 <button type="button" class="on" data-view="colour">Colour</button>
-                <button type="button" data-view="acoustic">Acoustic</button>
+                <button type="button" data-view="acoustic">Wave</button>
+                <button type="button" data-view="mirror">Mirror</button>
               </div>
               <div class="seg sub" id="fmax"></div>
               <div class="note" id="fmax-note"></div>
             </div>
           </section>
 
-          <section class="fold" data-fold="mirror">
-            <button type="button" class="fold-head"><span class="label">Mirror</span><i></i></button>
-            <div class="fold-body stack">
-              <div class="fields">
-                <label class="field switch"><span>reflectors</span><input type="checkbox" data-mirror="reflectors" /><em></em></label>
-                <label class="field switch"><span>occluders</span><input type="checkbox" data-mirror="occluders" /><em></em></label>
-                <label class="field switch"><span>paths</span><input type="checkbox" data-mirror="paths" checked /><em></em></label>
+          <section class="fold" data-fold="audit">
+            <button type="button" class="fold-head"><span class="label">Audit</span><i></i></button>
+            <div class="fold-body stack audit" id="audit" data-mode="colour">
+              <div class="note" id="audit-lead"></div>
+              <div class="stack only-mirror">
+                <div class="fields">
+                  <label class="field switch"><span>reflectors</span><input type="checkbox" data-mirror="reflectors" checked /><em></em></label>
+                  <label class="field switch"><span>occluders</span><input type="checkbox" data-mirror="occluders" /><em></em></label>
+                  <label class="field switch"><span>paths</span><input type="checkbox" data-mirror="paths" checked /><em></em></label>
+                  <label class="field switch"><span>receivers</span><input type="checkbox" data-mirror="receivers" /><em></em></label>
+                </div>
+                <div class="seg sub" id="audit-colour-by">
+                  <button type="button" class="on" data-by="label">by material</button>
+                  <button type="button" data-by="kind">by facet kind</button>
+                </div>
               </div>
-              <dl class="facts" id="mirror-facts"></dl>
-              <div class="note" id="mirror-note"></div>
+              <div class="problems" id="audit-problems"></div>
+              <dl class="facts" id="audit-facts"></dl>
+              <table class="legend" id="audit-legend"></table>
+              <div class="stack" id="audit-detail"></div>
+              <div class="note" id="audit-note"></div>
             </div>
           </section>
 

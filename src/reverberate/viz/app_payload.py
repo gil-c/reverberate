@@ -35,6 +35,7 @@ import numpy as np
 
 from reverberate.geometry.scene_ids import local_name, scene_of
 from reverberate.viz import field_payload
+from reverberate.viz.audit_payload import mirror_audit, wave_materials
 from reverberate.viz.vox_view import VoxelCloud, surface_of, write_quads
 
 __all__ = [
@@ -141,8 +142,15 @@ def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[s
         shutil.rmtree(link)
     link.symlink_to(source, target_is_directory=True)
     rooms = index.get("rooms") or []
+    labels = [str(v) for v in index.get("labels") or []]
     return {
         "url": f"meshes/{fmax}",
+        # What the audit legend names: the payload's own labels, in the order
+        # its label files index, and the solver's absorption for each.
+        "labels": labels,
+        "note": index.get("note"),
+        "cache_key": index.get("cache_key"),
+        "materials": wave_materials(index.get("cache_key"), labels),
         "h_m": index.get("h_m"),
         "coarse_m": rooms[0]["coarse"]["cell_m"] if rooms else None,
         # Name and regions both: the page matches a payload room to a room of
@@ -207,21 +215,31 @@ def _metrics_record(
 
 
 def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
-    """Link the mirror's audit layers and paths files into the site."""
+    """Link the mirror's audit layers and paths files into the site.
+
+    The layers are linked only when they are, triangle for triangle and label
+    for label, the derived scene the engine read
+    (:func:`reverberate.viz.audit_payload.mirror_audit`); otherwise the record
+    says why and the page draws nothing.
+    """
     if not run.mirror:
         return None
     record: dict[str, Any] = {"key": run.mirror.get("key")}
+    record["check"] = mirror_audit(run.path, run.mirror, run.sources)
     audit = run.mirror.get("audit")
-    if audit and (run.path / audit / "layers.json").is_file():
-        link = target / "mirror" / "audit"
+    link = target / "mirror" / "audit"
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.exists():
+        shutil.rmtree(link)
+    if audit and not record["check"]["problems"]:
         link.parent.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.exists():
-            shutil.rmtree(link)
         link.symlink_to((run.path / audit).resolve(), target_is_directory=True)
         record["audit"] = "mirror/audit"
+    elif record["check"]["problems"]:
+        print(f"{run.name}: mirror audit refused: {'; '.join(record['check']['problems'])}")
     paths: dict[str, str] = {}
+    written: dict[str, float] = {}
     for source_id, relative in (run.mirror.get("paths") or {}).items():
         source_file = run.path / str(relative)
         if source_file.is_file():
@@ -229,7 +247,9 @@ def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
             site.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_file, site / f"{source_id}.json")
             paths[str(source_id)] = f"mirror/paths/{source_id}.json"
+            written[str(source_id)] = source_file.stat().st_mtime
     record["paths"] = paths
+    record["paths_written"] = written
     return record
 
 

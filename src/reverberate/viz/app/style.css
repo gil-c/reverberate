@@ -116,9 +116,9 @@ select:focus-visible, .field input:focus-visible, .seg button:focus-visible {
 .check input, .field.switch input[type=checkbox] {
   width: 16px; height: 16px; justify-self: start; accent-color: var(--ear); margin: 0;
 }
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 2px 0 0; font: 12px var(--mono); }
-.facts dt { color: var(--dim); }
-.facts dd { margin: 0; color: var(--muted); text-align: right; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; margin: 2px 0 0; font: 12px var(--mono); }
+.facts dt { color: var(--dim); white-space: nowrap; }
+.facts dd { margin: 0; color: var(--muted); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .facts:empty { display: none; }
 
 /* foldable sections */
@@ -278,3 +278,25 @@ input[type=range].slide::-moz-range-thumb {
 .compass .back { top: 100%; left: 50%; transform: translate(-50%, 3px); }
 .compass .left { right: 100%; top: 50%; transform: translate(-5px, -50%); }
 .compass .right { left: 100%; top: 50%; transform: translate(5px, -50%); }
+
+/* The Audit section (audit.js): what the wave and the mirror views show. */
+.audit:not([data-mode=mirror]) .only-mirror { display: none; }
+.audit .problems { font: 12px var(--mono); color: #e06c5a; }
+.audit .problems:empty { display: none; }
+.audit .problems div + div { margin-top: 2px; }
+.legend, .bands { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.legend:empty { display: none; }
+.legend th, .bands th { color: var(--dim); font-weight: 400; text-align: right; padding: 1px 3px; }
+.legend th:first-child { text-align: left; }
+.legend td { color: var(--muted); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); white-space: nowrap; }
+.legend td:first-child { text-align: left; color: var(--text); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.legend tbody tr.pick { cursor: pointer; }
+.legend tbody tr:hover td { background: var(--panel-2); }
+.legend tbody tr.on td { background: var(--panel-2); color: var(--src); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.bands td { color: var(--text); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); }
+.bands th:first-child { text-align: left; }
+.bands tr.scatter td, .bands tr.scatter th { border-top: 1px solid var(--line-2); }
+.audit .orders { display: flex; flex-wrap: wrap; gap: 2px 10px; font: 11px var(--mono); color: var(--muted); }
+.audit .amber { color: var(--src); }
+[hidden] { display: none !important; }
