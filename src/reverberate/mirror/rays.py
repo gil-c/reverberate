@@ -321,32 +321,21 @@ def build_grid(
     tmax = np.clip(tmax, 0, limit)
     spans = tmax - tmin + 1
     counts = np.prod(spans, axis=1)
-    total = int(counts.sum())
-    cell_ids = np.empty(total, dtype=int)
-    item_ids = np.empty(total, dtype=int)
-    single = counts == 1
-    n_single = int(single.sum())
-    cursor = 0
-    if n_single:
-        t = np.flatnonzero(single)
-        cell_ids[:n_single] = (tmin[t, 0] * shape[1] + tmin[t, 1]) * shape[2] + tmin[t, 2]
-        item_ids[:n_single] = t
-        cursor = n_single
-    for item in np.flatnonzero(~single):
-        n = int(counts[item])
-        xs = np.arange(tmin[item, 0], tmax[item, 0] + 1)
-        ys = np.arange(tmin[item, 1], tmax[item, 1] + 1)
-        zs = np.arange(tmin[item, 2], tmax[item, 2] + 1)
-        grid_x, grid_y, grid_z = np.meshgrid(xs, ys, zs, indexing="ij")
-        cell_ids[cursor : cursor + n] = ((grid_x * shape[1] + grid_y) * shape[2] + grid_z).ravel()
-        item_ids[cursor : cursor + n] = int(item)
-        cursor += n
+    # Every (item, cell) of every box at once: the item repeated over its
+    # cells, and each repeat's rank unravelled over the box's own spans.
+    owner = np.repeat(np.arange(counts.size), counts)
+    rank = np.arange(owner.size) - np.repeat(np.cumsum(counts) - counts, counts)
+    tall = spans[owner, 2]
+    deep = spans[owner, 1] * tall
+    cx = tmin[owner, 0] + rank // deep
+    cy = tmin[owner, 1] + (rank % deep) // tall
+    cz = tmin[owner, 2] + rank % tall
+    cell_ids = (cx * shape[1] + cy) * shape[2] + cz
+    item_ids = owner
     order = np.lexsort((item_ids, cell_ids))
     cell_ids = cell_ids[order]
     item_ids = item_ids[order]
-    offsets = np.zeros(cells + 1, dtype=int)
-    np.add.at(offsets, cell_ids + 1, 1)
-    offsets = np.cumsum(offsets)
+    offsets = np.concatenate([[0], np.cumsum(np.bincount(cell_ids, minlength=cells))])
     return UniformGrid(lo, cell_m, shape, offsets, item_ids)
 
 
