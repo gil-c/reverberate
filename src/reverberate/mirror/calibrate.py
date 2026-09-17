@@ -451,14 +451,17 @@ def _weighted(values: np.ndarray, weight: np.ndarray) -> float:
     return float(np.sum(weight * values) / np.sum(weight))
 
 
-def band_cost(reports: list[PointReport], weights: CostWeights) -> tuple[float, float, float]:
+def band_cost(
+    reports: list[PointReport], weights: CostWeights, focus_low_hz: float = 1000.0
+) -> tuple[float, float, float]:
     """The cost with the colour and decay read band by band, not at the worst band.
 
     ``cost_of`` takes the largest colour error of a point, which on 0076 is
     always 250 Hz (the reference's room modes), so the search never saw the
     tail missing 4 to 6 dB above 1 kHz. Here each band counts, the bands at
     and above 500 Hz fully and 250 Hz at half weight, since the low end will
-    come from the wave solver.
+    come from the wave solver. Bands under ``focus_low_hz`` do not count at
+    all (a wave solve answers there); zero keeps the half weight rule.
     """
     if not reports:
         return float("inf"), float("inf"), float("inf")
@@ -469,7 +472,9 @@ def band_cost(reports: list[PointReport], weights: CostWeights) -> tuple[float, 
         recall_gap = max(0.0, 1.0 - r.errors["recall"])
         early_terms.append(weights.echogram_db * echogram + weights.recall * recall_gap)
         ref, cand = r.reference_tail, r.candidate_tail
-        band_weight = np.asarray([0.5 if b < 500 else 1.0 for b in ref.bands_hz])
+        band_weight = np.asarray(
+            [0.0 if b < 0.99 * focus_low_hz else (0.5 if b < 500 else 1.0) for b in ref.bands_hz]
+        )
         t30 = np.abs(np.asarray(cand.t30_s) / np.asarray(ref.t30_s) - 1.0)
         edt = np.abs(np.asarray(cand.edt_s) / np.asarray(ref.edt_s) - 1.0)
         colour = np.abs(np.asarray(ref.colour_db) - np.asarray(cand.colour_db))

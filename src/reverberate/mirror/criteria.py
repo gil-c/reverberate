@@ -103,6 +103,11 @@ class CriteriaSettings:
     #: Reflections are detected on the response above this frequency, where
     #: a pulse is short enough to have a time of its own.
     detection_low_hz: float = 500.0
+    #: The mirror answers above this frequency only: a wave solve covers the
+    #: rest. Decay, colour and seam are judged on the octave bands at and above
+    #: it, the echogram too, the reflections and the late field's directions
+    #: on the response high passed there. Zero judges every band.
+    focus_low_hz: float = 1000.0
     #: Reflections are looked for this long after the direct sound.
     early_s: float = 0.050
     #: The echogram spans this long after the direct sound.
@@ -583,7 +588,10 @@ def detect_reflections(
     lo = max(begin - pad, 0)
     hi = min(begin + length + window + pad, signals.shape[1])
     detection = _bandpass(
-        signals[:, lo:hi], rate, settings.detection_low_hz, settings.band_limit_hz
+        signals[:, lo:hi],
+        rate,
+        max(settings.detection_low_hz, settings.focus_low_hz),
+        settings.band_limit_hz,
     )
     limited = _bandpass(signals[:, lo:hi], rate, None, settings.band_limit_hz)
     per_band, _ = _band_signals(limited, rate, bands_hz)
@@ -866,7 +874,7 @@ def tail_statistics(
         seam_step.append(10.0 * np.log10(max(after, 1e-30) / max(before, 1e-30)))
 
     end = signals.shape[1]
-    limited = _bandpass(signals, rate, None, settings.band_limit_hz)
+    limited = _bandpass(signals, rate, settings.focus_low_hz or None, settings.band_limit_hz)
     order_energy = _order_energy_db(limited, ambisonic.order, mix_at, end)
     sectors = _sector_energy_db(limited, ambisonic.order, mix_at, end, sector_directions())
 
@@ -911,6 +919,13 @@ def tail_statistics(
 # --------------------------------------------------------------------------
 
 
+def focus_bands(
+    settings: CriteriaSettings, bands_hz: tuple[int, ...] = LEVEL_BANDS_HZ
+) -> tuple[int, ...]:
+    """The octave bands the judgement reads: those at and above the focus."""
+    return tuple(b for b in bands_hz if b >= settings.focus_low_hz * 0.99)
+
+
 def _relative(a: np.ndarray, b: np.ndarray) -> float:
     """Largest relative error over the bands where both are finite."""
     mask = np.isfinite(a) & np.isfinite(b) & (a > 0)
@@ -939,9 +954,17 @@ def judge(
     ref_list = detect_reflections(reference, s)
     cand_list = detect_reflections(candidate, s)
     matching = match_reflections(ref_list, cand_list, s)
-    distance = echogram_distance_db(echogram(reference, s), echogram(candidate, s))
+    judged = focus_bands(s)
+    distance = echogram_distance_db(
+        echogram(reference, s, bands_hz=judged), echogram(candidate, s, bands_hz=judged)
+    )
     ref_tail = tail_statistics(reference, s)
     cand_tail = tail_statistics(candidate, s, mixing_time=ref_tail.mixing_time_s)
+    kept = np.array([b in judged for b in ref_tail.bands_hz])
+
+    def focus(values: tuple[float, ...]) -> np.ndarray:
+        return np.asarray(np.asarray(values, dtype=float)[kept])
+
     cand_own_mix = mixing_time_s(
         _bandpass(candidate.signals[0:1], candidate.sample_rate_hz, None, s.band_limit_hz)[0],
         candidate.sample_rate_hz,
@@ -963,9 +986,9 @@ def judge(
         "mixing_time_relative": abs(cand_own_mix - ref_tail.mixing_time_s) / ref_tail.mixing_time_s
         if np.isfinite(cand_own_mix) and ref_tail.mixing_time_s > 0
         else float("nan"),
-        "t30_relative": _relative(np.asarray(ref_tail.t30_s), np.asarray(cand_tail.t30_s)),
-        "edt_relative": _relative(np.asarray(ref_tail.edt_s), np.asarray(cand_tail.edt_s)),
-        "tail_colour_db": _max_abs(np.asarray(ref_tail.colour_db), np.asarray(cand_tail.colour_db)),
+        "t30_relative": _relative(focus(ref_tail.t30_s), focus(cand_tail.t30_s)),
+        "edt_relative": _relative(focus(ref_tail.edt_s), focus(cand_tail.edt_s)),
+        "tail_colour_db": _max_abs(focus(ref_tail.colour_db), focus(cand_tail.colour_db)),
         "order_energy_db": _max_abs(
             np.asarray(ref_tail.order_energy_db), np.asarray(cand_tail.order_energy_db)
         ),
@@ -973,7 +996,7 @@ def judge(
             np.asarray(ref_tail.sector_energy_db), np.asarray(cand_tail.sector_energy_db)
         ),
         "late_coherence_error": abs(ref_tail.late_coherence - cand_tail.late_coherence),
-        "seam_db": _max_abs(np.asarray(ref_tail.seam_step_db), np.asarray(cand_tail.seam_step_db)),
+        "seam_db": _max_abs(focus(ref_tail.seam_step_db), focus(cand_tail.seam_step_db)),
     }
     limits = {
         "recall": (t.recall, "min"),
