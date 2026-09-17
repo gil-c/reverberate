@@ -142,3 +142,27 @@ def test_the_fixed_point_brings_the_decay_back_to_the_planted_absorption() -> No
     assert evaluations[-1].cost < evaluations[0].cost
     assert np.median(evaluations[1].parameters.absorption_scale) > 0.7
     assert best.image_absorption_scale is not None
+
+
+def test_the_shell_scattering_replaces_the_shell_class_only() -> None:
+    scene = box_scene(alpha=0.2, scattering=0.1)
+    shell = replace_labels(scene, ("shell",))
+    set_to = Parameters(scattering_scale=2.0, shell_scattering=0.6)
+    assert np.allclose(apply_parameters(shell, set_to).materials.scattering, 0.6)
+    assert np.allclose(apply_parameters(scene, set_to).materials.scattering, 0.2)
+    again = Parameters.from_record(set_to.record())
+    assert again.shell_scattering == 0.6 and again.key == set_to.key
+    assert "shell_scattering" not in Parameters().record()
+
+
+def replace_labels(scene, labels):  # type: ignore[no-untyped-def]
+    from dataclasses import replace as swap
+
+    from reverberate.mirror.geometry import MaterialTable
+
+    m = scene.materials
+    return swap(
+        scene,
+        labels=labels,
+        materials=MaterialTable(labels, m.absorption, m.scattering, m.bands_hz, m.source),
+    )

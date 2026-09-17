@@ -119,6 +119,7 @@ def calibrate_run(
     devices: list[int] | None = None,
     method: str = "nelder",
     scattering: tuple[float, ...] = (),
+    shell_scattering: tuple[float, ...] = (),
     say: Any = print,
 ) -> tuple[Parameters, list[Evaluation], Path]:
     """Calibrate on ``points`` of the run's card phase; returns the best, the trail, the file."""
@@ -178,6 +179,7 @@ def calibrate_run(
             criteria=settings.criteria,
             iterations=iterations,
             scattering=scattering,
+            shell_scattering=shell_scattering,
             workers=settings.workers,
             say=say,
         )

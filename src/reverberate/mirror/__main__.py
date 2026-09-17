@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
     p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
     p.add_argument(
+        "--order-weight", type=float, default=1.0, help="tail moments of degree n times this^n"
+    )
+    p.add_argument(
         "--phase",
         choices=("card", "host", "all"),
         default="all",
@@ -85,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--scattering", type=float, nargs="*", default=(), help="fixed: scattering scales to try"
+    )
+    p.add_argument(
+        "--shell-scattering",
+        type=float,
+        nargs="*",
+        default=(),
+        help="fixed: the shell's own scattering coefficients to try",
     )
     p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
     p.add_argument("--rays", type=int, default=100_000)
@@ -175,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                 air_absorption=not args.no_air,
                 tail_from_s=args.tail_from,
                 tail_bursts=args.bursts,
+                tail_order_weight=args.order_weight,
             ),
         )
         report = run_mirror(
@@ -220,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             sound_speed_m_s=args.sound_speed,
             method=args.method,
             scattering=tuple(args.scattering),
+            shell_scattering=tuple(args.shell_scattering),
         )
         print(json.dumps(best.record(), indent=1))
         print("wrote", target, "after", len(evaluations), "evaluations")

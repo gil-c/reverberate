@@ -68,6 +68,11 @@ class Parameters:
     #: uses ``absorption_scale``. The rays set the decay and the images the
     #: reflections' levels; one scale for both traded one against the other.
     image_absorption_scale: tuple[float, ...] | None = None
+    #: The shell's own scattering coefficient, in place of its class's value
+    #: times ``scattering_scale``; ``None`` keeps the class. A specular bounce
+    #: on the floor, the ceiling or a wall keeps a ray's elevation, so with
+    #: little scattering on the shell the rays' late field lies flat.
+    shell_scattering: float | None = None
 
     @property
     def key(self) -> str:
@@ -82,6 +87,8 @@ class Parameters:
             "tail_gain_db": [round(float(v), 4) for v in self.tail_gain_db],
             "note": self.note,
         }
+        if self.shell_scattering is not None:
+            record["shell_scattering"] = round(float(self.shell_scattering), 6)
         if self.image_absorption_scale is not None:
             # Only when set, so the keys of the files written before stay theirs.
             record["image_absorption_scale"] = [
@@ -99,6 +106,11 @@ class Parameters:
             image_absorption_scale=(
                 tuple(float(v) for v in record["image_absorption_scale"])
                 if record.get("image_absorption_scale") is not None
+                else None
+            ),
+            shell_scattering=(
+                float(record["shell_scattering"])
+                if record.get("shell_scattering") is not None
                 else None
             ),
         )
@@ -150,6 +162,10 @@ def apply_parameters(scene: DerivedScene, parameters: Parameters) -> DerivedScen
         scene.materials.absorption * np.asarray(parameters.absorption_scale)[None, :], 0.0, 0.999
     )
     scattering = np.clip(scene.materials.scattering * parameters.scattering_scale, 0.0, 1.0)
+    if parameters.shell_scattering is not None and "shell" in scene.materials.labels:
+        scattering[scene.materials.labels.index("shell")] = float(
+            np.clip(parameters.shell_scattering, 0.0, 1.0)
+        )
     materials = MaterialTable(
         scene.materials.labels,
         absorption,
@@ -378,6 +394,23 @@ def _band_residuals(reports: list[PointReport]) -> tuple[dict[int, float], dict[
     )
 
 
+def _sector_gap(reports: list[PointReport]) -> float:
+    """The median over points of the mean absolute sector energy gap, dB."""
+    gaps = [
+        float(
+            np.mean(
+                np.abs(
+                    np.subtract(
+                        r.reference_tail.sector_energy_db, r.candidate_tail.sector_energy_db
+                    )
+                )
+            )
+        )
+        for r in reports
+    ]
+    return round(float(np.nanmedian(gaps)), 3) if gaps else float("nan")
+
+
 def _edt_ratios(reports: list[PointReport]) -> list[float]:
     """Per judged band: the median EDT ratio, mirror over reference."""
     if not reports:
@@ -462,6 +495,7 @@ def calibrate_fixed_point(
     iterations: int = 8,
     damping: float = 0.8,
     scattering: tuple[float, ...] = (),
+    shell_scattering: tuple[float, ...] = (),
     images_apart: bool = True,
     workers: int = 1,
     say: Any = print,
@@ -512,6 +546,8 @@ def calibrate_fixed_point(
             f" (early {early:7.3f}, late {late:7.3f})"
             f" abs {np.round(candidate.absorption_scale, 3).tolist()}"
             f" scat {candidate.scattering_scale:.3f}"
+            f" shell {candidate.shell_scattering}"
+            f" sectors {_sector_gap(reports)}"
             f" gain {np.round(candidate.tail_gain_db, 2).tolist()}"
             f" | t30 ratio {[round(ratios.get(b, float('nan')), 3) for b in bands]}"
             f" colour gap {[round(gaps.get(b, float('nan')), 2) for b in bands]}"
@@ -557,6 +593,11 @@ def calibrate_fixed_point(
         for value in scattering:
             best = min(evaluations, key=lambda e: e.cost).parameters
             candidate = replace(best, scattering_scale=float(value))
+            for _ in range(3):
+                reports = evaluate(candidate)
+                candidate = step(candidate, reports)
+        for value in shell_scattering:
+            candidate = replace(parameters, shell_scattering=float(value))
             for _ in range(3):
                 reports = evaluate(candidate)
                 candidate = step(candidate, reports)

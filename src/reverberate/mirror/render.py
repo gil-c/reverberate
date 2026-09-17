@@ -81,6 +81,12 @@ class RenderSettings:
     analytic_direct: bool = True
     #: Noise bursts per histogram bin, each from its own sampled direction.
     tail_bursts: int = 6
+    #: The histogram's moments of degree n are weighted by this to the n
+    #: before the burst directions are drawn: 1 keeps the rays' leaning, 0
+    #: draws them uniformly. The rays mix directions less than the wave
+    #: field does (a specular bounce keeps the elevation), and this is the
+    #: host side's lever on it.
+    tail_order_weight: float = 1.0
     #: The histogram tail's band energies go through the inverse of what the
     #: bank reads of shaped noise (``bank_reading``), so they read as meant.
     bank_corrected: bool = True
@@ -104,6 +110,7 @@ class RenderSettings:
             "analytic_direct": self.analytic_direct,
             "bank_corrected": self.bank_corrected,
             "tail_bursts": self.tail_bursts,
+            "tail_order_weight": self.tail_order_weight,
         }
 
 
@@ -303,6 +310,11 @@ def tail_from_histogram(
     rng = np.random.default_rng(seed)
     grid, weights = quadrature(2 * histogram.order + 2)
     basis_low = real_sh(histogram.order, grid)  # [direction, low channel]
+    if settings.tail_order_weight != 1.0:
+        from reverberate.spatial.sh import degrees_of
+
+        weights_of_degree = settings.tail_order_weight ** degrees_of(histogram.order)
+        basis_low = basis_low * weights_of_degree[None, :]
     basis_out = real_sh(settings.order, grid)  # [direction, out channel]
     # The histogram's direct bin: the first bin with energy, its scale.
     first = int(np.argmax(np.any(energy > 0.0, axis=1))) if np.any(energy > 0.0) else -1
