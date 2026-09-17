@@ -13,6 +13,7 @@ import hashlib
 import os
 import subprocess
 import sys
+from typing import Any
 
 import numpy as np
 import pytest
@@ -190,7 +191,9 @@ def test_covered_rays_leave_the_direct_and_lose_the_specular_reflections() -> No
 
 def test_covered_rays_count_again_after_the_tree_s_window() -> None:
     """A covered ray that arrives after the tree's window is one the tree pruned: counted."""
-    common = dict(rays=1500, duration_s=0.04, bin_s=0.001, receiver_radius_m=0.4, seed=5)
+    common: dict[str, Any] = dict(
+        rays=1500, duration_s=0.04, bin_s=0.001, receiver_radius_m=0.4, seed=5
+    )
     scene = box_scene(alpha=0.3, scattering=0.0)
     full = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(**common))
     windowed = trace(

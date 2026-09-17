@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -24,7 +25,7 @@ from reverberate.viz.audit_payload import PFFDTD_BANDS_HZ, mirror_audit, wave_ma
 from test_accel_scene import write_scene
 
 
-def _mirror_run(tmp_path: Path) -> tuple[WalkRun, object]:
+def _mirror_run(tmp_path: Path) -> tuple[WalkRun, Any]:
     """A synthetic run carrying a derived box scene, its layers and a B field's report."""
     run = write_synthetic_run(tmp_path / "run", field_step_m=1.1, field_box_m=2.2)
     derived = derive(write_scene(tmp_path / "box.json", extra_material=True))

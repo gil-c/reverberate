@@ -10,6 +10,7 @@ doorway's side.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -31,7 +32,7 @@ def _rect(x: float, y0: float, y1: float, z0: float, z1: float) -> np.ndarray:
     return np.asarray([[a, b, c], [a, c, d]], dtype=float)
 
 
-def walled_box():  # type: ignore[no-untyped-def]
+def walled_box() -> Any:
     scene = box_scene(alpha=0.2)
     z0, z1, top = DOOR
     wall = np.concatenate(

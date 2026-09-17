@@ -7,6 +7,8 @@ absorption scale within a handful of evaluations. Small, on the twins.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -155,7 +157,7 @@ def test_the_shell_scattering_replaces_the_shell_class_only() -> None:
     assert "shell_scattering" not in Parameters().record()
 
 
-def replace_labels(scene, labels):  # type: ignore[no-untyped-def]
+def replace_labels(scene: Any, labels: tuple[str, ...]) -> Any:
     from dataclasses import replace as swap
 
     from reverberate.mirror.geometry import MaterialTable

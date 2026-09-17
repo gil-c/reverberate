@@ -8,6 +8,8 @@ tail must decay at Eyring's time and carry Barron's energy.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -184,7 +186,9 @@ def test_the_card_renders_the_early_part_as_the_host_and_the_tail_at_its_energy(
         rays=1,
     )
     bands = len(band_centres(48000))
-    common = dict(sound_speed_m_s=C, start_s=0.0, seed=3, scale_per_band=np.ones(bands))
+    common: dict[str, Any] = dict(
+        sound_speed_m_s=C, start_s=0.0, seed=3, scale_per_band=np.ones(bands)
+    )
     on_host, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, **common)
     on_card, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, xp=cupy, **common)
     on_card = cupy.asnumpy(on_card)
