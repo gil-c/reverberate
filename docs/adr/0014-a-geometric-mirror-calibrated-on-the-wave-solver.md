@@ -234,7 +234,9 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   54 per cent twice, 20 per cent three times or more. A single edge path
   cannot reach three quarters of them, which is why the geodesic still
   earns its place and why the edges help them less than their geometry
-  suggests.
+  suggests. In the delivered C the edges reach **81 of the 185**; the other
+  104 keep the geodesic alone (`points_with_edge_paths` in the run's
+  diffraction record).
 - **Snapping the geodesic's corners onto the edges was written, measured and
   left off** (`snap_corners`). It shortens the way round by 0.11 m in the
   median and moves the onset's direction error from 4.31 to 1.40 degrees,
