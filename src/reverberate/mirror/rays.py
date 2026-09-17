@@ -304,13 +304,27 @@ class UniformGrid:
 
 
 def build_grid(
-    boxes_min: np.ndarray, boxes_max: np.ndarray, cell_m: float, lo: np.ndarray, hi: np.ndarray
+    boxes_min: np.ndarray,
+    boxes_max: np.ndarray,
+    cell_m: float,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    *,
+    frame: tuple[np.ndarray, tuple[int, int, int]] | None = None,
 ) -> UniformGrid:
-    """Bin items by their boxes (``[n, 3]`` each) into cells of ``cell_m`` from ``lo`` to ``hi``."""
-    lo = np.asarray(lo, dtype=float) - cell_m
-    hi = np.asarray(hi, dtype=float) + cell_m
-    counts_per_axis = np.maximum(np.ceil((hi - lo) / cell_m), 1).astype(int)
-    shape = (int(counts_per_axis[0]), int(counts_per_axis[1]), int(counts_per_axis[2]))
+    """Bin items by their boxes (``[n, 3]`` each) into cells of ``cell_m`` from ``lo`` to ``hi``.
+
+    ``frame``, an origin and a shape, is used as given instead of being
+    derived from ``lo`` and ``hi``.
+    """
+    if frame is not None:
+        lo = np.asarray(frame[0], dtype=float)
+        shape = (int(frame[1][0]), int(frame[1][1]), int(frame[1][2]))
+    else:
+        lo = np.asarray(lo, dtype=float) - cell_m
+        hi = np.asarray(hi, dtype=float) + cell_m
+        counts_per_axis = np.maximum(np.ceil((hi - lo) / cell_m), 1).astype(int)
+        shape = (int(counts_per_axis[0]), int(counts_per_axis[1]), int(counts_per_axis[2]))
     cells = int(np.prod(shape))
     if boxes_min.shape[0] == 0:
         return UniformGrid(
@@ -343,11 +357,12 @@ def build_grid(
 
 def grid_like(grid: UniformGrid, boxes_min: np.ndarray, boxes_max: np.ndarray) -> UniformGrid:
     """Other items binned into the cells of an existing grid: same origin, cell and shape."""
-    cell = grid.cell_m
-    lo = grid.origin + cell
-    hi = grid.origin + cell * (np.asarray(grid.shape, dtype=float) - 1.0)
-    other = build_grid(boxes_min, boxes_max, cell, lo, hi)
-    if other.shape != grid.shape or not np.allclose(other.origin, grid.origin):
+    frame = (
+        np.asarray(grid.origin, dtype=float),
+        (int(grid.shape[0]), int(grid.shape[1]), int(grid.shape[2])),
+    )
+    other = build_grid(boxes_min, boxes_max, grid.cell_m, grid.origin, grid.origin, frame=frame)
+    if other.shape != grid.shape or not np.array_equal(other.origin, grid.origin):
         raise RuntimeError(f"grid_like built {other.shape} at {other.origin}, not {grid.shape}")
     return other
 
