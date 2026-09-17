@@ -25,11 +25,14 @@ body {
 #app {
   display: grid; height: 100vh;
   grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 320px);
+  /* One row, never taller than the window: without this the row grows to the
+     3D canvas's last backing height, and the panels' bottoms fall off screen. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 /* panels */
 .panel {
-  position: relative; background: var(--panel); min-width: 0;
+  position: relative; background: var(--panel); min-width: 0; min-height: 0;
   display: flex; flex-direction: row; overflow: hidden;
 }
 /* The handle sits on the panel's inner edge: after the body on the left
@@ -42,7 +45,7 @@ body {
   flex: 1; padding: 10px 14px 20px; overflow-y: auto; overflow-x: hidden; display: flex;
   flex-direction: column; gap: 12px; min-width: 0; contain: layout paint;
 }
-.panel .body > * { min-width: 0; }
+.panel .body > * { min-width: 0; flex-shrink: 0; }
 /* A scrollbar that is seen and grabbed: a 10 px track of the panel's own
    colour, a thumb that reads against it. */
 .panel .body::-webkit-scrollbar { width: 10px; }
@@ -189,8 +192,9 @@ input[type=range].slide::-moz-range-thumb {
 .srcrow input { accent-color: var(--src); margin: 0; }
 
 /* viewport */
-#view-pane { position: relative; min-width: 0; background: #000; }
-#view-pane canvas { display: block; width: 100%; height: 100%; cursor: default; }
+#view-pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #000; }
+/* Out of the flow: the canvas takes the pane's size and never sets it. */
+#view-pane canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: default; }
 .hud {
   position: absolute; left: 14px; bottom: 12px; font: 12px var(--mono); color: var(--muted);
   display: flex; gap: 18px; pointer-events: none;
