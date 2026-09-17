@@ -263,6 +263,10 @@ references of a few dozen points at order 3 (88 MB for 24 points).
   forty of them.
 - The diffracted onsets of the 185 points without a direct path: 2.5 s at
   home on a 10 cm grid.
+- Without a card (`--cpu`, `REVERBERATE_TWIN_WORKERS=10`, one BLAS thread):
+  the twin's rays on ten cores, 1e5 rays for 437 receivers in 1380 s, and a
+  fixed point evaluation (24 points, 2e4 rays) in 265 s. A card phase that
+  only changes materials reuses the paths (`--paths-from`).
 
 ### Transfer rule, learned the expensive way
 
