@@ -405,7 +405,8 @@ def _aperture(a: np.ndarray, b: np.ndarray, source: np.ndarray, receiver: np.nda
 
     def total(t: np.ndarray) -> np.ndarray:
         point = a + t[:, None] * (b - a)
-        return np.linalg.norm(point - source, axis=1) + np.linalg.norm(point - receiver, axis=1)
+        legs = np.linalg.norm(point - source, axis=1) + np.linalg.norm(point - receiver, axis=1)
+        return np.asarray(legs, dtype=float)
 
     left = hi - phi * (hi - lo)
     right = lo + phi * (hi - lo)
@@ -418,7 +419,7 @@ def _aperture(a: np.ndarray, b: np.ndarray, source: np.ndarray, receiver: np.nda
         right = lo + phi * (hi - lo)
         f_left, f_right = total(left), total(right)
     t = 0.5 * (lo + hi)
-    return np.asarray(a + t[:, None] * (b - a))
+    return np.asarray(a + t[:, None] * (b - a), dtype=float)
 
 
 def edge_paths(
