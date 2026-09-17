@@ -204,3 +204,10 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   moving mean takes out the estimator's noise, not its bias, so fewer rays
   still read a shorter decay (the reverberation time ratio falls to 0.93 at
   1e4). 1e5 rays and order 3 remain the cheapest setting that loses nothing.
+- **A deeper flutter was measured and not kept.** The wave field's tail does
+  hold a periodic structure of its own, 5 to 32 ms depending on where the
+  listener stands (autocorrelation of the broadband envelope, 0.2 to 0.4),
+  which is the floor to ceiling flutter the image tree already extends to
+  order 6. Taking that extension to 10 costs 20 per cent more images
+  (139 957 against 116 662) and reads 0.570 of the criteria against 0.568 on
+  the 24 calibration points: the same, within the seeds' own spread.
