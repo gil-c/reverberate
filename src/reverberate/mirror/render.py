@@ -137,6 +137,26 @@ def _fractional_pulses(
     return np.asarray(kernel * amplitudes[:, None]), np.asarray(base[:, None] + offsets[None, :])
 
 
+@lru_cache(maxsize=4)
+def _bank_kernels(rate: float) -> np.ndarray:
+    """The bank's FIR filters, ``[band, taps]``, as :func:`octave_filter_rows` reads them."""
+    from reverberate.metrics import octave_bank
+
+    kernels = np.ascontiguousarray(np.asarray(octave_bank(int(round(rate))).filters, float).T)
+    kernels.setflags(write=False)
+    return kernels
+
+
+def band_rows(rows: Any, rate: float, bands: np.ndarray, xp: Any = np) -> Any:
+    """:func:`octave_filter_rows` on ``xp``: row k through band ``bands[k]``, same length."""
+    if xp is np:
+        return octave_filter_rows(np.asarray(rows, dtype=float), int(round(rate)), bands)
+    from cupyx.scipy.signal import fftconvolve  # type: ignore[import-not-found]
+
+    kernels = xp.asarray(_bank_kernels(rate))[xp.asarray(np.asarray(bands, dtype=int))]
+    return fftconvolve(xp.asarray(rows, dtype=xp.float64), kernels, mode="same", axes=1)
+
+
 @lru_cache(maxsize=8)
 def band_pulse_energy(rate: float) -> np.ndarray:
     """The energy per band of a unit pulse through the bank, over its whole response.
@@ -178,41 +198,48 @@ def bank_reading(rate: float) -> np.ndarray:
     return reading
 
 
-def render_paths(paths: Paths, settings: RenderSettings, sound_speed_m_s: float) -> Ambisonic:
-    """The discrete part: every path as a band limited pulse on the harmonics of its direction."""
+def early_signals(
+    paths: Paths, settings: RenderSettings, sound_speed_m_s: float, xp: Any = np
+) -> Any:
+    """The discrete part as ``[channel, sample]`` on ``xp``: every pulse, every band at once."""
     rate = settings.sample_rate_hz
     length = int(round(settings.duration_s * rate))
     channels = channel_count(settings.order)
     centres, picks = _band_map(rate)
     if paths.count == 0:
-        return Ambisonic(np.zeros((channels, length)), rate, settings.order, paths.receiver)
+        return xp.zeros((channels, length))
     directions = scene_to_ambisonic(paths.direction)
     harmonics = real_sh(settings.order, directions)  # [path, channel]
     delays = (paths.length_m / sound_speed_m_s + settings.lead_s) * rate
     half = settings.delay_half_taps
     # The early part lives in a short buffer, filtered there, then placed.
     latest = int(np.ceil(delays.max())) + half + 2
-    buffer = np.zeros((len(centres), channels, latest + 1024))
+    span = latest + 1024
     kernels, indices = _fractional_pulses(delays, np.ones(paths.count), half)
-    valid = (indices >= 0) & (indices < buffer.shape[2])
-    for band, pick in enumerate(picks):
-        gains = paths.gain[:, pick]  # [path]
-        weighted = kernels * gains[:, None]  # [path, tap]
-        # signal[channel, sample] += sum over paths of Y[path, channel] * kernel[path, tap]
-        for tap in range(kernels.shape[1]):
-            ok = valid[:, tap]
-            if not ok.any():
-                continue
-            contribution = harmonics[ok].T * weighted[ok, tap][None, :]  # [channel, path]
-            np.add.at(buffer[band].T, indices[ok, tap], contribution.T)
-    rows = buffer.reshape(len(centres) * channels, -1)
-    row_bands = np.repeat(np.arange(len(centres)), channels)
-    filtered = octave_filter_rows(rows, int(round(rate)), row_bands)
-    early = filtered.reshape(len(centres), channels, -1).sum(axis=0)
-    signals = np.zeros((channels, length))
-    take = min(early.shape[1], length)
+    valid = (indices >= 0) & (indices < span)
+    bands = len(centres)
+    # value[band, path, tap, channel] = gain[path, band] kernel[path, tap] Y[path, channel]
+    weighted = paths.gain[:, picks].T[:, :, None] * kernels[None, :, :]  # [band, path, tap]
+    flat = (
+        np.arange(bands)[:, None, None, None] * channels + np.arange(channels)
+    ) * span + indices[None, :, :, None]
+    values = weighted[:, :, :, None] * harmonics[None, :, None, :]
+    keep = np.broadcast_to(valid[None, :, :, None], values.shape)
+    buffer = xp.zeros(bands * channels * span)
+    xp.add.at(buffer, xp.asarray(flat[keep]), xp.asarray(values[keep]))
+    rows = buffer.reshape(bands * channels, span)
+    filtered = band_rows(rows, rate, np.repeat(np.arange(bands), channels), xp)
+    early = filtered.reshape(bands, channels, span).sum(axis=0)
+    signals = xp.zeros((channels, length))
+    take = min(span, length)
     signals[:, :take] = early[:, :take]
-    return Ambisonic(signals, rate, settings.order, paths.receiver)
+    return signals
+
+
+def render_paths(paths: Paths, settings: RenderSettings, sound_speed_m_s: float) -> Ambisonic:
+    """The discrete part: every path as a band limited pulse on the harmonics of its direction."""
+    signals = early_signals(paths, settings, sound_speed_m_s)
+    return Ambisonic(signals, settings.sample_rate_hz, settings.order, paths.receiver)
 
 
 # --------------------------------------------------------------------------
@@ -277,7 +304,8 @@ def tail_from_histogram(
     bursts: int = 6,
     band_gain_db: np.ndarray | None = None,
     scale_per_band: np.ndarray | None = None,
-) -> tuple[np.ndarray, dict[str, Any]]:
+    xp: Any = np,
+) -> tuple[Any, dict[str, Any]]:
     """The tail as noise shaped by a receiver's histogram, band by band, with its anisotropy.
 
     Per band and per time bin the histogram gives the energy and its
@@ -334,41 +362,55 @@ def tail_from_histogram(
     wanted = energy[:, picks] * (scale * band_power[picks])[None, :]  # [bin, band]
     if settings.bank_corrected:
         wanted = np.maximum(np.linalg.solve(bank_reading(rate), wanted.T).T, 0.0)
-    draws = rng.standard_normal((len(picks), bursts, length))
-    per_band = np.zeros((len(picks), channels, length))
-    for b in range(from_bin, bins):
-        at = b * bin_samples
-        if at >= length:
-            break
-        stop = min(at + bin_samples, length)
-        for band, pick in enumerate(picks):
-            total = float(wanted[b, band])
-            if total <= 0.0:
-                continue
-            density = np.maximum(basis_low @ moments[b, pick], 0.0) * weights
-            if density.sum() <= 0.0:
-                density = weights.copy()
-            probability = density / density.sum()
-            chosen = rng.choice(grid.shape[0], size=bursts, p=probability)
-            burst = draws[band, :, at:stop]
-            # Each burst carries an equal share of the bin's energy.
-            have = np.sum(burst**2, axis=1)
-            gain = np.sqrt(total / bursts / np.maximum(have, 1e-30))
-            per_band[band, :, at:stop] += basis_out[chosen].T @ (burst * gain[:, None])
+    # Every bin and band at once: the directions drawn from the moments'
+    # density on the quadrature, the bursts laid bin by bin, each burst an
+    # equal share of its bin's energy, encoded on its direction's harmonics.
+    count = len(picks)
+    held = min(bins, -(-length // bin_samples))
+    energy_in = np.array(wanted[:held], dtype=float)
+    energy_in[: min(from_bin, held)] = 0.0
+    density = np.maximum(moments[:held][:, picks, :] @ basis_low.T, 0.0) * weights
+    empty = density.sum(axis=-1, keepdims=True) <= 0.0
+    density = np.where(empty, weights, density)
+    cumulative = np.cumsum(density / density.sum(axis=-1, keepdims=True), axis=-1)
+    cumulative[..., -1] = np.inf
+    drawn = rng.random((held, count, bursts))
+    chosen = np.argmax(drawn[..., None] < cumulative[:, :, None, :], axis=-1)  # [bin, band, burst]
+    span = held * bin_samples
+    if xp is np:
+        draws = rng.standard_normal((count, bursts, span))
+    else:
+        draws = xp.random.default_rng(seed).standard_normal((count, bursts, span))
+    if span > length:
+        draws[:, :, length:] = 0.0
+    segments = draws.reshape(count, bursts, held, bin_samples)
+    have = xp.sum(segments**2, axis=-1)  # [band, burst, bin]
+    share = xp.asarray(energy_in.T / bursts)[:, None, :]  # [band, 1, bin]
+    gain = xp.where(share > 0.0, xp.sqrt(share / xp.maximum(have, 1e-30)), 0.0)
+    coefficients = xp.asarray(basis_out)[xp.asarray(chosen)]  # [bin, band, burst, channel]
+    coefficients = coefficients * gain.transpose(2, 0, 1)[..., None]
+    laid = xp.matmul(
+        coefficients.transpose(1, 0, 3, 2),  # [band, bin, channel, burst]
+        segments.transpose(0, 2, 1, 3),  # [band, bin, burst, sample]
+    )  # [band, bin, channel, sample]
+    per_band = xp.zeros((count, channels, length))
+    stop = min(span, length)
+    per_band[:, :, :stop] = laid.transpose(0, 2, 1, 3).reshape(count, channels, span)[:, :, :stop]
     # Band limit each band's noise to its octave: the bursts were white, so
     # each band's rows go through their own filter and the bands are summed;
     # the filter keeps a fraction of a white burst's energy, restored here
     # band by band on the omni channel so the histogram's energy is kept.
-    rows = per_band.reshape(len(picks) * channels, length)
-    row_bands = np.repeat(np.arange(len(picks)), channels)
-    shaped = octave_filter_rows(rows, int(round(rate)), row_bands).reshape(
-        len(picks), channels, length
+    rows = per_band.reshape(count * channels, length)
+    row_bands = np.repeat(np.arange(count), channels)
+    shaped = band_rows(rows, rate, row_bands, xp).reshape(count, channels, length)
+    wanted_omni = xp.sum(per_band[:, 0] ** 2, axis=1)
+    kept_omni = xp.sum(shaped[:, 0] ** 2, axis=1)
+    ratio = xp.where(
+        (kept_omni > 0.0) & (wanted_omni > 0.0),
+        xp.sqrt(wanted_omni / xp.maximum(kept_omni, 1e-300)),
+        1.0,
     )
-    for band in range(len(picks)):
-        wanted = float(np.sum(per_band[band, 0] ** 2))
-        kept = float(np.sum(shaped[band, 0] ** 2))
-        if kept > 0.0 and wanted > 0.0:
-            shaped[band] *= np.sqrt(wanted / kept)
+    shaped *= ratio[:, None, None]
     tail = shaped.sum(axis=0)
     record = {
         "kind": "histogram of the rays, noise bursts per bin from sampled directions",

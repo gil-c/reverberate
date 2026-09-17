@@ -11,7 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from reverberate.metrics import rt60_per_band
+from reverberate.accel.backend import cuda_available
+from reverberate.metrics import band_centres, rt60_per_band
 from reverberate.mirror.criteria import CriteriaSettings, detect_reflections
 from reverberate.mirror.ism import IsmSettings, Paths, grow_tree, paths_for
 from reverberate.mirror.render import (
@@ -148,3 +149,45 @@ def test_the_histogram_tail_reads_through_the_bank_at_the_energy_asked() -> None
     asked = 200 * 1e-4
     # Every band from 250 Hz up reads what was asked within half a decibel.
     np.testing.assert_allclose(10 * np.log10(got[1:7] / asked), 0.0, atol=0.5)
+
+
+gpu = pytest.mark.skipif(not cuda_available(), reason="needs a CUDA device and cupy")
+
+
+@gpu
+def test_the_card_renders_the_early_part_as_the_host_and_the_tail_at_its_energy() -> None:
+    import cupy
+
+    from reverberate.mirror.rays import Histogram
+    from reverberate.mirror.render import early_signals, tail_from_histogram
+
+    scene = box_scene()
+    tree = grow_tree(scene, SOURCE, IsmSettings(max_order=2))
+    paths = paths_for(scene, tree, RECEIVER, IsmSettings(max_order=2))
+    settings = RenderSettings(order=3, duration_s=0.6, tail_from_s=0.0)
+    host = early_signals(paths, settings, C)
+    card = cupy.asnumpy(early_signals(paths, settings, C, cupy))
+    np.testing.assert_allclose(card, host, rtol=0, atol=1e-9 * np.abs(host).max())
+
+    rng = np.random.default_rng(1)
+    energy = np.zeros((1, 300, 7))
+    energy[0, 50:250] = 1e-4 * rng.uniform(0.5, 1.5, size=(200, 7))
+    moments = rng.normal(size=(1, 300, 7, 16)) * energy[..., None] * 0.2
+    moments[0, :, :, 0] = energy[0]
+    histogram = Histogram(
+        energy=energy,
+        moments=moments,
+        hits=np.ones((1, 300), dtype=np.int64),
+        bin_s=0.002,
+        bands_hz=(125, 250, 500, 1000, 2000, 4000, 8000),
+        order=3,
+        rays=1,
+    )
+    bands = len(band_centres(48000))
+    common = dict(sound_speed_m_s=C, start_s=0.0, seed=3, scale_per_band=np.ones(bands))
+    on_host, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, **common)
+    on_card, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, xp=cupy, **common)
+    on_card = cupy.asnumpy(on_card)
+    # The omni and first order energies agree within half a decibel: the draws differ, the law not.
+    ratio = np.sum(on_card**2, axis=1) / np.sum(on_host**2, axis=1)
+    np.testing.assert_allclose(10 * np.log10(ratio[:4]), 0.0, atol=0.5)

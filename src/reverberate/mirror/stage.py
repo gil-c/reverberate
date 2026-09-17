@@ -40,9 +40,9 @@ from typing import Any
 
 import h5py
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter
 
-from reverberate.audio import apply_air_absorption, lowpass
+from reverberate.accel.backend import to_numpy
 from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.audit import write_geometry_layers, write_paths
 from reverberate.mirror.calibrate import Parameters, apply_parameters, image_scene, regain
@@ -70,8 +70,8 @@ from reverberate.mirror.render import (
     RenderSettings,
     _band_map,
     band_pulse_energy,
+    early_signals,
     render,
-    render_paths,
     tail_from_histogram,
 )
 from reverberate.mirror.signature import apply_signature, measure_signature, write_signature
@@ -286,6 +286,7 @@ def _render_point(
     sound_speed_m_s: float,
     fallback: tuple[Any, ...] | None = None,
     signature: np.ndarray | None = None,
+    xp: Any = np,
 ) -> tuple[int, Ambisonic, dict[str, Any]]:
     """One point: the discrete part, then the histogram's tail when there is one.
 
@@ -296,30 +297,25 @@ def _render_point(
     straight line time the tail's clock starts from; a third item, when
     there, is the point's diffracted onset (a one-path ``Paths``), rendered
     with the early part, whose arrival is where the tail's clock starts.
+    ``xp`` is the array module the arithmetic runs on (``cupy`` on a card);
+    the response comes back on the host either way.
     """
-    scene = scene_path if isinstance(scene_path, DerivedScene) else load_derived(scene_path)
+    from reverberate.accel.dsp import air_absorption, lowpass_sos, sosfilt, sosfiltfilt
+
     if histogram is None:
+        scene = scene_path if isinstance(scene_path, DerivedScene) else load_derived(scene_path)
         response, plain = render(
             paths, scene, settings.render, sound_speed_m_s=sound_speed_m_s, seed=settings.seed
         )
         return index, response, plain
-    early = render_paths(paths, settings.render, sound_speed_m_s)
+    rate = settings.render.sample_rate_hz
+    signals = early_signals(paths, settings.render, sound_speed_m_s, xp)
     record: dict[str, Any] = {"paths": int(paths.count)}
     direct = paths.order == 0
     if direct.any() and histogram.hits[index].sum() > 0:
-        rate = settings.render.sample_rate_hz
         distance = float(paths.length_m[direct][0])
-        start = int(round((distance / sound_speed_m_s + settings.render.lead_s) * rate))
         centres = band_centres(int(round(rate)))
-        window = max(int(round(0.0005 * rate)), 1)
-        rows = octave_filter_rows(
-            np.repeat(
-                early.signals[0:1, max(start - window, 0) : start + window + 1], len(centres), 0
-            ),
-            int(round(rate)),
-            np.arange(len(centres)),
-        )
-        direct_energy = np.sum(rows**2, axis=1)
+        direct_energy = np.zeros(len(centres))
         analytic = None
         if settings.render.analytic_direct:
             # What a sphere of radius r at distance d catches of rays of energy 1/N,
@@ -331,6 +327,16 @@ def _render_point(
             amplitude = paths.gain[np.flatnonzero(direct)[0]][picks]
             whole = amplitude**2 * band_pulse_energy(rate)
             analytic = np.asarray(whole / expected, dtype=float)
+        else:
+            start = int(round((distance / sound_speed_m_s + settings.render.lead_s) * rate))
+            window = max(int(round(0.0005 * rate)), 1)
+            omni = to_numpy(signals[0, max(start - window, 0) : start + window + 1])
+            rows = octave_filter_rows(
+                np.repeat(omni[None, :], len(centres), 0),
+                int(round(rate)),
+                np.arange(len(centres)),
+            )
+            direct_energy = np.sum(rows**2, axis=1)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
@@ -342,8 +348,9 @@ def _render_point(
             bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
             scale_per_band=analytic,
+            xp=xp,
         )
-        signals = early.signals + tail
+        signals = signals + tail
         record["tail"] = tail_record
     elif fallback is not None and not direct.any() and histogram.hits[index].sum() > 0:
         scale, straight_s = fallback[0], fallback[1]
@@ -356,12 +363,7 @@ def _render_point(
         if onset is not None:
             # The diffracted onset is the first arrival: the tail starts after it.
             start_s = float(onset.length_m[0]) / sound_speed_m_s
-            early = Ambisonic(
-                early.signals + render_paths(onset, settings.render, sound_speed_m_s).signals,
-                early.sample_rate_hz,
-                early.order,
-                early.centre,
-            )
+            signals = signals + early_signals(onset, settings.render, sound_speed_m_s, xp)
             record["diffracted"] = {
                 "length_m": round(float(onset.length_m[0]), 4),
                 "gain_db": [round(float(v), 2) for v in 20.0 * np.log10(onset.gain[0])],
@@ -377,34 +379,43 @@ def _render_point(
             bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
             scale_per_band=scale,
+            xp=xp,
         )
-        signals = early.signals + tail
+        signals = signals + tail
         record["tail"] = {
             **tail_record,
             "scale_from": "the other points, no direct path here",
             "starts_s": round(start_s, 4),
         }
     else:
-        signals = early.signals
         record["tail"] = None if not direct.any() else "no ray reached this receiver"
     if settings.render.air_absorption:
-        signals = apply_air_absorption(
-            signals, settings.render.sample_rate_hz, sound_speed_m_s=sound_speed_m_s
-        )
+        signals = air_absorption(signals, rate, xp, sound_speed_m_s=sound_speed_m_s)
     if signature is not None and signature.size:
-        signals = apply_signature(signals, signature)
+        signals = _with_signature(signals, signature, xp)
     if settings.render.lowcut_hz > 0.0:
         sos = butter(
             settings.render.lowcut_order,
             settings.render.lowcut_hz,
             btype="high",
-            fs=settings.render.sample_rate_hz,
+            fs=rate,
             output="sos",
         )
-        signals = np.asarray(sosfilt(sos, signals, axis=-1))
+        signals = sosfilt(sos, signals, xp)
     if settings.render.band_limit_hz > 0.0:
-        signals = lowpass(signals, settings.render.sample_rate_hz, settings.render.band_limit_hz)
-    return index, Ambisonic(signals, early.sample_rate_hz, early.order, early.centre), record
+        signals = sosfiltfilt(lowpass_sos(rate, settings.render.band_limit_hz), signals, xp)
+    order = settings.render.order
+    return index, Ambisonic(to_numpy(signals), rate, order, paths.receiver), record
+
+
+def _with_signature(signals: Any, taps: np.ndarray, xp: Any) -> Any:
+    """:func:`apply_signature` on ``xp``."""
+    if xp is np:
+        return apply_signature(signals, taps)
+    n = signals.shape[-1]
+    n_fft = 1 << int(np.ceil(np.log2(n + taps.size)))
+    spectrum = xp.fft.rfft(signals, n_fft, axis=-1) * xp.fft.rfft(xp.asarray(taps), n_fft)[None, :]
+    return xp.fft.irfft(spectrum, n_fft, axis=-1)[..., :n]
 
 
 #: What every render worker reads, loaded once per worker by
@@ -419,7 +430,7 @@ def _load_shared(histogram_path: Path, scene_path: Path) -> None:
     _SHARED["scene"] = load_derived(scene_path)
 
 
-def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
+def _render_to_disk(args: tuple[Any, ...], xp: Any = np) -> tuple[int, float, dict[str, Any]]:
     """The render worker of the host phase: the response to ``scratch/<index>.npy``.
 
     A storey of 437 points at order 7 is 13 GB of responses; they go through
@@ -434,7 +445,7 @@ def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
         scene_path = _SHARED["scene"]
     signature = args[8] if len(args) > 8 else None
     _, response, record = _render_point(
-        index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback, signature
+        index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback, signature, xp
     )
     np.save(Path(scratch) / f"{index}.npy", response.signals.astype(np.float32))
     return index, _direct_energy(response, settings.criteria), record
@@ -700,22 +711,57 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
         energies: dict[int, float] = {}
         scales: list[np.ndarray] = []
 
-        def submit(pool: ProcessPoolExecutor, i: int, fallback: Any) -> Any:
-            return pool.submit(
-                _render_to_disk,
-                (
-                    i,
-                    every[i],
-                    SHARED,
-                    SHARED,
-                    settings_render,
-                    s.sound_speed_m_s,
-                    scratch,
-                    fallback,
-                    signature,
-                ),
+        def submit_args(i: int, fallback: Any) -> tuple[Any, ...]:
+            return (
+                i,
+                every[i],
+                SHARED,
+                SHARED,
+                settings_render,
+                s.sound_speed_m_s,
+                scratch,
+                fallback,
+                signature,
             )
 
+        def submit(pool: ProcessPoolExecutor, i: int, fallback: Any) -> Any:
+            return pool.submit(_render_to_disk, submit_args(i, fallback))
+
+        def fallback_of(i: int) -> Any:
+            if s.report.get("tail_scale_fallback") is None:
+                return None
+            if not bool(np.all(np.isfinite(source_position))):
+                return None
+            straight = float(np.linalg.norm(positions[i] - source_position))
+            s.report["points_tail_only"] += 1
+            return (
+                np.asarray(s.report["tail_scale_fallback"], dtype=float),
+                straight / s.sound_speed_m_s,
+                onsets.get(i),
+            )
+
+        if device_count() > 0:
+            # On the card, one point after another in this process: the
+            # arithmetic is the card's and the host only writes the files.
+            import cupy
+
+            _load_shared(histogram_path, s.scene_path)
+            with_scales = [_render_to_disk(submit_args(i, None), cupy) for i in with_direct]
+            for index, energy, record in with_scales:
+                energies[index] = energy
+                tail = record.get("tail")
+                if isinstance(tail, dict) and "scale_per_band" in tail:
+                    scales.append(np.asarray(tail["scale_per_band"], dtype=float))
+            fallback_scale = np.median(np.stack(scales), axis=0) if scales else None
+            s.report["tail_scale_fallback"] = (
+                None if fallback_scale is None else [float(v) for v in fallback_scale]
+            )
+            s.report["points_tail_only"] = 0
+            for i in without:
+                index, energy, _ = _render_to_disk(submit_args(i, fallback_of(i)), cupy)
+                energies[index] = energy
+            s.report["render_device"] = "card"
+            return energies
         with ProcessPoolExecutor(
             max_workers=settings.workers,
             initializer=_load_shared,
