@@ -39,7 +39,7 @@ import numpy as np
 
 from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.mirror.criteria import Criteria, CriteriaSettings, PointReport, judge
-from reverberate.mirror.geometry import DerivedScene, MaterialTable
+from reverberate.mirror.geometry import VERTICAL, DerivedScene, MaterialTable
 from reverberate.mirror.ism import Paths, _gains
 from reverberate.spatial.encode import Ambisonic
 
@@ -73,6 +73,12 @@ class Parameters:
     #: on the floor, the ceiling or a wall keeps a ray's elevation, so with
     #: little scattering on the shell the rays' late field lies flat.
     shell_scattering: float | None = None
+    #: The scattering of the shell's floors and ceilings alone, in place of
+    #: ``shell_scattering`` there; ``None`` keeps one value for the whole
+    #: shell. The wave field's late part keeps a floor to ceiling flutter
+    #: (more energy from above and below, a more coherent pair of ears) that
+    #: a well mixed shell loses.
+    floor_ceiling_scattering: float | None = None
 
     @property
     def key(self) -> str:
@@ -89,6 +95,8 @@ class Parameters:
         }
         if self.shell_scattering is not None:
             record["shell_scattering"] = round(float(self.shell_scattering), 6)
+        if self.floor_ceiling_scattering is not None:
+            record["floor_ceiling_scattering"] = round(float(self.floor_ceiling_scattering), 6)
         if self.image_absorption_scale is not None:
             # Only when set, so the keys of the files written before stay theirs.
             record["image_absorption_scale"] = [
@@ -111,6 +119,11 @@ class Parameters:
             shell_scattering=(
                 float(record["shell_scattering"])
                 if record.get("shell_scattering") is not None
+                else None
+            ),
+            floor_ceiling_scattering=(
+                float(record["floor_ceiling_scattering"])
+                if record.get("floor_ceiling_scattering") is not None
                 else None
             ),
         )
@@ -166,14 +179,63 @@ def apply_parameters(scene: DerivedScene, parameters: Parameters) -> DerivedScen
         scattering[scene.materials.labels.index("shell")] = float(
             np.clip(parameters.shell_scattering, 0.0, 1.0)
         )
+    labels = tuple(scene.materials.labels)
+    if parameters.floor_ceiling_scattering is not None and "shell" in labels:
+        return _split_shell(scene, absorption, scattering, parameters.floor_ceiling_scattering)
     materials = MaterialTable(
-        scene.materials.labels,
+        labels,
         absorption,
         scattering,
         scene.materials.bands_hz,
         scene.materials.source,
     )
     return replace(scene, materials=materials)
+
+
+#: The label the shell's floors and ceilings take when their scattering is their own.
+FLOOR_CEILING = "shell_floor_ceiling"
+
+
+def _split_shell(
+    scene: DerivedScene, absorption: np.ndarray, scattering: np.ndarray, value: float
+) -> DerivedScene:
+    """The shell's horizontal triangles and facets under a label of their own.
+
+    The new label is the shell's absorption with ``value`` for scattering;
+    a shell triangle or facet is horizontal when its normal is within the
+    geometry's ``VERTICAL`` rule of the vertical, as the facets' kinds are
+    decided at derivation.
+    """
+    labels = tuple(scene.materials.labels)
+    shell = labels.index("shell")
+    new = len(labels)
+    tris = np.asarray(scene.occluder_vertices, dtype=float).reshape(-1, 3, 3)
+    normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    up = np.abs(normals[:, 1]) / np.maximum(np.linalg.norm(normals, axis=1), 1e-30)
+    occluder_label = np.asarray(scene.occluder_label).copy()
+    occluder_label[(occluder_label == shell) & (up > VERTICAL)] = new
+    # Facets by the same rule as their triangles, so a facet and its triangles agree.
+    facets = tuple(
+        replace(f, label=new)
+        if f.label == shell and abs(float(np.asarray(f.normal)[1])) > VERTICAL
+        else f
+        for f in scene.facets
+    )
+    split_labels = (*labels, FLOOR_CEILING)
+    materials = MaterialTable(
+        split_labels,
+        np.vstack([absorption, absorption[shell][None, :]]),
+        np.append(scattering, float(np.clip(value, 0.0, 1.0))),
+        scene.materials.bands_hz,
+        scene.materials.source,
+    )
+    return replace(
+        scene,
+        labels=split_labels,
+        materials=materials,
+        facets=facets,
+        occluder_label=occluder_label.astype(np.asarray(scene.occluder_label).dtype),
+    )
 
 
 def image_scene(scene: DerivedScene, parameters: Parameters) -> DerivedScene:
@@ -183,7 +245,7 @@ def image_scene(scene: DerivedScene, parameters: Parameters) -> DerivedScene:
     of the flat shell's specular reflection (the solver's walls are flat):
     the images keep the class's scattering there.
     """
-    images = replace(parameters, shell_scattering=None)
+    images = replace(parameters, shell_scattering=None, floor_ceiling_scattering=None)
     if parameters.image_absorption_scale is None:
         return apply_parameters(scene, images)
     return apply_parameters(
