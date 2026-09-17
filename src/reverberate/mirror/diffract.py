@@ -38,7 +38,16 @@ from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import Paths
 
-__all__ = ["DiffractionSettings", "Occupancy", "diffracted_paths", "maekawa_db", "occupancy_of"]
+__all__ = [
+    "DiffractionSettings",
+    "Edges",
+    "Occupancy",
+    "diffracted_paths",
+    "diffracting_edges",
+    "edge_paths",
+    "maekawa_db",
+    "occupancy_of",
+]
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,33 @@ class DiffractionSettings:
     cluster_m: float = 0.25
     #: Paths kept per receiver, the shortest first.
     max_paths: int = 24
+    #: Shortest edge kept as a diffracting one. Under about a third of a
+    #: metre an edge bends too little of the band the mirror answers.
+    min_edge_m: float = 0.30
+    #: An edge whose faces absorb more than this at 1 kHz is left out: a
+    #: curtain's hem bends a field that is not there.
+    max_edge_absorption: float = 0.60
+    #: How much longer than the straight line a single edge path may be.
+    #: Measured on the 32 shadowed points of hssd_0076: the share of criteria
+    #: met is 0.230 with no edge at all, 0.303 at 0.5 m, 0.309 at 1.5 m,
+    #: 0.297 at 3 m and 0.289 at 8 m. Long ways round spread the early part
+    #: in time, which costs early decay time and seam more than their own
+    #: directions gain.
+    max_edge_detour_m: float = 1.5
+    #: Edge paths within this of the geodesic onset are the same arrival.
+    same_arrival_s: float = 0.0002
+    same_arrival_deg: float = 15.0
+    #: Whether every selected edge is tried, beside the geodesic.
+    edges: bool = True
+    #: What sets the diffracted energy of a shadowed point. ``geodesic``
+    #: keeps what the single shortest way round carried and shares it over
+    #: the edges by their own weights, so the edges decide when and from
+    #: where the sound arrives and not how much of it there is. Maekawa's
+    #: loss is a whole barrier's answer, so applying it to each of a
+    #: doorway's edges and adding them counts the same sound several times:
+    #: on hssd_0076 that cost 0.20 of early decay time and 2.3 dB of seam.
+    #: ``maekawa`` leaves each edge with its own.
+    edge_gain: str = "geodesic"
 
     def record(self) -> dict[str, Any]:
         return {
@@ -78,6 +114,11 @@ class DiffractionSettings:
             "reflections": self.reflections,
             "cluster_m": self.cluster_m,
             "max_paths": self.max_paths,
+            "min_edge_m": self.min_edge_m,
+            "max_edge_absorption": self.max_edge_absorption,
+            "max_edge_detour_m": self.max_edge_detour_m,
+            "edges": self.edges,
+            "edge_gain": self.edge_gain,
         }
 
 
@@ -229,6 +270,225 @@ def _pull(occupancy: Occupancy, chain: np.ndarray) -> list[np.ndarray]:
     return corners
 
 
+# --------------------------------------------------------------------------
+# the edges themselves
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Edges:
+    """The scene's diffracting edges: where they are, how long, whose they are."""
+
+    #: ``[edge, 3]`` the two ends.
+    a: np.ndarray
+    b: np.ndarray
+    #: ``[edge]`` the label the edge's facet carries, and the facet itself.
+    label: np.ndarray
+    facet: np.ndarray
+    length_m: np.ndarray
+
+    @property
+    def count(self) -> int:
+        return int(self.a.shape[0])
+
+    def record(self) -> dict[str, Any]:
+        from collections import Counter
+
+        return {
+            "edges": self.count,
+            "length_m_total": round(float(self.length_m.sum()), 2),
+            "length_m_median": round(float(np.median(self.length_m)), 3) if self.count else None,
+            "by_label": dict(Counter(int(v) for v in self.label).most_common(8)),
+        }
+
+
+def _lines_of(
+    facet_triangles: np.ndarray, min_length_m: float
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The facet's own boundary, as the longest segment on each of its lines.
+
+    A facet is a merged plane of many triangles; an edge shared by two of
+    them is inside it, and one held by a single triangle is its rim. The rim
+    is made of many short collinear pieces, so the pieces on one line are
+    taken together and only the whole is kept.
+    """
+    tri = facet_triangles
+    a = np.concatenate([tri[:, 0], tri[:, 1], tri[:, 2]])
+    b = np.concatenate([tri[:, 1], tri[:, 2], tri[:, 0]])
+    key = np.round(np.concatenate([np.minimum(a, b), np.maximum(a, b)], axis=1), 5)
+    view = np.ascontiguousarray(key).view([("", key.dtype)] * 6).ravel()
+    unique, counts = np.unique(view, return_counts=True)
+    rim = unique[counts == 1].view(key.dtype).reshape(-1, 6)
+    if rim.shape[0] == 0:
+        return []
+    p, q = rim[:, :3], rim[:, 3:]
+    direction = q - p
+    length = np.linalg.norm(direction, axis=1)
+    alive = length > 1e-9
+    p, q, direction, length = p[alive], q[alive], direction[alive], length[alive]
+    unit = direction / length[:, None]
+    # One sense per line, so a piece and its reverse land together.
+    flip = (unit[:, 0] < -1e-9) | ((np.abs(unit[:, 0]) < 1e-9) & (unit[:, 1] < -1e-9))
+    unit[flip] *= -1.0
+    foot = p - np.einsum("ij,ij->i", p, unit)[:, None] * unit
+    groups: dict[tuple[Any, ...], list[int]] = {}
+    for i in range(unit.shape[0]):
+        marker = (tuple(np.round(unit[i], 3)), tuple(np.round(foot[i], 2)))
+        groups.setdefault(marker, []).append(i)
+    out = []
+    for members in groups.values():
+        axis = unit[members[0]]
+        along = np.concatenate([p[members] @ axis, q[members] @ axis])
+        low, high = float(along.min()), float(along.max())
+        if high - low < min_length_m:
+            continue
+        origin = foot[members[0]]
+        out.append((origin + low * axis, origin + high * axis))
+    return out
+
+
+def diffracting_edges(scene: DerivedScene, settings: DiffractionSettings | None = None) -> Edges:
+    """The edges worth bending sound round, chosen by their length and their material.
+
+    Geometry first: an edge is the rim of a reflector facet, taken whole
+    along each of its lines, and it is kept when it is at least
+    ``min_edge_m`` long. Below that it bends too little of the band the
+    mirror answers, and there are thousands of them.
+
+    Material second: an edge whose facet absorbs more than
+    ``max_edge_absorption`` at 1 kHz is dropped. What a curtain's hem bends
+    is a field the curtain has already taken.
+
+    On hssd_0076 this leaves 709 edges of 19 805 triangle rim pieces, 1 425 m
+    of them the shell's own: the doorways, the window reveals and the wall
+    returns, which is what a point in another room hears first.
+    """
+    settings = settings or DiffractionSettings()
+    bands = np.asarray(OCTAVE_BANDS, dtype=float)
+    at_1k = int(np.argmin(np.abs(bands - 1000.0)))
+    ends_a: list[np.ndarray] = []
+    ends_b: list[np.ndarray] = []
+    labels: list[int] = []
+    facets: list[int] = []
+    for index, facet in enumerate(scene.facets):
+        absorption = float(scene.materials.absorption[facet.label][at_1k])
+        if absorption > settings.max_edge_absorption:
+            continue
+        for low, high in _lines_of(scene.reflector_vertices[facet.triangles], settings.min_edge_m):
+            ends_a.append(low)
+            ends_b.append(high)
+            labels.append(int(facet.label))
+            facets.append(index)
+    if not ends_a:
+        empty = np.zeros((0, 3))
+        return Edges(empty, empty, np.zeros(0, dtype=int), np.zeros(0, dtype=int), np.zeros(0))
+    a = np.asarray(ends_a, dtype=float)
+    b = np.asarray(ends_b, dtype=float)
+    return Edges(
+        a=a,
+        b=b,
+        label=np.asarray(labels, dtype=np.int64),
+        facet=np.asarray(facets, dtype=np.int64),
+        length_m=np.linalg.norm(b - a, axis=1),
+    )
+
+
+def _aperture(a: np.ndarray, b: np.ndarray, source: np.ndarray, receiver: np.ndarray) -> np.ndarray:
+    """The point on each segment ``a -> b`` with the shortest way from source to receiver.
+
+    The sum of the two legs is convex along the segment, so a golden section
+    over the whole of it finds the one point, for every edge at once.
+    """
+    lo = np.zeros(a.shape[0])
+    hi = np.ones(a.shape[0])
+    phi = 0.5 * (np.sqrt(5.0) - 1.0)
+
+    def total(t: np.ndarray) -> np.ndarray:
+        point = a + t[:, None] * (b - a)
+        return np.linalg.norm(point - source, axis=1) + np.linalg.norm(point - receiver, axis=1)
+
+    left = hi - phi * (hi - lo)
+    right = lo + phi * (hi - lo)
+    f_left, f_right = total(left), total(right)
+    for _ in range(24):
+        take = f_left < f_right
+        hi = np.where(take, right, hi)
+        lo = np.where(take, lo, left)
+        left = hi - phi * (hi - lo)
+        right = lo + phi * (hi - lo)
+        f_left, f_right = total(left), total(right)
+    t = 0.5 * (lo + hi)
+    return np.asarray(a + t[:, None] * (b - a))
+
+
+def edge_paths(
+    scene: DerivedScene,
+    edges: Edges,
+    source: np.ndarray,
+    receiver: np.ndarray,
+    *,
+    grid: Any,
+    sound_speed_m_s: float,
+    settings: DiffractionSettings,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """One diffracted arrival per edge the receiver can see the source round.
+
+    Returns the lengths, the directions, the per band gains and the points
+    the sound bent at, for the paths that survive: the edge's own aperture
+    point is found, the two legs are tested against the occluders, and
+    Maekawa's loss for that detour is applied. A shadowed point in the
+    reference hears its first sound round several edges at once, and the
+    geodesic can only give it one.
+    """
+    from reverberate.mirror.ism import _segment_hits
+
+    nothing = (np.zeros(0), np.zeros((0, 3)), np.zeros((0, len(OCTAVE_BANDS))), np.zeros((0, 3)))
+    if edges.count == 0:
+        return nothing
+    straight = float(np.linalg.norm(receiver - source))
+    point = _aperture(edges.a, edges.b, source, receiver)
+    first = np.linalg.norm(point - source, axis=1)
+    second = np.linalg.norm(point - receiver, axis=1)
+    total = first + second
+    near = total <= straight + settings.max_edge_detour_m
+    near &= second > 1e-3
+    if not bool(np.any(near)):
+        return nothing
+    picked = np.flatnonzero(near)
+    order = picked[np.argsort(total[picked])]
+    clear_a = ~_segment_hits(
+        np.repeat(source[None, :], order.size, axis=0),
+        point[order],
+        scene.occluder_vertices,
+        grid,
+        epsilon_m=0.01,
+    )
+    keep = order[clear_a]
+    if keep.size == 0:
+        return nothing
+    clear_b = ~_segment_hits(
+        point[keep],
+        np.repeat(receiver[None, :], keep.size, axis=0),
+        scene.occluder_vertices,
+        grid,
+        epsilon_m=0.01,
+    )
+    keep = keep[clear_b]
+    if keep.size == 0:
+        return nothing
+    bands = np.asarray(OCTAVE_BANDS, dtype=float)
+    lengths = total[keep]
+    towards = point[keep] - receiver
+    directions = towards / np.maximum(np.linalg.norm(towards, axis=1, keepdims=True), 1e-9)
+    gains = np.zeros((keep.size, bands.size))
+    for i, index in enumerate(keep):
+        loss = maekawa_db(
+            float(total[index] - straight), bands, sound_speed_m_s, settings.max_loss_db
+        )
+        gains[i] = 10.0 ** (-loss / 20.0) / max(float(total[index]), 1e-3)
+    return lengths, directions, gains, point[keep]
+
+
 def diffracted_paths(
     scene: DerivedScene,
     source: np.ndarray,
@@ -313,6 +573,11 @@ def diffracted_paths(
         lengths.append(length - float(np.linalg.norm(receiver - source)))
     reflected = 0
     trees = 0
+    edge_record: dict[str, Any] = {}
+    if settings.edges:
+        out, secondary, edge_record = _through_the_edges(
+            scene, source, receivers, out, secondary, sound_speed_m_s, settings
+        )
     if settings.reflections > 0 and secondary:
         out, trees, reflected = _reflect_the_edges(scene, receivers, out, secondary, settings)
     record = {
@@ -324,6 +589,7 @@ def diffracted_paths(
         "detour_m_median": round(float(np.median(lengths)), 3) if lengths else None,
         "edge_trees": trees,
         "reflected_paths": reflected,
+        **edge_record,
     }
     if say is not None:
         say(
@@ -331,6 +597,99 @@ def diffracted_paths(
             f"{trees} edge trees, {reflected} reflected paths"
         )
     return out, record
+
+
+def _through_the_edges(
+    scene: DerivedScene,
+    source: np.ndarray,
+    receivers: np.ndarray,
+    out: dict[int, Paths],
+    secondary: dict[int, tuple[np.ndarray, float, np.ndarray]],
+    sound_speed_m_s: float,
+    settings: DiffractionSettings,
+) -> tuple[dict[int, Paths], dict[int, tuple[np.ndarray, float, np.ndarray]], dict[str, Any]]:
+    """Every selected edge tried for every shadowed receiver, beside the geodesic.
+
+    The geodesic gives one way round and therefore one direction; the
+    reference's first sound arrives round several edges at once, which is
+    why the onset's direction on hssd_0076 was unbiased and yet spread
+    +-35 degrees in elevation. Here each edge that both the source and the
+    receiver can see contributes its own arrival, at its own time, from its
+    own direction. The geodesic is kept only when it is shorter than every
+    single edge path, which is where it earns its place: a way round two
+    corners that no one edge gives.
+    """
+    from reverberate.mirror.ism import occluder_grid
+
+    edges = diffracting_edges(scene, settings)
+    grid = occluder_grid(scene)
+    bands = len(OCTAVE_BANDS)
+    found = 0
+    per_point: list[int] = []
+    for index in sorted(out):
+        lengths, directions, gains, apertures = edge_paths(
+            scene,
+            edges,
+            source,
+            receivers[index],
+            grid=grid,
+            sound_speed_m_s=sound_speed_m_s,
+            settings=settings,
+        )
+        if lengths.size == 0:
+            per_point.append(0)
+            continue
+        # Two facets can share one rim; one arrival is enough.
+        marker = np.round(np.column_stack([lengths, directions]), 3)
+        _, first = np.unique(marker, axis=0, return_index=True)
+        pick = np.sort(first)
+        lengths, directions, gains = lengths[pick], directions[pick], gains[pick]
+        apertures = apertures[pick]
+        keep = np.argsort(lengths)[: settings.max_paths]
+        lengths, directions, gains = lengths[keep], directions[keep], gains[keep]
+        apertures = apertures[keep]
+        onset = out[index]
+        geodesic = float(onset.length_m[0])
+        rows = lengths.size
+        nearest = int(np.argmin(lengths))
+        aperture = apertures[nearest]
+        before = float(np.linalg.norm(aperture - source))
+        loss_db = -20.0 * np.log10(np.maximum(gains[nearest] * float(lengths[nearest]), 1e-12))
+        if geodesic < float(lengths.min()) - 0.01:
+            lengths = np.concatenate([onset.length_m[:1], lengths])
+            directions = np.vstack([onset.direction[:1], directions])
+            gains = np.vstack([onset.gain[:1], gains])
+        if settings.edge_gain == "geodesic":
+            # One barrier's worth of sound, shared over the ways round it.
+            share = np.sqrt(np.sum(onset.gain[0] ** 2) / max(float(np.sum(gains**2)), 1e-300))
+            gains = gains * share
+        points = np.repeat(receivers[index][None, None, :], 5, axis=1)
+        points = np.repeat(points, lengths.size, axis=0)
+        points[:, 0] = source
+        out[index] = Paths(
+            receiver=receivers[index].copy(),
+            image=np.full(lengths.size, -1, dtype=np.int64),
+            order=np.zeros(lengths.size, dtype=np.int64),
+            length_m=lengths,
+            direction=directions,
+            gain=gains,
+            points=points,
+            sequence=np.full((lengths.size, 3), -1, dtype=np.int64),
+        )
+        # The room reflects the nearest edge, so the tree moves there too.
+        secondary[index] = (aperture, before, loss_db[:bands])
+        found += 1
+        per_point.append(int(rows))
+    return (
+        out,
+        secondary,
+        {
+            "edges_kept": edges.count,
+            "edges_record": edges.record(),
+            "points_with_edge_paths": found,
+            "edge_paths_median": float(np.median(per_point)) if per_point else 0.0,
+        },
+    )
 
 
 def _reflect_the_edges(

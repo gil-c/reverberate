@@ -118,3 +118,50 @@ def test_the_edge_reflects_in_the_receivers_own_room() -> None:
         first, second = order[0], order[1]
         assert with_edge[0].length_m[second] > with_edge[0].length_m[first]
         assert record["edge_trees"] >= 1
+
+
+def test_the_edges_are_chosen_by_length_and_material() -> None:
+    """A rim under the length floor, or on a face that absorbs, is not an edge."""
+    from reverberate.mirror.diffract import diffracting_edges
+
+    scene = walled_box()
+    edges = diffracting_edges(scene, DiffractionSettings(min_edge_m=0.3))
+    assert edges.count > 0
+    assert float(edges.length_m.min()) >= 0.3
+    # Nothing survives a material the sound does not reach.
+    deaf = diffracting_edges(scene, DiffractionSettings(max_edge_absorption=0.0))
+    assert deaf.count < edges.count
+    # ... nor an impossible length floor.
+    assert diffracting_edges(scene, DiffractionSettings(min_edge_m=1e6)).count == 0
+
+
+def test_a_shadowed_point_hears_several_edges() -> None:
+    """The geodesic gives one way round; the edges give the ones that exist."""
+    scene = walled_box()
+    source = np.array([1.0, 1.2, 0.8])
+    receivers = np.array([[3.0, 1.2, 0.8]])
+    one, _ = diffracted_paths(
+        scene,
+        source,
+        receivers,
+        [0],
+        sound_speed_m_s=343.2,
+        settings=DiffractionSettings(edges=False, reflections=0),
+    )
+    many, record = diffracted_paths(
+        scene,
+        source,
+        receivers,
+        [0],
+        sound_speed_m_s=343.2,
+        settings=DiffractionSettings(edges=True, reflections=0, max_edge_detour_m=4.0),
+    )
+    assert record["edges_kept"] > 0
+    assert many[0].length_m.size > one[0].length_m.size
+    # Every one of them is a real way round: longer than the straight line.
+    straight = float(np.linalg.norm(receivers[0] - source))
+    assert float(many[0].length_m.min()) > straight
+    # The energy is the one barrier's, shared, not one barrier's for each edge.
+    shared = float(np.sum(many[0].gain[:, 4] ** 2))
+    alone = float(one[0].gain[0, 4] ** 2)
+    assert shared == pytest.approx(alone, rel=0.05)
