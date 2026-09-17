@@ -123,6 +123,18 @@ class TestOfferSelection:
         assert parsed["cuda_vers"] == {"gte": 12.0}
         assert parsed["type"] == "on-demand"
 
+    def test_a_value_may_hold_a_space_because_every_card_name_does(self) -> None:
+        """``RTX 3090`` is one value, not a field and a stray token.
+
+        Splitting on whitespace alone sent ``gpu_name={"eq": "RTX"}``, which
+        matches no card and comes back as an empty list with no error.
+        """
+        parsed = parse_query("gpu_name=RTX 3090 rentable=true disk_space>40")
+        assert parsed["gpu_name"] == {"eq": "RTX 3090"}
+        assert parsed["rentable"] == {"eq": True}
+        assert parsed["disk_space"] == {"gt": 40}
+        assert parse_query(search_query())["gpu_name"] == {"eq": "RTX 4090"}
+
     def test_cheapest_respects_the_memory_floor(self) -> None:
         small = make_offer(1, dph=0.10, gpu_ram_gb=12.0)
         big = make_offer(2, dph=0.40, gpu_ram_gb=24.0)
