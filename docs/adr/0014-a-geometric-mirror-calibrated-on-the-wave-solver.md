@@ -211,3 +211,13 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   order 6. Taking that extension to 10 costs 20 per cent more images
   (139 957 against 116 662) and reads 0.570 of the criteria against 0.568 on
   the 24 calibration points: the same, within the seeds' own spread.
+- **The join was measured, third octave by third octave.** The hybrid's level
+  against the wave field's, median over 19 points of 0076, from 315 Hz to
+  2.5 kHz. With the crossover as it stands (1 kHz, one octave, the onset in
+  pressure, the step levelled per point): 0.00 dB up to 630 Hz, then +0.27,
+  +0.33, -0.86, -0.75, +0.67, -0.57. Nothing at the join stands out from
+  what the mirror does on its own above it. Each choice was worth what it
+  claims: without the pressure masks over the onset the join gains 1.6 dB at
+  the cutoff, without the levelling it loses 1.2 dB there and 3.5 dB just
+  above, and a half octave ramp digs a 1.6 dB hole at 1.25 kHz. Two octaves
+  read the same as one.
