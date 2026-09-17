@@ -29,9 +29,31 @@ as the third field.
 | --- | --- |
 | `field_mirror/<S>.h5` | The mirror field in the reference's format (`ambisonic-field.md`): same lattice datasets and attributes, `ir` rendered by the mirror, aligned to the reference's clock and scale; `mirror_silent` lists the points with no response; `provenance_json` holds the scene key, the settings, the alignment and the tree. |
 | `mirror/metrics/<S>.json` | The criteria's record, the solver's floor, the summary over the storey (medians and percentiles of every error, verdict rates) and one judgement per point. The criteria's `focus_low_hz` (1000 from 2026-09-17) says which octave bands the decay, colour, seam and echogram errors read and where the reflections and the late field's directions are high passed; every band's values stay in the point's record. The interaural coherences are energy weighted means of 20 ms frames from that date. |
-| `mirror/report_<S>.json` | The whole stage's report: the card's part, the alignment, the summary, the timings, the diffraction record (`asked`, `found`, grid, median detour). |
+| `mirror/report_<S>.json` | The whole stage's report: the card's part, the alignment, the summary, the timings, the diffraction record (`asked`, `found`, grid, median detour, `edge_trees` and `reflected_paths` from 2026-09-18, when a shadowed point's corner gained its own image tree). |
 | `mirror/signature_<S>.npy`, `.json` | The source signature: minimum phase FIR taps from the reference's median direct spectrum, and the record of how it was read. |
 | `walk.json` | Updated: the source's entry gains `field_mirror` and `metrics`; a top level `mirror` entry names the scene, its key, the audit directory and the paths file per source. |
+
+The summary of `mirror/metrics/<S>.json` carries two readings of the same
+criteria from 2026-09-18. `pass_fraction` is the share of points meeting
+`criteria.targets`, which hold each criterion at the next round number over
+the measurement's own floor (one mirror judged against another that differs
+only in its ray seed). `storey_verdicts` is the storey's median against
+`storey_targets`, the difference a listener hears; a median over hundreds of
+points carries the floor over the square root of their count, so the
+perceptual threshold is honest there and meaningless per point.
+
+The rendering smooths the histogram's energy and moments over time before it
+draws the tail (`tail_smooth_s`, `tail_smooth_fraction` in the render
+settings, and `smooth_half_bins` in each point's tail record): the half
+width is a tenth of the time since the tail began, capped at 50 ms. What the
+rays leave bin to bin is the estimator's own variance, not the room.
+
+## Written by `mirror hybrid` (where both fields are)
+
+| Path | What |
+| --- | --- |
+| `field_hybrid/<S>.h5` | One field from two solvers: the wave field under the cutoff, the mirror over it, in the reference's own format. Everything that is not `ir` is copied from the low side. `provenance_json` names both files, the crossover (cutoff, width in octaves, how long the onset is joined in pressure) and the seam's median and deciles: how far apart the two were over the band they share, before one scalar per point levelled them. |
+| `walk.json` | Updated: the source's entry gains `field_hybrid`, which the app offers as a fourth field beside the reference and the two mirrors. |
 
 ## Written by the calibration (where the card and the references are)
 

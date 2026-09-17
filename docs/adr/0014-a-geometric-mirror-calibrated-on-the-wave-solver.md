@@ -151,3 +151,47 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   (0.60 where there is a direct path) and precision (0.67) are limited by
   paths the model does not have, not by a bias (near misses fall both
   sides of the 0.2 ms gate).
+
+## Update, 2026-09-18, night: the two solvers joined, and what a threshold means
+
+- **The tail's grain was the rays' own noise.** The reference's broadband
+  envelope fluctuates 1.9 dB about its decay between 0.15 and 0.45 s; the
+  mirror's fluctuated 4.0 dB. A 2 ms histogram bin holds some sixty ray
+  crossings whose energies are unequal enough to leave 3.5 dB on top of the
+  field's own. A moving mean over the histogram's bins, whose half width
+  grows as a tenth of the time since the tail began and stops at 50 ms,
+  brings it to 2.2 to 2.9 dB. A flat window of the same width costs 0.05 of
+  early decay time; the growing one costs nothing, because the first bins
+  stay as the rays wrote them.
+- **The two solvers are joined per point** (`mirror hybrid`). Over the octave
+  round 1 kHz the wave field and the mirror correlate 0.83 to 0.98 over the
+  direct sound and under 0.25 after 200 ms, so the onset is joined with
+  masks that add to one in pressure and the rest with masks that add to one
+  in power. Both are spectra, so no arrival moves. The step at the join is
+  measured per point: the mirror sits 2.4 dB under the wave field there,
+  2.1 dB where there is a direct path and 3.2 dB where there is not, and one
+  scalar per point takes it out.
+- **What that buys.** The wave field of 0076 plans 6.4 s of card time for
+  its band to 1 kHz, 496 s for the band to 4 kHz and 2929 s for the band to
+  8 kHz. A campaign that solves only what it keeps drops the two largest
+  lines; the crossover's own frequency hardly matters between 500 Hz and
+  1 kHz, so it is chosen on quality alone.
+- **A threshold is not a statistic.** The perceptual thresholds (5 per cent
+  of a decay time, a decibel, 20 microseconds, 0.075 of coherence) are right
+  and were being asked of one point's measurement, which is noisier than
+  they are. They now judge the storey's median, whose noise is the floor
+  over the square root of the point count. Per point each criterion sits at
+  the next round number over the measured floor: reverberation time 0.10,
+  early decay time 0.15, seam 4 dB, the others unchanged.
+- **The smoothing lowered the floor as well as the error**: two seeds now
+  read a reverberation time 8.0 per cent apart against 11.1, an early decay
+  time 10.2 against 14.9, a colour 0.81 dB against 1.05 and a seam 3.12 dB
+  against 3.64.
+- **The shadowed points' first arrival is one geodesic and should be
+  several.** Its time is right, its direction is right half the time: the
+  elevation and the azimuth of the onset are unbiased (median error 0) but
+  spread +-35 and +-70 degrees, because the reference's first arrival comes
+  round several edges at once and the geodesic picks one. The corner's own
+  reflections are now added (order 1, trees shared between nearby corners),
+  which gains 0.007 of reverberation time and 0.008 of early decay time
+  there; the direction needs the edges themselves.

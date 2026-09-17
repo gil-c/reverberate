@@ -334,3 +334,34 @@ reference subset. The stage's two phases exist for this.
 - Python's stdout is buffered when redirected: a remote stage's log stays
   empty until it ends. Run with `PYTHONUNBUFFERED=1`.
 
+
+### A campaign that solves only what it keeps, 2026-09-18
+
+The mirror answers above 1 kHz and the wave solver below, and
+`python -m reverberate.mirror hybrid` joins the two per point into
+`field_hybrid/<S>.h5`. A campaign built for that does not solve the bands it
+throws away. From `plan.json` of hssd_0076, the card time each band's grid
+asks for:
+
+| Band | fmax | Nodes | Steps | Card time (planned) | Output |
+| --- | --- | --- | --- | --- | --- |
+| low | 1 kHz | 19.5 M | 21 846 | 6.4 s | 74.6 GB |
+| mid | 4 kHz | 1 140 M | 29 128 | 495.6 s | 104.0 GB |
+| high | 8 kHz | 8 982 M | 21 846 | 2 928.7 s | 78.0 GB |
+
+Measured on 2 x A100 (2026-09-15, 68 min in all): voxelise 4.9 min, audit
+3.4, plan 1.5, low 4.5 + 4.4 (engine + encode), mid 9.6 + 2.9, high
+30.6 + 1.7, assembly 3.6. Dropping the mid and the high bands leaves
+**about 22 min against 68**, and the voxelisation and the audit fall too,
+since only the low grid is then built: **nearer 12 to 15 min, a fifth of the
+campaign**. The mirror's own 90 s on one RTX 3090 (0.4 US cents) is noise
+beside it.
+
+The crossover's frequency barely moves that, because the low band is 6.4 s
+of 3 431: between 500 Hz and 1 kHz it costs nothing to choose the higher
+one, so it is chosen on quality. The mirror's error against the reference
+per octave, whole response, 25 points of 0076: 11.2 dB of colour at 62 Hz,
+5.4 at 125, 4.1 at 250, 2.4 at 500, 2.6 at 1 k, and its reverberation time
+0.64 relative at 62 Hz, 0.23 at 125, 0.12 at 250, 0.073 at 500, 0.061 at
+1 k. A **low band solved to 1.5 kHz** (four times 6.4 s, still nothing) lets
+the ramp end inside the solved band with the crossover at 1 kHz.
