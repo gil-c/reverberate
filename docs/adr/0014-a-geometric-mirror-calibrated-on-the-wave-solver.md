@@ -193,5 +193,14 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   spread +-35 and +-70 degrees, because the reference's first arrival comes
   round several edges at once and the geodesic picks one. The corner's own
   reflections are now added (order 1, trees shared between nearby corners),
-  which gains 0.007 of reverberation time and 0.008 of early decay time
-  there; the direction needs the edges themselves.
+  and so is every edge the point can see the source round: 651 of them on
+  0076, chosen by length (at least 30 cm) and by material (under 0.6 of
+  absorption at 1 kHz), each carrying Maekawa's loss for its own detour and
+  sharing the geodesic's energy rather than claiming a whole barrier's. The
+  share of criteria met on 32 shadowed points goes from 0.230 to 0.309.
+- **The plateau is still at 1e5 rays**, smoothing or not. One evaluation of
+  the calibration's own cost on 24 points, same parameters, only the ray
+  count moving: 19.09 at 3e5, 19.53 at 1e5, 20.26 at 3e4, 21.10 at 1e4. The
+  moving mean takes out the estimator's noise, not its bias, so fewer rays
+  still read a shorter decay (the reverberation time ratio falls to 0.93 at
+  1e4). 1e5 rays and order 3 remain the cheapest setting that loses nothing.
