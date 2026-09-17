@@ -273,3 +273,26 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   the whole way round against the straight line 0.3008 (early decay time
   0.186, 0.200, 0.375). The grid's slack wins because it is the only one of
   the three that still knows how deep in the shadow the receiver is.
+- **The seam criterion measured less than its own noise, and is rebuilt.**
+  It read the level step across the mixing time on 10 ms either side, per
+  octave, and took the worst band. Ten milliseconds of an octave band holds
+  a handful of independent samples, so the reading was noise: two mirrors
+  differing only in their ray seed sit 3.59 dB apart there, while the
+  mirror's own distance to the reference is 3.44 dB. Signal over floor:
+  0.96. Measured against the window's width, 24 points, worst band then
+  median band:
+
+  | window | floor, worst | error, worst | floor, median | error, median |
+  | --- | --- | --- | --- | --- |
+  | 10 ms | 3.59 | 3.44 | 1.73 | 1.79 |
+  | 20 ms | 2.51 | 3.49 | 1.34 | 1.49 |
+  | 40 ms | 1.93 | 2.53 | 0.90 | 1.54 |
+  | 80 ms | 2.04 | 3.76 | 1.09 | 2.42 |
+  | 160 ms | 2.05 | 3.67 | 1.04 | 2.42 |
+
+  The seam now reads **80 ms** either side and the **median** over the
+  focus bands, where the floor is 1.09 dB against a distance of 2.42: the
+  criterion tells the two apart at last, and its target goes from 4 dB to
+  1.5. The worst band is the right reading for a colour, where one band out
+  of place is heard; it is the wrong one for a step, where the worst of
+  four bands carries the noise of all four.

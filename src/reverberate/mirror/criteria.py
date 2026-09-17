@@ -149,8 +149,13 @@ class CriteriaSettings:
     echo_threshold: float = 0.95
     #: The colour of the tail is read over this long after the mixing time.
     tail_colour_s: float = 0.100
-    #: Level and colour are read this long either side of the seam.
-    seam_s: float = 0.010
+    #: Level and colour are read this long either side of the seam. Ten
+    #: milliseconds of an octave band holds too few independent samples to
+    #: measure a level with: two mirrors that differ only in their ray seed
+    #: read a seam 3.6 dB apart there, and the mirror's own distance to the
+    #: reference is 3.4 dB, so the criterion measured less than its own
+    #: noise. At 80 ms the floor is 1.1 dB against a distance of 2.4 dB.
+    seam_s: float = 0.080
     #: Order of the binaural decode the interaural figures are read on, and
     #: the octave the tail's coherence is read in.
     binaural_order: int = 3
@@ -226,7 +231,8 @@ PERCEPTUAL = Targets()
 #: mirror against another that differs only in its ray seed (24 points,
 #: 3e5 rays, criteria from 1 kHz, the settings the field was rendered
 #: with). The medians of that judgement are the floor: reverberation time
-#: 0.084, early decay time 0.088, colour 1.06 dB, seam 3.03 dB, sector
+#: 0.084, early decay time 0.088, colour 1.06 dB, seam 1.09 dB (on the 80 ms
+#: window and the median over bands that replaced the 10 ms maximum), sector
 #: energy 1.58 dB, order energy 0.30 dB, late coherence 0.016, early
 #: coherence 0.030, mixing time 0.083. Four targets sat under their own
 #: floor and move here to the next round number above it; the rest already
@@ -253,7 +259,7 @@ PER_POINT = Targets(
     order_energy_db=1.0,
     sector_energy_db=2.0,
     late_coherence_error=0.05,
-    seam_db=4.0,
+    seam_db=1.5,
 )
 
 
@@ -1027,6 +1033,23 @@ def _relative(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.max(np.abs(a[mask] - b[mask]) / a[mask]))
 
 
+def _median_abs(a: np.ndarray, b: np.ndarray) -> float:
+    """The median over the bands of how far apart the two are.
+
+    The worst band is the right reading for a colour, where one band out of
+    place is heard. It is the wrong one for a step at the seam, where the
+    worst of four bands carries the noise of all four: on 0076 the max reads
+    a floor of 2.0 dB against a distance of 3.8, and the median 1.1 against
+    2.4, so only the median tells the two apart.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if not mask.any():
+        return float("nan")
+    return float(np.median(np.abs(a[mask] - b[mask])))
+
+
 def _max_abs(a: np.ndarray, b: np.ndarray) -> float:
     mask = np.isfinite(a) & np.isfinite(b)
     if not mask.any():
@@ -1089,7 +1112,7 @@ def judge(
             np.asarray(ref_tail.sector_energy_db), np.asarray(cand_tail.sector_energy_db)
         ),
         "late_coherence_error": abs(ref_tail.late_coherence - cand_tail.late_coherence),
-        "seam_db": _max_abs(focus(ref_tail.seam_step_db), focus(cand_tail.seam_step_db)),
+        "seam_db": _median_abs(focus(ref_tail.seam_step_db), focus(cand_tail.seam_step_db)),
     }
     limits = {
         "recall": (t.recall, "min"),
