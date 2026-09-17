@@ -166,3 +166,10 @@ def replace_labels(scene, labels):  # type: ignore[no-untyped-def]
         labels=labels,
         materials=MaterialTable(labels, m.absorption, m.scattering, m.bands_hz, m.source),
     )
+
+
+def test_the_images_keep_the_class_scattering_on_the_shell() -> None:
+    scene = replace_labels(box_scene(alpha=0.2, scattering=0.05), ("shell",))
+    parameters = Parameters(shell_scattering=0.5)
+    assert np.allclose(apply_parameters(scene, parameters).materials.scattering, 0.5)
+    assert np.allclose(image_scene(scene, parameters).materials.scattering, 0.05)

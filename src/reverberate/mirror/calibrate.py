@@ -177,11 +177,17 @@ def apply_parameters(scene: DerivedScene, parameters: Parameters) -> DerivedScen
 
 
 def image_scene(scene: DerivedScene, parameters: Parameters) -> DerivedScene:
-    """The catalogue scene with the materials the image sources' gains read."""
+    """The catalogue scene with the materials the image sources' gains read.
+
+    The shell's own scattering is the rays' mixing of directions, not a loss
+    of the flat shell's specular reflection (the solver's walls are flat):
+    the images keep the class's scattering there.
+    """
+    images = replace(parameters, shell_scattering=None)
     if parameters.image_absorption_scale is None:
-        return apply_parameters(scene, parameters)
+        return apply_parameters(scene, images)
     return apply_parameters(
-        scene, replace(parameters, absorption_scale=parameters.image_absorption_scale)
+        scene, replace(images, absorption_scale=parameters.image_absorption_scale)
     )
 
 
