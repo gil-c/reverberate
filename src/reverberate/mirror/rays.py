@@ -495,9 +495,17 @@ def trace(
     settings: RaySettings | None = None,
     *,
     grid: UniformGrid | None = None,
+    ray_start: int = 0,
+    ray_count: int | None = None,
 ) -> Histogram:
-    """The twin: every ray in turn, in Python. For tests and small scenes."""
+    """The twin: every ray in turn, in Python. For tests and small scenes.
+
+    ``ray_start`` and ``ray_count`` trace a share of the rays, as a card
+    does: each ray keeps its own index, stream and energy ``1 / rays``, so
+    the shares' histograms sum to the whole one.
+    """
     settings = settings or RaySettings()
+    count = settings.rays - ray_start if ray_count is None else ray_count
     source = np.asarray(source, dtype=float).reshape(3)
     receivers = np.atleast_2d(np.asarray(receivers, dtype=float))
     triangles = scene.occluder_vertices
@@ -517,16 +525,16 @@ def trace(
     energy = np.zeros((receivers.shape[0], bins, bands), dtype=np.int64)
     moments = np.zeros((receivers.shape[0], bins, bands, channels), dtype=np.int64)
     hits = np.zeros((receivers.shape[0], bins), dtype=np.int64)
-    directions = ray_directions(settings.rays, settings.seed)
+    directions = ray_directions(count, settings.seed, start=ray_start)
     floor = settings.energy_floor / settings.rays
     one = np.array([0])
     tri_reflector, tri_furniture = reflector_of_triangles(scene)
     skip_reach = (
         settings.sound_speed_m_s * settings.skip_window_s if settings.skip_window_s > 0 else np.inf
     )
-    for ray in range(settings.rays):
+    for ray in range(ray_start, ray_start + count):
         position = source.copy()
-        direction = directions[ray]
+        direction = directions[ray - ray_start]
         carried = np.full(bands, 1.0 / settings.rays)
         travelled = 0.0
         last_triangle = -1

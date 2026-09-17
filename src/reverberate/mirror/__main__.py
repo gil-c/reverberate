@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--tag", default="", help="a second mirror beside the first, e.g. c")
     p.add_argument(
+        "--paths-from",
+        type=Path,
+        default=None,
+        help="card: reuse this paths file (same scene and lattice), regained",
+    )
+    p.add_argument(
         "--skip-specular",
         type=int,
         default=0,
@@ -196,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             sound_speed_m_s=args.sound_speed,
             phase=args.phase,
             tag=args.tag,
+            paths_from=args.paths_from,
         )
         print(
             json.dumps({k: v for k, v in report.items() if k != "settings"}, indent=1, default=str)

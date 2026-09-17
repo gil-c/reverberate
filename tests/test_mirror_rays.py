@@ -206,3 +206,29 @@ def test_covered_rays_count_again_after_the_tree_s_window() -> None:
     assert windowed.hits[0, after:].sum() > always.hits[0, after:].sum()
     np.testing.assert_array_equal(windowed.hits[0, :11], always.hits[0, :11])
     assert windowed.hits[0, after:].sum() <= full.hits[0, after:].sum()
+
+
+def test_shares_of_the_rays_sum_to_the_whole_histogram() -> None:
+    scene = box_scene(alpha=0.3, scattering=0.4)
+    settings = RaySettings(rays=90, duration_s=0.05, bin_s=0.002, receiver_radius_m=0.5, seed=7)
+    whole = trace(scene, SOURCE, RECEIVER[None, :], settings)
+    parts = [
+        trace(scene, SOURCE, RECEIVER[None, :], settings, ray_start=a, ray_count=n)
+        for a, n in ((0, 30), (30, 45), (75, 15))
+    ]
+    np.testing.assert_array_equal(sum(p.hits for p in parts), whole.hits)
+    np.testing.assert_allclose(sum(p.energy for p in parts), whole.energy, rtol=0, atol=1e-12)
+
+
+def test_the_twin_on_several_cores_is_the_twin_on_one(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from reverberate.mirror import engine
+
+    scene = box_scene(alpha=0.3, scattering=0.4)
+    settings = RaySettings(rays=60, duration_s=0.05, bin_s=0.002, receiver_radius_m=0.5, seed=7)
+    grid = triangle_grid(scene.occluder_vertices, settings.cell_m, scene.bmin, scene.bmax)
+    one = trace(scene, SOURCE, RECEIVER[None, :], settings, grid=grid)
+    monkeypatch.setenv("REVERBERATE_TWIN_WORKERS", "3")
+    many = engine._trace_on_cores(scene, SOURCE, RECEIVER[None, :], settings, grid)
+    np.testing.assert_array_equal(many.hits, one.hits)
+    np.testing.assert_allclose(many.energy, one.energy, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(many.moments, one.moments, rtol=0, atol=1e-12)

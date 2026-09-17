@@ -520,7 +520,12 @@ class _Stage:
 
 
 def _card_phase(
-    s: _Stage, *, models: Path, source: dict[str, Any], devices: list[int] | None
+    s: _Stage,
+    *,
+    models: Path,
+    source: dict[str, Any],
+    devices: list[int] | None,
+    paths_from: Path | None = None,
 ) -> dict[str, Any]:
     """Derive, tree, paths and rays on the card(s); writes what the host needs."""
     settings = s.settings
@@ -561,12 +566,19 @@ def _card_phase(
     s.report["tree"] = {"images": tree.count, "orders": np.bincount(tree.order).tolist()}
     grid = s.stage("grid", lambda: occluder_grid(scene, settings.rays.cell_m))
 
-    every = s.stage(
-        "paths",
-        lambda: paths_on_devices(
-            scene, tree, positions, ism, devices=devices, grid=grid, say=s.say
-        ),
-    )
+    if paths_from is not None:
+        # The images and their validity do not depend on the materials: the
+        # paths of an earlier card phase serve, with this phase's gains.
+        every = s.stage("paths", lambda: load_every(paths_from))
+        s.report["paths_from"] = str(paths_from)
+        every = [regain(p, image_scene(catalogue, settings.parameters)) for p in every]
+    else:
+        every = s.stage(
+            "paths",
+            lambda: paths_on_devices(
+                scene, tree, positions, ism, devices=devices, grid=grid, say=s.say
+            ),
+        )
     if settings.parameters.image_absorption_scale is not None:
         # The images' gains read their own absorption scale.
         images = image_scene(catalogue, settings.parameters)
@@ -821,6 +833,7 @@ def run_mirror(
     devices: list[int] | None = None,
     phase: str = "all",
     tag: str = "",
+    paths_from: Path | None = None,
     say: Any = print,
 ) -> dict[str, Any]:
     """The stage for one source of one run, or one of its phases; returns the report written.
@@ -838,7 +851,7 @@ def run_mirror(
     s = _Stage(Path(run), str(source["name"]), settings, sound_speed_m_s, say, tag=tag)
     started = time.time()
     if phase in ("card", "all"):
-        _card_phase(s, models=Path(models), source=source, devices=devices)
+        _card_phase(s, models=Path(models), source=source, devices=devices, paths_from=paths_from)
     if phase in ("host", "all"):
         _host_phase(s)
     s.report["phase"] = phase

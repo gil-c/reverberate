@@ -36,6 +36,7 @@ from reverberate.mirror.ism import (
 )
 from reverberate.mirror.kernels import PATHS_KERNEL, RAYS_KERNEL
 from reverberate.mirror.rays import (
+    HISTOGRAM_SCALE,
     Histogram,
     RaySettings,
     UniformGrid,
@@ -407,6 +408,58 @@ def histogram_on_device(
         return cupy.asnumpy(energy), cupy.asnumpy(moments), cupy.asnumpy(hits)
 
 
+_TWIN: dict[str, Any] = {}
+
+
+def _twin_share(share: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    scene, source, receivers, settings, grid = _TWIN["job"]
+    h = trace(scene, source, receivers, settings, grid=grid, ray_start=share[0], ray_count=share[1])
+    return (
+        np.rint(h.energy * HISTOGRAM_SCALE).astype(np.int64),
+        np.rint(h.moments * HISTOGRAM_SCALE).astype(np.int64),
+        h.hits,
+    )
+
+
+def _trace_on_cores(
+    scene: DerivedScene,
+    source: np.ndarray,
+    receivers: np.ndarray,
+    settings: RaySettings,
+    grid: UniformGrid,
+) -> Histogram:
+    """The twin without a card, its rays split over ``REVERBERATE_TWIN_WORKERS`` processes.
+
+    The shares are forked from this process, so the scene is not copied;
+    their integer histograms sum to the one process trace exactly.
+    """
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    workers = int(os.environ.get("REVERBERATE_TWIN_WORKERS", "1"))
+    if workers <= 1 or settings.rays < 2 * workers:
+        return trace(scene, source, receivers, settings, grid=grid)
+    bounds = np.array_split(np.arange(settings.rays), workers)
+    shares = [(int(b[0]), int(b.size)) for b in bounds if b.size]
+    _TWIN["job"] = (scene, source, receivers, settings, grid)
+    try:
+        context = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+            parts = list(pool.map(_twin_share, shares))
+    finally:
+        _TWIN.pop("job", None)
+    return Histogram.from_counts(
+        np.sum([p[0] for p in parts], axis=0),
+        np.sum([p[1] for p in parts], axis=0),
+        np.sum([p[2] for p in parts], axis=0),
+        bin_s=settings.bin_s,
+        bands_hz=scene.materials.bands_hz,
+        order=settings.order,
+        rays=settings.rays,
+    )
+
+
 def histogram_on_devices(
     scene: DerivedScene,
     source: np.ndarray,
@@ -423,7 +476,7 @@ def histogram_on_devices(
     source = np.asarray(source, dtype=float).reshape(3)
     grid = grid or occluder_grid(scene, settings.cell_m)
     if device_count() == 0:
-        return trace(scene, source, receivers, settings, grid=grid)
+        return _trace_on_cores(scene, source, receivers, settings, grid)
     devices = devices if devices is not None else list(range(device_count()))
     shares = np.array_split(np.arange(settings.rays), len(devices))
     bands = scene.materials.absorption.shape[1]
