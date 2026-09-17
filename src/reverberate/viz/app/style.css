@@ -24,7 +24,7 @@ body {
 }
 #app {
   display: grid; height: 100vh;
-  grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 320px);
+  grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 360px);
   /* One row, never taller than the window: without this the row grows to the
      3D canvas's last backing height, and the panels' bottoms fall off screen. */
   grid-template-rows: minmax(0, 1fr);
@@ -256,3 +256,25 @@ input[type=range].slide::-moz-range-thumb {
 .metrics td:first-child { color: var(--text); }
 .metrics tr.ok td:nth-child(2) { color: var(--ok); }
 .metrics tr.bad td:nth-child(2) { color: #e06c5a; }
+
+/* Axes beside the plots (axes.js): a gutter left of the canvas, a strip
+   under it, ticks pointing out of the plot, the unit once at the far end. */
+.axes { display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: auto 17px; }
+.axes > canvas { grid-column: 2; grid-row: 1; }
+.axis { position: relative; font: 10px/1 var(--mono); color: var(--muted); }
+.axis.y { grid-column: 1; grid-row: 1; }
+.axis.x { grid-column: 2; grid-row: 2; }
+.axis .mark { position: absolute; }
+.axis.y .mark { right: 0; top: var(--at); width: 4px; border-top: 1px solid var(--dim); transform: translateY(-0.5px); }
+.axis.y .mark span { position: absolute; right: 6px; top: 0; transform: translateY(-50%); white-space: nowrap; }
+.axis.x .mark { top: 0; left: var(--at); height: 4px; border-left: 1px solid var(--dim); transform: translateX(-0.5px); }
+.axis.x .mark span { position: absolute; top: 6px; left: 0; transform: translateX(-50%); white-space: nowrap; }
+.axis .mark.unit { border: 0; }
+.axis .mark.unit span { color: var(--text); }
+.compass { position: relative; width: 160px; height: 160px; margin: 14px auto; }
+.compass .plot.round { margin: 0; }
+.compass > span { position: absolute; font: 10px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.compass .front { bottom: 100%; left: 50%; transform: translate(-50%, -3px); }
+.compass .back { top: 100%; left: 50%; transform: translate(-50%, 3px); }
+.compass .left { right: 100%; top: 50%; transform: translate(-5px, -50%); }
+.compass .right { left: 100%; top: 50%; transform: translate(5px, -50%); }

@@ -457,6 +457,9 @@ async function openRun(run) {
         .then((field) => {
           if (mine !== generation) return;
           source.waveField = field;
+          for (const mirror of [source.mirrorField, source.mirrorFieldC]) {
+            if (mirror) plots.shareReference(mirror, field);
+          }
           spatial.setField(source.id, activeField(source));
           plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
@@ -469,6 +472,7 @@ async function openRun(run) {
           .then((field) => {
             if (mine !== generation) return;
             source.mirrorField = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
             refreshAb();
             if (state.ab === "mirror") {
               spatial.setField(source.id, field);
@@ -482,6 +486,7 @@ async function openRun(run) {
           .then((field) => {
             if (mine !== generation) return;
             source.mirrorFieldC = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
             refreshAb();
             if (state.ab === "mirror_c") {
               spatial.setField(source.id, field);
