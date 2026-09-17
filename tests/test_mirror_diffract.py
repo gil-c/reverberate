@@ -186,12 +186,12 @@ def test_a_corner_snaps_onto_the_edge_it_stands_near() -> None:
     np.testing.assert_allclose(moved[0], corners[0])
     np.testing.assert_allclose(moved[2], corners[2])
     # The middle point now lies on an edge, and the way round is no longer.
-    on_edge = min(
+    gap = min(
         float(np.linalg.norm(np.cross(edges.b[k] - edges.a[k], moved[1] - edges.a[k])))
         / max(float(np.linalg.norm(edges.b[k] - edges.a[k])), 1e-9)
         for k in range(edges.count)
     )
-    assert on_edge < 1e-6
+    assert gap < 1e-6
 
     def walk(points: list[np.ndarray]) -> float:
         return float(
