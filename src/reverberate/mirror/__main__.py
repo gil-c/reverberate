@@ -8,6 +8,8 @@ python -m reverberate.mirror derive --model apartment_full.json --out DIR/scene
 python -m reverberate.mirror calibrate --run DIR --source S1 [--points 24] [--iterations 40]
     [--tied] [--order 3] [--rays 100000] [--start FILE.json] [--skip-specular 3]
 python -m reverberate.mirror subset --run DIR --source S1 --points 24 [--order 3]
+python -m reverberate.mirror hybrid --run DIR --source S1 [--high field_mirror_c]
+    [--cut 1000] [--width 1.0] [--out field_hybrid] [--no-match]
 """
 
 from __future__ import annotations
@@ -93,6 +95,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("card", "host", "all"),
         default="all",
         help="card: paths and rays where the card is; host: the rest where the field is",
+    )
+
+    p = sub.add_parser("hybrid", help="one field from two solvers: the wave low, the mirror high")
+    p.add_argument("--run", type=Path, required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--low", default="field", help="folder of the field heard under the cutoff")
+    p.add_argument("--high", default="field_mirror_c", help="folder of the field heard over it")
+    p.add_argument("--out", default="field_hybrid", help="folder the joined field is written to")
+    p.add_argument("--cut", type=float, default=1000.0, help="Hz; where the two meet")
+    p.add_argument("--width", type=float, default=1.0, help="octaves; the ramp's width")
+    p.add_argument(
+        "--no-match", action="store_true", help="do not level the high side onto the low side"
     )
 
     p = sub.add_parser("calibrate", help="the calibration on a few points, where the card is")
@@ -275,6 +289,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(best.record(), indent=1))
         print("wrote", target, "after", len(evaluations), "evaluations")
+        return 0
+    if args.command == "hybrid":
+        from reverberate.mirror.hybrid import Crossover, write_hybrid_field
+
+        run: Path = args.run
+        target = run / args.out / f"{args.source}.h5"
+        summary = write_hybrid_field(
+            target,
+            run / args.low / f"{args.source}.h5",
+            run / args.high / f"{args.source}.h5",
+            crossover=Crossover(cutoff_hz=args.cut, width_octaves=args.width),
+            match=not args.no_match,
+        )
+        walk = run / "walk.json"
+        if walk.is_file():
+            record = json.loads(walk.read_text())
+            for source in record.get("sources", []):
+                if str(source.get("id")) == args.source:
+                    source[args.out] = f"{args.out}/{args.source}.h5"
+            walk.write_text(json.dumps(record, indent=1))
+        print(json.dumps(summary, indent=1))
+        print("wrote", target)
         return 0
     if args.command == "subset":
         from reverberate.mirror.stage import load_every
