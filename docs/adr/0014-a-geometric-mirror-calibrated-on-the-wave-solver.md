@@ -245,5 +245,13 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   0.4 dB less of Maekawa's loss, and the tail gains were calibrated against
   the grid's own longer way: the early decay time's error goes from 0.19 to
   0.37, the colour's from 8.5 to 9.2 dB, and the share of criteria met from
-  0.316 to 0.299. It is the first thing to turn on the next time the
-  calibration is run, and worth nothing before that.
+  0.316 to 0.299.
+- **And the level is not what is wrong with it.** `DiffractionSettings`
+  gained a `gain_db`, decibels on every diffracted path, so the two effects
+  could be separated. Swept with the corners snapped: -3 dB brings the share
+  of criteria met back to 0.3164, exactly the unsnapped figure, and leaves
+  the early decay time's error at 0.367 against 0.189. A flat gain buys back
+  the aggregate and not the decay, so what snapping costs is not loudness.
+  The likeliest cause is that a shorter geodesic flips which paths survive
+  the "shorter than every edge" test and changes the whole set. That is a
+  session of its own; `snap_corners` stays off until it has had one.

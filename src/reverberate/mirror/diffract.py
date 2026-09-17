@@ -108,11 +108,20 @@ class DiffractionSettings:
     #: loss, and the early decay time's error goes from 0.19 to 0.37 and the
     #: colour's from 8.5 to 9.2 dB. The tail gains were calibrated against
     #: the grid's own longer detour, so a louder onset unbalances them. This
-    #: is worth turning on again the next time the calibration is run, and
-    #: not before.
+    #: is not a level: ``gain_db`` at -3 dB buys the aggregate back to
+    #: 0.3164, exactly the unsnapped figure, and leaves the early decay
+    #: time at 0.367. What snapping costs is something else, most likely
+    #: which paths survive the "shorter than every edge" test. Off until
+    #: that has been looked at.
     snap_corners: bool = False
     #: How far a corner may be from an edge and still be taken as that edge.
     snap_m: float = 0.30
+    #: Decibels on every diffracted path, the one lever the shadowed points
+    #: have of their own. Maekawa's loss is a curve fitted to a screen in a
+    #: free field, and what reaches a room two doors away is not that; every
+    #: improvement to the geometry of the way round moves the level as well,
+    #: and without this there is nothing to put the level back with.
+    gain_db: float = 0.0
     #: What sets the diffracted energy of a shadowed point. ``geodesic``
     #: keeps what the single shortest way round carried and shares it over
     #: the edges by their own weights, so the edges decide when and from
@@ -141,6 +150,7 @@ class DiffractionSettings:
             "edge_gain": self.edge_gain,
             "snap_corners": self.snap_corners,
             "snap_m": self.snap_m,
+            "gain_db": self.gain_db,
         }
 
 
@@ -654,7 +664,7 @@ def diffracted_paths(
             loss += maekawa_db(0.0, bands, sound_speed_m_s, settings.max_loss_db)
         towards = corners[1] - receiver
         direction = towards / max(float(np.linalg.norm(towards)), 1e-9)
-        gain = 10.0 ** (-loss / 20.0) / max(length, 1e-3)
+        gain = 10.0 ** ((settings.gain_db - loss) / 20.0) / max(length, 1e-3)
         points = np.repeat(receiver[None, None, :], 5, axis=1)
         points[0, 0] = source
         out[index] = Paths(
