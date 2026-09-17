@@ -144,7 +144,9 @@ extern "C" __global__ void paths(
     const double* __restrict__ tree_pos, const int* __restrict__ tree_order,
     const int* __restrict__ tree_parent, const int* __restrict__ tree_seq, int width,
     const double* __restrict__ facet_normal, const double* __restrict__ facet_offset,
-    const int* __restrict__ facet_start, const int* __restrict__ facet_count,
+    const double* __restrict__ facet_frame, const int* __restrict__ facet_shape,
+    const long long* __restrict__ facet_base, const long long* __restrict__ bucket_offsets,
+    const int* __restrict__ bucket_members,
     const double* __restrict__ reflector_tris,
     const double* __restrict__ occ_tris,
     const double* __restrict__ grid_origin, double grid_cell, const int* __restrict__ grid_shape,
@@ -189,11 +191,24 @@ extern "C" __global__ void paths(
            against the facet's own triangles, as the twin does it. */
         double pa[3], pd[3];
         for (int k = 0; k < 3; ++k) { pa[k] = hit[k] - 1e-4 * n[k]; pd[k] = 2e-4 * n[k]; }
+        /* Only the triangles whose padded box in the facet's plane holds the
+           crossing's own plane coordinates: every triangle the probe can hit
+           is among them (the probe runs along the normal), so the answer is
+           the full scan's. */
+        const double* fr = facet_frame + (long long)facet * 9;
+        double pu = dot3(hit, fr + 3), pv = dot3(hit, fr + 6);
+        int iu = (int)floor((pu - fr[0]) / fr[2]);
+        int iv = (int)floor((pv - fr[1]) / fr[2]);
+        int su = facet_shape[facet * 2], sv = facet_shape[facet * 2 + 1];
+        if (iu < 0) iu = 0;
+        if (iu > su - 1) iu = su - 1;
+        if (iv < 0) iv = 0;
+        if (iv > sv - 1) iv = sv - 1;
+        long long bucket = facet_base[facet] + (long long)iu * sv + iv;
         bool inside = false;
-        int start = facet_start[facet], count = facet_count[facet];
-        for (int i = 0; i < count && !inside; ++i) {
+        for (long long m = bucket_offsets[bucket]; m < bucket_offsets[bucket + 1] && !inside; ++m) {
             double tt;
-            inside = segment_hits(pa, pd, reflector_tris + (long long)(start + i) * 9, 0.0, 1.0, &tt);
+            inside = segment_hits(pa, pd, reflector_tris + (long long)bucket_members[m] * 9, 0.0, 1.0, &tt);
         }
         if (!inside) { alive = false; break; }
         if (leg_blocked(g, cell_offsets, cell_members, occ_tris, near, hit, epsilon)) { alive = false; break; }

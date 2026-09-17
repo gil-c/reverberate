@@ -77,6 +77,89 @@ def _facet_ranges(scene: DerivedScene) -> tuple[np.ndarray, np.ndarray]:
     return start, count
 
 
+#: The facets' own buckets aim at this many triangles a cell, at most this many cells a side.
+_BUCKET_LOAD = 4.0
+_BUCKET_SIDE = 512
+_BUCKET_PAD_M = 1e-6
+
+
+def facet_buckets(
+    scene: DerivedScene,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per facet, a uniform grid in its plane of the triangles whose padded boxes meet each cell.
+
+    Returns ``frame [facet, 9]`` (origin u, origin v, cell, axis u, axis v),
+    ``shape [facet, 2]``, ``base [facet]`` (the facet's first bucket),
+    ``offsets [bucket + 1]`` and ``members`` (global reflector triangle
+    indices). The probe of the paths kernel runs along the facet's normal,
+    so a triangle it hits has the crossing's plane coordinates inside its
+    box: the bucket of the crossing holds every such triangle.
+    """
+    count = len(scene.facets)
+    frame = np.zeros((count, 9))
+    shape = np.ones((count, 2), dtype=np.int32)
+    base = np.zeros(count, dtype=np.int64)
+    bucket_lists: list[np.ndarray] = []
+    bucket_counts: list[np.ndarray] = []
+    total = 0
+    normals, _, _, _ = _facet_arrays(scene)
+    for f, facet in enumerate(scene.facets):
+        n = np.asarray(normals[f], dtype=float)
+        helper = np.eye(3)[int(np.argmin(np.abs(n)))]
+        u = np.cross(n, helper)
+        u /= np.linalg.norm(u)
+        v = np.cross(n, u)
+        indices = np.asarray(facet.triangles, dtype=np.int64)
+        tris = scene.reflector_vertices[indices] if indices.size else np.zeros((0, 3, 3))
+        pu = tris @ u
+        pv = tris @ v
+        if indices.size:
+            u_lo, u_hi = pu.min(axis=1) - _BUCKET_PAD_M, pu.max(axis=1) + _BUCKET_PAD_M
+            v_lo, v_hi = pv.min(axis=1) - _BUCKET_PAD_M, pv.max(axis=1) + _BUCKET_PAD_M
+            origin_u, origin_v = float(u_lo.min()), float(v_lo.min())
+            extent_u = float(u_hi.max()) - origin_u
+            extent_v = float(v_hi.max()) - origin_v
+            cells = max(indices.size / _BUCKET_LOAD, 1.0)
+            cell = max(np.sqrt(max(extent_u * extent_v, 1e-12) / cells), 1e-3)
+            cell = max(cell, extent_u / _BUCKET_SIDE, extent_v / _BUCKET_SIDE)
+            su = int(min(max(np.ceil(extent_u / cell), 1), _BUCKET_SIDE))
+            sv = int(min(max(np.ceil(extent_v / cell), 1), _BUCKET_SIDE))
+        else:
+            origin_u = origin_v = 0.0
+            cell = 1.0
+            su = sv = 1
+        frame[f] = [origin_u, origin_v, cell, *u, *v]
+        shape[f] = (su, sv)
+        base[f] = total
+        grid_count = np.zeros(su * sv, dtype=np.int64)
+        members = np.zeros(0, dtype=np.int64)
+        if indices.size:
+            iu0 = np.clip(np.floor((u_lo - origin_u) / cell), 0, su - 1).astype(np.int64)
+            iu1 = np.clip(np.floor((u_hi - origin_u) / cell), 0, su - 1).astype(np.int64)
+            iv0 = np.clip(np.floor((v_lo - origin_v) / cell), 0, sv - 1).astype(np.int64)
+            iv1 = np.clip(np.floor((v_hi - origin_v) / cell), 0, sv - 1).astype(np.int64)
+            wide = iu1 - iu0 + 1
+            tall = iv1 - iv0 + 1
+            spans = wide * tall
+            owner = np.repeat(np.arange(indices.size), spans)
+            rank = np.arange(owner.size) - np.repeat(np.cumsum(spans) - spans, spans)
+            cu = iu0[owner] + rank // tall[owner]
+            cv = iv0[owner] + rank % tall[owner]
+            flat = cu * sv + cv
+            order = np.argsort(flat, kind="stable")
+            members = indices[owner[order]]
+            grid_count = np.bincount(flat, minlength=su * sv)
+        bucket_lists.append(members)
+        bucket_counts.append(grid_count)
+        total += su * sv
+    counts = np.concatenate(bucket_counts) if bucket_counts else np.zeros(0, dtype=np.int64)
+    offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
+    members = (
+        np.concatenate(bucket_lists).astype(np.int32) if bucket_lists else np.zeros(0, np.int32)
+    )
+    return frame, shape, base, offsets, members
+
+
 def upload(
     scene: DerivedScene,
     tree: ImageTree,
@@ -90,6 +173,7 @@ def upload(
     grid = grid or occluder_grid(scene)
     normals, offsets, _, _ = _facet_arrays(scene)
     facet_start, facet_count = _facet_ranges(scene)
+    frame, shape, base, bucket_offsets, bucket_members = facet_buckets(scene)
     tri_reflector, tri_furniture = reflector_of_triangles(scene)
     with cupy.cuda.Device(device):
         arrays = {
@@ -99,8 +183,11 @@ def upload(
             "tree_seq": cupy.asarray(np.ascontiguousarray(tree.sequence, dtype=np.int32)),
             "facet_normal": cupy.asarray(np.ascontiguousarray(normals, dtype=np.float64)),
             "facet_offset": cupy.asarray(np.ascontiguousarray(offsets, dtype=np.float64)),
-            "facet_start": cupy.asarray(facet_start),
-            "facet_count": cupy.asarray(facet_count),
+            "facet_frame": cupy.asarray(np.ascontiguousarray(frame, dtype=np.float64)),
+            "facet_shape": cupy.asarray(np.ascontiguousarray(shape, dtype=np.int32)),
+            "facet_base": cupy.asarray(np.ascontiguousarray(base, dtype=np.int64)),
+            "bucket_offsets": cupy.asarray(bucket_offsets),
+            "bucket_members": cupy.asarray(bucket_members),
             "reflector_tris": cupy.asarray(
                 np.ascontiguousarray(scene.reflector_vertices.reshape(-1, 9), dtype=np.float64)
             ),
@@ -140,8 +227,11 @@ def _paths_kernel_args(held: DeviceScene, tree: ImageTree) -> tuple[Any, ...]:
         np.int32(tree.sequence.shape[1]),
         a["facet_normal"],
         a["facet_offset"],
-        a["facet_start"],
-        a["facet_count"],
+        a["facet_frame"],
+        a["facet_shape"],
+        a["facet_base"],
+        a["bucket_offsets"],
+        a["bucket_members"],
         a["reflector_tris"],
         a["occ_tris"],
         a["grid_origin"],
