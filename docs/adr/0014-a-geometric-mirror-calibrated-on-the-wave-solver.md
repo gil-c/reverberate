@@ -92,3 +92,35 @@ than hide it.
 - The roadmap's list of non goals keeps "no second solver"; the mirror is
   reported under it as the calibrated model this record describes, for the
   owner to place.
+
+## Update, 2026-09-17: what the model needed to meet the reference
+
+Measured on hssd_0076 against the same wave field; the numbers are in the
+run's `mirror/metrics_c/S1.json` and the report to the owner.
+
+- The whole band, the reference chain's air absorption and the reference's
+  own source signature (a minimum phase filter from its median direct
+  spectrum) are part of the mirror, not options of a listening test.
+- The tail's level is set against the direct pulse's whole band energy
+  and the energy a receiver sphere catches of the direct rays,
+  `r^2 / (4 d^2)`; its band energies pass through the inverse of what the
+  analysis bank reads of shaped noise. Three reading errors (reflections in
+  the direct bins, a 1 ms window on ringing filters, a bank applied twice)
+  had been paid for by 4 to 8 dB of calibrated gain.
+- Rays whose bounces are all specular on reflectors, within the image
+  tree's order and window, are left to the images.
+- The shell has its own scattering coefficient, a calibrated parameter: a
+  specular bounce keeps a ray's elevation, and without mixing the late
+  field lay flat and decayed slowly, which the calibration had paid for
+  with 1.3 to 1.7 times the catalogue's absorption. With the shell at 0.4
+  the calibration keeps the catalogue's absorption within 4 % and the tail
+  gain within 1.4 dB. The images keep the class's scattering and have their
+  own absorption scale, set by the matched reflections.
+- A point without a direct path gets a diffracted onset: the geodesic
+  round the occluders with Maekawa's loss per edge.
+- The calibration is a band by band fixed point on a cost that reads every
+  band (T30 to absorption, colour to tail gain, reflection level to the
+  images' absorption), a few evaluations where the fifteen-coordinate
+  search took forty.
+- Order 4 of the image tree was measured and not kept: three points of
+  recall for twelve times the paths.
