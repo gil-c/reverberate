@@ -197,3 +197,36 @@ def test_the_card_renders_the_early_part_as_the_host_and_the_tail_at_its_energy(
     ratio = 10 * np.log10(np.sum(on_card**2, axis=1) / np.sum(on_host**2, axis=1))
     assert abs(ratio[0]) < 0.3
     np.testing.assert_allclose(ratio[1:4], 0.0, atol=1.5)
+
+
+def test_smooth_over_time_keeps_the_mean_and_the_slope() -> None:
+    """The moving mean removes the noise, keeps the total, and leaves the early bins."""
+    from reverberate.mirror.render import smooth_over_time
+
+    rng = np.random.default_rng(7)
+    bins = 400
+    decay = np.exp(-np.arange(bins) / 80.0)
+    noisy = decay * rng.lognormal(0.0, 0.8, size=bins)
+    values = noisy[:, None]
+
+    flat = smooth_over_time(values, 10, first=50)[:, 0]
+    # What comes before the window's first bin is untouched.
+    np.testing.assert_allclose(flat[:50], noisy[:50], rtol=0, atol=0)
+    # The smoothed part holds the same energy to within the window's own edges.
+    assert abs(flat[60:-20].sum() / noisy[60:-20].sum() - 1.0) < 0.05
+
+    # ... and fluctuates far less about the decay.
+    def spread(x: np.ndarray) -> float:
+        lg = np.log10(np.maximum(x[60:350], 1e-30))
+        t = np.arange(lg.size)
+        fit = np.polyval(np.polyfit(t, lg, 1), t)
+        return float(10 * (lg - fit).std())
+
+    assert spread(flat) < 0.45 * spread(noisy)
+
+    grown = smooth_over_time(values, 100, first=0, fraction=0.1)[:, 0]
+    # A window that grows leaves the first bins alone and averages the last hard.
+    np.testing.assert_allclose(grown[:5], noisy[:5], rtol=1e-12, atol=0)
+    assert spread(grown) < spread(noisy)
+    early, late = noisy[:40], grown[:40]
+    assert abs(np.log10(late.sum() / early.sum())) < 0.05

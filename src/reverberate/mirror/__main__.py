@@ -69,6 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
     p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
+    p.add_argument(
+        "--tail-smooth",
+        type=float,
+        default=0.050,
+        help="s; cap on the moving mean's half width over the histogram's bins; 0 keeps the noise",
+    )
+    p.add_argument(
+        "--tail-smooth-fraction",
+        type=float,
+        default=0.10,
+        help="the moving mean's half width, as a fraction of the time since the tail began",
+    )
     p.add_argument("--cell", type=float, default=0.10, help="m; the occluder grid's cell")
     p.add_argument(
         "--focus", type=float, default=1000.0, help="Hz; the judgement reads the bands above"
@@ -202,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
                 air_absorption=not args.no_air,
                 tail_from_s=args.tail_from,
                 tail_bursts=args.bursts,
+                tail_smooth_s=args.tail_smooth,
+                tail_smooth_fraction=args.tail_smooth_fraction,
                 tail_order_weight=args.order_weight,
             ),
         )
@@ -236,7 +250,12 @@ def main(argv: list[str] | None = None) -> int:
                 cell_m=args.cell,
             ),
             criteria=CriteriaSettings(focus_low_hz=args.focus),
-            render=RenderSettings(tail_from_s=args.tail_from, tail_bursts=args.bursts),
+            render=RenderSettings(
+                tail_from_s=args.tail_from,
+                tail_bursts=args.bursts,
+                tail_smooth_s=getattr(args, "tail_smooth", 0.050),
+                tail_smooth_fraction=getattr(args, "tail_smooth_fraction", 0.10),
+            ),
             parameters=_parameters_of(args.start),
             workers=args.workers,
             signature=not args.no_signature,
