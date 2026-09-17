@@ -22,10 +22,18 @@ otherwise leave a 3 dB hole at the cutoff. Both pairs are applied in the
 frequency domain: no group delay, so neither solver's arrival times move.
 
 **The level.** The mirror is calibrated against the wave field band by
-band, so the two already agree at the join to about a decibel. What is
-left is measured per point in the crossover octave and reported as
-``seam_db``; ``match`` scales the mirror by it, one scalar per point, so
-the join has no step in it. Nothing else of either solver is touched.
+band, and what is left over the crossover is measured per point and
+reported as ``seam_db``; ``match`` scales the mirror by it, one scalar per
+point. Nothing else of either solver is touched.
+
+**What the join costs, measured.** The hybrid's level against the wave
+field's, third octave by third octave, median over 19 points of 0076:
+0.00 dB up to 630 Hz, then +0.27, +0.33, -0.86, -0.75, +0.67, -0.57 from
+800 Hz to 2.5 kHz. Nothing at the join stands out from what the mirror
+does on its own above it. Take the pressure masks away from the onset and
+the cutoff gains 1.6 dB; take the levelling away and it loses 1.2 dB there
+and 3.5 dB just above; narrow the ramp to half an octave and it digs a
+1.6 dB hole at 1.25 kHz. Two octaves read the same as one.
 
 **The clock.** The mirror field is written on the reference's own clock and
 scale (:mod:`reverberate.mirror.field`), so the two are already aligned
