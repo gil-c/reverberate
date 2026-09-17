@@ -407,13 +407,31 @@ def _render_point(
     return index, Ambisonic(signals, early.sample_rate_hz, early.order, early.centre), record
 
 
+#: What every render worker reads, loaded once per worker by
+#: :func:`_load_shared` rather than pickled with each job: the histogram of a
+#: storey is 235 MB and the derived scene 130 MB.
+_SHARED: dict[str, Any] = {}
+SHARED = "shared"
+
+
+def _load_shared(histogram_path: Path, scene_path: Path) -> None:
+    _SHARED["histogram"] = load_histogram(histogram_path)
+    _SHARED["scene"] = load_derived(scene_path)
+
+
 def _render_to_disk(args: tuple[Any, ...]) -> tuple[int, float, dict[str, Any]]:
     """The render worker of the host phase: the response to ``scratch/<index>.npy``.
 
     A storey of 437 points at order 7 is 13 GB of responses; they go through
     the disk one at a time and only the direct energy comes back.
+    ``histogram`` and ``scene_path`` may be :data:`SHARED`: the worker then
+    reads what the phase put in ``_SHARED`` before forking.
     """
     index, paths, histogram, scene_path, settings, sound_speed_m_s, scratch, fallback = args[:8]
+    if isinstance(histogram, str) and histogram == SHARED:
+        histogram = _SHARED["histogram"]
+    if isinstance(scene_path, str) and scene_path == SHARED:
+        scene_path = _SHARED["scene"]
     signature = args[8] if len(args) > 8 else None
     _, response, record = _render_point(
         index, paths, histogram, scene_path, settings, sound_speed_m_s, fallback, signature
@@ -634,7 +652,9 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
     s.report["parameters"] = settings.parameters.record()
     scene = load_derived(s.scene_path)
     every = load_every(s.mirror_dir / f"paths_{name}{s.suffix}.npz")
-    histogram = load_histogram(s.mirror_dir / f"histogram_{name}{s.suffix}.npz")
+    histogram_path = s.mirror_dir / f"histogram_{name}{s.suffix}.npz"
+    if not histogram_path.is_file():
+        raise FileNotFoundError(f"{histogram_path}: the card phase wrote no histogram")
     _, rate, order = _lattice_of(s.run, name)
 
     render_settings = RenderSettings(
@@ -686,8 +706,8 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
                 (
                     i,
                     every[i],
-                    histogram,
-                    s.scene_path,
+                    SHARED,
+                    SHARED,
                     settings_render,
                     s.sound_speed_m_s,
                     scratch,
@@ -696,7 +716,11 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
                 ),
             )
 
-        with ProcessPoolExecutor(max_workers=settings.workers) as pool:
+        with ProcessPoolExecutor(
+            max_workers=settings.workers,
+            initializer=_load_shared,
+            initargs=(histogram_path, s.scene_path),
+        ) as pool:
             for job in [submit(pool, i, None) for i in with_direct]:
                 index, energy, record = job.result()
                 energies[index] = energy
