@@ -188,6 +188,8 @@ def test_the_card_renders_the_early_part_as_the_host_and_the_tail_at_its_energy(
     on_host, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, **common)
     on_card, _ = tail_from_histogram(histogram, 0, np.zeros(bands), settings, xp=cupy, **common)
     on_card = cupy.asnumpy(on_card)
-    # The omni and first order energies agree within half a decibel: the draws differ, the law not.
-    ratio = np.sum(on_card**2, axis=1) / np.sum(on_host**2, axis=1)
-    np.testing.assert_allclose(10 * np.log10(ratio[:4]), 0.0, atol=0.5)
+    # The draws differ, the law does not: the omni energy agrees within 0.3 dB, the first
+    # order ones (where a few bursts' cross terms still show) within 1.5 dB.
+    ratio = 10 * np.log10(np.sum(on_card**2, axis=1) / np.sum(on_host**2, axis=1))
+    assert abs(ratio[0]) < 0.3
+    np.testing.assert_allclose(ratio[1:4], 0.0, atol=1.5)
