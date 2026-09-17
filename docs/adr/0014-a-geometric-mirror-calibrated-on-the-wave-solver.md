@@ -221,3 +221,11 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   the cutoff, without the levelling it loses 1.2 dB there and 3.5 dB just
   above, and a half octave ramp digs a 1.6 dB hole at 1.25 kHz. Two octaves
   read the same as one.
+- **Scaling a shadowed point's tail on its own onset was tried and left
+  off** (`tail_scale_on_onset`). The idea was that the rays and the
+  diffracted onset came round the same doorway, so their ratio is that
+  point's own and not the storey's median. Measured on 32 shadowed points it
+  is worse: the share of criteria met falls from 0.316 to 0.293, the tail's
+  colour error from 8.5 to 11.2 dB and the early decay time from 0.19 to
+  0.47. The histogram's first bin behind a door holds too few crossings to
+  be a scale, and the onset's own level carries the edges' loss twice over.

@@ -369,23 +369,41 @@ def _render_point(
                 "length_m": round(float(onset.length_m[0]), 4),
                 "gain_db": [round(float(v), 2) for v in 20.0 * np.log10(onset.gain[0])],
             }
+        own = None
+        if onset is not None and settings.render.tail_scale_on_onset:
+            # The point's own first arrival is a scale, direct or not: what the
+            # rays carried round the doorway against what the render laid down
+            # there. The other points' median is a guess about a room this
+            # point is not in.
+            centres = band_centres(int(round(rate)))
+            start = int(round(start_s * rate))
+            window = max(int(round(0.002 * rate)), 1)
+            omni = to_numpy(signals[0, max(start - window, 0) : start + window + 1])
+            rows = octave_filter_rows(
+                np.repeat(omni[None, :], len(centres), 0),
+                int(round(rate)),
+                np.arange(len(centres)),
+            )
+            own = np.sum(rows**2, axis=1)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
-            np.zeros(len(scale)),
+            own if own is not None else np.zeros(len(scale)),
             settings.render,
             sound_speed_m_s=sound_speed_m_s,
             start_s=start_s,
             seed=settings.seed + index,
             bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
-            scale_per_band=scale,
+            scale_per_band=None if own is not None else scale,
             xp=xp,
         )
         signals = signals + tail
         record["tail"] = {
             **tail_record,
-            "scale_from": "the other points, no direct path here",
+            "scale_from": "this point's own diffracted onset"
+            if own is not None
+            else "the other points, no direct path here",
             "starts_s": round(start_s, 4),
         }
     else:

@@ -101,6 +101,16 @@ class RenderSettings:
     #: field does (a specular bounce keeps the elevation), and this is the
     #: host side's lever on it.
     tail_order_weight: float = 1.0
+    #: A point with no direct path scales its tail on its own first arrival,
+    #: the diffracted onset, instead of on the median the other points gave.
+    #: The rays came round the same doorway the onset did, so the two should
+    #: be the same sound. Measured on 0076 they are not: the share of
+    #: criteria met on 32 shadowed points falls from 0.316 to 0.293 and the
+    #: tail's colour error rises from 8.5 to 11.2 dB, because the histogram's
+    #: first bin behind a door holds too few crossings to be a scale. Left
+    #: off; kept because the measurement is worth repeating on another
+    #: storey.
+    tail_scale_on_onset: bool = False
     #: The histogram tail's band energies go through the inverse of what the
     #: bank reads of shaped noise (``bank_reading``), so they read as meant.
     bank_corrected: bool = True
@@ -127,6 +137,7 @@ class RenderSettings:
             "tail_order_weight": self.tail_order_weight,
             "tail_smooth_s": self.tail_smooth_s,
             "tail_smooth_fraction": self.tail_smooth_fraction,
+            "tail_scale_on_onset": self.tail_scale_on_onset,
         }
 
 
