@@ -103,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="s; the image tree's window, past which the rays count every arrival again",
     )
     p.add_argument("--no-signature", action="store_true")
+    p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
     p.add_argument("--workers", type=int, default=4, help="judges in parallel")
     p.add_argument("--sound-speed", type=float, default=343.2)
     p.add_argument("--cpu", action="store_true")
@@ -203,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                 skip_specular_order=args.skip_specular,
                 skip_window_s=args.window if args.skip_specular else 0.0,
             ),
-            render=RenderSettings(tail_from_s=args.tail_from),
+            render=RenderSettings(tail_from_s=args.tail_from, tail_bursts=args.bursts),
             parameters=_parameters_of(args.start),
             workers=args.workers,
             signature=not args.no_signature,
