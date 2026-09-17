@@ -131,3 +131,19 @@ def test_the_stage_writes_everything_and_its_two_phases_equal_it(tmp_path: Path)
     assert host["tree"] == whole["tree"] and host["alignment"] == whole["alignment"]
     assert host["summary"] == whole["summary"]
     assert (run / "field_mirror" / "S1.h5").read_bytes() == whole_field
+
+
+def test_the_card_spectrum_is_the_signature_and_the_low_cut() -> None:
+    from scipy.signal import butter, sosfilt
+
+    from reverberate.mirror.stage import _through_spectrum, _with_signature
+
+    rng = np.random.default_rng(4)
+    rate = 48000.0
+    decay = np.exp(-np.arange(24000) / 4000.0)
+    signals = rng.standard_normal((4, 24000)) * decay
+    taps = rng.standard_normal(64) * np.exp(-np.arange(64) / 8.0)
+    sos = butter(8, 40.0, btype="high", fs=rate, output="sos")
+    recursive = sosfilt(sos, _with_signature(signals, taps, np), axis=-1)
+    spectral = _through_spectrum(signals, rate, taps, sos, np)
+    assert np.max(np.abs(spectral - recursive)) < 1e-9 * np.max(np.abs(recursive))

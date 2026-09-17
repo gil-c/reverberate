@@ -220,17 +220,17 @@ def early_signals(
     # value[band, path, tap, channel] = gain[path, band] kernel[path, tap] Y[path, channel],
     # added path after path as slices: the same order of additions on every device.
     weighted = paths.gain[:, picks].T[:, :, None] * kernels[None, :, :]  # [band, path, tap]
-    values = xp.asarray(weighted[:, :, :, None] * harmonics[None, :, None, :])
-    buffer = xp.zeros((bands, span, channels))
+    # Laid on the host, where a slice costs nothing, then moved once.
+    values = weighted[:, :, :, None] * harmonics[None, :, None, :]
+    laid = np.zeros((bands, span, channels))
     for path in range(paths.count):
         first = int(indices[path, 0])
         lo = max(first, 0)
         hi = min(first + indices.shape[1], span)
         if hi <= lo:
             continue
-        buffer[:, lo:hi, :] += values[:, path, lo - first : hi - first, :]
-    buffer = buffer.transpose(0, 2, 1)
-    rows = buffer.reshape(bands * channels, span)
+        laid[:, lo:hi, :] += values[:, path, lo - first : hi - first, :]
+    rows = xp.asarray(np.ascontiguousarray(laid.transpose(0, 2, 1)).reshape(bands * channels, span))
     filtered = band_rows(rows, rate, np.repeat(np.arange(bands), channels), xp)
     early = filtered.reshape(bands, channels, span).sum(axis=0)
     signals = xp.zeros((channels, length))
@@ -378,7 +378,11 @@ def tail_from_histogram(
     cumulative = np.cumsum(density / density.sum(axis=-1, keepdims=True), axis=-1)
     cumulative[..., -1] = np.inf
     drawn = rng.random((held, count, bursts))
-    chosen = np.argmax(drawn[..., None] < cumulative[:, :, None, :], axis=-1)  # [bin, band, burst]
+    # The same comparisons on either device: the first direction whose
+    # cumulative probability passes the draw, [bin, band, burst].
+    chosen = xp.argmax(
+        xp.asarray(drawn)[..., None] < xp.asarray(cumulative)[:, :, None, :], axis=-1
+    )
     span = held * bin_samples
     if xp is np:
         draws = rng.standard_normal((count, bursts, span))
@@ -390,7 +394,7 @@ def tail_from_histogram(
     have = xp.sum(segments**2, axis=-1)  # [band, burst, bin]
     share = xp.asarray(energy_in.T / bursts)[:, None, :]  # [band, 1, bin]
     gain = xp.where(share > 0.0, xp.sqrt(share / xp.maximum(have, 1e-30)), 0.0)
-    coefficients = xp.asarray(basis_out)[xp.asarray(chosen)]  # [bin, band, burst, channel]
+    coefficients = xp.asarray(basis_out)[chosen]  # [bin, band, burst, channel]
     coefficients = coefficients * gain.transpose(2, 0, 1)[..., None]
     laid = xp.matmul(
         coefficients.transpose(1, 0, 3, 2),  # [band, bin, channel, burst]
