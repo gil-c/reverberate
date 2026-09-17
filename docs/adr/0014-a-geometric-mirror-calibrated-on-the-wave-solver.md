@@ -229,3 +229,19 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   colour error from 8.5 to 11.2 dB and the early decay time from 0.19 to
   0.47. The histogram's first bin behind a door holds too few crossings to
   be a scale, and the onset's own level carries the edges' loss twice over.
+- **Most shadowed points bend more than once.** On 0076, of the 185 points
+  with no direct path, 5 per cent bend not at all, 21 per cent bend once,
+  54 per cent twice, 20 per cent three times or more. A single edge path
+  cannot reach three quarters of them, which is why the geodesic still
+  earns its place and why the edges help them less than their geometry
+  suggests.
+- **Snapping the geodesic's corners onto the edges was written, measured and
+  left off** (`snap_corners`). It shortens the way round by 0.11 m in the
+  median and moves the onset's direction error from 4.31 to 1.40 degrees,
+  its level error from 1.61 to 0.92 dB, the interaural level error from
+  2.12 to 1.49 dB: the geometry is plainly better. But 0.11 m less detour is
+  0.4 dB less of Maekawa's loss, and the tail gains were calibrated against
+  the grid's own longer way: the early decay time's error goes from 0.19 to
+  0.37, the colour's from 8.5 to 9.2 dB, and the share of criteria met from
+  0.316 to 0.299. It is the first thing to turn on the next time the
+  calibration is run, and worth nothing before that.

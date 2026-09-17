@@ -93,6 +93,26 @@ class DiffractionSettings:
     same_arrival_deg: float = 15.0
     #: Whether every selected edge is tried, beside the geodesic.
     edges: bool = True
+    #: Whether the geodesic's own corners are pulled onto the edges they are
+    #: near. The geodesic walks a grid, so its corners sit at cell centres
+    #: and its length, its arrival time and its direction all carry the
+    #: grid's step. Only 21 per cent of the shadowed points of hssd_0076
+    #: bend once; 74 per cent bend twice or more, where no single edge
+    #: reaches, so this is the only thing that improves their geometry.
+    #:
+    #: **Off, and the measurement says why.** On 32 shadowed points it moves
+    #: the onset's direction error from 4.31 to 1.40 degrees, its level
+    #: error from 1.61 to 0.92 dB and the interaural level error from 2.12
+    #: to 1.49 dB -- the geometry is plainly better. It also shortens the
+    #: way round by 0.11 m in the median, which takes 0.4 dB off Maekawa's
+    #: loss, and the early decay time's error goes from 0.19 to 0.37 and the
+    #: colour's from 8.5 to 9.2 dB. The tail gains were calibrated against
+    #: the grid's own longer detour, so a louder onset unbalances them. This
+    #: is worth turning on again the next time the calibration is run, and
+    #: not before.
+    snap_corners: bool = False
+    #: How far a corner may be from an edge and still be taken as that edge.
+    snap_m: float = 0.30
     #: What sets the diffracted energy of a shadowed point. ``geodesic``
     #: keeps what the single shortest way round carried and shares it over
     #: the edges by their own weights, so the edges decide when and from
@@ -119,6 +139,8 @@ class DiffractionSettings:
             "max_edge_detour_m": self.max_edge_detour_m,
             "edges": self.edges,
             "edge_gain": self.edge_gain,
+            "snap_corners": self.snap_corners,
+            "snap_m": self.snap_m,
         }
 
 
@@ -490,6 +512,77 @@ def edge_paths(
     return lengths, directions, gains, point[keep]
 
 
+def _nearest_on_segment(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The point of each segment ``a -> b`` closest to ``point``."""
+    along = b - a
+    length2 = np.einsum("ij,ij->i", along, along)
+    t = np.where(
+        length2 > 1e-18,
+        np.einsum("ij,ij->i", point[None, :] - a, along) / np.maximum(length2, 1e-18),
+        0.0,
+    )
+    return np.asarray(a + np.clip(t, 0.0, 1.0)[:, None] * along)
+
+
+def _on_segment(a: np.ndarray, b: np.ndarray, before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """The point of one segment with the shortest way from ``before`` to ``after``."""
+    phi = 0.5 * (np.sqrt(5.0) - 1.0)
+    lo, hi = 0.0, 1.0
+
+    def total(t: float) -> float:
+        point = a + t * (b - a)
+        return float(np.linalg.norm(point - before) + np.linalg.norm(point - after))
+
+    left, right = hi - phi * (hi - lo), lo + phi * (hi - lo)
+    f_left, f_right = total(left), total(right)
+    for _ in range(20):
+        if f_left < f_right:
+            hi, right, f_right = right, left, f_left
+            left = hi - phi * (hi - lo)
+            f_left = total(left)
+        else:
+            lo, left, f_left = left, right, f_right
+            right = lo + phi * (hi - lo)
+            f_right = total(right)
+    return np.asarray(a + 0.5 * (lo + hi) * (b - a))
+
+
+def snap_to_edges(
+    corners: list[np.ndarray], edges: Edges, settings: DiffractionSettings, sweeps: int = 3
+) -> list[np.ndarray]:
+    """The geodesic's corners pulled onto the edges they stand near, then tightened.
+
+    A corner from the grid sits at a cell centre, so the way round is as
+    long as the grid is coarse and arrives from a direction the grid chose.
+    Each interior corner is matched to the nearest selected edge, within
+    ``snap_m``; a corner with no edge near it is left where it is, since the
+    grid may have gone round an occluder that carries no reflector facet at
+    all. What is matched is then swept back and forth, each point taking the
+    place on its own edge that shortens its two legs, which is the shortest
+    way round that sequence of edges.
+    """
+    if edges.count == 0 or len(corners) < 3:
+        return corners
+    held: list[int | None] = [None] * len(corners)
+    out = [np.asarray(c, dtype=float) for c in corners]
+    for k in range(1, len(corners) - 1):
+        feet = _nearest_on_segment(out[k], edges.a, edges.b)
+        gaps = np.linalg.norm(feet - out[k], axis=1)
+        best = int(np.argmin(gaps))
+        if float(gaps[best]) <= settings.snap_m:
+            held[k] = best
+            out[k] = feet[best]
+    if not any(h is not None for h in held):
+        return corners
+    for _ in range(sweeps):
+        for k in range(1, len(out) - 1):
+            edge = held[k]
+            if edge is None:
+                continue
+            out[k] = _on_segment(edges.a[edge], edges.b[edge], out[k - 1], out[k + 1])
+    return out
+
+
 def diffracted_paths(
     scene: DerivedScene,
     source: np.ndarray,
@@ -515,6 +608,11 @@ def diffracted_paths(
     hi = np.maximum(np.maximum(receivers.max(axis=0), source), scene.bmax) + 0.3
     occupancy = occupancy_of(scene, lo, hi, settings)
     _clear(occupancy, np.vstack([source[None, :], chosen]), settings.clear_cells)
+    selected = (
+        diffracting_edges(scene, settings) if (settings.snap_corners or settings.edges) else None
+    )
+    if selected is not None and not settings.snap_corners:
+        selected = None
     graph = _graph(occupancy)
     start = int(occupancy.flat(occupancy.cell_of(source))[0])
     distance, predecessor = dijkstra(graph, directed=False, indices=start, return_predecessors=True)
@@ -536,6 +634,8 @@ def diffracted_paths(
         chain[0] = receiver
         chain[-1] = source
         corners = _pull(occupancy, chain)
+        if selected is not None:
+            corners = snap_to_edges(corners, selected, settings)
         legs = [
             float(np.linalg.norm(b - a)) for a, b in zip(corners[:-1], corners[1:], strict=True)
         ]
@@ -590,6 +690,7 @@ def diffracted_paths(
         "detour_m_median": round(float(np.median(lengths)), 3) if lengths else None,
         "edge_trees": trees,
         "reflected_paths": reflected,
+        "snapped_to_edges": bool(settings.snap_corners),
         **edge_record,
     }
     if say is not None:

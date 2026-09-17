@@ -165,3 +165,40 @@ def test_a_shadowed_point_hears_several_edges() -> None:
     shared = float(np.sum(many[0].gain[:, 4] ** 2))
     alone = float(one[0].gain[0, 4] ** 2)
     assert shared == pytest.approx(alone, rel=0.05)
+
+
+def test_a_corner_snaps_onto_the_edge_it_stands_near() -> None:
+    """The grid puts a corner at a cell centre; the edge puts it where it belongs."""
+    from reverberate.mirror.diffract import diffracting_edges, snap_to_edges
+
+    scene = walled_box()
+    edges = diffracting_edges(scene, DiffractionSettings())
+    settings = DiffractionSettings(snap_m=0.5)
+    # A corner 12 cm off the first edge, between two points either side of it.
+    edge = 0
+    middle = 0.5 * (edges.a[edge] + edges.b[edge])
+    off = np.array([0.12, 0.0, 0.0])
+    corners = [middle + np.array([1.0, 0.0, 1.0]), middle + off, middle - np.array([1.0, 0.0, 1.0])]
+    moved = snap_to_edges([c.copy() for c in corners], edges, settings)
+    assert len(moved) == 3
+    np.testing.assert_allclose(moved[0], corners[0])
+    np.testing.assert_allclose(moved[2], corners[2])
+    # The middle point now lies on an edge, and the way round is no longer.
+    on_edge = min(
+        float(np.linalg.norm(np.cross(edges.b[k] - edges.a[k], moved[1] - edges.a[k])))
+        / max(float(np.linalg.norm(edges.b[k] - edges.a[k])), 1e-9)
+        for k in range(edges.count)
+    )
+    assert on_edge < 1e-6
+
+    def walk(points: list[np.ndarray]) -> float:
+        return float(
+            sum(np.linalg.norm(b - a) for a, b in zip(points[:-1], points[1:], strict=True))
+        )
+
+    assert walk(moved) <= walk(corners) + 1e-9
+
+    # With no edge within reach the corners are left exactly where they were.
+    far = snap_to_edges([c.copy() for c in corners], edges, DiffractionSettings(snap_m=1e-6))
+    for a, b in zip(far, corners, strict=True):
+        np.testing.assert_allclose(a, b)
