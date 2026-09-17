@@ -28,7 +28,7 @@ as the third field.
 | Path | What |
 | --- | --- |
 | `field_mirror/<S>.h5` | The mirror field in the reference's format (`ambisonic-field.md`): same lattice datasets and attributes, `ir` rendered by the mirror, aligned to the reference's clock and scale; `mirror_silent` lists the points with no response; `provenance_json` holds the scene key, the settings, the alignment and the tree. |
-| `mirror/metrics/<S>.json` | The criteria's record, the solver's floor, the summary over the storey (medians and percentiles of every error, verdict rates) and one judgement per point. |
+| `mirror/metrics/<S>.json` | The criteria's record, the solver's floor, the summary over the storey (medians and percentiles of every error, verdict rates) and one judgement per point. The criteria's `focus_low_hz` (1000 from 2026-09-17) says which octave bands the decay, colour, seam and echogram errors read and where the reflections and the late field's directions are high passed; every band's values stay in the point's record. The interaural coherences are energy weighted means of 20 ms frames from that date. |
 | `mirror/report_<S>.json` | The whole stage's report: the card's part, the alignment, the summary, the timings, the diffraction record (`asked`, `found`, grid, median detour). |
 | `mirror/signature_<S>.npy`, `.json` | The source signature: minimum phase FIR taps from the reference's median direct spectrum, and the record of how it was read. |
 | `walk.json` | Updated: the source's entry gains `field_mirror` and `metrics`; a top level `mirror` entry names the scene, its key, the audit directory and the paths file per source. |
@@ -37,7 +37,7 @@ as the third field.
 
 | Path | What |
 | --- | --- |
-| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band, and when set the image sources' own absorption scale per band) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. The key of a file without an image scale is what it was before that field existed. |
+| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band, and when set the image sources' own absorption scale per band, the shell's own scattering and the scattering of the shell's floors and ceilings apart from its walls, `floor_ceiling_scattering`, which the rays read under an added label `shell_floor_ceiling`) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. The key of a file without an image scale is what it was before that field existed. |
 | `mirror/calibration/latest.json` | The key and the file of the last calibration, and the points it read. |
 | `mirror/reference_subset_<S>.h5` | Only where the field is not: `ir [n, channels, samples]` of the chosen points at a low order, `point_index`, the rate and the order. |
 
