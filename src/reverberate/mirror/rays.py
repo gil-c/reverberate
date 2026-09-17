@@ -69,8 +69,10 @@ class RaySettings:
     #: A ray whose energy in every band falls under this fraction of its
     #: start is dropped.
     energy_floor: float = 1e-6
-    #: Cell edge of the uniform grid.
-    cell_m: float = 0.25
+    #: Cell edge of the uniform grid. It changes no count, only the time:
+    #: on hssd_0076 0.10 m holds 25 triangles a cell against 119 at 0.25 m,
+    #: and the paths take 9 s against 21 s, the rays 15 s against 48 s.
+    cell_m: float = 0.10
     seed: int = 0
     #: A ray whose bounces so far are all specular, on reflector facets, at
     #: most this many, is what the image tree renders already: it is not

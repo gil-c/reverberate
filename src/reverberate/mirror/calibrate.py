@@ -548,7 +548,7 @@ def calibrate_fixed_point(
             jobs.append((references[index], response, criteria_settings))
         judged = list(pool.map(_judge_one, jobs)) if pool else [_judge_one(j) for j in jobs]
         reports = [r for r in judged if r is not None]
-        total, early, late = band_cost(reports, weights)
+        total, early, late = band_cost(reports, weights, criteria_settings.focus_low_hz)
         evaluations.append(Evaluation(candidate, total, early, late, reports, time.time() - t0))
         ratios, gaps = _band_residuals(reports)
         levels = _reflection_gaps(reports)
