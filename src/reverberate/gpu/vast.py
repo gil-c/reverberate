@@ -317,15 +317,28 @@ def _coerce(value: str) -> Any:
 
 
 def parse_query(query: str) -> dict[str, Any]:
-    """Turn ``"a=1 b>2"`` into the JSON filter the bundles endpoint expects."""
+    """Turn ``"a=1 b>2"`` into the JSON filter the bundles endpoint expects.
+
+    A value may hold spaces, and one does: every card is named ``RTX 3090``
+    and not ``RTX_3090``. A token with no operator in it therefore continues
+    the value of the token before it. Splitting on whitespace alone sent
+    ``gpu_name={"eq": "RTX"}`` to the endpoint, which matches no card at all
+    and returns an empty list with no error; two sessions read that as "no
+    card is free tonight".
+    """
     ops = ((">=", "gte"), ("<=", "lte"), ("!=", "neq"), (">", "gt"), ("<", "lt"), ("=", "eq"))
     parsed: dict[str, Any] = {}
+    last: tuple[str, str] | None = None
     for token in query.split():
         for symbol, name in ops:
             if symbol in token:
                 field, _, value = token.partition(symbol)
                 parsed[field] = {name: _coerce(value)}
+                last = (field, name)
                 break
+        else:
+            if last is not None and isinstance(parsed[last[0]][last[1]], str):
+                parsed[last[0]][last[1]] = f"{parsed[last[0]][last[1]]} {token}"
     parsed.setdefault("type", "on-demand")
     return parsed
 
