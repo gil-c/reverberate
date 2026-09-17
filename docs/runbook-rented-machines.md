@@ -268,6 +268,38 @@ references of a few dozen points at order 3 (88 MB for 24 points).
   fixed point evaluation (24 points, 2e4 rays) in 265 s. A card phase that
   only changes materials reuses the paths (`--paths-from`).
 
+### The whole campaign on one RTX 3090 (0.155 USD/h billed), 2026-09-17
+
+After the facet buckets in the paths kernel, the 0.10 m occluder grid, the
+vectorised grid build and the render on the card, one source of hssd_0076
+(437 points, order 7, 48 kHz) timed stage by stage on the card
+(`campaign_bench.py` in the session's scratchpad, judgement excluded):
+
+| Stage | 3e5 rays | 1e5 rays | 3e4 rays | order 2, 1e5 rays |
+| --- | --- | --- | --- | --- |
+| load the derived scene | 0.7 s | 0.6 s | 0.7 s | 0.7 s |
+| image tree | 1.1 s | 1.1 s | 1.3 s | 1.0 s (4 260 images) |
+| occluder grid | 1.5 s | 1.5 s | 1.7 s | 1.5 s |
+| paths of 437 points | 9.8 s | 10.4 s | 10.9 s | 6.2 s |
+| rays | 36.1 s | 16.0 s | 9.4 s | 14.9 s |
+| diffracted onsets (host CPU) | 8.7 s | 11.8 s | 13.1 s | 9.4 s |
+| render and float32 write of 437 points | 68.0 s | 67.6 s | 64.7 s | 61.8 s |
+| **total** | **126 s** | **109 s** | **102 s** | **96 s** |
+
+Deriving the scene from the export takes 4.8 s on the laptop; writing the
+field in the reference's layout 8.5 s. At the billed rate a campaign is 0.4
+to 0.6 US cents, against 1.06 USD of machine time for the optimised wave
+campaign of the same storey (68 min on 2 x A100): 1/260 to 1/300. The card
+phase alone, through the CLI with 3e5 rays, took 1.1 min. Before these
+changes the paths alone took 435 s and the rays 323 s (1e6).
+
+The quality against the reference on the 24 calibration points (criteria
+from 1 kHz up) reaches its plateau at 1e5 rays: 3e5 and 1e5 rays read the
+same share of criteria within the seeds' spread (0.48 +- 0.015); 3e4 rays
+lose 2.5 points and 1e4 rays 5, mostly on the late field's directions.
+Order 2 saves 4 s and loses 10 points of recall; order 4 (window 50 ms,
+4 M images allowed) takes 55 s of paths for no gain.
+
 ### Transfer rule, learned the expensive way
 
 The laptop uploads to a Vast box at about 0.65 MB/s and downloads at 0.2 to

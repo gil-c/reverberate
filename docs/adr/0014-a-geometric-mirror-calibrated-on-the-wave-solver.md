@@ -124,3 +124,29 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   search took forty.
 - Order 4 of the image tree was measured and not kept: three points of
   recall for twelve times the paths.
+
+## Update, 2026-09-17, morning: above 1 kHz, and what a campaign costs
+
+- The mirror answers above 1 kHz; a wave solve will answer below. The
+  judgement reads decay, colour, seam and echogram on the octave bands from
+  1 kHz, and the reflections and the late field's directions on the
+  response high passed there. Per band, the night's C erred 3.9 dB in colour
+  at 250 Hz, 2.4 at 500 and 2.0 at 1 kHz.
+- The interaural coherence is an energy weighted mean of its 20 ms frames.
+  The plain mean counted frames 50 to 130 dB down, where the reference's
+  ears grow coherent and nothing is heard, as much as the first ones.
+- The judgement's own floor, two renders of one model with other seeds:
+  T30 11 %, EDT 15 %, colour 1.0 dB, seam 3.6 dB, sector energy 1.4 dB. The
+  T30 target (5 %) and the seam target (1 dB) are under it; the mirror's
+  T30 gap to the reference (9.5 %) is at it.
+- A whole campaign of hssd_0076 (437 points, order 7) takes 96 to 126 s on
+  one RTX 3090, 1/260 to 1/300 of the optimised wave campaign's machine
+  time; the quality's plateau starts at 1e5 rays and order 3, the cheapest
+  setting that loses nothing measurable (runbook part 6).
+- What stays open: points without a direct path (185 of 437) meet 23 % of
+  the criteria against 44 % elsewhere; their diffracted onset arrives 1.6 ms
+  after the reference's first arrival (median), the 10 cm grid's dilation,
+  and a finer grid without dilation leaks through thin walls. Recall
+  (0.60 where there is a direct path) and precision (0.67) are limited by
+  paths the model does not have, not by a bias (near misses fall both
+  sides of the 0.2 ms gate).
