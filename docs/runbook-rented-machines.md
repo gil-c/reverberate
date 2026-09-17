@@ -365,3 +365,10 @@ per octave, whole response, 25 points of 0076: 11.2 dB of colour at 62 Hz,
 0.64 relative at 62 Hz, 0.23 at 125, 0.12 at 250, 0.073 at 500, 0.061 at
 1 k. A **low band solved to 1.5 kHz** (four times 6.4 s, still nothing) lets
 the ramp end inside the solved band with the crossover at 1 kHz.
+
+The mirror's own campaign grew with the edges. The diffraction stage, on
+the laptop's ten cores, takes 1.8 s for the geodesic alone and **19.1 s**
+with the 651 edges and the corners' own image trees. One source of 0076 on
+one RTX 3090 is then about **83 s with 1e5 rays** and 105 s with 3e5,
+against 68 and 90 before: 0.37 and 0.47 US cents at 0.16 USD/h, still
+1/290 and 1/225 of the wave campaign's 1.06 USD.
