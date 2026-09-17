@@ -146,7 +146,15 @@ function audioStatus() {
   const parts = [];
   parts.push(source && source.cell !== null && source.cell !== undefined ? `cell ${source.cell}` : "no cell");
   if (source && (source.mirrorField || source.mirrorFieldC)) {
-    parts.push(state.ab === "mirror" ? "<b>B mirror</b>" : state.ab === "mirror_c" ? "<b>C new</b>" : "A wave");
+    parts.push(
+      state.ab === "mirror"
+        ? "<b>B mirror</b>"
+        : state.ab === "mirror_c"
+          ? "<b>C new</b>"
+          : state.ab === "hybrid"
+            ? "<b>D mixte</b>"
+            : "A wave",
+    );
   }
   if (source && source.solvedToHz) parts.push(`solved to ${(source.solvedToHz / 1000).toFixed(1)} kHz`);
   if (lastRender) parts.push(`update <b>${lastRender.ms.toFixed(1)} ms</b>`);
@@ -243,18 +251,21 @@ function selectSource(id) {
 function activeField(source) {
   if (state.ab === "mirror" && source.mirrorField) return source.mirrorField;
   if (state.ab === "mirror_c" && source.mirrorFieldC) return source.mirrorFieldC;
+  if (state.ab === "hybrid" && source.hybridField) return source.hybridField;
   return source.waveField;
 }
 
 function refreshAb() {
   const anyMirror = state.sources.some((s) => s.mirrorField);
   const anyC = state.sources.some((s) => s.mirrorFieldC);
+  const anyHybrid = state.sources.some((s) => s.hybridField);
   for (const button of $("#ab").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.ab === state.ab);
     if (button.dataset.ab === "mirror") button.disabled = !anyMirror;
     if (button.dataset.ab === "mirror_c") button.disabled = !anyC;
+    if (button.dataset.ab === "hybrid") button.disabled = !anyHybrid;
   }
-  $("#ab").style.opacity = anyMirror || anyC ? 1 : 0.45;
+  $("#ab").style.opacity = anyMirror || anyC || anyHybrid ? 1 : 0.45;
 }
 
 function setAb(mode) {
@@ -541,7 +552,7 @@ async function openRun(run) {
           source.waveField = field;
           // The mirror was handed the reference field's lattice as its receivers.
           if (source.mirror || source.mirror_c) mirrorLayers.setReceivers(field.index.positions);
-          for (const mirror of [source.mirrorField, source.mirrorFieldC]) {
+          for (const mirror of [source.mirrorField, source.mirrorFieldC, source.hybridField]) {
             if (mirror) plots.shareReference(mirror, field);
           }
           spatial.setField(source.id, activeField(source));
@@ -578,6 +589,20 @@ async function openRun(run) {
             }
           })
           .catch((error) => busy(`${source.id} mirror C: ${error.message}`));
+      }
+      if (source.hybrid) {
+        loadField(`${run.url}/${source.hybrid.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.hybridField = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
+            refreshAb();
+            if (state.ab === "hybrid") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} hybrid: ${error.message}`));
       }
       dashboard.load(source.id, source.metrics ? `${run.url}/${source.metrics.url}` : null);
       dashboard.load(source.id, source.metrics_c ? `${run.url}/${source.metrics_c.url}` : null, "c");

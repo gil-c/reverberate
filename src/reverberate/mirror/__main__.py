@@ -85,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--cell", type=float, default=0.10, help="m; the occluder grid's cell")
     p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="the rays' and the tail's draws; two runs that differ only here measure the floor",
+    )
+    p.add_argument(
         "--focus", type=float, default=1000.0, help="Hz; the judgement reads the bands above"
     )
     p.add_argument(
@@ -216,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                 skip_specular_order=args.skip_specular,
                 skip_window_s=args.window if args.skip_specular else 0.0,
                 cell_m=args.cell,
+                seed=args.seed,
             ),
             criteria=CriteriaSettings(focus_low_hz=args.focus),
             workers=args.workers,
@@ -223,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             parameters=_parameters_of(args.parameters),
             signature=not args.no_signature,
             diffraction=not args.no_diffraction,
+            seed=args.seed,
             render=RenderSettings(
                 band_limit_hz=args.band_limit,
                 air_absorption=not args.no_air,

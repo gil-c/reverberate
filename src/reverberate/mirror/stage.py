@@ -47,6 +47,7 @@ from reverberate.metrics import band_centres, octave_filter_rows
 from reverberate.mirror.audit import write_geometry_layers, write_paths
 from reverberate.mirror.calibrate import Parameters, apply_parameters, image_scene, regain
 from reverberate.mirror.criteria import (
+    PERCEPTUAL,
     Criteria,
     CriteriaSettings,
     PointReport,
@@ -895,7 +896,7 @@ def _host_phase(s: _Stage) -> dict[str, Any]:
             "source": name,
             "criteria": Criteria(settings=criteria_settings).record(),
             "floor": SolverFloor().record(),
-            "summary": aggregate(reports),
+            "summary": aggregate(reports, PERCEPTUAL),
             "judged": len(chosen),
             "points": points,
         }

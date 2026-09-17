@@ -56,6 +56,16 @@ class DiffractionSettings:
     clear_cells: int = 1
     #: A pulled corner adding less detour than this is the grid's, not an edge.
     min_detour_m: float = 0.05
+    #: Reflection order of the edge's own image tree. The edge the sound bends
+    #: round is a source in the receiver's room, and that room reflects it:
+    #: on 0076 the reference gives a point behind a doorway a floor and a
+    #: ceiling bounce 3 to 6 dB under its onset, and the mirror had neither.
+    #: Zero keeps the onset alone.
+    reflections: int = 1
+    #: Edges closer together than this share one image tree.
+    cluster_m: float = 0.25
+    #: Paths kept per receiver, the shortest first.
+    max_paths: int = 24
 
     def record(self) -> dict[str, Any]:
         return {
@@ -65,6 +75,9 @@ class DiffractionSettings:
             "max_loss_db": self.max_loss_db,
             "clear_cells": self.clear_cells,
             "min_detour_m": self.min_detour_m,
+            "reflections": self.reflections,
+            "cluster_m": self.cluster_m,
+            "max_paths": self.max_paths,
         }
 
 
@@ -247,6 +260,7 @@ def diffracted_paths(
     bands = np.asarray(OCTAVE_BANDS, dtype=float)
     shape = occupancy.blocked.shape
     out: dict[int, Paths] = {}
+    secondary: dict[int, tuple[np.ndarray, float, np.ndarray]] = {}
     lengths = []
     for index in indices:
         receiver = receivers[index]
@@ -292,7 +306,15 @@ def diffracted_paths(
             points=points,
             sequence=np.full((1, 3), -1, dtype=np.int64),
         )
+        # The last corner is a source in the receiver's own room; keep what the
+        # room needs to reflect it: where it stands, how far the sound already
+        # travelled to reach it, and what the edges took out on the way.
+        secondary[index] = (np.asarray(corners[1], dtype=float), length - legs[0], loss)
         lengths.append(length - float(np.linalg.norm(receiver - source)))
+    reflected = 0
+    trees = 0
+    if settings.reflections > 0 and secondary:
+        out, trees, reflected = _reflect_the_edges(scene, receivers, out, secondary, settings)
     record = {
         "settings": settings.record(),
         "grid": list(shape),
@@ -300,7 +322,123 @@ def diffracted_paths(
         "asked": len(indices),
         "found": len(out),
         "detour_m_median": round(float(np.median(lengths)), 3) if lengths else None,
+        "edge_trees": trees,
+        "reflected_paths": reflected,
     }
     if say is not None:
-        say(f"diffraction: {len(out)} of {len(indices)} points, grid {shape}")
+        say(
+            f"diffraction: {len(out)} of {len(indices)} points, grid {shape}, "
+            f"{trees} edge trees, {reflected} reflected paths"
+        )
     return out, record
+
+
+def _reflect_the_edges(
+    scene: DerivedScene,
+    receivers: np.ndarray,
+    out: dict[int, Paths],
+    secondary: dict[int, tuple[np.ndarray, float, np.ndarray]],
+    settings: DiffractionSettings,
+) -> tuple[dict[int, Paths], int, int]:
+    """Give each diffracted onset the reflections of its own edge in the receiver's room.
+
+    The corner the sound last bent round is a point source standing in the
+    doorway. Its image tree, grown to ``settings.reflections``, gives the
+    receiver the floor, the ceiling and the near walls of the room it is
+    actually in, which the source's own tree cannot reach at all. Every
+    such path carries the edges' loss and spreads over the whole way, the
+    leg before the edge included, so the onset itself comes back unchanged.
+
+    Edges within ``settings.cluster_m`` of each other share one tree, which
+    is what makes this affordable: on 0076 the 185 points with no direct
+    path stand behind some twenty doorways.
+    """
+    from reverberate.mirror.ism import IsmSettings, grow_tree, occluder_grid, paths_for
+
+    grid = occluder_grid(scene)
+    ism = IsmSettings(max_order=settings.reflections, flutter_order=0)
+    order = sorted(secondary)
+    taken: list[np.ndarray] = []
+    groups: list[list[int]] = []
+    for index in order:
+        point = secondary[index][0]
+        for k, centre in enumerate(taken):
+            if float(np.linalg.norm(point - centre)) <= settings.cluster_m:
+                groups[k].append(index)
+                break
+        else:
+            taken.append(point)
+            groups.append([index])
+    reflected = 0
+    for centre, members in zip(taken, groups, strict=True):
+        tree = grow_tree(scene, centre, ism)
+        for index in members:
+            edge, before_m, loss_db = secondary[index]
+            found = paths_for(scene, tree, receivers[index], ism, grid=grid)
+            keep = found.order > 0
+            if not bool(np.any(keep)):
+                continue
+            after = found.length_m[keep]
+            total = after + before_m
+            # One point source at the edge: the spreading is over the whole
+            # way, not over the leg after it, and the edges' loss applies.
+            scale = (after / np.maximum(total, 1e-6))[:, None] * 10.0 ** (-loss_db / 20.0)[None, :]
+            onset = out[index]
+            reflected_points = _shift_points(found.points[keep], edge)
+            width = max(onset.points.shape[1], reflected_points.shape[1])
+            columns = max(onset.sequence.shape[1], found.sequence.shape[1])
+            merged = Paths(
+                receiver=onset.receiver,
+                image=np.concatenate([onset.image, found.image[keep]]),
+                order=np.concatenate([onset.order, found.order[keep]]),
+                length_m=np.concatenate([onset.length_m, total]),
+                direction=np.vstack([onset.direction, found.direction[keep]]),
+                gain=np.vstack([onset.gain, found.gain[keep] * scale]),
+                points=np.concatenate(
+                    [_widen(onset.points, width), _widen(reflected_points, width)], axis=0
+                ),
+                sequence=np.concatenate(
+                    [_pad(onset.sequence, columns), _pad(found.sequence[keep], columns)]
+                ),
+            )
+            keep_n = min(settings.max_paths, merged.length_m.size)
+            pick = np.argsort(merged.length_m)[:keep_n]
+            out[index] = Paths(
+                receiver=merged.receiver,
+                image=merged.image[pick],
+                order=merged.order[pick],
+                length_m=merged.length_m[pick],
+                direction=merged.direction[pick],
+                gain=merged.gain[pick],
+                points=merged.points[pick],
+                sequence=merged.sequence[pick],
+            )
+            reflected += int(keep_n) - 1
+    return out, len(taken), reflected
+
+
+def _widen(points: np.ndarray, width: int) -> np.ndarray:
+    """``[path, point, 3]`` padded to ``width`` points by repeating the last one.
+
+    A path's points end at the receiver, so repeating the last one adds legs
+    of zero length and changes nothing the renderer reads.
+    """
+    if points.shape[1] >= width:
+        return points
+    extra = np.repeat(points[:, -1:, :], width - points.shape[1], axis=1)
+    return np.concatenate([points, extra], axis=1)
+
+
+def _pad(sequence: np.ndarray, columns: int) -> np.ndarray:
+    """``[path, order]`` padded with -1, the empty facet."""
+    if sequence.shape[1] >= columns:
+        return sequence
+    fill = np.full((sequence.shape[0], columns - sequence.shape[1]), -1, dtype=sequence.dtype)
+    return np.concatenate([sequence, fill], axis=1)
+
+
+def _shift_points(points: np.ndarray, edge: np.ndarray) -> np.ndarray:
+    """The path's own points with the edge written where the source would be."""
+    out = np.array(points, dtype=float, copy=True)
+    out[:, 0] = edge
+    return out

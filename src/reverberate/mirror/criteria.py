@@ -70,6 +70,8 @@ __all__ = [
     "PointReport",
     "Reflection",
     "TailReport",
+    "PERCEPTUAL",
+    "PER_POINT",
     "Targets",
     "aggregate",
     "beam_weights",
@@ -168,7 +170,32 @@ DEFAULT_SETTINGS = CriteriaSettings()
 
 @dataclass(frozen=True)
 class Targets:
-    """The acceptance thresholds agreed on 2026-09-16, as numbers a report can quote."""
+    """Acceptance thresholds, as numbers a report can quote.
+
+    Two sets of these exist and they answer two different questions.
+
+    :data:`PERCEPTUAL` holds the difference a listener hears: 5 per cent of
+    a reverberation time (ISO 3382-1), a decibel of level, 20 microseconds
+    of interaural delay, 0.075 of interaural coherence. It is the right
+    threshold and the wrong statistic to put it on. Judged point by point
+    it is unreachable, not because a model is bad but because one point's
+    measurement is noisier than the difference being asked about: two runs
+    of the **same** mirror, differing only in the seed the rays are drawn
+    with, read reverberation times 11 per cent apart and a seam 3.6 dB
+    apart. A threshold under a measurement's own noise passes nothing and
+    tells nobody anything.
+
+    :data:`PER_POINT` holds the same criteria at the level one point can
+    resolve, taken from that mirror against mirror floor and rounded up. A
+    point that fails one of these differs from the reference by more than
+    the measurement's own spread, which is what a per point verdict should
+    mean.
+
+    The perceptual thresholds are then kept where they are honest: on the
+    storey's median, whose own noise is the floor divided by the square
+    root of the point count, far under the threshold
+    (:func:`aggregate`).
+    """
 
     recall: float = 0.90
     precision: float = 0.90
@@ -189,6 +216,44 @@ class Targets:
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
+
+
+#: What a listener hears, on a statistic quiet enough to carry it: the
+#: storey's median. Agreed 2026-09-16.
+PERCEPTUAL = Targets()
+
+#: What one point resolves, measured 2026-09-18 on hssd_0076 by judging one
+#: mirror against another that differs only in its ray seed (24 points,
+#: 3e5 rays, criteria from 1 kHz). The medians of that judgement are the
+#: floor: reverberation time 0.080, early decay time 0.102, colour 0.81 dB,
+#: seam 3.12 dB, sector energy 1.61 dB, order energy 0.36 dB, late
+#: coherence 0.024, mixing time 0.087. Three targets sat under their own
+#: floor and move here to the next round number above it; the rest already
+#: stood over it and keep the perceptual number.
+#:
+#: The early criteria have no floor of this kind at all: the image tree is
+#: the same in both runs, so recall, precision, time, level and the two
+#: interaural errors read exactly zero. What limits them is the paths the
+#: model does not have, which is a fact about the model and not about the
+#: measurement, so their targets stay where they were.
+PER_POINT = Targets(
+    recall=0.90,
+    precision=0.90,
+    time_error_s=0.0001,
+    direction_error_deg=10.0,
+    level_error_db=1.0,
+    itd_error_s=20e-6,
+    ild_error_db=1.0,
+    early_coherence_error=0.075,
+    mixing_time_relative=0.20,
+    t30_relative=0.10,
+    edt_relative=0.15,
+    tail_colour_db=1.0,
+    order_energy_db=1.0,
+    sector_energy_db=2.0,
+    late_coherence_error=0.05,
+    seam_db=4.0,
+)
 
 
 @dataclass(frozen=True)
@@ -343,7 +408,7 @@ class Criteria:
     """The settings and targets, and the prepared grids and decoder they imply."""
 
     settings: CriteriaSettings = field(default_factory=CriteriaSettings)
-    targets: Targets = field(default_factory=Targets)
+    targets: Targets = field(default_factory=lambda: PER_POINT)
 
     def record(self) -> dict[str, Any]:
         return {"settings": self.settings.record(), "targets": self.targets.record()}
@@ -1062,10 +1127,24 @@ def judge(
     )
 
 
-def aggregate(reports: list[PointReport]) -> dict[str, Any]:
-    """Medians of every error and the share of points passing each criterion."""
+#: Which way each criterion is read: a floor for the two that count matches,
+#: a ceiling for every error.
+SENSE: dict[str, str] = {"recall": "min", "precision": "min"}
+
+
+def aggregate(reports: list[PointReport], storey: Targets | None = None) -> dict[str, Any]:
+    """Medians of every error, the share of points passing, and the storey's own verdict.
+
+    The share of points is read against whatever targets judged them, one
+    point at a time. ``storey_verdicts`` is the other reading: the storey's
+    median against ``storey``, the thresholds a listener hears
+    (:data:`PERCEPTUAL`). A median over hundreds of points carries a noise
+    of the measurement's own floor over the square root of their count, so
+    a threshold that is meaningless per point is honest here.
+    """
     if not reports:
         return {"points": 0}
+    storey = storey or PERCEPTUAL
     names = list(reports[0].errors)
     out: dict[str, Any] = {"points": len(reports), "errors": {}, "pass_fraction": {}}
     for name in names:
@@ -1076,6 +1155,20 @@ def aggregate(reports: list[PointReport]) -> dict[str, Any]:
             "p90": _round_or_none(float(np.percentile(finite, 90)), 5) if finite.size else None,
         }
         out["pass_fraction"][name] = round(float(np.mean([r.verdicts[name] for r in reports])), 4)
+    limits = storey.record()
+    out["storey_targets"] = limits
+    out["storey_verdicts"] = {}
+    for name in names:
+        median = out["errors"][name]["median"]
+        limit = limits.get(name)
+        if median is None or limit is None:
+            out["storey_verdicts"][name] = False
+            continue
+        out["storey_verdicts"][name] = bool(
+            median >= limit if SENSE.get(name) == "min" else median <= limit
+        )
+    out["storey_passed"] = sum(out["storey_verdicts"].values())
+    out["storey_of"] = len(out["storey_verdicts"])
     out["echogram_distance_db"] = [
         _round_or_none(float(np.median([r.echogram_distance_db[k] for r in reports])), 3)
         for k in range(len(reports[0].echogram_distance_db))

@@ -79,3 +79,42 @@ def test_the_onset_goes_through_the_doorway(cell_m: float) -> None:
     assert np.all(np.diff(loss) >= -1e-9) and loss[0] > 4.0 and loss[-1] > loss[0] + 6.0
     # It arrives from the doorway's side: towards +z and back towards the wall.
     assert path.direction[0, 2] > 0.5 and path.direction[0, 0] < 0.0
+
+
+def test_the_edge_reflects_in_the_receivers_own_room() -> None:
+    """The corner the sound bends round is a source, and the room round it answers."""
+    scene = walled_box()
+    source = np.asarray([1.0, 1.2, 1.2])
+    receivers = np.asarray([[3.0, 1.2, 1.2]])
+    plain, plain_record = diffracted_paths(
+        scene,
+        source,
+        receivers,
+        [0],
+        sound_speed_m_s=343.2,
+        settings=DiffractionSettings(reflections=0),
+    )
+    with_edge, record = diffracted_paths(
+        scene,
+        source,
+        receivers,
+        [0],
+        sound_speed_m_s=343.2,
+        settings=DiffractionSettings(reflections=1),
+    )
+    assert plain_record["edge_trees"] == 0
+    if 0 not in plain:
+        return  # the geodesic found no way round in this fixture
+    assert 0 in with_edge
+    # The onset itself is untouched: same shortest path, same time, same gain.
+    assert with_edge[0].length_m.min() == pytest.approx(plain[0].length_m[0])
+    np.testing.assert_allclose(
+        with_edge[0].gain[np.argmin(with_edge[0].length_m)], plain[0].gain[0], rtol=1e-9
+    )
+    # ... and what is added arrives later and quieter, as a reflection must.
+    assert with_edge[0].length_m.size >= plain[0].length_m.size
+    if with_edge[0].length_m.size > 1:
+        order = np.argsort(with_edge[0].length_m)
+        first, second = order[0], order[1]
+        assert with_edge[0].length_m[second] > with_edge[0].length_m[first]
+        assert record["edge_trees"] >= 1

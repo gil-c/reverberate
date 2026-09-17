@@ -175,7 +175,8 @@ def _field_record(
     """Index a source's field into the site: a small index and a link to the file.
 
     ``key`` names the source's entry: ``field`` for the reference, ``field_mirror``
-    for the geometric mirror of it, which the page can switch to at a cell.
+    for the geometric mirror of it, ``field_hybrid`` for the two solvers
+    joined; the page switches between them at a cell.
     """
     relative = source.get(key)
     if not relative:
@@ -272,6 +273,7 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
                 "mirror_c": _field_record(
                     run, source, target, key="field_mirror_c", folder="mirrors_c"
                 ),
+                "hybrid": _field_record(run, source, target, key="field_hybrid", folder="hybrid"),
                 "metrics": _metrics_record(run, source, target),
                 "metrics_c": _metrics_record(run, source, target, key="metrics_c"),
             }
