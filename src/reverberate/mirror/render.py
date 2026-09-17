@@ -216,17 +216,20 @@ def early_signals(
     latest = int(np.ceil(delays.max())) + half + 2
     span = latest + 1024
     kernels, indices = _fractional_pulses(delays, np.ones(paths.count), half)
-    valid = (indices >= 0) & (indices < span)
     bands = len(centres)
-    # value[band, path, tap, channel] = gain[path, band] kernel[path, tap] Y[path, channel]
+    # value[band, path, tap, channel] = gain[path, band] kernel[path, tap] Y[path, channel],
+    # added path after path as slices: the same order of additions on every device.
     weighted = paths.gain[:, picks].T[:, :, None] * kernels[None, :, :]  # [band, path, tap]
-    flat = (
-        np.arange(bands)[:, None, None, None] * channels + np.arange(channels)
-    ) * span + indices[None, :, :, None]
-    values = weighted[:, :, :, None] * harmonics[None, :, None, :]
-    keep = np.broadcast_to(valid[None, :, :, None], values.shape)
-    buffer = xp.zeros(bands * channels * span)
-    xp.add.at(buffer, xp.asarray(flat[keep]), xp.asarray(values[keep]))
+    values = xp.asarray(weighted[:, :, :, None] * harmonics[None, :, None, :])
+    buffer = xp.zeros((bands, span, channels))
+    for path in range(paths.count):
+        first = int(indices[path, 0])
+        lo = max(first, 0)
+        hi = min(first + indices.shape[1], span)
+        if hi <= lo:
+            continue
+        buffer[:, lo:hi, :] += values[:, path, lo - first : hi - first, :]
+    buffer = buffer.transpose(0, 2, 1)
     rows = buffer.reshape(bands * channels, span)
     filtered = band_rows(rows, rate, np.repeat(np.arange(bands), channels), xp)
     early = filtered.reshape(bands, channels, span).sum(axis=0)
