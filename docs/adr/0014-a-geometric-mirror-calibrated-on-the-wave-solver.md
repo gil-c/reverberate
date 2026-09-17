@@ -139,10 +139,11 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   T30 11 %, EDT 15 %, colour 1.0 dB, seam 3.6 dB, sector energy 1.4 dB. The
   T30 target (5 %) and the seam target (1 dB) are under it; the mirror's
   T30 gap to the reference (9.5 %) is at it.
-- A whole campaign of hssd_0076 (437 points, order 7) takes 96 to 126 s on
-  one RTX 3090, 1/260 to 1/300 of the optimised wave campaign's machine
-  time; the quality's plateau starts at 1e5 rays and order 3, the cheapest
-  setting that loses nothing measurable (runbook part 6).
+- A whole campaign of hssd_0076 (437 points, order 7) takes 68 s on one
+  RTX 3090 with 1e5 rays and 90 s with 3e5, 0.30 and 0.40 US cents billed:
+  1/350 and 1/265 of the optimised wave campaign's machine time. The
+  quality's plateau starts at 1e5 rays and order 3, the cheapest setting
+  that loses nothing measurable (runbook part 6).
 - What stays open: points without a direct path (185 of 437) meet 23 % of
   the criteria against 44 % elsewhere; their diffracted onset arrives 1.6 ms
   after the reference's first arrival (median), the 10 cm grid's dilation,

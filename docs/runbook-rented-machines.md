@@ -294,10 +294,12 @@ and write of the 437 points 42 s (66 ms a point: early part 12 ms, tail
 37 ms, air 7 ms, write 16 to 26 ms), paths 7.6 s, diffraction 4.4 s.
 
 Deriving the scene from the export takes 4.8 s on the laptop; writing the
-field in the reference's layout 8.5 s. At the billed rate a campaign is 0.4
-to 0.6 US cents, against 1.06 USD of machine time for the optimised wave
-campaign of the same storey (68 min on 2 x A100): 1/260 to 1/300, and
-about 1/350 after the render changes above. The card
+field in the reference's layout 8.5 s. At the billed rate (0.155 USD/h)
+the table's campaigns cost 0.41 to 0.54 US cents, against 1.06 USD of
+machine time for the optimised wave campaign of the same storey (68 min on
+2 x A100): 1/196 (3e5 rays) to 1/258 (order 2). After the render changes
+above, at about 0.16 USD/h billed: 0.30 cents with 1e5 rays (1/350) and
+0.40 cents with 3e5 (1/265). The card
 phase alone, through the CLI with 3e5 rays, took 1.1 min. Before these
 changes the paths alone took 435 s and the rays 323 s (1e6).
 
