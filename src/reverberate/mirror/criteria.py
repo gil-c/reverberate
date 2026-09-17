@@ -46,6 +46,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.signal import butter, sosfiltfilt
 from scipy.special import erfc
 
+from reverberate.audio import lowpass
 from reverberate.metrics import band_centres, edt_per_band, octave_filter_rows, rt60_per_band
 from reverberate.spatial.binaural import (
     BinauralDecoder,
@@ -834,6 +835,34 @@ def _order_energy_db(signals: np.ndarray, order: int, begin: int, end: int) -> t
     return tuple(float(10.0 * np.log10(max(m, 1e-30) / means[0])) for m in means)
 
 
+def _coherence(brir: np.ndarray, rate: float, band_hz: float) -> float:
+    """The frames' interaural coherence in the band, each frame weighted by its energy.
+
+    :func:`interaural_coherence` gives one value per 20 ms frame; a plain
+    mean over a response's late part counts a frame 100 dB down as much as
+    the first one, and on 0076 the reference's frames grow coherent only
+    below -40 dB, where nothing is heard. The weights are the frames' energy
+    at the two ears in the same band, framed as the coherence is.
+    """
+    _, values = interaural_coherence(brir, rate, band_hz=band_hz)
+    if not values.size:
+        return float("nan")
+    high = min(band_hz * np.sqrt(2.0), 0.49 * rate)
+    block = lowpass(np.asarray(brir, dtype=float), rate, high)
+    block = block - lowpass(block, rate, band_hz / np.sqrt(2.0))
+    frame = max(int(round(0.02 * rate)), 8)
+    hop = max(int(round(0.01 * rate)), 1)
+    energy = np.array(
+        [
+            float(np.sum(block[:, start : start + frame] ** 2))
+            for start in range(0, block.shape[1] - frame + 1, hop)
+        ]
+    )[: values.size]
+    if float(energy.sum()) <= 0.0:
+        return float(np.mean(values))
+    return float(np.sum(values * energy) / np.sum(energy))
+
+
 def tail_statistics(
     ambisonic: Ambisonic,
     settings: CriteriaSettings = DEFAULT_SETTINGS,
@@ -890,12 +919,10 @@ def tail_statistics(
     head = brir[:, ears_start : ears_start + direct_span]
     itd = itd_s(head, rate)
     ild = ild_db(head)
-    _, early_values = interaural_coherence(
-        brir[:, ears_start : ears_start + early_span], rate, band_hz=settings.coherence_band_hz
+    early_coherence = _coherence(
+        brir[:, ears_start : ears_start + early_span], rate, settings.coherence_band_hz
     )
-    _, late_values = interaural_coherence(
-        brir[:, mix_at + delay :], rate, band_hz=settings.coherence_band_hz
-    )
+    late_coherence = _coherence(brir[:, mix_at + delay :], rate, settings.coherence_band_hz)
     floor = coherence_floor(rate, band_hz=settings.coherence_band_hz)
     return TailReport(
         mixing_time_s=float(t_mix),
@@ -905,8 +932,8 @@ def tail_statistics(
         colour_db=tuple(float(v) for v in colour),
         order_energy_db=order_energy,
         sector_energy_db=sectors,
-        early_coherence=float(np.mean(early_values)) if early_values.size else float("nan"),
-        late_coherence=float(np.mean(late_values)) if late_values.size else float("nan"),
+        early_coherence=early_coherence,
+        late_coherence=late_coherence,
         coherence_floor=floor,
         direct_itd_s=itd,
         direct_ild_db=ild,
