@@ -1,12 +1,15 @@
 /** Boot: wire the panels, the viewport, the plan, the sound and the run. */
 import { createViewport, roomAt } from "./viewport.js";
-import { createMeshViews } from "./grid.js";
+import { clippedAt, createMeshViews } from "./grid.js";
 import { createSourceGlyphs } from "./sources.js";
 import { createMinimap } from "./minimap.js";
 import { createListenerTab } from "./listener.js";
 import { createPlayers, createSourceList } from "./players.js";
 import { setupPanels } from "./panels.js";
 import { createPlots } from "./plots.js";
+import { createDashboard } from "./dashboard.js";
+import { createMirrorLayers } from "./mirror.js";
+import { createAuditPanel } from "./audit.js";
 import { createPoints } from "./points.js";
 import { bindSettings, loadSettings } from "./settings.js";
 import { setupFolds } from "./folds.js";
@@ -30,6 +33,69 @@ setupFolds($("#left"));
 const glyphs = createSourceGlyphs(THREE, viewport);
 viewport.overlays.add(glyphs.group);
 const points = createPoints(viewport);
+// The mirror's audit is a view of its own, beside colour and wave.
+const mirrorLayers = createMirrorLayers(THREE, { onLoaded: () => viewport.invalidate() });
+mirrorLayers.onRedraw(() => viewport.invalidate());
+viewport.setMirror(mirrorLayers.group);
+viewport.onResize((width, height) => mirrorLayers.setSize(width, height));
+viewport.resize();
+const audit = createAuditPanel($("#audit"), THREE, {
+  onHighlight: () => viewport.invalidate(),
+  onMirrorSwitch: (name, on) => {
+    mirrorLayers.setWanted(name, on);
+    if (on && (name === "reflectors" || name === "occluders") && !mirrorLayers.loaded(name)) {
+      busy(`loading mirror ${name}`);
+      mirrorLayers.ensure().then(() => busy(""));
+    }
+  },
+  onColourBy: (mode) => mirrorLayers.setColourBy(mode),
+});
+// A click without a drag on an audit view names the face under the cursor.
+const pickRay = new THREE.Raycaster();
+let downAt = null;
+viewport.canvas.addEventListener("pointerdown", (event) => {
+  downAt = [event.clientX, event.clientY];
+});
+viewport.canvas.addEventListener("pointerup", (event) => {
+  const start = downAt;
+  downAt = null;
+  if (!start || Math.hypot(event.clientX - start[0], event.clientY - start[1]) > 4) return;
+  if (state.view !== "acoustic" && state.view !== "mirror") return;
+  const rect = viewport.canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  pickRay.setFromCamera(ndc, viewport.camera);
+  const meshes =
+    state.view === "mirror" ? mirrorLayers.pickable() : grid ? grid.group.children.filter((m) => m.visible) : [];
+  const hit = pickRay
+    .intersectObjects(meshes, false)
+    .find((h) => !clippedAt(h.object.userData.clip, h.point));
+  if (!hit) {
+    audit.pick(null);
+    return;
+  }
+  const value = hit.object.geometry.attributes.aLabel.getX(hit.face.a);
+  const label = value >= 0 ? audit.labels()[value] : null;
+  if (label === null || label === undefined) {
+    busy(value === -2 ? "a sealed inside" : "a rigid face, no material");
+    audit.pick(null);
+    return;
+  }
+  busy("");
+  if (state.view === "mirror" && mirrorLayers.isReflectors(hit.object)) {
+    audit.pick({ label, layer: "reflectors", facet: mirrorLayers.facetOf(Math.floor(hit.faceIndex / 2)) });
+  } else {
+    audit.pick({ label, layer: state.view === "mirror" ? "occluders" : "grid" });
+  }
+});
+
+/** The mirror's paths at the selected source's cell, drawn and counted. */
+function showMirrorCell(id, position) {
+  mirrorLayers.showCell(id, position);
+  audit.setCell(id, position, mirrorLayers.pathsAt(id, position));
+}
 const minimap = createMinimap($("#map"), {
   onMove: (x, z) => viewport.moveTo({ x, z }),
   onSelectSource: (id) => selectSource(id),
@@ -45,6 +111,11 @@ const plots = createPlots({
   captions: { spectrogram: $("#spectrogram-cap"), decay: $("#decay-cap"), direction: $("#direction-cap") },
   workerUrl: new URL("./audio/plots.worker.js", import.meta.url),
 });
+const dashboard = createDashboard($("#mirror"), {
+  table: $("#mirror-table"),
+  summary: $("#mirror-summary"),
+  caption: $("#mirror-cap"),
+});
 let lastRender = null;
 const spatial = createSpatial({
   engine,
@@ -55,7 +126,11 @@ const spatial = createSpatial({
     audioStatus();
   },
   onCell: (id, position) => {
-    if (id === state.selected) showPlots(id, position);
+    if (id === state.selected) {
+      showPlots(id, position);
+      dashboard.show(id, position);
+      showMirrorCell(id, position);
+    }
   },
   onStatus: (id, status) => {
     const source = sourceById(id);
@@ -70,6 +145,17 @@ function audioStatus() {
   const source = sourceById(state.selected);
   const parts = [];
   parts.push(source && source.cell !== null && source.cell !== undefined ? `cell ${source.cell}` : "no cell");
+  if (source && (source.mirrorField || source.mirrorFieldC)) {
+    parts.push(
+      state.ab === "mirror"
+        ? "<b>B mirror</b>"
+        : state.ab === "mirror_c"
+          ? "<b>C new</b>"
+          : state.ab === "hybrid"
+            ? "<b>D mixte</b>"
+            : "A wave",
+    );
+  }
   if (source && source.solvedToHz) parts.push(`solved to ${(source.solvedToHz / 1000).toFixed(1)} kHz`);
   if (lastRender) parts.push(`update <b>${lastRender.ms.toFixed(1)} ms</b>`);
   if (source && source.late) parts.push(source.late === "exact" ? "late exact" : "late at entry");
@@ -148,10 +234,59 @@ function selectSource(id) {
   state.selected = id;
   renderSources();
   plots.clear();
+  dashboard.clear();
   const source = sourceById(id);
-  if (source && source.cell !== null && source.cell !== undefined) showPlots(id, source.cell);
+  if (source && source.cell !== null && source.cell !== undefined) {
+    showPlots(id, source.cell);
+    dashboard.show(id, source.cell);
+    showMirrorCell(id, source.cell);
+  } else {
+    showMirrorCell(null, null);
+  }
   spatial.update(viewport.pose(), audibleIds());
 }
+
+// --- A against B: the wave solver's field, or the geometric mirror of it -----------
+/** The field a source is heard through under the A-B choice. */
+function activeField(source) {
+  if (state.ab === "mirror" && source.mirrorField) return source.mirrorField;
+  if (state.ab === "mirror_c" && source.mirrorFieldC) return source.mirrorFieldC;
+  if (state.ab === "hybrid" && source.hybridField) return source.hybridField;
+  return source.waveField;
+}
+
+function refreshAb() {
+  const anyMirror = state.sources.some((s) => s.mirrorField);
+  const anyC = state.sources.some((s) => s.mirrorFieldC);
+  const anyHybrid = state.sources.some((s) => s.hybridField);
+  for (const button of $("#ab").querySelectorAll("button")) {
+    button.classList.toggle("on", button.dataset.ab === state.ab);
+    if (button.dataset.ab === "mirror") button.disabled = !anyMirror;
+    if (button.dataset.ab === "mirror_c") button.disabled = !anyC;
+    if (button.dataset.ab === "hybrid") button.disabled = !anyHybrid;
+  }
+  $("#ab").style.opacity = anyMirror || anyC || anyHybrid ? 1 : 0.45;
+}
+
+function setAb(mode) {
+  if (mode === state.ab) return;
+  state.ab = mode;
+  refreshAb();
+  for (const source of state.sources) {
+    const field = activeField(source);
+    if (field) spatial.setField(source.id, field);
+  }
+  plots.clear();
+  spatial.update(viewport.pose(), audibleIds());
+  audioStatus();
+  dashboard.select(mode === "mirror_c" ? "c" : "");
+  const source = sourceById(state.selected);
+  if (source && source.cell !== null && source.cell !== undefined) dashboard.show(source.id, source.cell);
+}
+$("#ab").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (button && !button.disabled) setAb(button.dataset.ab);
+});
 
 /** The plots of one source's response at a cell, from the field itself. */
 function showPlots(id, position) {
@@ -211,6 +346,7 @@ function armSettle() {
 // --- view and mesh selectors ----------------------------------------------------
 let meshViews = null;
 let grid = null;
+let runData = null; // run.json of the run open
 // Bumped on every run change, so a grid or a field still loading for the
 // old run is dropped rather than attached to the new one.
 let generation = 0;
@@ -224,6 +360,8 @@ const tierText = (status) => {
 function renderViewButtons() {
   for (const button of $("#view").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.view === state.view);
+    if (button.dataset.view === "acoustic") button.disabled = !meshViews || !meshViews.bands.length;
+    if (button.dataset.view === "mirror") button.disabled = !mirrorLayers.record();
   }
   $("#fmax").replaceChildren(
     ...(meshViews ? meshViews.bands : []).map((band) => {
@@ -236,7 +374,9 @@ function renderViewButtons() {
       return button;
     })
   );
-  $("#fmax").style.opacity = state.view === "acoustic" ? 1 : 0.45;
+  // The band limits belong to the wave view alone.
+  $("#fmax").hidden = state.view !== "acoustic";
+  $("#fmax-note").hidden = state.view !== "acoustic";
 }
 $("#view").addEventListener("click", (event) => {
   const button = event.target.closest("button");
@@ -245,10 +385,18 @@ $("#view").addEventListener("click", (event) => {
 
 function setView(view) {
   if (view === "acoustic" && !meshViews) return;
+  if (view === "mirror" && !mirrorLayers.record()) return;
   state.view = view;
   if (view === "acoustic") reconcileMesh();
   else $("#hud-tier").textContent = "";
+  if (view === "mirror") {
+    if (["reflectors", "occluders"].some((n) => mirrorLayers.wanted[n] && !mirrorLayers.loaded(n))) {
+      busy("loading the mirror's scene");
+      mirrorLayers.ensure().then(() => busy(""), (error) => busy(`mirror audit: ${error.message}`));
+    }
+  }
   viewport.show(state.view);
+  audit.setMode(view);
   renderViewButtons();
 }
 
@@ -267,6 +415,7 @@ async function setFmax(band) {
   if (mine !== generation || state.fmax !== band) return;
   busy("");
   viewport.setAcoustic(grid.group);
+  audit.setWave(runData ? runData.meshes[band] : null, band);
   followGrid(viewport.pose(), true);
 }
 
@@ -354,16 +503,21 @@ async function openRun(run) {
   points.set([]);
   minimap.setPoints([]);
   viewport.setAcoustic(null);
+  mirrorLayers.clear();
   plots.clear();
   lastRender = null;
   $("#hud-tier").textContent = "";
-  if (state.view === "acoustic") setView("colour");
+  if (state.view !== "colour") setView("colour");
+  runData = null;
+  audit.setWave(null);
+  audit.setMirror(null);
   state.sources = [];
   state.selected = null;
   if (run) {
     const data = await fetch(`${run.url}/run.json`).then((r) => r.json());
     if (state.run !== run) return;
     data.baseUrl = run.url;
+    runData = data;
     state.sources = data.sources.map((source, i) => ({
       ...source,
       on: true,
@@ -371,26 +525,89 @@ async function openRun(run) {
       loop: true,
       voice: voices.length ? voices[i % voices.length].url : null,
       cell: null,
+      waveField: null,
+      mirrorField: null,
+      mirrorFieldC: null,
     }));
+    dashboard.clear();
     state.selected = state.sources.length ? state.sources[0].id : null;
+    const mine = generation;
+    mirrorLayers
+      .load(data)
+      .then((check) => {
+        if (mine !== generation) return;
+        audit.setMirror(check);
+        renderViewButtons();
+      })
+      .catch((error) => busy(`mirror audit: ${error.message}`));
     meshViews = createMeshViews(THREE, data, () => settings.nearM, (status) => {
       $("#hud-tier").textContent = state.view === "acoustic" ? tierText(status) : "";
     });
-    const mine = generation;
     for (const source of state.sources.filter((s) => s.field)) {
       engine.setLoop(source.id, true);
       engine.setVolume(source.id, source.volume);
       loadField(`${run.url}/${source.field.url}`)
         .then((field) => {
           if (mine !== generation) return;
-          spatial.setField(source.id, field);
+          source.waveField = field;
+          // The mirror was handed the reference field's lattice as its receivers.
+          if (source.mirror || source.mirror_c) mirrorLayers.setReceivers(field.index.positions);
+          for (const mirror of [source.mirrorField, source.mirrorFieldC, source.hybridField]) {
+            if (mirror) plots.shareReference(mirror, field);
+          }
+          spatial.setField(source.id, activeField(source));
           plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
           minimap.setPoints(points.positions());
           spatial.update(viewport.pose(), [source.id]);
         })
         .catch((error) => busy(`${source.id} field: ${error.message}`));
+      if (source.mirror) {
+        loadField(`${run.url}/${source.mirror.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.mirrorField = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
+            refreshAb();
+            if (state.ab === "mirror") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} mirror: ${error.message}`));
+      }
+      if (source.mirror_c) {
+        loadField(`${run.url}/${source.mirror_c.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.mirrorFieldC = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
+            refreshAb();
+            if (state.ab === "mirror_c") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} mirror C: ${error.message}`));
+      }
+      if (source.hybrid) {
+        loadField(`${run.url}/${source.hybrid.url}`)
+          .then((field) => {
+            if (mine !== generation) return;
+            source.hybridField = field;
+            if (source.waveField) plots.shareReference(field, source.waveField);
+            refreshAb();
+            if (state.ab === "hybrid") {
+              spatial.setField(source.id, field);
+              spatial.update(viewport.pose(), [source.id]);
+            }
+          })
+          .catch((error) => busy(`${source.id} hybrid: ${error.message}`));
+      }
+      dashboard.load(source.id, source.metrics ? `${run.url}/${source.metrics.url}` : null);
+      dashboard.load(source.id, source.metrics_c ? `${run.url}/${source.metrics_c.url}` : null, "c");
     }
+    refreshAb();
     // Opening a run is a choice of what to listen to: stand a metre from its
     // first source, facing it, rather than wherever the apartment left us.
     // Not between two runs of one apartment: those are compared from where

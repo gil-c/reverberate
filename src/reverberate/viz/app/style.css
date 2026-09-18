@@ -24,12 +24,15 @@ body {
 }
 #app {
   display: grid; height: 100vh;
-  grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 320px);
+  grid-template-columns: var(--left, 300px) minmax(0, 1fr) var(--right, 360px);
+  /* One row, never taller than the window: without this the row grows to the
+     3D canvas's last backing height, and the panels' bottoms fall off screen. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 /* panels */
 .panel {
-  position: relative; background: var(--panel); min-width: 0;
+  position: relative; background: var(--panel); min-width: 0; min-height: 0;
   display: flex; flex-direction: row; overflow: hidden;
 }
 /* The handle sits on the panel's inner edge: after the body on the left
@@ -42,7 +45,7 @@ body {
   flex: 1; padding: 10px 14px 20px; overflow-y: auto; overflow-x: hidden; display: flex;
   flex-direction: column; gap: 12px; min-width: 0; contain: layout paint;
 }
-.panel .body > * { min-width: 0; }
+.panel .body > * { min-width: 0; flex-shrink: 0; }
 /* A scrollbar that is seen and grabbed: a 10 px track of the panel's own
    colour, a thumb that reads against it. */
 .panel .body::-webkit-scrollbar { width: 10px; }
@@ -113,9 +116,9 @@ select:focus-visible, .field input:focus-visible, .seg button:focus-visible {
 .check input, .field.switch input[type=checkbox] {
   width: 16px; height: 16px; justify-self: start; accent-color: var(--ear); margin: 0;
 }
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 2px 0 0; font: 12px var(--mono); }
-.facts dt { color: var(--dim); }
-.facts dd { margin: 0; color: var(--muted); text-align: right; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; margin: 2px 0 0; font: 12px var(--mono); }
+.facts dt { color: var(--dim); white-space: nowrap; }
+.facts dd { margin: 0; color: var(--muted); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .facts:empty { display: none; }
 
 /* foldable sections */
@@ -189,8 +192,9 @@ input[type=range].slide::-moz-range-thumb {
 .srcrow input { accent-color: var(--src); margin: 0; }
 
 /* viewport */
-#view-pane { position: relative; min-width: 0; background: #000; }
-#view-pane canvas { display: block; width: 100%; height: 100%; cursor: default; }
+#view-pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #000; }
+/* Out of the flow: the canvas takes the pane's size and never sets it. */
+#view-pane canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: default; }
 .hud {
   position: absolute; left: 14px; bottom: 12px; font: 12px var(--mono); color: var(--muted);
   display: flex; gap: 18px; pointer-events: none;
@@ -243,3 +247,56 @@ input[type=range].slide::-moz-range-thumb {
 .plot-cap { font: 12px var(--mono); color: var(--muted); margin-top: 4px; min-height: 1.3em; }
 .player select.voice { grid-column: 2; grid-row: 2; }
 .status { flex-wrap: wrap; gap: 4px 12px; }
+
+/* The mirror: the A-B switch and the criteria at the cell. */
+#ab { margin-top: 6px; }
+.mirror.hidden { display: none; }
+.metrics { width: 100%; border-collapse: collapse; font: 12px var(--mono); margin-top: 4px; }
+.metrics td { padding: 2px 4px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.metrics td:first-child { color: var(--text); }
+.metrics tr.ok td:nth-child(2) { color: var(--ok); }
+.metrics tr.bad td:nth-child(2) { color: #e06c5a; }
+
+/* Axes beside the plots (axes.js): a gutter left of the canvas, a strip
+   under it, ticks pointing out of the plot, the unit once at the far end. */
+.axes { display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: auto 17px; }
+.axes > canvas { grid-column: 2; grid-row: 1; }
+.axis { position: relative; font: 10px/1 var(--mono); color: var(--muted); }
+.axis.y { grid-column: 1; grid-row: 1; }
+.axis.x { grid-column: 2; grid-row: 2; }
+.axis .mark { position: absolute; }
+.axis.y .mark { right: 0; top: var(--at); width: 4px; border-top: 1px solid var(--dim); transform: translateY(-0.5px); }
+.axis.y .mark span { position: absolute; right: 6px; top: 0; transform: translateY(-50%); white-space: nowrap; }
+.axis.x .mark { top: 0; left: var(--at); height: 4px; border-left: 1px solid var(--dim); transform: translateX(-0.5px); }
+.axis.x .mark span { position: absolute; top: 6px; left: 0; transform: translateX(-50%); white-space: nowrap; }
+.axis .mark.unit { border: 0; }
+.axis .mark.unit span { color: var(--text); }
+.compass { position: relative; width: 160px; height: 160px; margin: 14px auto; }
+.compass .plot.round { margin: 0; }
+.compass > span { position: absolute; font: 10px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.compass .front { bottom: 100%; left: 50%; transform: translate(-50%, -3px); }
+.compass .back { top: 100%; left: 50%; transform: translate(-50%, 3px); }
+.compass .left { right: 100%; top: 50%; transform: translate(-5px, -50%); }
+.compass .right { left: 100%; top: 50%; transform: translate(5px, -50%); }
+
+/* The Audit section (audit.js): what the wave and the mirror views show. */
+.audit:not([data-mode=mirror]) .only-mirror { display: none; }
+.audit .problems { font: 12px var(--mono); color: #e06c5a; }
+.audit .problems:empty { display: none; }
+.audit .problems div + div { margin-top: 2px; }
+.legend, .bands { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.legend:empty { display: none; }
+.legend th, .bands th { color: var(--dim); font-weight: 400; text-align: right; padding: 1px 3px; }
+.legend th:first-child { text-align: left; }
+.legend td { color: var(--muted); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); white-space: nowrap; }
+.legend td:first-child { text-align: left; color: var(--text); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.legend tbody tr.pick { cursor: pointer; }
+.legend tbody tr:hover td { background: var(--panel-2); }
+.legend tbody tr.on td { background: var(--panel-2); color: var(--src); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.bands td { color: var(--text); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); }
+.bands th:first-child { text-align: left; }
+.bands tr.scatter td, .bands tr.scatter th { border-top: 1px solid var(--line-2); }
+.audit .orders { display: flex; flex-wrap: wrap; gap: 2px 10px; font: 11px var(--mono); color: var(--muted); }
+.audit .amber { color: var(--src); }
+[hidden] { display: none !important; }

@@ -107,3 +107,28 @@ def test_a_mesh_of_another_flat_is_refused(tmp_path: Path) -> None:
 
     assert any("scene 999" in problem for problem in check_run(run.path))
     assert build_run(run, tmp_path / "site")["meshes"] == {}
+
+
+def test_a_source_may_carry_the_mirror_of_its_field_and_its_metrics(tmp_path: Path) -> None:
+    """The geometric mirror rides beside the reference: a second field per
+    source the page can switch to at a cell, and the criteria's numbers."""
+    import shutil
+
+    run = write_synthetic_run(tmp_path / "run", field_step_m=1.1, field_box_m=2.2)
+    (run.path / "field_mirror").mkdir()
+    shutil.copy2(run.path / "fields" / "S1.h5", run.path / "field_mirror" / "S1.h5")
+    (run.path / "mirror").mkdir()
+    (run.path / "mirror" / "S1.json").write_text(json.dumps({"points": 1}))
+    manifest = json.loads((run.path / "walk.json").read_text())
+    manifest["sources"][0]["field_mirror"] = "field_mirror/S1.h5"
+    manifest["sources"][0]["metrics"] = "mirror/S1.json"
+    (run.path / "walk.json").write_text(json.dumps(manifest))
+    run = WalkRun.read(run.path)
+    site = tmp_path / "site" / "runs" / "run"
+    record = build_run(run, site)
+    first, second = record["sources"]
+    assert first["mirror"]["url"] == "mirrors/S1" and first["mirror"]["order"] == 7
+    assert (site / "mirrors" / "S1" / "index.json").is_file()
+    assert first["metrics"] == {"url": "metrics/S1.json"}
+    assert json.loads((site / "metrics" / "S1.json").read_text()) == {"points": 1}
+    assert second["mirror"] is None and second["metrics"] is None

@@ -6,7 +6,8 @@
 const MIN = 220;
 const MAX = 560;
 const RAIL = 28;
-const DEFAULTS = { left: 300, right: 320 };
+// The right panel is 40 px wider than it was: the plots' axes gutter and a scrollbar, so the plots keep their width.
+const DEFAULTS = { left: 300, right: 360 };
 
 export function setupPanels(app, onResize) {
   const widths = { ...DEFAULTS };

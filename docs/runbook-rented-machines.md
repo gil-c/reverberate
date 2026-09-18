@@ -220,3 +220,155 @@ on 31 workers: **the campaign in 68 min** against 105 min the day before, the fi
 45 min for 21 GB, of which the field and the audit view are 6.6 GB: the rest was the encodings,
 the self-check samples and grids already installed on the laptop. The renter now brings home
 what `take_home` keeps and only the grids the laptop lacks.
+
+## 6. The mirror beside the field (ADR 0014)
+
+The geometric mirror runs on the machine that solved the field, after the
+assembly, in two phases (`python -m reverberate.mirror run --phase card|host|all`).
+The card phase needs the derived geometry and the lattice's positions; the host
+phase needs the reference field. Where both are on one machine, `--phase all`.
+When they are not, what travels is small: the positions (11 KB), the paths of
+every point (0.7 MB), the histogram (60 MB), and for a calibration the
+references of a few dozen points at order 3 (88 MB for 24 points).
+
+### Measured on hssd_0076, one source, 437 points, RTX 3090 (0.155 USD/h billed), 2026-09-16
+
+- Derived geometry: 41 labels, reflectors from planar facets of 0.4 m2 and up
+  (exact coplanar merge), occluders from closed meshes decimated to 2 cm; the
+  tree at order 3 with the flutter to 6 holds 116 662 images (2 s).
+- Paths of the whole storey on the card: **435 s**, in batches of 68 receivers
+  (7.9 M image-receiver pairs, 62 to 72 s each); median 10 paths a point, at
+  most 49; 185 points have no direct path (rooms without a line of sight).
+  The numpy twin takes 92 to 98 s a point: the card is 100 times faster and
+  finds the same images, the same hit points to 1e-14 m.
+- Rays: **1e5 rays in 33 s, 1e6 in 323 s** (26 M sphere crossings, median
+  73 000 a receiver); the histograms' counts are equal to the twin's.
+- The card phase in all: **13.2 min, 0.03 USD**. The host phase at home on
+  10 cores: the render of 437 points at order 7 and the judgement, streamed
+  through the disk one point at a time (13 GB of responses would not fit).
+- Two cards (2 x RTX 2080 Ti, 0.169 USD/h, 2026-09-16): the same images, hit
+  points, gains and integer histograms as one card; 136 receivers' paths in
+  78 s against 153 s, 200 000 rays in 47 s against 80 s. The devices run one
+  thread each and the merge is in share order. A 2080 Ti is about half a 3090
+  on the paths kernel.
+
+### Mirror C on hssd_0076, 2 x RTX 3090 (0.27 USD/h), night of 2026-09-16 to 17
+
+- Card phase with the covered rays (`--skip-specular 3`, window 80 ms): paths
+  345 s and rays about 7 min on the two cards while a calibration shared them.
+- The fixed point calibration (`calibrate --method fixed`, 24 points, 1e5
+  rays, 32 judges): **35 s an evaluation** once the judges ran one BLAS thread
+  each; seven evaluations bring the medians within 1 % of T30 and 0.2 dB of
+  colour. Nelder-Mead in fifteen coordinates took 135 s an evaluation and
+  forty of them.
+- The diffracted onsets of the 185 points without a direct path: 2.5 s at
+  home on a 10 cm grid.
+- Without a card (`--cpu`, `REVERBERATE_TWIN_WORKERS=10`, one BLAS thread):
+  the twin's rays on ten cores, 1e5 rays for 437 receivers in 1380 s, and a
+  fixed point evaluation (24 points, 2e4 rays) in 265 s. A card phase that
+  only changes materials reuses the paths (`--paths-from`).
+
+### The whole campaign on one RTX 3090 (0.155 USD/h billed), 2026-09-17
+
+After the facet buckets in the paths kernel, the 0.10 m occluder grid, the
+vectorised grid build and the render on the card, one source of hssd_0076
+(437 points, order 7, 48 kHz) timed stage by stage on the card
+(`campaign_bench.py` in the session's scratchpad, judgement excluded):
+
+| Stage | 3e5 rays | 1e5 rays | 3e4 rays | order 2, 1e5 rays |
+| --- | --- | --- | --- | --- |
+| load the derived scene | 0.7 s | 0.6 s | 0.7 s | 0.7 s |
+| image tree | 1.1 s | 1.1 s | 1.3 s | 1.0 s (4 260 images) |
+| occluder grid | 1.5 s | 1.5 s | 1.7 s | 1.5 s |
+| paths of 437 points | 9.8 s | 10.4 s | 10.9 s | 6.2 s |
+| rays | 36.1 s | 16.0 s | 9.4 s | 14.9 s |
+| diffracted onsets (host CPU) | 8.7 s | 11.8 s | 13.1 s | 9.4 s |
+| render and float32 write of 437 points | 68.0 s | 67.6 s | 64.7 s | 61.8 s |
+| **total** | **126 s** | **109 s** | **102 s** | **96 s** |
+
+The same day, after laying the pulses on the host, drawing the tail's
+directions on the card and applying the low cut as a spectrum (1e-13 of
+the peak from the recursion), on an RTX 3090 with a 4.4 GHz host
+(0.133 USD/h quoted): **68 s with 1e5 rays, 90 s with 3e5**; the render
+and write of the 437 points 42 s (66 ms a point: early part 12 ms, tail
+37 ms, air 7 ms, write 16 to 26 ms), paths 7.6 s, diffraction 4.4 s.
+
+Deriving the scene from the export takes 4.8 s on the laptop; writing the
+field in the reference's layout 8.5 s. At the billed rate (0.155 USD/h)
+the table's campaigns cost 0.41 to 0.54 US cents, against 1.06 USD of
+machine time for the optimised wave campaign of the same storey (68 min on
+2 x A100): 1/196 (3e5 rays) to 1/258 (order 2). After the render changes
+above, at about 0.16 USD/h billed: 0.30 cents with 1e5 rays (1/350) and
+0.40 cents with 3e5 (1/265). The card
+phase alone, through the CLI with 3e5 rays, took 1.1 min. Before these
+changes the paths alone took 435 s and the rays 323 s (1e6).
+
+The quality against the reference on the 24 calibration points (criteria
+from 1 kHz up) reaches its plateau at 1e5 rays: 3e5 and 1e5 rays read the
+same share of criteria within the seeds' spread (0.48 +- 0.015); 3e4 rays
+lose 2.5 points and 1e4 rays 5, mostly on the late field's directions.
+Order 2 saves 4 s and loses 10 points of recall; order 4 (window 50 ms,
+4 M images allowed) takes 55 s of paths for no gain.
+
+### Transfer rule, learned the expensive way
+
+The laptop uploads to a Vast box at about 0.65 MB/s and downloads at 0.2 to
+0.8 MB/s through the ssh proxy. A 6 GB field would take three hours either
+way: never move a field; move the positions, the paths, the histogram, the
+reference subset. The stage's two phases exist for this.
+
+### Failures seen
+
+- The host phase held every rendered response in memory: 437 points at order
+  7 are 13 GB, twice with the aligned copies. It now writes each response to
+  a scratch file and reads them back for the field and the judges.
+- `dataclasses.asdict` turned the nested settings into dictionaries when the
+  render settings were overridden; `dataclasses.replace` keeps them.
+- A calibration with 32 judge processes, each opening one OpenBLAS thread
+  per core (64), hit the container's process limit (`pids.max` 3840):
+  `pthread_create failed`, and the search hung between two evaluations.
+  Set `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1` for every
+  mirror job on a box; read `/sys/fs/cgroup/pids.current` when a job stalls.
+- `pkill -f 'mirror calibrate'` over ssh matches its own shell and kills the
+  connection; kill by pid from a script on the box.
+- Python's stdout is buffered when redirected: a remote stage's log stays
+  empty until it ends. Run with `PYTHONUNBUFFERED=1`.
+
+
+### A campaign that solves only what it keeps, 2026-09-18
+
+The mirror answers above 1 kHz and the wave solver below, and
+`python -m reverberate.mirror hybrid` joins the two per point into
+`field_hybrid/<S>.h5`. A campaign built for that does not solve the bands it
+throws away. From `plan.json` of hssd_0076, the card time each band's grid
+asks for:
+
+| Band | fmax | Nodes | Steps | Card time (planned) | Output |
+| --- | --- | --- | --- | --- | --- |
+| low | 1 kHz | 19.5 M | 21 846 | 6.4 s | 74.6 GB |
+| mid | 4 kHz | 1 140 M | 29 128 | 495.6 s | 104.0 GB |
+| high | 8 kHz | 8 982 M | 21 846 | 2 928.7 s | 78.0 GB |
+
+Measured on 2 x A100 (2026-09-15, 68 min in all): voxelise 4.9 min, audit
+3.4, plan 1.5, low 4.5 + 4.4 (engine + encode), mid 9.6 + 2.9, high
+30.6 + 1.7, assembly 3.6. Dropping the mid and the high bands leaves
+**about 22 min against 68**, and the voxelisation and the audit fall too,
+since only the low grid is then built: **nearer 12 to 15 min, a fifth of the
+campaign**. The mirror's own 90 s on one RTX 3090 (0.4 US cents) is noise
+beside it.
+
+The crossover's frequency barely moves that, because the low band is 6.4 s
+of 3 431: between 500 Hz and 1 kHz it costs nothing to choose the higher
+one, so it is chosen on quality. The mirror's error against the reference
+per octave, whole response, 25 points of 0076: 11.2 dB of colour at 62 Hz,
+5.4 at 125, 4.1 at 250, 2.4 at 500, 2.6 at 1 k, and its reverberation time
+0.64 relative at 62 Hz, 0.23 at 125, 0.12 at 250, 0.073 at 500, 0.061 at
+1 k. A **low band solved to 1.5 kHz** (four times 6.4 s, still nothing) lets
+the ramp end inside the solved band with the crossover at 1 kHz.
+
+The mirror's own campaign grew with the edges. The diffraction stage, on
+the laptop's ten cores, takes 1.8 s for the geodesic alone and **19.1 s**
+with the 651 edges and the corners' own image trees. One source of 0076 on
+one RTX 3090 is then about **83 s with 1e5 rays** and 105 s with 3e5,
+against 68 and 90 before: 0.37 and 0.47 US cents at 0.16 USD/h, still
+1/290 and 1/225 of the wave campaign's 1.06 USD.

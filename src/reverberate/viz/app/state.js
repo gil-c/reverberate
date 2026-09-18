@@ -21,4 +21,7 @@ export const state = {
   // Sources of the run with the page's own per-source state.
   sources: [],
   selected: null,
+  // Which field is heard: "wave", the solver's, or "mirror", the geometric
+  // mirror of it, when a source carries one.
+  ab: "wave",
 };

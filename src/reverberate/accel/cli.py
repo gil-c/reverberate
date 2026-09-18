@@ -27,6 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--solve-bands", default=None, help="comma separated bands to solve, for a flow test"
     )
+    p.add_argument("--no-mirror", action="store_true", help="skip the geometric mirror stage")
+    p.add_argument(
+        "--mirror-parameters",
+        type=Path,
+        default=None,
+        help="a calibration json to render the mirror with (mirror/calibration/<key>.json)",
+    )
 
     p = sub.add_parser("bundle", help="prepare what the machine needs, on the laptop")
     p.add_argument("--out", type=Path, required=True)
@@ -71,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             gpu=False if args.cpu else None,
             workers=args.workers,
             solve_bands=tuple(args.solve_bands.split(",")) if args.solve_bands else None,
+            mirror_field=not args.no_mirror,
+            mirror_parameters=args.mirror_parameters,
         )
         return 0
     if args.command == "bundle":

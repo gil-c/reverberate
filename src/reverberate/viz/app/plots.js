@@ -9,6 +9,7 @@
  * away plots lower, which is the point.
  */
 import { headYawOfCamera } from "./audio/sh.js";
+import { attachAxes, frequencyMarks, levelMarks, timeMarks } from "./axes.js";
 
 //: Decibels below the reference the spectrogram and the decay show.
 const RANGE_DB = 90;
@@ -28,9 +29,25 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
   let shows = 0;
   let shown = null; // the latest analysis on screen
   const references = new WeakMap(); // field -> { ceilingDb, energyDb }
+  const aliases = new WeakMap(); // a mirror's field -> the wave field whose scale it plots on
   let reference = { ceilingDb: 0, energyDb: 0 };
   let cameraYaw = 0;
   let seconds = 0;
+  // Graduations beside the canvases, outside them: the plots' pixels stay the
+  // ones drawn below, whatever the axes say.
+  const spectrogramAxes = attachAxes(spectrogram);
+  const decayAxes = attachAxes(decay);
+  decayAxes.setY(levelMarks(RANGE_DB));
+  const compass = document.createElement("div");
+  compass.className = "compass";
+  direction.replaceWith(compass);
+  compass.append(direction);
+  for (const side of ["front", "back", "left", "right"]) {
+    const word = document.createElement("span");
+    word.className = side;
+    word.textContent = side;
+    compass.append(word);
+  }
 
   function clear() {
     for (const [g, canvas] of [[sg, spectrogram], [dg, decay], [pg, direction]]) {
@@ -38,6 +55,8 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
       g.fillRect(0, 0, canvas.width, canvas.height);
     }
     for (const caption of Object.values(captions)) caption.textContent = "";
+    spectrogramAxes.clear();
+    decayAxes.setX([]);
     shown = null;
   }
 
@@ -185,11 +204,15 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
       let ceilingDb = -Infinity;
       for (const level of result.spectrogram.levels) ceilingDb = Math.max(ceilingDb, level);
       references.set(field, { ceilingDb, energyDb: result.energyDb });
-      if (shown && shown.field === field) {
+      if (shown && (shown.field === field || aliases.get(shown.field) === field)) {
         reference = references.get(field);
         drawSpectrogram(shown.spectrogram, shown.sampleRate);
         drawDecay(shown.decay);
       }
+    },
+    /** Plot `field` on the level scale of `of`: B and C read on A's scale. */
+    shareReference(field, of) {
+      aliases.set(field, of);
     },
     /** Plot one cell of a field; a later call wins over one still analysing. */
     async show(field, position, earlySamples) {
@@ -197,8 +220,11 @@ export function createPlots({ spectrogram, decay, direction, captions, workerUrl
       const result = await analyse(await field.cell(position), field.index.order, earlySamples);
       if (mine !== shows) return;
       shown = { ...result, field, sampleRate: field.index.sample_rate_hz };
-      reference = references.get(field) || reference;
+      reference = references.get(aliases.get(field) || field) || reference;
       seconds = field.index.samples / field.index.sample_rate_hz;
+      spectrogramAxes.setY(frequencyMarks(shown.sampleRate / 2));
+      spectrogramAxes.setX(timeMarks(seconds));
+      decayAxes.setX(timeMarks(seconds));
       drawSpectrogram(shown.spectrogram, shown.sampleRate);
       drawDecay(shown.decay);
       drawDirection();

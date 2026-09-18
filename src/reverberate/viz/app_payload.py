@@ -35,6 +35,7 @@ import numpy as np
 
 from reverberate.geometry.scene_ids import local_name, scene_of
 from reverberate.viz import field_payload
+from reverberate.viz.audit_payload import mirror_audit, wave_materials
 from reverberate.viz.vox_view import VoxelCloud, surface_of, write_quads
 
 __all__ = [
@@ -68,6 +69,10 @@ class WalkRun:
     #: Band limit in hertz, as text because it is a JSON key, to the payload
     #: directory relative to ``path``.
     meshes: dict[str, str] = field(default_factory=dict)
+    #: The mirror's audit, when the run carries one: ``audit`` names the
+    #: directory of the derived geometry's layers, ``paths`` maps a source id
+    #: to the paths file, both relative to ``path``.
+    mirror: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def read(cls, path: Path) -> WalkRun:
@@ -99,6 +104,7 @@ class WalkRun:
             dwelling=dwelling,
             sources=sources,
             meshes={str(k): str(v) for k, v in (manifest.get("meshes") or {}).items()},
+            mirror=dict(manifest.get("mirror") or {}),
         )
 
 
@@ -136,8 +142,15 @@ def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[s
         shutil.rmtree(link)
     link.symlink_to(source, target_is_directory=True)
     rooms = index.get("rooms") or []
+    labels = [str(v) for v in index.get("labels") or []]
     return {
         "url": f"meshes/{fmax}",
+        # What the audit legend names: the payload's own labels, in the order
+        # its label files index, and the solver's absorption for each.
+        "labels": labels,
+        "note": index.get("note"),
+        "cache_key": index.get("cache_key"),
+        "materials": wave_materials(index.get("cache_key"), labels),
         "h_m": index.get("h_m"),
         "coarse_m": rooms[0]["coarse"]["cell_m"] if rooms else None,
         # Name and regions both: the page matches a payload room to a room of
@@ -151,24 +164,94 @@ def _mesh_record(run: WalkRun, fmax: str, relative: str, target: Path) -> dict[s
     }
 
 
-def _field_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[str, Any] | None:
-    """Index a source's field into the site: a small index and a link to the file."""
-    relative = source.get("field")
+def _field_record(
+    run: WalkRun,
+    source: dict[str, Any],
+    target: Path,
+    *,
+    key: str = "field",
+    folder: str = "fields",
+) -> dict[str, Any] | None:
+    """Index a source's field into the site: a small index and a link to the file.
+
+    ``key`` names the source's entry: ``field`` for the reference, ``field_mirror``
+    for the geometric mirror of it, ``field_hybrid`` for the two solvers
+    joined; the page switches between them at a cell.
+    """
+    relative = source.get(key)
     if not relative:
         return None
     field = (run.path / relative).resolve()
     if not field.is_file():
         raise FileNotFoundError(f"{run.name}: source {source.get('id')!r} names {relative}, absent")
-    site = target / "fields" / str(source.get("id"))
+    site = target / folder / str(source.get("id"))
     if site.is_symlink():
         site.unlink()
     index = field_payload.build_site(field, site)
     return {
-        "url": f"fields/{source.get('id')}",
+        "url": f"{folder}/{source.get('id')}",
         "cells": len(index["cell_index"]),
         "order": index["order"],
         "samples": index["samples"],
     }
+
+
+def _metrics_record(
+    run: WalkRun, source: dict[str, Any], target: Path, *, key: str = "metrics"
+) -> dict[str, Any] | None:
+    """Copy a source's mirror metrics into the site, when the run has them.
+
+    ``key`` is ``metrics`` for the mirror, ``metrics_c`` for the newer one.
+    """
+    relative = source.get(key)
+    if not relative:
+        return None
+    metrics = (run.path / relative).resolve()
+    if not metrics.is_file():
+        raise FileNotFoundError(f"{run.name}: source {source.get('id')!r} names {relative}, absent")
+    site = target / key
+    site.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(metrics, site / f"{source.get('id')}.json")
+    return {"url": f"{key}/{source.get('id')}.json"}
+
+
+def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
+    """Link the mirror's audit layers and paths files into the site.
+
+    The layers are linked only when they are, triangle for triangle and label
+    for label, the derived scene the engine read
+    (:func:`reverberate.viz.audit_payload.mirror_audit`); otherwise the record
+    says why and the page draws nothing.
+    """
+    if not run.mirror:
+        return None
+    record: dict[str, Any] = {"key": run.mirror.get("key")}
+    record["check"] = mirror_audit(run.path, run.mirror, run.sources)
+    audit = run.mirror.get("audit")
+    link = target / "mirror" / "audit"
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.exists():
+        shutil.rmtree(link)
+    if audit and not record["check"]["problems"]:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to((run.path / audit).resolve(), target_is_directory=True)
+        record["audit"] = "mirror/audit"
+    elif record["check"]["problems"]:
+        print(f"{run.name}: mirror audit refused: {'; '.join(record['check']['problems'])}")
+    paths: dict[str, str] = {}
+    written: dict[str, float] = {}
+    for source_id, relative in (run.mirror.get("paths") or {}).items():
+        source_file = run.path / str(relative)
+        if source_file.is_file():
+            site = target / "mirror" / "paths"
+            site.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, site / f"{source_id}.json")
+            paths[str(source_id)] = f"mirror/paths/{source_id}.json"
+            written[str(source_id)] = source_file.stat().st_mtime
+    record["paths"] = paths
+    record["paths_written"] = written
+    return record
 
 
 def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
@@ -186,6 +269,13 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
                 "position": [float(v) for v in source["position"]],
                 "directivity": str(source.get("directivity", "omni")),
                 "field": _field_record(run, source, target),
+                "mirror": _field_record(run, source, target, key="field_mirror", folder="mirrors"),
+                "mirror_c": _field_record(
+                    run, source, target, key="field_mirror_c", folder="mirrors_c"
+                ),
+                "hybrid": _field_record(run, source, target, key="field_hybrid", folder="hybrid"),
+                "metrics": _metrics_record(run, source, target),
+                "metrics_c": _metrics_record(run, source, target, key="metrics_c"),
             }
             for i, source in enumerate(run.sources)
         ],
@@ -194,6 +284,7 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
             for fmax, relative in sorted(run.meshes.items(), key=lambda item: float(item[0]))
             if (record := _mesh_record(run, fmax, relative, target)) is not None
         },
+        "mirror": _mirror_record(run, target),
     }
     (target / "run.json").write_text(json.dumps(record))
     return record

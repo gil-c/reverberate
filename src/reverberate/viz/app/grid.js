@@ -36,8 +36,13 @@ const HYSTERESIS_M = 1;
 //: How many fine tile boxes of one room the coarse shader can hold per list.
 const CLIP_MAX = 64;
 
+//: The label the audit views single out, shared by every quad mesh: -1 is
+//: none, and then every face keeps its own colour exactly.
+export const HIGHLIGHT = { value: -1 };
+const HIGHLIGHT_OTHERS = "vec3(0.26, 0.28, 0.31)";
+
 /** A material's colour: seventeen hues over three lightnesses, by index. */
-function materialColour(rgb, index) {
+export function materialColour(rgb, index) {
   const hue = (index % 17) / 17;
   const lightness = [0.78, 0.62, 0.46][Math.floor(index / 17) % 3];
   return rgb.setHSL(hue, 0.6, lightness);
@@ -67,11 +72,14 @@ function quadMaterial(THREE, clip) {
   }
   material.customProgramCacheKey = () => (clip ? "grid-clip" : "grid");
   material.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader.replace(
+    shader.uniforms.highlight = HIGHLIGHT;
+    shader.vertexShader = `attribute float aLabel;\nuniform float highlight;\n${shader.vertexShader}`.replace(
       "#include <color_vertex>",
       `#include <color_vertex>
        vec3 n = normalize(normalMatrix * normal);
-       vColor.rgb *= 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);`
+       float shade = 0.55 + 0.45 * abs(n.y) + 0.15 * abs(n.x);
+       vColor.rgb *= shade;
+       if (highlight > -0.5 && abs(aLabel - highlight) > 0.5) vColor.rgb = ${HIGHLIGHT_OTHERS} * shade;`
     );
     if (!clip) return;
     Object.assign(shader.uniforms, {
@@ -137,11 +145,29 @@ export async function fetchQuadMesh(THREE, base, meta, clip = null) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
   geometry.setAttribute("color", new THREE.BufferAttribute(colour, 3));
+  // The label per corner, for the highlight and for picking a face.
+  geometry.setAttribute("aLabel", new THREE.BufferAttribute(labels, 1));
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(index), 1));
   geometry.computeVertexNormals();
   const mesh = new THREE.Mesh(geometry, quadMaterial(THREE, clip));
   mesh.name = "voxels";
+  // Picking must skip what the shader cuts away.
+  mesh.userData.clip = clip;
   return mesh;
+}
+
+/** Whether the shader of a mesh with `clip` drops the fragment at `p`. */
+export function clippedAt(clip, p) {
+  if (!clip) return false;
+  const inside = (list) => {
+    for (let i = 0; i < list.count.value; i++) {
+      const lo = list.lo.value[i];
+      const hi = list.hi.value[i];
+      if (p.x > lo.x && p.y > lo.y && p.z > lo.z && p.x < hi.x && p.y < hi.y && p.z < hi.z) return true;
+    }
+    return false;
+  };
+  return !inside(clip.keep) && inside(clip.cut);
 }
 
 /** The squared distance from a point to a tile's own box, zero inside it. */
