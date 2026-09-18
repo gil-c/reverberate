@@ -37,7 +37,7 @@ const HYSTERESIS_M = 1;
 const CLIP_MAX = 64;
 
 /** A material's colour: seventeen hues over three lightnesses, by index. */
-function materialColour(rgb, index) {
+export function materialColour(rgb, index) {
   const hue = (index % 17) / 17;
   const lightness = [0.78, 0.62, 0.46][Math.floor(index / 17) % 3];
   return rgb.setHSL(hue, 0.6, lightness);

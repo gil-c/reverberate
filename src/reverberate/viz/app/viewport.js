@@ -108,7 +108,9 @@ export function createViewport(canvas, pane) {
   let manifest = null;
   let yaw = 0;
   let pitch = 0;
-  const groups = { colour: null, acoustic: null };
+  // One view in the scene at a time: the furnished model, the wave solver's
+  // grid, the mirror solver's derived scene.
+  const groups = { colour: null, acoustic: null, mirror: null };
   let shown = null;
   const overlays = new THREE.Group();
   overlays.name = "overlays";
@@ -448,6 +450,12 @@ export function createViewport(canvas, pane) {
       if (groups.acoustic) scene.remove(groups.acoustic);
       groups.acoustic = group;
       if (shown === "acoustic") show("acoustic");
+    },
+
+    setMirror(group) {
+      if (groups.mirror) scene.remove(groups.mirror);
+      groups.mirror = group;
+      if (shown === "mirror") show("mirror");
     },
 
     show,

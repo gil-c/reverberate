@@ -243,3 +243,19 @@ input[type=range].slide::-moz-range-thumb {
 .plot-cap { font: 12px var(--mono); color: var(--muted); margin-top: 4px; min-height: 1.3em; }
 .player select.voice { grid-column: 2; grid-row: 2; }
 .status { flex-wrap: wrap; gap: 4px 12px; }
+
+/* The mirror solver's audit (mirror-audit.js). */
+.legend, .bands { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.legend:empty { display: none; }
+.legend th, .bands th { color: var(--dim); font-weight: 400; text-align: right; padding: 1px 3px; }
+.legend th:first-child, .bands th:first-child { text-align: left; }
+.legend td { color: var(--muted); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); white-space: nowrap; }
+.legend td:first-child { text-align: left; color: var(--text); overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+.legend tbody tr.pick { cursor: pointer; }
+.legend tbody tr:hover td, .legend tbody tr.on td { background: var(--panel-2); }
+.legend tbody tr.on td { color: var(--src); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.bands td { color: var(--text); text-align: right; padding: 1px 3px; border-top: 1px solid var(--line); }
+.bands tr.scatter td, .bands tr.scatter th { border-top: 1px solid var(--line-2); }
+.audit .orders { display: flex; flex-wrap: wrap; gap: 2px 10px; font: 11px var(--mono); color: var(--muted); }
+[hidden] { display: none !important; }
