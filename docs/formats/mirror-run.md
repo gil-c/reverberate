@@ -33,14 +33,11 @@ as the third field.
 | `mirror/signature_<S>.npy`, `.json` | The source signature: minimum phase FIR taps from the reference's median direct spectrum, and the record of how it was read. |
 | `walk.json` | Updated: the source's entry gains `field_mirror` and `metrics`; a top level `mirror` entry names the scene, its key, the audit directory and the paths file per source. |
 
-The summary of `mirror/metrics/<S>.json` carries two readings of the same
-criteria from 2026-09-18. `pass_fraction` is the share of points meeting
-`criteria.targets`, which hold each criterion at the next round number over
-the measurement's own floor (one mirror judged against another that differs
-only in its ray seed). `storey_verdicts` is the storey's median against
-`storey_targets`, the difference a listener hears; a median over hundreds of
-points carries the floor over the square root of their count, so the
-perceptual threshold is honest there and meaningless per point.
+The summary of `mirror/metrics/<S>.json` reads one set of thresholds, the
+difference a listener hears (`criteria.targets`). `pass_fraction` is the
+share of points meeting each. A threshold does not move because one point's
+reading is noisy: where the measurement's own floor is the limit, the
+judgement fails and says so.
 
 The rendering smooths the histogram's energy and moments over time before it
 draws the tail (`tail_smooth_s`, `tail_smooth_fraction` in the render

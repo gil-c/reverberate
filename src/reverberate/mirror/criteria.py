@@ -70,8 +70,6 @@ __all__ = [
     "PointReport",
     "Reflection",
     "TailReport",
-    "PERCEPTUAL",
-    "PER_POINT",
     "Targets",
     "aggregate",
     "beam_weights",
@@ -149,13 +147,8 @@ class CriteriaSettings:
     echo_threshold: float = 0.95
     #: The colour of the tail is read over this long after the mixing time.
     tail_colour_s: float = 0.100
-    #: Level and colour are read this long either side of the seam. Ten
-    #: milliseconds of an octave band holds too few independent samples to
-    #: measure a level with: two mirrors that differ only in their ray seed
-    #: read a seam 3.6 dB apart there, and the mirror's own distance to the
-    #: reference is 3.4 dB, so the criterion measured less than its own
-    #: noise. At 80 ms the floor is 1.1 dB against a distance of 2.4 dB.
-    seam_s: float = 0.080
+    #: Level and colour are read this long either side of the seam.
+    seam_s: float = 0.010
     #: Order of the binaural decode the interaural figures are read on, and
     #: the octave the tail's coherence is read in.
     binaural_order: int = 3
@@ -175,31 +168,15 @@ DEFAULT_SETTINGS = CriteriaSettings()
 
 @dataclass(frozen=True)
 class Targets:
-    """Acceptance thresholds, as numbers a report can quote.
+    """The acceptance thresholds agreed on 2026-09-16, as numbers a report can quote.
 
-    Two sets of these exist and they answer two different questions.
-
-    :data:`PERCEPTUAL` holds the difference a listener hears: 5 per cent of
-    a reverberation time (ISO 3382-1), a decibel of level, 20 microseconds
-    of interaural delay, 0.075 of interaural coherence. It is the right
-    threshold and the wrong statistic to put it on. Judged point by point
-    it is unreachable, not because a model is bad but because one point's
-    measurement is noisier than the difference being asked about: two runs
-    of the **same** mirror, differing only in the seed the rays are drawn
-    with, read reverberation times 11 per cent apart and a seam 3.6 dB
-    apart. A threshold under a measurement's own noise passes nothing and
-    tells nobody anything.
-
-    :data:`PER_POINT` holds the same criteria at the level one point can
-    resolve, taken from that mirror against mirror floor and rounded up. A
-    point that fails one of these differs from the reference by more than
-    the measurement's own spread, which is what a per point verdict should
-    mean.
-
-    The perceptual thresholds are then kept where they are honest: on the
-    storey's median, whose own noise is the floor divided by the square
-    root of the point count, far under the threshold
-    (:func:`aggregate`).
+    These are the differences a listener hears: 5 per cent of a decay time
+    (ISO 3382-1), a decibel of level, 20 microseconds of interaural delay,
+    0.075 of interaural coherence. They are the thresholds the model has to
+    reach, and they do not move because a measurement is noisy. Where one
+    point's reading is noisier than the difference asked about, the
+    judgement says so by failing; raising the threshold to clear the noise
+    would only hide the fact.
     """
 
     recall: float = 0.90
@@ -221,49 +198,6 @@ class Targets:
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
-
-
-#: What a listener hears, on a statistic quiet enough to carry it: the
-#: storey's median. Agreed 2026-09-16.
-PERCEPTUAL = Targets()
-
-#: What one point resolves, measured 2026-09-18 on hssd_0076 by judging one
-#: mirror against another that differs only in its ray seed (24 points,
-#: 3e5 rays, criteria from 1 kHz, the settings the field was rendered
-#: with). The medians of that judgement are the floor: reverberation time
-#: 0.040 and early decay time 0.049 (on the median over bands that replaced
-#: the worst of them), colour 1.06 dB, seam 1.09 dB (on the 80 ms
-#: window and the median over bands that replaced the 10 ms maximum), sector
-#: energy 1.58 dB, order energy 0.30 dB, late coherence 0.016, early
-#: coherence 0.030, mixing time 0.083. Four targets sat under their own
-#: floor and move here to the next round number above it; the rest already
-#: stood over it and keep the perceptual number. The reverberation time is
-#: back at the 5 per cent a listener hears, because its floor came down to
-#: 0.040 when the reading stopped being the worst band.
-#:
-#: The early criteria have no floor of this kind at all: the image tree is
-#: the same in both runs, so recall, precision, time, level and the two
-#: interaural errors read exactly zero. What limits them is the paths the
-#: model does not have, which is a fact about the model and not about the
-#: measurement, so their targets stay where they were.
-PER_POINT = Targets(
-    recall=0.90,
-    precision=0.90,
-    time_error_s=0.0001,
-    direction_error_deg=10.0,
-    level_error_db=1.0,
-    itd_error_s=20e-6,
-    ild_error_db=1.0,
-    early_coherence_error=0.075,
-    mixing_time_relative=0.20,
-    t30_relative=0.05,
-    edt_relative=0.075,
-    tail_colour_db=1.5,
-    order_energy_db=1.0,
-    sector_energy_db=2.0,
-    late_coherence_error=0.05,
-    seam_db=1.5,
-)
 
 
 @dataclass(frozen=True)
@@ -418,7 +352,7 @@ class Criteria:
     """The settings and targets, and the prepared grids and decoder they imply."""
 
     settings: CriteriaSettings = field(default_factory=CriteriaSettings)
-    targets: Targets = field(default_factory=lambda: PER_POINT)
+    targets: Targets = field(default_factory=Targets)
 
     def record(self) -> dict[str, Any]:
         return {"settings": self.settings.record(), "targets": self.targets.record()}
@@ -1029,38 +963,11 @@ def focus_bands(
 
 
 def _relative(a: np.ndarray, b: np.ndarray) -> float:
-    """The median relative error over the bands where both are finite.
-
-    A decay time is not a colour. Nobody hears "the worst octave's
-    reverberation time"; ISO 3382 reports one per band and a room is quoted
-    by the middle of them. Taking the worst of four put the noise of all
-    four into the reading: on 0076 two mirrors that differ only in their ray
-    seed read reverberation times 8.4 per cent apart on the worst band and
-    4.0 on the median, and the mirror's own distance to the reference 10.2
-    against 5.5. Halving the floor is what lets the 5 per cent a listener
-    hears be asked of one point at all.
-    """
+    """Largest relative error over the bands where both are finite."""
     mask = np.isfinite(a) & np.isfinite(b) & (a > 0)
     if not mask.any():
         return float("nan")
-    return float(np.median(np.abs(a[mask] - b[mask]) / a[mask]))
-
-
-def _median_abs(a: np.ndarray, b: np.ndarray) -> float:
-    """The median over the bands of how far apart the two are.
-
-    The worst band is the right reading for a colour, where one band out of
-    place is heard. It is the wrong one for a step at the seam, where the
-    worst of four bands carries the noise of all four: on 0076 the max reads
-    a floor of 2.0 dB against a distance of 3.8, and the median 1.1 against
-    2.4, so only the median tells the two apart.
-    """
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    mask = np.isfinite(a) & np.isfinite(b)
-    if not mask.any():
-        return float("nan")
-    return float(np.median(np.abs(a[mask] - b[mask])))
+    return float(np.max(np.abs(a[mask] - b[mask]) / a[mask]))
 
 
 def _max_abs(a: np.ndarray, b: np.ndarray) -> float:
@@ -1125,7 +1032,7 @@ def judge(
             np.asarray(ref_tail.sector_energy_db), np.asarray(cand_tail.sector_energy_db)
         ),
         "late_coherence_error": abs(ref_tail.late_coherence - cand_tail.late_coherence),
-        "seam_db": _median_abs(focus(ref_tail.seam_step_db), focus(cand_tail.seam_step_db)),
+        "seam_db": _max_abs(focus(ref_tail.seam_step_db), focus(cand_tail.seam_step_db)),
     }
     limits = {
         "recall": (t.recall, "min"),
@@ -1164,24 +1071,10 @@ def judge(
     )
 
 
-#: Which way each criterion is read: a floor for the two that count matches,
-#: a ceiling for every error.
-SENSE: dict[str, str] = {"recall": "min", "precision": "min"}
-
-
-def aggregate(reports: list[PointReport], storey: Targets | None = None) -> dict[str, Any]:
-    """Medians of every error, the share of points passing, and the storey's own verdict.
-
-    The share of points is read against whatever targets judged them, one
-    point at a time. ``storey_verdicts`` is the other reading: the storey's
-    median against ``storey``, the thresholds a listener hears
-    (:data:`PERCEPTUAL`). A median over hundreds of points carries a noise
-    of the measurement's own floor over the square root of their count, so
-    a threshold that is meaningless per point is honest here.
-    """
+def aggregate(reports: list[PointReport]) -> dict[str, Any]:
+    """Medians of every error and the share of points passing each criterion."""
     if not reports:
         return {"points": 0}
-    storey = storey or PERCEPTUAL
     names = list(reports[0].errors)
     out: dict[str, Any] = {"points": len(reports), "errors": {}, "pass_fraction": {}}
     for name in names:
@@ -1192,20 +1085,6 @@ def aggregate(reports: list[PointReport], storey: Targets | None = None) -> dict
             "p90": _round_or_none(float(np.percentile(finite, 90)), 5) if finite.size else None,
         }
         out["pass_fraction"][name] = round(float(np.mean([r.verdicts[name] for r in reports])), 4)
-    limits = storey.record()
-    out["storey_targets"] = limits
-    out["storey_verdicts"] = {}
-    for name in names:
-        median = out["errors"][name]["median"]
-        limit = limits.get(name)
-        if median is None or limit is None:
-            out["storey_verdicts"][name] = False
-            continue
-        out["storey_verdicts"][name] = bool(
-            median >= limit if SENSE.get(name) == "min" else median <= limit
-        )
-    out["storey_passed"] = sum(out["storey_verdicts"].values())
-    out["storey_of"] = len(out["storey_verdicts"])
     out["echogram_distance_db"] = [
         _round_or_none(float(np.median([r.echogram_distance_db[k] for r in reports])), 3)
         for k in range(len(reports[0].echogram_distance_db))

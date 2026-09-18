@@ -176,13 +176,19 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   8 kHz. A campaign that solves only what it keeps drops the two largest
   lines; the crossover's own frequency hardly matters between 500 Hz and
   1 kHz, so it is chosen on quality alone.
-- **A threshold is not a statistic.** The perceptual thresholds (5 per cent
-  of a decay time, a decibel, 20 microseconds, 0.075 of coherence) are right
-  and were being asked of one point's measurement, which is noisier than
-  they are. They now judge the storey's median, whose noise is the floor
-  over the square root of the point count. Per point each criterion sits at
-  the next round number over the measured floor: reverberation time 0.10,
-  early decay time 0.15, seam 4 dB, the others unchanged.
+- **The measurement has a floor, and the thresholds do not move for it.**
+  One mirror judged against another that differs only in its ray seed reads,
+  on 24 points of 0076, a reverberation time 8.4 per cent apart on the worst
+  band, an early decay time 8.8, a colour 1.06 dB and a seam 3.6 dB at the
+  10 ms window. Several perceptual thresholds sit under that floor. The
+  thresholds stay where they are: they state the quality wanted, not the
+  quality this measurement can currently resolve. A criterion that fails
+  because its reading is noisy is a criterion asking for a quieter reading,
+  and the work is to give it one -- more rays, a longer window inside the
+  metric's own definition, a better estimator -- not to raise the bar's
+  height. **Recorded and reverted 2026-09-18:** a second per point target
+  set derived from this floor was added and removed the same day, on the
+  owner's rule that one improves the outcome, never the yardstick.
 - **The smoothing lowered the floor as well as the error**: two seeds now
   read a reverberation time 8.0 per cent apart against 11.1, an early decay
   time 10.2 against 14.9, a colour 0.81 dB against 1.05 and a seam 3.12 dB
@@ -273,10 +279,10 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   the whole way round against the straight line 0.3008 (early decay time
   0.186, 0.200, 0.375). The grid's slack wins because it is the only one of
   the three that still knows how deep in the shadow the receiver is.
-- **The seam criterion measured less than its own noise, and is rebuilt.**
-  It read the level step across the mixing time on 10 ms either side, per
-  octave, and took the worst band. Ten milliseconds of an octave band holds
-  a handful of independent samples, so the reading was noise: two mirrors
+- **The seam criterion reads less than its own noise, and that is a fact
+  about the estimator.** It reads the level step across the mixing time on
+  10 ms either side, per octave, and takes the worst band. Ten milliseconds
+  of an octave band holds a handful of independent samples: two mirrors
   differing only in their ray seed sit 3.59 dB apart there, while the
   mirror's own distance to the reference is 3.44 dB. Signal over floor:
   0.96. Measured against the window's width, 24 points, worst band then
@@ -290,28 +296,27 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   | 80 ms | 2.04 | 3.76 | 1.09 | 2.42 |
   | 160 ms | 2.05 | 3.67 | 1.04 | 2.42 |
 
-  The seam now reads **80 ms** either side and the **median** over the
-  focus bands, where the floor is 1.09 dB against a distance of 2.42: the
-  criterion tells the two apart at last, and its target goes from 4 dB to
-  1.5. The worst band is the right reading for a colour, where one band out
-  of place is heard; it is the wrong one for a step, where the worst of
-  four bands carries the noise of all four.
-- **The decay times were read on the worst band, and a decay time is not a
-  colour.** Nobody hears "the worst octave's reverberation time"; ISO 3382
-  reports one per band and a room is quoted by the middle of them. Taking
-  the worst of four put the noise of all four into the reading. Measured on
-  24 points, floor then distance to the reference:
+  **Recorded and reverted 2026-09-18.** The window was widened to 80 ms and
+  the statistic changed to the median; both were put back. The table is kept
+  because it says what the mirror must do to be judged on the seam at all:
+  bring the ray estimator's variance down until 10 ms of an octave band is
+  a measurement. Widening the window measures a different quantity, and
+  taking the median of four bands hides the band that is out of place.
+- **The decay times are read on the worst band, and stay there.** Taking
+  the worst of four bands puts the noise of all four into the reading.
+  Measured on 24 points, floor then distance to the reference:
 
   | statistic | floor | error | ratio |
   | --- | --- | --- | --- |
   | reverberation time, worst band | 0.084 | 0.102 | 1.21 |
-  | reverberation time, median band | **0.040** | 0.055 | 1.37 |
+  | reverberation time, median band | 0.040 | 0.055 | 1.37 |
   | early decay time, worst band | 0.088 | 0.260 | 2.95 |
-  | early decay time, median band | **0.049** | 0.132 | 2.71 |
+  | early decay time, median band | 0.049 | 0.132 | 2.71 |
 
-  Both read the median from now on. What that buys is the threshold: with
-  the worst band the 5 per cent a listener hears sat under a floor of 8.4
-  per cent and could not be asked of one point at all; on the median the
-  floor is 4.0 per cent and **the per point target for the reverberation
-  time goes back to the perceptual 0.05**, with the early decay time at
-  0.075, the next round number over its own 0.049.
+  **Recorded and reverted 2026-09-18.** Both were moved to the median band
+  and put back. The median halves the floor for the reverberation time and
+  makes the early decay time's ratio *worse*, so it was not even a
+  consistent gain; and it hides what it averages. On 219 points of 0076,
+  of those whose median band met 5 per cent, 17 per cent had a band more
+  than 10 per cent out, the worst at 27. A listener walking the storey
+  hears that band. The worst band stays.
