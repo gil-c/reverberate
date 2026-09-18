@@ -47,7 +47,6 @@ from typing import Any
 import h5py
 import numpy as np
 
-from reverberate.accel.backend import raw_kernel, to_numpy
 from reverberate.accel.lattice import (
     CartGrid,
     Lattice,
@@ -58,6 +57,7 @@ from reverberate.accel.lattice import (
 )
 from reverberate.accel.lattice import sim_constants as constants_for
 from reverberate.accel.scene import EPS, Scene, dotv, load_scene, normalise
+from reverberate.compute import raw_kernel, to_numpy
 
 __all__ = [
     "R_EPS",

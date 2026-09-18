@@ -7,13 +7,20 @@ A run is a directory holding ``walk.json``:
     {"dwelling": "hssd_0002",
      "sources": [{"id": "S1", "name": "voice", "position": [-6.05, 1.7, -3.89],
                   "directivity": "omni", "field": "field/S1.h5"}],
-     "meshes": {"4000": "../w36_audit_4k/voxels"}}
+     "meshes": {"4000": "../w36_audit_4k/voxels"},
+     "simulation": "wave",
+     "mirror_solver": {"scene": "mirror/scene", "paths": {"S1": "mirror/paths_S1.npz"}}}
 
 ``dwelling`` is the project's name for the scene (``scene_id``, the HSSD id,
 is accepted instead); ``field`` names the source's impulse response field
 (:mod:`reverberate.viz.field_payload`); ``meshes`` maps a band limit in hertz
-to a tiered audit payload, both relative to the run. A run without
-``walk.json`` is not offered, which keeps every earlier run out of the app.
+to a tiered audit payload, both relative to the run. ``simulation`` says what
+made the fields, shown beside the audio: ``wave`` (the default), or ``hybrid``
+for the wave solver under the crossover and the mirror over it.
+``mirror_solver`` names the derived scene and the paths the mirror solver
+read and wrote, for its audit view (:mod:`reverberate.viz.mirror_audit`).
+Several runs of one dwelling are several simulations, offered under the
+dwelling. A run without ``walk.json`` is not offered.
 Positions are in the scene frame, metres, y up.
 
 :func:`write_synthetic_run` writes a run of a box room with mock fields, for
@@ -35,6 +42,7 @@ import numpy as np
 
 from reverberate.geometry.scene_ids import local_name, scene_of
 from reverberate.viz import field_payload
+from reverberate.viz.mirror_audit import mirror_record
 from reverberate.viz.vox_view import VoxelCloud, surface_of, write_quads
 
 __all__ = [
@@ -68,6 +76,10 @@ class WalkRun:
     #: Band limit in hertz, as text because it is a JSON key, to the payload
     #: directory relative to ``path``.
     meshes: dict[str, str] = field(default_factory=dict)
+    #: What made the fields: ``wave`` or ``hybrid``.
+    simulation: str = "wave"
+    #: ``scene`` and ``paths`` (source id to file) of the mirror, relative to ``path``.
+    mirror: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def read(cls, path: Path) -> WalkRun:
@@ -99,6 +111,8 @@ class WalkRun:
             dwelling=dwelling,
             sources=sources,
             meshes={str(k): str(v) for k, v in (manifest.get("meshes") or {}).items()},
+            simulation=str(manifest.get("simulation", "wave")),
+            mirror=dict(manifest.get("mirror_solver") or {}),
         )
 
 
@@ -171,6 +185,14 @@ def _field_record(run: WalkRun, source: dict[str, Any], target: Path) -> dict[st
     }
 
 
+def _mirror_record(run: WalkRun, target: Path) -> dict[str, Any] | None:
+    """The mirror solver's audit files in the site, when the run names them."""
+    if not run.mirror:
+        return None
+    paths = {str(i): run.path / str(p) for i, p in (run.mirror.get("paths") or {}).items()}
+    return mirror_record(run.path / str(run.mirror["scene"]), paths, target)
+
+
 def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
     """Write ``run.json`` under ``target`` and link the payloads it names."""
     target = Path(target)
@@ -194,6 +216,8 @@ def build_run(run: WalkRun, target: Path) -> dict[str, Any]:
             for fmax, relative in sorted(run.meshes.items(), key=lambda item: float(item[0]))
             if (record := _mesh_record(run, fmax, relative, target)) is not None
         },
+        "simulation": run.simulation,
+        "mirror": _mirror_record(run, target),
     }
     (target / "run.json").write_text(json.dumps(record))
     return record

@@ -23,7 +23,6 @@ import numpy as np
 import pytest
 
 from reverberate import settings
-from reverberate.accel.backend import cuda_available
 from reverberate.accel.lattice import cart_grid, lattice_for, sim_constants, voxel_triangles
 from reverberate.accel.scene import load_scene
 from reverberate.accel.voxelise import (
@@ -33,6 +32,7 @@ from reverberate.accel.voxelise import (
     finish,
     voxelise_scene,
 )
+from reverberate.compute import cuda_available
 from test_accel_scene import pffdtd_available, write_scene
 
 gpu = pytest.mark.skipif(not cuda_available(), reason="needs a CUDA device and cupy")

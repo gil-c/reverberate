@@ -1,6 +1,8 @@
 /** Boot: wire the panels, the viewport, the plan, the sound and the run. */
 import { createViewport, roomAt } from "./viewport.js";
 import { createMeshViews } from "./grid.js";
+import { createMirrorLayers } from "./mirror.js";
+import { createMirrorAudit } from "./mirror-audit.js";
 import { createSourceGlyphs } from "./sources.js";
 import { createMinimap } from "./minimap.js";
 import { createListenerTab } from "./listener.js";
@@ -35,6 +37,16 @@ const minimap = createMinimap($("#map"), {
   onSelectSource: (id) => selectSource(id),
 });
 const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => viewport.moveTo(pose) });
+
+// The mirror solver's view: the derived scene it read, its paths at the listener's cell.
+const mirrorLayers = createMirrorLayers(THREE, { onLoaded: () => viewport.invalidate() });
+mirrorLayers.onRedraw(() => viewport.invalidate());
+viewport.setMirror(mirrorLayers.group);
+viewport.onResize((width, height) => mirrorLayers.setSize(width, height));
+const mirrorAudit = createMirrorAudit($("#audit"), THREE, {
+  onSwitch: (name, on) => mirrorLayers.setWanted(name, on),
+  onColourBy: (mode) => mirrorLayers.setColourBy(mode),
+});
 
 // --- sound --------------------------------------------------------------------
 const engine = createEngine();
@@ -155,6 +167,8 @@ function selectSource(id) {
 
 /** The plots of one source's response at a cell, from the field itself. */
 function showPlots(id, position) {
+  mirrorLayers.showCell(id, position);
+  mirrorAudit.setCell(position, mirrorLayers.pathsAt(id, position));
   const field = spatial.fieldOf(id);
   if (!field) return;
   const earlySamples = Math.round((settings.earlyMs / 1000) * field.index.sample_rate_hz);
@@ -224,7 +238,9 @@ const tierText = (status) => {
 function renderViewButtons() {
   for (const button of $("#view").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.view === state.view);
+    if (button.dataset.view === "mirror") button.disabled = !mirrorLayers.record();
   }
+  $("#audit-fold").hidden = state.view !== "mirror";
   $("#fmax").replaceChildren(
     ...(meshViews ? meshViews.bands : []).map((band) => {
       const button = document.createElement("button");
@@ -245,7 +261,12 @@ $("#view").addEventListener("click", (event) => {
 
 function setView(view) {
   if (view === "acoustic" && !meshViews) return;
+  if (view === "mirror" && !mirrorLayers.record()) return;
   state.view = view;
+  if (view === "mirror") {
+    busy("loading the mirror solver's scene");
+    mirrorLayers.ensure().then(() => busy(""), (error) => busy(`mirror: ${error.message}`));
+  }
   if (view === "acoustic") reconcileMesh();
   else $("#hud-tier").textContent = "";
   viewport.show(state.view);
@@ -357,13 +378,28 @@ async function openRun(run) {
   plots.clear();
   lastRender = null;
   $("#hud-tier").textContent = "";
-  if (state.view === "acoustic") setView("colour");
+  if (state.view !== "colour") setView("colour");
+  mirrorLayers.clear();
+  mirrorAudit.setScene(null);
+  $("#simulation").textContent = "";
   state.sources = [];
   state.selected = null;
   if (run) {
     const data = await fetch(`${run.url}/run.json`).then((r) => r.json());
     if (state.run !== run) return;
     data.baseUrl = run.url;
+    $("#simulation").textContent =
+      data.simulation === "hybrid"
+        ? "simulation: wave solver under 1 kHz, mirror solver above"
+        : "simulation: wave solver";
+    mirrorLayers
+      .load(data)
+      .then((scene) => {
+        if (state.run !== run) return;
+        mirrorAudit.setScene(scene);
+        renderViewButtons();
+      })
+      .catch((error) => busy(`mirror audit: ${error.message}`));
     state.sources = data.sources.map((source, i) => ({
       ...source,
       on: true,
@@ -384,6 +420,7 @@ async function openRun(run) {
         .then((field) => {
           if (mine !== generation) return;
           spatial.setField(source.id, field);
+          if (data.mirror) mirrorLayers.setReceivers(field.index.positions);
           plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
           minimap.setPoints(points.positions());
@@ -405,7 +442,6 @@ async function openRun(run) {
   renderSources();
   audioStatus();
   renderViewButtons();
-  if (meshViews && meshViews.bands.length) setView("acoustic");
 }
 
 /** The walkable outline's extent on each axis, and its area by the shoelace formula. */
@@ -507,16 +543,6 @@ async function boot() {
   players.setVoices(voices);
 
   heads = await fetch("decoders/decoders.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
-  const headSelect = $("#head");
-  headSelect.replaceChildren(
-    ...heads.map((record) => {
-      const option = document.createElement("option");
-      option.value = record.name;
-      option.textContent = record.name;
-      return option;
-    })
-  );
-  headSelect.addEventListener("change", () => loadHead(headSelect.value));
   const level = $("#level");
   level.addEventListener("input", () => {
     engine.setMasterDb(Number(level.value));

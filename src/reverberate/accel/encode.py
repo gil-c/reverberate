@@ -39,7 +39,7 @@ from scipy.fft import next_fast_len
 from scipy.special import spherical_jn
 
 from reverberate.accel import dsp
-from reverberate.accel.backend import to_numpy
+from reverberate.compute import to_numpy
 from reverberate.spatial.array import ArrayDesign
 from reverberate.spatial.encode import (
     EncoderSettings,

@@ -35,10 +35,30 @@
             <div class="fold-body stack">
               <div class="seg" id="view">
                 <button type="button" class="on" data-view="colour">Colour</button>
-                <button type="button" data-view="acoustic">Acoustic</button>
+                <button type="button" data-view="acoustic">Wave solver</button>
+                <button type="button" data-view="mirror">Mirror solver</button>
               </div>
               <div class="seg sub" id="fmax"></div>
               <div class="note" id="fmax-note"></div>
+            </div>
+          </section>
+
+          <section class="fold" data-fold="audit" id="audit-fold" hidden>
+            <button type="button" class="fold-head"><span class="label">Mirror audit</span><i></i></button>
+            <div class="fold-body stack audit" id="audit">
+              <div class="fields">
+                <label class="field switch"><span>reflectors</span><input type="checkbox" data-mirror="reflectors" checked /><em></em></label>
+                <label class="field switch"><span>occluders</span><input type="checkbox" data-mirror="occluders" /><em></em></label>
+                <label class="field switch"><span>paths</span><input type="checkbox" data-mirror="paths" checked /><em></em></label>
+                <label class="field switch"><span>receivers</span><input type="checkbox" data-mirror="receivers" /><em></em></label>
+              </div>
+              <div class="seg sub" id="audit-colour-by">
+                <button type="button" class="on" data-by="label">by material</button>
+                <button type="button" data-by="kind">by facet kind</button>
+              </div>
+              <dl class="facts" id="audit-facts"></dl>
+              <table class="legend" id="audit-legend"></table>
+              <div class="stack" id="audit-detail"></div>
             </div>
           </section>
 
@@ -99,8 +119,8 @@
         <div class="grip" data-grip="right"></div>
         <div class="body">
           <div class="stack">
-            <p class="label">Head</p>
-            <select id="head"></select>
+            <p class="label">Audio</p>
+            <div class="note" id="simulation"></div>
             <label class="field"><span>level</span><input id="level" type="range" min="-60" max="60" step="1" value="40" /><em id="level-read">40 dB</em></label>
 
           </div>

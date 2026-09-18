@@ -34,8 +34,8 @@ from typing import Any
 import numpy as np
 from scipy.signal import bilinear_zpk, butter, zpk2sos
 
-from reverberate.accel.backend import raw_kernel
 from reverberate.audio import Atmosphere, frame_for
+from reverberate.compute import raw_kernel
 
 __all__ = [
     "air_absorption",

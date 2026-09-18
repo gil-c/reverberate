@@ -91,8 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "voxelise":
         import numpy as np
 
-        from reverberate.accel.backend import xp_for
         from reverberate.accel.voxelise import voxelise_scene
+        from reverberate.compute import xp_for
         from reverberate.wave.remote_voxelise import grid_shape_of
         from reverberate.wave.voxelise import nh_for
 
