@@ -22,8 +22,8 @@ from typing import Any
 
 import numpy as np
 
-from reverberate.accel.backend import to_numpy
 from reverberate.accel.scene import Triangles, dotv
+from reverberate.compute import to_numpy
 
 __all__ = [
     "CartGrid",

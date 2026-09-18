@@ -19,7 +19,7 @@ fetching live in :mod:`reverberate.gpu.onebox`, so the library runs the same
 on a laptop's CPU (with ``numpy``), on any NVIDIA card (with ``cupy``), and in
 the tests, which never see a card.
 
-- :mod:`.backend`: which array library, and the compile rules of the kernels.
+- :mod:`reverberate.compute`: which array library and which devices, and the kernels' compile rules.
 - :mod:`.scene`: PFFDTD's ``RoomGeo`` and ``tris_precompute``, op for op.
 - :mod:`.lattice`: the Cartesian grid, the voxel lattice, the triangle index.
 - :mod:`.voxelise`: the adjacency of every grid node, on the card.
