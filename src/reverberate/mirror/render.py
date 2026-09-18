@@ -47,7 +47,6 @@ __all__ = [
     "label_areas_m2",
     "render",
     "render_paths",
-    "smooth_over_time",
     "storey_volume_m3",
     "tail_from_histogram",
 ]
@@ -71,49 +70,13 @@ class RenderSettings:
     lowcut_order: int = 8
     #: Half length of the windowed sinc that places a pulse between samples.
     delay_half_taps: int = 16
-    #: Where the statistical tail starts and how long it fades in.
-    tail_from_s: float = 0.020
+    #: Where the statistical tail starts and how long it fades in. Ten
+    #: milliseconds is what the tuning of 2026-09-17 picked over 5 and 20.
+    tail_from_s: float = 0.010
     tail_fade_s: float = 0.010
-    #: The tail's scale divides the direct energy by what the histogram's
-    #: direct bin holds in expectation, ``r^2 / (4 d^2)`` per band for a sphere
-    #: of radius r at distance d and rays of energy 1/N. False reads the first
-    #: two bins instead, which also hold the floor and ceiling reflections
-    #: arriving within 4 ms: +2 dB median, +4.7 dB at p90 on 0076.
-    analytic_direct: bool = True
     #: Noise bursts per histogram bin, each from its own sampled direction.
-    tail_bursts: int = 6
-    #: Cap, in seconds, on the half width of the moving mean that smooths the
-    #: histogram's energy and moments over time before the tail is
-    #: synthesised. The rays estimate a smooth late decay; what they leave
-    #: bin to bin is the estimator's own noise, not the room. On 0076 the
-    #: reference's broadband envelope fluctuates 1.9 dB about its decay and
-    #: the unsmoothed tail 4.0 dB. Zero keeps the histogram as the rays left
-    #: it.
-    tail_smooth_s: float = 0.050
-    #: The moving mean's half width is this fraction of the time elapsed
-    #: since the tail began, capped at ``tail_smooth_s``. A window that grows
-    #: keeps the early decay's own slope, which the early decay time reads,
-    #: and averages hardest where the rays are thinnest.
-    tail_smooth_fraction: float = 0.10
-    #: The histogram's moments of degree n are weighted by this to the n
-    #: before the burst directions are drawn: 1 keeps the rays' leaning, 0
-    #: draws them uniformly. The rays mix directions less than the wave
-    #: field does (a specular bounce keeps the elevation), and this is the
-    #: host side's lever on it.
-    tail_order_weight: float = 1.0
-    #: A point with no direct path scales its tail on its own first arrival,
-    #: the diffracted onset, instead of on the median the other points gave.
-    #: The rays came round the same doorway the onset did, so the two should
-    #: be the same sound. Measured on 0076 they are not: the share of
-    #: criteria met on 32 shadowed points falls from 0.316 to 0.293 and the
-    #: tail's colour error rises from 8.5 to 11.2 dB, because the histogram's
-    #: first bin behind a door holds too few crossings to be a scale. Left
-    #: off; kept because the measurement is worth repeating on another
-    #: storey.
-    tail_scale_on_onset: bool = False
-    #: The histogram tail's band energies go through the inverse of what the
-    #: bank reads of shaped noise (``bank_reading``), so they read as meant.
-    bank_corrected: bool = True
+    #: Twenty-four is what the tuning of 2026-09-17 picked over 6 and 64.
+    tail_bursts: int = 24
     #: The direct sound is placed this long after the start, as the
     #: reference's own chain does; the criteria align on it anyway.
     lead_s: float = 0.0
@@ -131,13 +94,7 @@ class RenderSettings:
             "tail_from_s": self.tail_from_s,
             "tail_fade_s": self.tail_fade_s,
             "lead_s": self.lead_s,
-            "analytic_direct": self.analytic_direct,
-            "bank_corrected": self.bank_corrected,
             "tail_bursts": self.tail_bursts,
-            "tail_order_weight": self.tail_order_weight,
-            "tail_smooth_s": self.tail_smooth_s,
-            "tail_smooth_fraction": self.tail_smooth_fraction,
-            "tail_scale_on_onset": self.tail_scale_on_onset,
         }
 
 
@@ -322,51 +279,6 @@ def barron_reflected_ratio(distance_m: float, t60_s: np.ndarray, volume_m3: floa
     return np.asarray(reflected / direct)
 
 
-def smooth_over_time(
-    values: np.ndarray, half: int, *, first: int = 0, fraction: float = 0.0
-) -> np.ndarray:
-    """A centred moving mean over the first axis, from bin ``first`` on.
-
-    The rays give one Monte Carlo estimate of a smooth late decay per time
-    bin. What that estimate leaves bin to bin is its own variance: on 0076 a
-    bin of 2 ms holds some sixty ray crossings whose energies are so unequal
-    that the bin to bin spread reaches 4 dB where the reference's is 2 dB.
-    The mean over ``2 * h + 1`` bins divides that variance by the count.
-
-    The window grows with the time since ``first``: ``h`` is ``fraction`` of
-    the bins elapsed, capped at ``half``. The early tail therefore keeps its
-    own slope, which the early decay time reads, and the late tail, where
-    the estimate is worst and the field is diffuse, is averaged hard. A flat
-    window of 20 ms costs 0.05 of early decay time on 0076; the growing one
-    costs nothing and removes as much of the noise.
-
-    Bins before ``first`` are left alone, so the direct bin a scale is read
-    from stays what the rays wrote. Each window is normalised by how many
-    bins it covers, so neither end gains or loses energy.
-    """
-    if (half <= 0 and fraction <= 0.0) or values.shape[0] <= 1:
-        return values
-    out = np.array(values, dtype=float, copy=True)
-    tail = out[first:]
-    if tail.shape[0] <= 1:
-        return out
-    flat = tail.reshape(tail.shape[0], -1)
-    padded = np.zeros((flat.shape[0] + 1, flat.shape[1]), dtype=float)
-    np.cumsum(flat, axis=0, out=padded[1:])
-    count = flat.shape[0]
-    steps = np.arange(count)
-    widths = (
-        np.full(count, half)
-        if fraction <= 0.0
-        else np.minimum(np.rint(fraction * steps).astype(int), half if half > 0 else count)
-    )
-    lo = np.maximum(steps - widths, 0)
-    hi = np.minimum(steps + widths + 1, count)
-    means = (padded[hi] - padded[lo]) / (hi - lo)[:, None]
-    out[first:] = means.reshape(tail.shape)
-    return out
-
-
 def tail_from_histogram(
     histogram: Histogram,
     receiver: int,
@@ -413,11 +325,6 @@ def tail_from_histogram(
     rng = np.random.default_rng(seed)
     grid, weights = quadrature(2 * histogram.order + 2)
     basis_low = real_sh(histogram.order, grid)  # [direction, low channel]
-    if settings.tail_order_weight != 1.0:
-        from reverberate.spatial.sh import degrees_of
-
-        weights_of_degree = settings.tail_order_weight ** degrees_of(histogram.order)
-        basis_low = basis_low * weights_of_degree[None, :]
     basis_out = real_sh(settings.order, grid)  # [direction, out channel]
     # The histogram's direct bin: the first bin with energy, its scale.
     first = int(np.argmax(np.any(energy > 0.0, axis=1))) if np.any(energy > 0.0) else -1
@@ -429,19 +336,13 @@ def tail_from_histogram(
         for band, pick in enumerate(picks):
             reference = float(np.sum(energy[first : first + 2, pick]))
             scale[band] = direct_energy[band] / reference if reference > 0.0 else 0.0
-    half = int(round(settings.tail_smooth_s / histogram.bin_s))
-    fraction = settings.tail_smooth_fraction
-    if half > 0 or fraction > 0.0:
-        energy = smooth_over_time(energy, half, first=from_bin, fraction=fraction)
-        moments = smooth_over_time(moments, half, first=from_bin, fraction=fraction)
     band_power = np.ones(len(OCTAVE_BANDS))
     if band_gain_db is not None:
         band_power = 10.0 ** (np.asarray(band_gain_db, dtype=float) / 10.0)
     # The energy each bin should read per band, then what to synthesise so the
     # bank reads it: the inverse of the bank's own reading, clipped at zero.
     wanted = energy[:, picks] * (scale * band_power[picks])[None, :]  # [bin, band]
-    if settings.bank_corrected:
-        wanted = np.maximum(np.linalg.solve(bank_reading(rate), wanted.T).T, 0.0)
+    wanted = np.maximum(np.linalg.solve(bank_reading(rate), wanted.T).T, 0.0)
     # Every bin and band at once: the directions drawn from the moments'
     # density on the quadrature, the bursts laid bin by bin, each burst an
     # equal share of its bin's energy, encoded on its direction's harmonics.
@@ -499,8 +400,6 @@ def tail_from_histogram(
     record = {
         "kind": "histogram of the rays, noise bursts per bin from sampled directions",
         "bursts_per_bin": bursts,
-        "smooth_half_bins": half,
-        "smooth_fraction": fraction,
         "scale_per_band": [round(float(v), 6) for v in scale],
         "seed": seed,
     }

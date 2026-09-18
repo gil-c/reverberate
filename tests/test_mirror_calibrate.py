@@ -170,37 +170,6 @@ def replace_labels(scene: Any, labels: tuple[str, ...]) -> Any:
     )
 
 
-def test_the_floors_and_ceilings_take_their_own_scattering() -> None:
-    from dataclasses import replace as swap
-
-    from reverberate.mirror.calibrate import FLOOR_CEILING
-    from reverberate.mirror.rays import reflector_of_triangles
-
-    boxed = replace_labels(box_scene(alpha=0.2, scattering=0.05), ("shell",))
-    # One shell label everywhere, triangles and facets alike, as an export gives it.
-    scene = swap(
-        boxed,
-        occluder_label=np.zeros_like(boxed.occluder_label),
-        facets=tuple(swap(f, label=0) for f in boxed.facets),
-    )
-    parameters = Parameters(shell_scattering=0.5, floor_ceiling_scattering=0.1)
-    split = apply_parameters(scene, parameters)
-    new = split.materials.labels.index(FLOOR_CEILING)
-    assert split.materials.scattering[new] == 0.1
-    assert split.materials.scattering[split.materials.labels.index("shell")] == 0.5
-    np.testing.assert_array_equal(split.materials.absorption[new], split.materials.absorption[0])
-    for facet in split.facets:
-        assert (facet.label == new) == (abs(facet.normal[1]) > 0.9)
-    # The rays find every horizontal shell triangle on its facet, as before the split.
-    before, _ = reflector_of_triangles(scene)
-    after, _ = reflector_of_triangles(split)
-    np.testing.assert_array_equal(before, after)
-    assert (split.occluder_label == new).sum() > 0
-    assert image_scene(scene, parameters).materials.labels == scene.materials.labels
-    again = Parameters.from_record(parameters.record())
-    assert again.floor_ceiling_scattering == 0.1 and again.key == parameters.key
-
-
 def test_the_images_keep_the_class_scattering_on_the_shell() -> None:
     scene = replace_labels(box_scene(alpha=0.2, scattering=0.05), ("shell",))
     parameters = Parameters(shell_scattering=0.5)

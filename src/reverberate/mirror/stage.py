@@ -43,7 +43,7 @@ import numpy as np
 from scipy.signal import butter
 
 from reverberate.accel.backend import to_numpy
-from reverberate.metrics import band_centres, octave_filter_rows
+from reverberate.metrics import band_centres
 from reverberate.mirror.audit import write_geometry_layers, write_paths
 from reverberate.mirror.calibrate import Parameters, apply_parameters, image_scene, regain
 from reverberate.mirror.criteria import (
@@ -116,7 +116,7 @@ class MirrorSettings:
 
     rules: GeometryRules = field(default_factory=GeometryRules)
     ism: IsmSettings = field(default_factory=IsmSettings)
-    rays: RaySettings = field(default_factory=lambda: RaySettings(rays=1_000_000))
+    rays: RaySettings = field(default_factory=RaySettings)
     render: RenderSettings = field(default_factory=RenderSettings)
     criteria: CriteriaSettings = field(default_factory=CriteriaSettings)
     #: Points judged in parallel on the host's cores.
@@ -315,32 +315,20 @@ def _render_point(
     if direct.any() and histogram.hits[index].sum() > 0:
         distance = float(paths.length_m[direct][0])
         centres = band_centres(int(round(rate)))
-        direct_energy = np.zeros(len(centres))
-        analytic = None
-        if settings.render.analytic_direct:
-            # What a sphere of radius r at distance d catches of rays of energy 1/N,
-            # against the direct pulse's whole energy per band (gain squared times
-            # the bank's energy for a unit pulse), not what a 1 ms window keeps.
-            radius = settings.rays.receiver_radius_m
-            expected = radius**2 / (4.0 * max(distance, 1.05 * radius) ** 2)
-            _, picks = _band_map(rate)
-            amplitude = paths.gain[np.flatnonzero(direct)[0]][picks]
-            whole = amplitude**2 * band_pulse_energy(rate)
-            analytic = np.asarray(whole / expected, dtype=float)
-        else:
-            start = int(round((distance / sound_speed_m_s + settings.render.lead_s) * rate))
-            window = max(int(round(0.0005 * rate)), 1)
-            omni = to_numpy(signals[0, max(start - window, 0) : start + window + 1])
-            rows = octave_filter_rows(
-                np.repeat(omni[None, :], len(centres), 0),
-                int(round(rate)),
-                np.arange(len(centres)),
-            )
-            direct_energy = np.sum(rows**2, axis=1)
+        # The tail's scale: what a sphere of radius r at distance d catches of
+        # rays of energy 1/N, against the direct pulse's whole energy per band
+        # (gain squared times the bank's energy for a unit pulse), not what a
+        # 1 ms window keeps.
+        radius = settings.rays.receiver_radius_m
+        expected = radius**2 / (4.0 * max(distance, 1.05 * radius) ** 2)
+        _, picks = _band_map(rate)
+        amplitude = paths.gain[np.flatnonzero(direct)[0]][picks]
+        whole = amplitude**2 * band_pulse_energy(rate)
+        analytic = np.asarray(whole / expected, dtype=float)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
-            direct_energy,
+            np.zeros(len(centres)),
             settings.render,
             sound_speed_m_s=sound_speed_m_s,
             start_s=distance / sound_speed_m_s,
@@ -368,41 +356,23 @@ def _render_point(
                 "length_m": round(float(onset.length_m[0]), 4),
                 "gain_db": [round(float(v), 2) for v in 20.0 * np.log10(onset.gain[0])],
             }
-        own = None
-        if onset is not None and settings.render.tail_scale_on_onset:
-            # The point's own first arrival is a scale, direct or not: what the
-            # rays carried round the doorway against what the render laid down
-            # there. The other points' median is a guess about a room this
-            # point is not in.
-            centres = band_centres(int(round(rate)))
-            start = int(round(start_s * rate))
-            window = max(int(round(0.002 * rate)), 1)
-            omni = to_numpy(signals[0, max(start - window, 0) : start + window + 1])
-            rows = octave_filter_rows(
-                np.repeat(omni[None, :], len(centres), 0),
-                int(round(rate)),
-                np.arange(len(centres)),
-            )
-            own = np.sum(rows**2, axis=1)
         tail, tail_record = tail_from_histogram(
             histogram,
             index,
-            own if own is not None else np.zeros(len(scale)),
+            np.zeros(len(scale)),
             settings.render,
             sound_speed_m_s=sound_speed_m_s,
             start_s=start_s,
             seed=settings.seed + index,
             bursts=settings.render.tail_bursts,
             band_gain_db=np.asarray(settings.parameters.tail_gain_db, dtype=float),
-            scale_per_band=None if own is not None else scale,
+            scale_per_band=scale,
             xp=xp,
         )
         signals = signals + tail
         record["tail"] = {
             **tail_record,
-            "scale_from": "this point's own diffracted onset"
-            if own is not None
-            else "the other points, no direct path here",
+            "scale_from": "the other points, no direct path here",
             "starts_s": round(start_s, 4),
         }
     else:

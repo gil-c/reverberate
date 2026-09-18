@@ -189,10 +189,19 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   height. **Recorded and reverted 2026-09-18:** a second per point target
   set derived from this floor was added and removed the same day, on the
   owner's rule that one improves the outcome, never the yardstick.
-- **The smoothing lowered the floor as well as the error**: two seeds now
-  read a reverberation time 8.0 per cent apart against 11.1, an early decay
-  time 10.2 against 14.9, a colour 0.81 dB against 1.05 and a seam 3.12 dB
-  against 3.64.
+- **Smoothing the histogram over time was measured and removed.** A moving
+  mean over the bins, half width a tenth of the time since the tail began
+  and at most 50 ms, took the tail's grain from 4.0 to 2.1 dB between 1 and
+  12 kHz and lowered the seed to seed floor (reverberation time 11.1 to
+  8.0 per cent apart). It also smoothed what the reference has: the wave
+  field's tail shows vertical stripes, arrivals common to every band in a
+  5 ms frame, and on the storey each point's stripe depth moved further
+  from the reference's (1.92 dB of gap for B, unsmoothed, against 2.43 for
+  the smoothed C), while the seam went from 3.76 to 4.12 dB. Monte Carlo
+  noise is independent from one direction and one band to the next; the
+  room's arrivals are not. A smoothing belongs across those, never across
+  time. **Removed 2026-09-18** with `tail_smooth_s` and
+  `tail_smooth_fraction`.
 - **The shadowed points' first arrival is one geodesic and should be
   several.** Its time is right, its direction is right half the time: the
   elevation and the azimuth of the onset are unbiased (median error 0) but
@@ -204,7 +213,7 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   absorption at 1 kHz), each carrying Maekawa's loss for its own detour and
   sharing the geodesic's energy rather than claiming a whole barrier's. The
   share of criteria met on 32 shadowed points goes from 0.230 to 0.309.
-- **The plateau is still at 1e5 rays**, smoothing or not. One evaluation of
+- **The plateau is still at 1e5 rays.** One evaluation of
   the calibration's own cost on 24 points, same parameters, only the ray
   count moving: 19.09 at 3e5, 19.53 at 1e5, 20.26 at 3e4, 21.10 at 1e4. The
   moving mean takes out the estimator's noise, not its bias, so fewer rays
@@ -227,8 +236,8 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   the cutoff, without the levelling it loses 1.2 dB there and 3.5 dB just
   above, and a half octave ramp digs a 1.6 dB hole at 1.25 kHz. Two octaves
   read the same as one.
-- **Scaling a shadowed point's tail on its own onset was tried and left
-  off** (`tail_scale_on_onset`). The idea was that the rays and the
+- **Scaling a shadowed point's tail on its own onset was tried and
+  removed** (`tail_scale_on_onset`, 2026-09-18). The idea was that the rays and the
   diffracted onset came round the same doorway, so their ratio is that
   point's own and not the storey's median. Measured on 32 shadowed points it
   is worse: the share of criteria met falls from 0.316 to 0.293, the tail's
@@ -243,8 +252,7 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   suggests. In the delivered C the edges reach **81 of the 185**; the other
   104 keep the geodesic alone (`points_with_edge_paths` in the run's
   diffraction record).
-- **Snapping the geodesic's corners onto the edges was written, measured and
-  left off** (`snap_corners`). It shortens the way round by 0.11 m in the
+- **Snapping the geodesic's corners onto the edges, first measured.** It shortens the way round by 0.11 m in the
   median and moves the onset's direction error from 4.31 to 1.40 degrees,
   its level error from 1.61 to 0.92 dB, the interaural level error from
   2.12 to 1.49 dB: the geometry is plainly better. But 0.11 m less detour is
@@ -259,8 +267,10 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   the early decay time's error at 0.367 against 0.189. A flat gain buys back
   the aggregate and not the decay, so what snapping costs is not loudness.
   The likeliest cause is that a shorter geodesic flips which paths survive
-  the "shorter than every edge" test and changes the whole set. That is a
-  session of its own; `snap_corners` stays off until it has had one.
+  the "shorter than every edge" test and changes the whole set. The next
+  point says what it actually was. `gain_db` was **removed 2026-09-18**: a
+  flat fudge with no physics, and its only use was to cancel a loss that
+  turned out to be a counting error.
 - **What snapping cost was a counting rule, and it is fixed.** Pulling the
   chain tight takes the kink out of a bend, and a bend was counted by the
   kink it had left (`min_detour_m`, there to reject corners the grid
@@ -272,13 +282,24 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   direction error goes from 4.31 to 1.40 degrees, its level error from 1.61
   to 0.92 dB, the interaural level error from 2.12 to 1.49 dB, the tail's
   colour from 8.53 to 8.40 dB, and the share of criteria met and the early
-  decay time do not move (0.3164 and 0.186).
+  decay time do not move (0.3164 and 0.186). Measured again on 40 shadowed
+  points once the tail smoothing was gone: 0.2297 of criteria met with the
+  corners snapped against 0.2250 without, the onset's level error 2.96
+  against 4.07 dB. Snapping is no longer a setting; the corners are always
+  pulled onto the edges within `snap_m`.
 - **Which detour the loss is read from** (`loss_from`) was measured too:
   keeping the grid's own slack for a snapped bend reads 0.3164 of the
   criteria, using what is left after tightening 0.3105, and one loss from
   the whole way round against the straight line 0.3008 (early decay time
   0.186, 0.200, 0.375). The grid's slack wins because it is the only one of
-  the three that still knows how deep in the shadow the receiver is.
+  the three that still knows how deep in the shadow the receiver is. On
+  the 40 points of the second measurement the grid's slack and the
+  tightened detour read the same (0.2297) and the whole way round 0.2281.
+  **Removed 2026-09-18** as a setting: the grid's slack is the code. So are
+  `max_loss_db` (24, 32, 40 and 60 dB read the same; 24 is Maekawa's own
+  limit and stays as the function's cap), `edge_gain` (one value ever
+  used; the other counted a doorway's sound once per edge) and
+  `same_arrival_s`, `same_arrival_deg` (declared, never read).
 - **The seam criterion reads less than its own noise, and that is a fact
   about the estimator.** It reads the level step across the mixing time on
   10 ms either side, per octave, and takes the worst band. Ten milliseconds

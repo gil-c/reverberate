@@ -59,8 +59,6 @@ class DiffractionSettings:
     grow_cells: int = 1
     #: Least samples per triangle edge when the occluders are rasterised.
     samples_per_edge: int = 4
-    #: Cap of one edge's loss, dB (Maekawa's own practical limit).
-    max_loss_db: float = 24.0
     #: Cells kept free round the source and each receiver.
     clear_cells: int = 1
     #: A pulled corner adding less detour than this is the grid's, not an edge.
@@ -88,64 +86,24 @@ class DiffractionSettings:
     #: in time, which costs early decay time and seam more than their own
     #: directions gain.
     max_edge_detour_m: float = 1.5
-    #: Edge paths within this of the geodesic onset are the same arrival.
-    same_arrival_s: float = 0.0002
-    same_arrival_deg: float = 15.0
     #: Whether every selected edge is tried, beside the geodesic.
     edges: bool = True
-    #: Whether the geodesic's own corners are pulled onto the edges they are
-    #: near. The geodesic walks a grid, so its corners sit at cell centres
-    #: and its length, its arrival time and its direction all carry the
-    #: grid's step. Only 21 per cent of the shadowed points of hssd_0076
-    #: bend once; 74 per cent bend twice or more, where no single edge
-    #: reaches, so this is the only thing that improves their geometry.
-    #:
-    #: On 32 shadowed points of hssd_0076 it moves the onset's direction
-    #: error from 4.31 to 1.40 degrees, its level error from 1.61 to
-    #: 0.92 dB, the interaural level error from 2.12 to 1.49 dB and the
-    #: tail's colour from 8.53 to 8.40 dB, and the share of criteria met and
-    #: the early decay time do not move at all.
-    #:
-    #: It cost 0.317 of criteria met against 0.299 until the rule that
-    #: counts bends was corrected. Pulling the chain tight takes the kink
-    #: out of a bend, and a bend was being counted by the kink it had left:
-    #: 115 of the 185 shadowed points lost at least one bend that way, the
-    #: median count falling from 2 to 1 and the loss at 2 kHz from 28.7 to
-    #: 18.2 dB. A corner that stands on an edge is a bend whatever kink is
-    #: left, and with that the whole cost goes away.
-    snap_corners: bool = True
+    #: The geodesic walks a grid, so its corners sit at cell centres and its
+    #: length, arrival and direction carry the grid's step. Each corner
+    #: within this of a selected edge is pulled onto it. Measured on 40
+    #: shadowed points of hssd_0076 (2026-09-18, after the bend rule below
+    #: was fixed): criteria met 0.2297 against 0.2250 without, the onset's
+    #: level error 2.96 against 4.07 dB, its direction 1.47 against 1.63
+    #: degrees. A corner that stands on an edge is a bend whatever kink is
+    #: left once the chain is pulled tight.
     #: How far a corner may be from an edge and still be taken as that edge.
     snap_m: float = 0.30
-    #: Where the detour that Maekawa's loss is read from comes from, on a way
-    #: round that bends more than once. ``grid`` keeps the slack the
-    #: occupancy grid left at each corner, ``tight`` uses what is left once
-    #: the chain is pulled onto its edges, and ``total`` reads one loss from
-    #: the whole way round against the straight line. The three differ by
-    #: more than ten decibels on hssd_0076, which is the real uncertainty in
-    #: a shadowed point's level.
-    loss_from: str = "grid"
-    #: Decibels on every diffracted path, the one lever the shadowed points
-    #: have of their own. Maekawa's loss is a curve fitted to a screen in a
-    #: free field, and what reaches a room two doors away is not that; every
-    #: improvement to the geometry of the way round moves the level as well,
-    #: and without this there is nothing to put the level back with.
-    gain_db: float = 0.0
-    #: What sets the diffracted energy of a shadowed point. ``geodesic``
-    #: keeps what the single shortest way round carried and shares it over
-    #: the edges by their own weights, so the edges decide when and from
-    #: where the sound arrives and not how much of it there is. Maekawa's
-    #: loss is a whole barrier's answer, so applying it to each of a
-    #: doorway's edges and adding them counts the same sound several times:
-    #: on hssd_0076 that cost 0.20 of early decay time and 2.3 dB of seam.
-    #: ``maekawa`` leaves each edge with its own.
-    edge_gain: str = "geodesic"
 
     def record(self) -> dict[str, Any]:
         return {
             "cell_m": self.cell_m,
             "grow_cells": self.grow_cells,
             "samples_per_edge": self.samples_per_edge,
-            "max_loss_db": self.max_loss_db,
             "clear_cells": self.clear_cells,
             "min_detour_m": self.min_detour_m,
             "reflections": self.reflections,
@@ -155,11 +113,7 @@ class DiffractionSettings:
             "max_edge_absorption": self.max_edge_absorption,
             "max_edge_detour_m": self.max_edge_detour_m,
             "edges": self.edges,
-            "edge_gain": self.edge_gain,
-            "snap_corners": self.snap_corners,
             "snap_m": self.snap_m,
-            "gain_db": self.gain_db,
-            "loss_from": self.loss_from,
         }
 
 
@@ -289,9 +243,14 @@ def _graph(occupancy: Occupancy) -> csr_matrix:
 
 
 def maekawa_db(
-    detour_m: float, bands_hz: np.ndarray, sound_speed_m_s: float, cap_db: float
+    detour_m: float, bands_hz: np.ndarray, sound_speed_m_s: float, cap_db: float = 24.0
 ) -> np.ndarray:
-    """Maekawa's insertion loss of one edge per band, for a detour of ``detour_m``."""
+    """Maekawa's insertion loss of one edge per band, for a detour of ``detour_m``.
+
+    Capped at 24 dB, Maekawa's own practical limit. On hssd_0076 caps of 24,
+    32, 40 and 60 dB read the same: the onset sits some 20 dB under the
+    peak there, and the judgement's first arrival is another one.
+    """
     fresnel = 2.0 * max(detour_m, 0.0) * np.asarray(bands_hz, dtype=float) / sound_speed_m_s
     return np.asarray(np.minimum(10.0 * np.log10(3.0 + 20.0 * fresnel), cap_db))
 
@@ -536,9 +495,7 @@ def edge_paths(
     directions = towards / np.maximum(np.linalg.norm(towards, axis=1, keepdims=True), 1e-9)
     gains = np.zeros((keep.size, bands.size))
     for i, index in enumerate(keep):
-        loss = maekawa_db(
-            float(total[index] - straight), bands, sound_speed_m_s, settings.max_loss_db
-        )
+        loss = maekawa_db(float(total[index] - straight), bands, sound_speed_m_s)
         gains[i] = 10.0 ** (-loss / 20.0) / max(float(total[index]), 1e-3)
     return lengths, directions, gains, point[keep]
 
@@ -645,11 +602,7 @@ def diffracted_paths(
     hi = np.maximum(np.maximum(receivers.max(axis=0), source), scene.bmax) + 0.3
     occupancy = occupancy_of(scene, lo, hi, settings)
     _clear(occupancy, np.vstack([source[None, :], chosen]), settings.clear_cells)
-    selected = (
-        diffracting_edges(scene, settings) if (settings.snap_corners or settings.edges) else None
-    )
-    if selected is not None and not settings.snap_corners:
-        selected = None
+    selected = diffracting_edges(scene, settings)
     graph = _graph(occupancy)
     start = int(occupancy.flat(occupancy.cell_of(source))[0])
     distance, predecessor = dijkstra(graph, directed=False, indices=start, return_predecessors=True)
@@ -671,10 +624,8 @@ def diffracted_paths(
         chain[0] = receiver
         chain[-1] = source
         corners = _pull(occupancy, chain)
-        on_edge = [False] * len(corners)
         loose = _detours(corners)
-        if selected is not None:
-            corners, on_edge = snap_to_edges(corners, selected, settings)
+        corners, on_edge = snap_to_edges(corners, selected, settings)
         legs = [
             float(np.linalg.norm(b - a)) for a, b in zip(corners[:-1], corners[1:], strict=True)
         ]
@@ -682,30 +633,25 @@ def diffracted_paths(
         loss = np.zeros(len(bands))
         edges = 0
         tight = _detours(corners)
-        straight = float(np.linalg.norm(receiver - source))
         for k in range(1, len(corners) - 1):
             # A corner on an edge is a bend whatever kink it has left: pulling
-            # the chain tight takes the kink out and not the wall.
-            if settings.loss_from == "tight":
-                detour = tight[k]
-            else:
-                detour = max(tight[k], loose[k]) if on_edge[k] else tight[k]
+            # the chain tight takes the kink out and not the wall. Its detour
+            # keeps the grid's slack, the only reading that still knows how
+            # deep in the shadow the receiver is (on 40 shadowed points of
+            # 0076: 0.2297 of criteria met, against 0.2297 for the tightened
+            # detour alone and 0.2281 for one loss over the whole way round).
+            detour = max(tight[k], loose[k]) if on_edge[k] else tight[k]
             if detour < settings.min_detour_m and not on_edge[k]:
                 # A corner the grid made, not an edge the sound bends round.
                 continue
             edges += 1
-            if settings.loss_from != "total":
-                loss += maekawa_db(detour, bands, sound_speed_m_s, settings.max_loss_db)
-        if settings.loss_from == "total" and edges > 0:
-            loss = maekawa_db(
-                max(length - straight, 0.0), bands, sound_speed_m_s, settings.max_loss_db
-            )
+            loss += maekawa_db(detour, bands, sound_speed_m_s)
         if edges == 0:
             # Pulled straight within the grid's slack: the shadow boundary's 4.8 dB.
-            loss += maekawa_db(0.0, bands, sound_speed_m_s, settings.max_loss_db)
+            loss += maekawa_db(0.0, bands, sound_speed_m_s)
         towards = corners[1] - receiver
         direction = towards / max(float(np.linalg.norm(towards)), 1e-9)
-        gain = 10.0 ** ((settings.gain_db - loss) / 20.0) / max(length, 1e-3)
+        gain = 10.0 ** (-loss / 20.0) / max(length, 1e-3)
         points = np.repeat(receiver[None, None, :], 5, axis=1)
         points[0, 0] = source
         out[index] = Paths(
@@ -741,7 +687,6 @@ def diffracted_paths(
         "detour_m_median": round(float(np.median(lengths)), 3) if lengths else None,
         "edge_trees": trees,
         "reflected_paths": reflected,
-        "snapped_to_edges": bool(settings.snap_corners),
         **edge_record,
     }
     if say is not None:
@@ -812,10 +757,12 @@ def _through_the_edges(
             lengths = np.concatenate([onset.length_m[:1], lengths])
             directions = np.vstack([onset.direction[:1], directions])
             gains = np.vstack([onset.gain[:1], gains])
-        if settings.edge_gain == "geodesic":
-            # One barrier's worth of sound, shared over the ways round it.
-            share = np.sqrt(np.sum(onset.gain[0] ** 2) / max(float(np.sum(gains**2)), 1e-300))
-            gains = gains * share
+        # One barrier's worth of sound, shared over the ways round it. Maekawa's
+        # loss is a whole barrier's answer; giving it to each of a doorway's
+        # edges and adding them counts the same sound several times (on 0076
+        # that cost 0.20 of early decay time and 2.3 dB of seam).
+        share = np.sqrt(np.sum(onset.gain[0] ** 2) / max(float(np.sum(gains**2)), 1e-300))
+        gains = gains * share
         points = np.repeat(receivers[index][None, None, :], 5, axis=1)
         points = np.repeat(points, lengths.size, axis=0)
         points[:, 0] = source

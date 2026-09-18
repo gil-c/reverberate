@@ -22,6 +22,12 @@ from typing import Any
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # The flags take their defaults from the settings, never their own: a flag
+    # that restates a default silently keeps the old one when the settings move.
+    from reverberate.mirror.rays import RaySettings
+    from reverberate.mirror.render import RenderSettings
+
+    render, rays = RenderSettings(), RaySettings()
     parser = argparse.ArgumentParser(prog="reverberate.mirror", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -30,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--models", type=Path, required=True, help="export with apartment_full.json")
     p.add_argument("--source", required=True, help="source name, as in walk.json")
     p.add_argument("--position", type=float, nargs=3, default=None, help="else from walk.json")
-    p.add_argument("--rays", type=int, default=1_000_000)
+    p.add_argument("--rays", type=int, default=rays.rays)
     p.add_argument("--order", type=int, default=3)
     p.add_argument("--flutter", type=int, default=6)
     p.add_argument("--max-images", type=int, default=500_000)
@@ -57,7 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="rays whose bounces are all specular up to this order are left to the images",
     )
-    p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
+    p.add_argument(
+        "--tail-from", type=float, default=render.tail_from_s, help="s after the first arrival"
+    )
     p.add_argument(
         "--window",
         type=float,
@@ -70,18 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-diffraction", action="store_true", help="no diffracted onset where no direct path"
     )
     p.add_argument("--band-limit", type=float, default=0.0, help="Hz; 0 keeps the whole band")
-    p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
     p.add_argument(
-        "--tail-smooth",
-        type=float,
-        default=0.050,
-        help="s; cap on the moving mean's half width over the histogram's bins; 0 keeps the noise",
-    )
-    p.add_argument(
-        "--tail-smooth-fraction",
-        type=float,
-        default=0.10,
-        help="the moving mean's half width, as a fraction of the time since the tail began",
+        "--bursts", type=int, default=render.tail_bursts, help="noise bursts per histogram bin"
     )
     p.add_argument("--cell", type=float, default=0.10, help="m; the occluder grid's cell")
     p.add_argument(
@@ -92,9 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--focus", type=float, default=1000.0, help="Hz; the judgement reads the bands above"
-    )
-    p.add_argument(
-        "--order-weight", type=float, default=1.0, help="tail moments of degree n times this^n"
     )
     p.add_argument(
         "--phase",
@@ -139,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="fixed: the shell's own scattering coefficients to try",
     )
     p.add_argument("--order", type=int, default=3, help="ambisonic order the cost is read at")
-    p.add_argument("--rays", type=int, default=100_000)
+    p.add_argument("--rays", type=int, default=rays.rays)
     p.add_argument("--start", type=Path, default=None, help="a calibration json to start from")
     p.add_argument(
         "--skip-specular",
@@ -147,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="rays whose bounces are all specular up to this order are left to the images",
     )
-    p.add_argument("--tail-from", type=float, default=0.020, help="s after the first arrival")
+    p.add_argument(
+        "--tail-from", type=float, default=render.tail_from_s, help="s after the first arrival"
+    )
     p.add_argument(
         "--window",
         type=float,
@@ -155,7 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="s; the image tree's window, past which the rays count every arrival again",
     )
     p.add_argument("--no-signature", action="store_true")
-    p.add_argument("--bursts", type=int, default=6, help="noise bursts per histogram bin")
+    p.add_argument(
+        "--bursts", type=int, default=render.tail_bursts, help="noise bursts per histogram bin"
+    )
     p.add_argument("--cell", type=float, default=0.10, help="m; the occluder grid's cell")
     p.add_argument(
         "--focus", type=float, default=1000.0, help="Hz; the judgement reads the bands above"
@@ -236,9 +235,6 @@ def main(argv: list[str] | None = None) -> int:
                 air_absorption=not args.no_air,
                 tail_from_s=args.tail_from,
                 tail_bursts=args.bursts,
-                tail_smooth_s=args.tail_smooth,
-                tail_smooth_fraction=args.tail_smooth_fraction,
-                tail_order_weight=args.order_weight,
             ),
         )
         report = run_mirror(
@@ -275,8 +271,6 @@ def main(argv: list[str] | None = None) -> int:
             render=RenderSettings(
                 tail_from_s=args.tail_from,
                 tail_bursts=args.bursts,
-                tail_smooth_s=getattr(args, "tail_smooth", 0.050),
-                tail_smooth_fraction=getattr(args, "tail_smooth_fraction", 0.10),
             ),
             parameters=_parameters_of(args.start),
             workers=args.workers,

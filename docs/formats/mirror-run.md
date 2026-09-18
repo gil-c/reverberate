@@ -39,12 +39,6 @@ share of points meeting each. A threshold does not move because one point's
 reading is noisy: where the measurement's own floor is the limit, the
 judgement fails and says so.
 
-The rendering smooths the histogram's energy and moments over time before it
-draws the tail (`tail_smooth_s`, `tail_smooth_fraction` in the render
-settings, and `smooth_half_bins` in each point's tail record): the half
-width is a tenth of the time since the tail began, capped at 50 ms. What the
-rays leave bin to bin is the estimator's own variance, not the room.
-
 ## Written by `mirror hybrid` (where both fields are)
 
 | Path | What |
@@ -56,7 +50,7 @@ rays leave bin to bin is the estimator's own variance, not the room.
 
 | Path | What |
 | --- | --- |
-| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band, and when set the image sources' own absorption scale per band, the shell's own scattering and the scattering of the shell's floors and ceilings apart from its walls, `floor_ceiling_scattering`, which the rays read under an added label `shell_floor_ceiling`) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. The key of a file without an image scale is what it was before that field existed. |
+| `mirror/calibration/<key>.json` | The parameters (absorption scale per band, scattering scale, tail gain per band, and when set the image sources' own absorption scale per band and the shell's own scattering) and the trajectory of the search, one record per evaluation with its cost and the medians of the criteria. The key of a file without an image scale is what it was before that field existed. |
 | `mirror/calibration/latest.json` | The key and the file of the last calibration, and the points it read. |
 | `mirror/reference_subset_<S>.h5` | Only where the field is not: `ir [n, channels, samples]` of the chosen points at a low order, `point_index`, the rate and the order. |
 
