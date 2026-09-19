@@ -5,7 +5,8 @@ numpy code of :mod:`reverberate.mirror.ism` and :mod:`reverberate.mirror.rays`,
 which is their specification. Receivers are split over the devices for the
 paths, rays for the histogram, and results are merged in share order: a
 receiver's paths do not depend on which device validated them and the
-histogram is a sum of integers, so the field is the same on one device or eight.
+histogram is a sum of integers. The paths and the histogram are the same on
+the host and on any number of cards.
 """
 
 from __future__ import annotations
@@ -395,6 +396,11 @@ def histogram_on_device(
     rec_grid = grid_like(held.grid, receivers - radius, receivers + radius)
     if rec_grid.shape != held.grid.shape:
         raise RuntimeError("the receiver grid must share the occluder grid's cells")
+    # The kernel holds a ray's bands and harmonics in fixed arrays.
+    if bands > 8 or channels > 16:
+        raise ValueError(
+            f"the ray kernel holds 8 bands and order 3, asked {bands} and {settings.order}"
+        )
     kernel = raw_kernel(RAYS_KERNEL, "rays")
     with cupy.cuda.Device(held.device):
         energy = cupy.zeros((receivers.shape[0], bins, bands), dtype=cupy.int64)
@@ -416,9 +422,7 @@ def histogram_on_device(
                     np.int32(first),
                     np.int32(count),
                     np.int32(settings.rays),
-                    a["source"]
-                    if source is None
-                    else cupy.asarray(np.asarray(source, dtype=np.float64)),
+                    cupy.asarray(np.asarray(source, dtype=np.float64)),
                     np.float64(reach),
                     np.int32(bins),
                     np.float64(settings.sound_speed_m_s * settings.bin_s),

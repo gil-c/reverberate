@@ -14,7 +14,7 @@ The direct ray hits are in the histogram too, and they are its scale: the
 renderer sets the tail so that the histogram's direct energy equals the
 rendered direct pulse's, band by band, which needs no detector theory.
 
-**Everything here is written so the card can reproduce it to the bit.** The
+**Everything here is written so the card reproduces it to the integer.** The
 generator is an integer hash of (seed, ray, bounce, draw); directions come
 from rejection sampling with nothing but products, sums and square roots;
 and the histogram accumulates in 64 bit integers at a fixed scale, so the
@@ -75,14 +75,15 @@ class RaySettings:
     seed: int = 0
     #: A ray whose bounces so far are all specular, on reflector facets, at
     #: most this many, is what the image tree renders already: it is not
-    #: counted when it crosses a receiver. Zero counts everything.
-    skip_specular_order: int = 0
+    #: counted when it crosses a receiver. The image tree's order
+    #: (:class:`reverberate.mirror.ism.IsmSettings`); zero counts everything.
+    skip_specular_order: int = 3
     #: ... and with at most this many of those bounces on furniture, as the
     #: tree's ``furniture_bounces`` rule.
     skip_furniture_bounces: int = 1
     #: ... and arriving within this many seconds, the image tree's window;
     #: zero skips them whenever they arrive.
-    skip_window_s: float = 0.0
+    skip_window_s: float = 0.080
 
     def record(self) -> dict[str, Any]:
         return {
@@ -259,9 +260,6 @@ class UniformGrid:
 
     def members_in(self, flat: int) -> np.ndarray:
         return np.asarray(self.members[self.offsets[flat] : self.offsets[flat + 1]])
-
-    def triangles_in(self, flat: int) -> np.ndarray:
-        return self.members_in(flat)
 
     def cells_along(self, a: np.ndarray, b: np.ndarray) -> list[int]:
         """The flat indices of the cells a segment passes through, in order (3D DDA)."""
@@ -582,7 +580,8 @@ def trace(
                     np.int64
                 )
                 for r, entry in zip(which, entries, strict=True):
-                    at = int((travelled + entry) / settings.sound_speed_m_s / settings.bin_s)
+                    # The kernel's divisor, so a time on a bin edge lands alike.
+                    at = int((travelled + entry) / (settings.sound_speed_m_s * settings.bin_s))
                     if at < bins:
                         energy[r, at] += counts
                         moments[r, at] += weighted
