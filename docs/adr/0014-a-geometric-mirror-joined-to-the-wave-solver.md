@@ -47,6 +47,10 @@ above.** `reverberate.mirror`:
 
 ## Rejected
 
+The measurements are in `0014-appendix-measurements.md`; the costs and the
+failures of the rented machines in `docs/runbook-rented-machines.md`, part 6.
+
+
 Each measured on hssd_0076 and removed: image order 4 (twelve times the path
 time, precision lower); 300 000 rays (no criterion moved over 100 000); a
 Nelder-Mead search (135 s an evaluation, forty of them, against 31 s and
