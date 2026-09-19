@@ -123,3 +123,12 @@ def test_the_card_spectrum_is_the_signature_and_the_low_cut() -> None:
     recursive = sosfilt(sos, apply_signature(signals, taps), axis=-1)
     spectral = _through_spectrum(signals, rate, taps, sos, np)
     assert np.max(np.abs(spectral - recursive)) < 1e-9 * np.max(np.abs(recursive))
+
+
+def test_the_rays_leave_to_the_images_exactly_what_the_images_render() -> None:
+    settings = MirrorSettings(ism=IsmSettings(max_order=2, window_s=0.05))
+    rays = settings.traced_rays()
+    assert rays.skip_specular_order == 2 and rays.skip_window_s == 0.05
+    assert rays.sound_speed_m_s == settings.sound_speed_m_s
+    # A tracer on its own counts every crossing.
+    assert RaySettings().skip_specular_order == 0

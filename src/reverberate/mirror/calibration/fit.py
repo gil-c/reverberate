@@ -361,7 +361,7 @@ def calibrate(
     positions, rate, _ = lattice_of(Path(run), source)
     references = read_references(Path(run), source, chosen, order)
     position = np.asarray(position, dtype=float).reshape(3)
-    rays = replace(settings.rays, sound_speed_m_s=settings.sound_speed_m_s)
+    rays = settings.traced_rays()
     render_settings = replace(settings.render, order=order, sample_rate_hz=rate)
     grid = occluder_grid(catalogue, rays.cell_m)
     local = {index: k for k, index in enumerate(chosen)}
@@ -404,7 +404,7 @@ def calibrate(
     best = replace(
         best,
         note=f"{best.note}; {len(chosen)} points of {source}",
-        rendered_with={"rays": settings.rays.record(), "render": settings.render.record()},
+        rendered_with={"rays": rays.record(), "render": settings.render.record()},
     )
     target = mirror / "calibration" / f"{best.key}.json"
     target.parent.mkdir(parents=True, exist_ok=True)

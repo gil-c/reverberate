@@ -75,15 +75,16 @@ class RaySettings:
     seed: int = 0
     #: A ray whose bounces so far are all specular, on reflector facets, at
     #: most this many, is what the image tree renders already: it is not
-    #: counted when it crosses a receiver. The image tree's order
-    #: (:class:`reverberate.mirror.ism.IsmSettings`); zero counts everything.
-    skip_specular_order: int = 3
+    #: counted when it crosses a receiver. Zero counts everything, as a tracer
+    #: on its own must; the mirror sets it from the image tree
+    #: (:meth:`reverberate.mirror.pipeline.MirrorSettings.traced_rays`).
+    skip_specular_order: int = 0
     #: ... and with at most this many of those bounces on furniture, as the
     #: tree's ``furniture_bounces`` rule.
     skip_furniture_bounces: int = 1
     #: ... and arriving within this many seconds, the image tree's window;
     #: zero skips them whenever they arrive.
-    skip_window_s: float = 0.080
+    skip_window_s: float = 0.0
 
     def record(self) -> dict[str, Any]:
         return {

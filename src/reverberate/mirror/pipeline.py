@@ -70,11 +70,23 @@ class MirrorSettings:
         tail = {k: v for k, v in fitted.get("render", {}).items() if k.startswith("tail_")}
         return replace(self, rays=rays, render=replace(self.render, **tail))
 
+    def traced_rays(self) -> RaySettings:
+        """The rays, leaving to the image sources what they render: their order, in their window.
+
+        One source of truth: the image tree's settings, never a second number.
+        """
+        return replace(
+            self.rays,
+            skip_specular_order=self.ism.max_order,
+            skip_window_s=self.ism.window_s,
+            sound_speed_m_s=self.sound_speed_m_s,
+        )
+
     def record(self) -> dict[str, Any]:
         return {
             "rules": self.rules.record(),
             "ism": self.ism.record(),
-            "rays": self.rays.record(),
+            "rays": self.traced_rays().record(),
             "render": self.render.record(),
             "parameters": self.parameters.record(),
             "sound_speed_m_s": self.sound_speed_m_s,
@@ -131,7 +143,7 @@ def trace(
     scene = apply_parameters(catalogue, settings.parameters)
     region = (positions.min(axis=0) - 0.5, positions.max(axis=0) + 0.5)
     ism = replace(settings.ism, sound_speed_m_s=settings.sound_speed_m_s)
-    rays = replace(settings.rays, sound_speed_m_s=settings.sound_speed_m_s)
+    rays = settings.traced_rays()
     tree = grow_tree(scene, source, ism, region=region)
     grid = occluder_grid(scene, rays.cell_m)
     every = paths_on_devices(scene, tree, positions, ism, devices=devices, grid=grid, say=say)
