@@ -1,8 +1,8 @@
 /** The decode itself: an ambisonic response, a head orientation and a
  * decoder in; two ear responses out. No worker, no messages, no clock.
  *
- * `brir.worker.js` is the message shell around this module; the tests drive
- * the same functions with no browser.
+ * `brir.worker.js` is the message shell around this module; the tests and the
+ * offline harness (`tests/js/`) drive the same functions with no browser.
  *
  * All of it is linear: the rotation is applied to spectra, which it mixes
  * exactly as it mixes the samples, and the sum of an early part and a late

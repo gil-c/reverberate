@@ -1,12 +1,20 @@
-"""The walk-through engine's rules, through node.
+"""The walk-through engine's rules, and its smoothness harness, through node.
 
-``audio/ring.js``, which decides which slot a response goes to and every
-slot's gain: fades that were re-ramped at every swap approached zero and
-never got there, a ring choosing the slot free longest collapsed three slots
-into two, and every early response was cut short. Pinned under the intervals
-the app really produces. And the rules that are plain functions: which cell a
-listener is given, when the late part of the response moves, how the
-propagation delay ramps.
+Three things, each something this engine once got wrong:
+
+- ``audio/ring.js``, which decides which slot a response goes to and every
+  slot's gain. Fades that were re-ramped at every swap approached zero and
+  never got there: a ring choosing the slot free longest collapsed three
+  slots into two, and every early response was cut short. Pinned under the
+  intervals the app really produces.
+- The rules of ``audio/spatial.js`` and ``audio/engine.js`` that are plain
+  functions: how far the listener may be from a cell, when the late part
+  moves, how the propagation delay ramps.
+- ``tests/js/smoothness.mjs``, which walks a field offline and measures how
+  far the binaural filter moves from frame to frame. It is run by hand on a
+  real field (ADR 0013 records the numbers); here, on a mock one, that it
+  reads zero when nothing moves and that each decision it measures still
+  pays.
 
 Skipped where node is not installed, as the other JavaScript tests are.
 """
@@ -21,8 +29,13 @@ from typing import Any
 
 import pytest
 
+from reverberate.viz.decoders import export_decoders
+from reverberate.viz.field_payload import build_site, mock_field
+from test_spatial_binaural import TestAMeasuredHead as _Head
+
 ROOT = Path(__file__).resolve().parents[1]
 AUDIO = ROOT / "src" / "reverberate" / "viz" / "app" / "audio"
+HARNESS = ROOT / "tests" / "js" / "smoothness.mjs"
 
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 
@@ -184,3 +197,55 @@ def test_how_the_delay_line_ramps(tmp_path: Path) -> None:
     got = _node(tmp_path, RAMP, str(AUDIO))
     assert got["aStep"]["seconds"] > got["aStepFromAnOldPose"]["seconds"] > 0
     assert got["acrossTheRoom"] == {"jump": True}
+
+
+HARNESS_SCRIPT = """
+const harness = await import(process.argv[2]);
+const { rows } = await harness.run({
+  fieldDirectory: process.argv[3],
+  decoderDirectory: process.argv[4],
+  decoderName: "measured",
+  seconds: 2,
+  cases: { walk: harness.CASES.walk },
+  variants: harness.VARIANTS,
+});
+console.log(JSON.stringify(Object.fromEntries(rows.map((row) => [row.variant, row]))));
+"""
+
+
+@needs_node
+def test_the_harness_reads_zero_standing_still_and_each_decision_pays(tmp_path: Path) -> None:
+    """On a mock field, so only with room to spare: a test that turns on a few
+    per cent fails on a busy laptop rather than on a regression. The worklet
+    is not among them, because a mock field's early response is a handful of
+    mirror images that crossfade cleanly on any convolver; what it is worth
+    is pinned in ``test_partitioned_js.py``."""
+    field = mock_field(
+        tmp_path / "field.h5",
+        source_id="S1",
+        source_position=(1.0, 1.2, 1.0),
+        box_lo=(0.0, 0.0, 0.0),
+        box_hi=(6.0, 2.6, 4.0),
+        order=3,
+        step_m=0.4,
+        total_s=0.4,
+    )
+    build_site(field, tmp_path / "site")
+    head = _Head().a_file(tmp_path)
+    export_decoders(tmp_path / "decoders", measured_path=head, order=3, filter_length=64)
+    rows = _node(
+        tmp_path, HARNESS_SCRIPT, str(HARNESS), str(tmp_path / "site"), str(tmp_path / "decoders")
+    )
+    # Every variant runs, so none of those the ADR's table is drawn from rots.
+    assert set(rows) >= {"shipped", "frozen", "before", "lattice"}
+    frozen = rows["frozen"]
+    assert frozen["levelJerkDb"] == 0
+    assert frozen["timbreStepDb"] == 0
+    assert frozen["itdJerkSamples"] == 0
+    shipped = rows["shipped"]
+    # The delay line stops the arrival stepping from cell to cell.
+    assert shipped["arrivalJerkSamples"] * 10 < rows["noDelayLine"]["arrivalJerkSamples"]
+    # The late part by the two metres stops the reverberation restarting.
+    assert shipped["reverbJerkDb"] * 4 < rows["tailEveryCell"]["reverbJerkDb"]
+    # And all of it together, against the page before.
+    assert shipped["levelJerkDb"] * 5 < rows["before"]["levelJerkDb"]
