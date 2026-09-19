@@ -18,6 +18,7 @@ import functools
 import multiprocessing
 import os
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -117,6 +118,7 @@ T = TypeVar("T")
 
 #: The work of the share being run in a forked core process; see :meth:`Devices.map`.
 _FORKED: list[Any] = []
+_FORK_LOCK = threading.Lock()
 
 
 def _run_forked(index: int) -> Any:
@@ -174,11 +176,13 @@ class Devices:
         shares = [s for s in shares if s.size]
         if not shares:
             return []
+        if self.cards and len(shares) > len(self.cards):
+            raise ValueError(f"{len(shares)} shares for {len(self.cards)} cards")
         if self.cards:
             with ThreadPoolExecutor(max_workers=len(shares)) as pool:
                 futures = [
                     pool.submit(work, card, share)
-                    for card, share in zip(self.cards, shares, strict=False)
+                    for card, share in zip(self.cards[: len(shares)], shares, strict=True)
                 ]
                 return [f.result() for f in futures]
         if len(shares) == 1:
@@ -186,13 +190,15 @@ class Devices:
         if not sys.platform.startswith("linux"):
             with ThreadPoolExecutor(max_workers=len(shares)) as pool:
                 return list(pool.map(lambda share: work(-1, share), shares))
-        _FORKED[:] = [work, shares]
-        try:
-            context = multiprocessing.get_context("fork")
-            with ProcessPoolExecutor(max_workers=len(shares), mp_context=context) as pool:
-                return list(pool.map(_run_forked, range(len(shares))))
-        finally:
-            _FORKED.clear()
+        # The forked children read the work from a module global: one map at a time.
+        with _FORK_LOCK:
+            _FORKED[:] = [work, shares]
+            try:
+                context = multiprocessing.get_context("fork")
+                with ProcessPoolExecutor(max_workers=len(shares), mp_context=context) as pool:
+                    return list(pool.map(_run_forked, range(len(shares))))
+            finally:
+                _FORKED.clear()
 
     def record(self) -> dict[str, Any]:
         return {"cards": list(self.cards), "cores": self.cores}
