@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from reverberate.mirror.files import write_paths
 from reverberate.mirror.geometry import write_derived
@@ -33,4 +34,9 @@ def test_the_audit_draws_the_scene_s_triangles_and_each_point_s_paths(tmp_path: 
     assert sum(f["triangles"] for f in layers["facets"]) == reflectors["triangles"]
     drawn = json.loads((tmp_path / "site" / record["paths"]["S1"]).read_text())["points"][0]
     assert len(drawn) == paths[0].count and drawn[0][0] == 0
-    assert mirror_record(tmp_path / "none", {}, tmp_path / "site") is None
+    assert len(drawn[0][1]) == 2 * 3  # the direct path: source and point
+
+
+def test_a_scene_or_paths_named_but_absent_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        mirror_record(tmp_path / "none", {}, tmp_path / "site")

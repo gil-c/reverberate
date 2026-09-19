@@ -25,8 +25,6 @@ from reverberate.mirror.ism import Paths
 
 __all__ = ["mirror_record", "write_layers", "write_paths"]
 
-SOUND_SPEED_M_S = 343.2
-
 
 def _quads(vertices: np.ndarray, labels: np.ndarray, target: Path, stem: str) -> dict[str, Any]:
     """``[n, 3, 3]`` triangles as quads: corners f32, index u32, label i16 per corner."""
@@ -92,40 +90,32 @@ def write_layers(scene: DerivedScene, target: Path) -> Path:
     return path
 
 
-def write_paths(every: list[Paths], scene: DerivedScene, target: Path) -> Path:
-    """Per point, ``[order, time_ms, facets bounced on, flat vertices]`` for every path."""
-    out = []
-    for paths in every:
-        rows = []
-        for k in np.argsort(paths.length_m):
-            order = int(paths.order[k])
-            rows.append(
-                [
-                    order,
-                    round(float(paths.length_m[k] / SOUND_SPEED_M_S * 1000.0), 3),
-                    [
-                        f"{scene.facets[int(f)].kind}/{scene.labels[scene.facets[int(f)].label]}"
-                        for f in paths.sequence[k]
-                        if f >= 0
-                    ],
-                    [round(float(v), 3) for v in paths.points[k, : order + 2].ravel()],
-                ]
-            )
-        out.append(rows)
+def write_paths(every: list[Paths], target: Path) -> Path:
+    """Per point, ``[order, flat vertices from source to point]`` for every path, nearest first."""
+    out = [
+        [
+            [
+                int(paths.order[k]),
+                [round(float(v), 3) for v in paths.points[k, : int(paths.order[k]) + 2].ravel()],
+            ]
+            for k in np.argsort(paths.length_m)
+        ]
+        for paths in every
+    ]
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({"points": out}))
     return target
 
 
-def mirror_record(scene_path: Path, paths: dict[str, Path], site: Path) -> dict[str, Any] | None:
+def mirror_record(scene_path: Path, paths: dict[str, Path], site: Path) -> dict[str, Any]:
     """The audit of the derived scene at ``scene_path`` and each source's paths file, in ``site``.
 
-    Returns the record ``run.json`` carries, or ``None`` without a scene.
-    The layers are rewritten only when the scene's key changed.
+    Returns the record ``run.json`` carries. The layers are rewritten only
+    when the scene's key changed.
     """
     if not Path(scene_path).with_suffix(".json").is_file():
-        return None
+        raise FileNotFoundError(f"the mirror solver's scene {scene_path} is not there")
     scene = load_derived(scene_path)
     audit = Path(site) / "mirror" / "audit"
     layers = audit / "layers.json"
@@ -133,9 +123,8 @@ def mirror_record(scene_path: Path, paths: dict[str, Path], site: Path) -> dict[
         write_layers(scene, audit)
     urls: dict[str, str] = {}
     for source, found in paths.items():
-        if Path(found).is_file():
-            write_paths(
-                load_paths(found), scene, Path(site) / "mirror" / "paths" / f"{source}.json"
-            )
-            urls[source] = f"mirror/paths/{source}.json"
+        if not Path(found).is_file():
+            raise FileNotFoundError(f"the mirror solver's paths {found} are not there")
+        write_paths(load_paths(found), Path(site) / "mirror" / "paths" / f"{source}.json")
+        urls[source] = f"mirror/paths/{source}.json"
     return {"audit": "mirror/audit", "paths": urls, "key": scene.key}

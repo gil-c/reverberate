@@ -11,7 +11,10 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { fetchQuadMesh } from "./grid.js";
 
-export const ORDER_COLOURS = [0xf5f0e6, 0xf2a541, 0xe8783d, 0xd94f3a, 0xb03a5c, 0x7a3a8c, 0x4a4a9c];
+const ORDER_COLOURS = [0xf5f0e6, 0xf2a541, 0xe8783d, 0xd94f3a, 0xb03a5c, 0x7a3a8c, 0x4a4a9c];
+
+/** A path's colour by its reflection order. */
+export const orderColour = (order) => ORDER_COLOURS[Math.min(order, ORDER_COLOURS.length - 1)];
 
 //: Facet kinds and their colours when the facets are coloured by kind.
 export const KIND_COLOURS = {
@@ -24,7 +27,7 @@ export const KIND_COLOURS = {
 //: Path width in CSS pixels: a one pixel hairline is lost against the walls.
 const PATH_PX = 2;
 
-export function createMirrorLayers(THREE, { onLoaded } = {}) {
+export function createMirrorLayers(THREE, { onLoaded, onPaths } = {}) {
   const group = new THREE.Group();
   group.name = "mirror";
   const layers = { reflectors: null, occluders: null };
@@ -35,6 +38,8 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
   let scene = null; // layers.json: key, labels, facets, census, materials
   let quadMeta = null;
   const pathFiles = new Map(); // source id -> parsed paths json
+  let pathUrls = {}; // source id -> url, fetched when first shown
+  let cell = { id: null, position: null }; // where the listener stands
   let lines = null;
   let receivers = null;
   let redraw = () => {};
@@ -159,8 +164,8 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
     const vertices = [];
     const colours = [];
     const colour = new THREE.Color();
-    for (const [order, , , flat] of rows) {
-      colour.setHex(ORDER_COLOURS[Math.min(order, ORDER_COLOURS.length - 1)]);
+    for (const [order, flat] of rows) {
+      colour.setHex(orderColour(order));
       for (let i = 0; i + 5 < flat.length; i += 3) {
         vertices.push(flat[i], flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4], flat[i + 5]);
         colours.push(colour.r, colour.g, colour.b, colour.r, colour.g, colour.b);
@@ -185,9 +190,24 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
     object.material.dispose();
   }
 
+  /** The paths of source `id`, fetched once per run; the cell redrawn when they land. */
+  function ensurePaths(id) {
+    if (!id || pathFiles.has(id) || !pathUrls[id]) return;
+    const mine = base;
+    pathFiles.set(id, null);
+    fetch(pathUrls[id])
+      .then((r) => (r.ok ? r.json() : null))
+      .then((file) => {
+        if (base !== mine) return;
+        pathFiles.set(id, file);
+        if (cell.id === id) drawPaths(cell.id, cell.position);
+        if (onPaths) onPaths(id);
+      })
+      .catch(() => pathFiles.delete(id));
+  }
+
   return {
     group,
-    wanted,
     /** The drawing size, for the paths' pixel width. */
     setSize(width, height) {
       resolution.set(width, height);
@@ -208,6 +228,8 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
       receivers = null;
       drawPaths(null, null);
       pathFiles.clear();
+      pathUrls = {};
+      cell = { id: null, position: null };
       scene = null;
       base = null;
       quadMeta = null;
@@ -216,16 +238,11 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
     async load(run) {
       this.clear();
       if (!run || !run.mirror) return null;
-      for (const [id, url] of Object.entries(run.mirror.paths || {})) {
-        fetch(`${run.baseUrl}/${url}`)
-          .then((r) => (r.ok ? r.json() : null))
-          .then((file) => {
-            if (file) pathFiles.set(id, file);
-          })
-          .catch(() => {});
-      }
       const mine = `${run.baseUrl}/${run.mirror.audit}`;
       base = mine;
+      pathUrls = Object.fromEntries(
+        Object.entries(run.mirror.paths || {}).map(([id, url]) => [id, `${run.baseUrl}/${url}`])
+      );
       const index = await fetch(`${mine}/layers.json`).then((r) => (r.ok ? r.json() : null));
       if (base !== mine || !index) return null;
       scene = index;
@@ -263,15 +280,15 @@ export function createMirrorLayers(THREE, { onLoaded } = {}) {
     },
     /** The listener stands at `position` of source `id`'s field: draw its paths. */
     showCell(id, position) {
+      cell = { id, position };
+      ensurePaths(id);
       drawPaths(id, position);
     },
-    /** The paths at a cell, as the file gives them: order, time, facets bounced on. */
+    /** The paths at a cell, as ``[order, vertices]``; null until the file is in. */
     pathsAt(id, position) {
       const file = pathFiles.get(id);
       return file && position !== null && position !== undefined ? file.points[position] || [] : null;
     },
-    loaded: (name) => Boolean(layers[name]),
-    loading: (name) => Boolean(loading[name]),
     record: () => scene,
   };
 }

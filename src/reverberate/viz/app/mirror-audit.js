@@ -5,7 +5,7 @@
  * the legend, and the paths the image sources found at the listener's cell.
  */
 import { materialColour } from "./grid.js";
-import { KIND_COLOURS, ORDER_COLOURS } from "./mirror.js";
+import { KIND_COLOURS, orderColour } from "./mirror.js";
 
 const el = (tag, props = {}, ...children) => {
   const node = Object.assign(document.createElement(tag), props);
@@ -153,7 +153,7 @@ export function createMirrorAudit(root, THREE, { onSwitch, onColourBy }) {
               ? el(
                   "span",
                   {},
-                  el("i", { className: "swatch", style: `background:${hex(ORDER_COLOURS[Math.min(order, ORDER_COLOURS.length - 1)])}` }),
+                  el("i", { className: "swatch", style: `background:${hex(orderColour(order))}` }),
                   `order ${order}: ${n}`
                 )
               : null

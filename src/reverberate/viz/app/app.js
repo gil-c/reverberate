@@ -39,7 +39,10 @@ const minimap = createMinimap($("#map"), {
 const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => viewport.moveTo(pose) });
 
 // The mirror solver's view: the derived scene it read, its paths at the listener's cell.
-const mirrorLayers = createMirrorLayers(THREE, { onLoaded: () => viewport.invalidate() });
+const mirrorLayers = createMirrorLayers(THREE, {
+  onLoaded: () => viewport.invalidate(),
+  onPaths: () => showMirrorCell(),
+});
 mirrorLayers.onRedraw(() => viewport.invalidate());
 viewport.setMirror(mirrorLayers.group);
 viewport.onResize((width, height) => mirrorLayers.setSize(width, height));
@@ -76,7 +79,7 @@ const spatial = createSpatial({
     audioStatus();
   },
 });
-let heads = [];
+let head = null; // the measured head's decoder record
 
 function audioStatus() {
   const source = sourceById(state.selected);
@@ -88,8 +91,8 @@ function audioStatus() {
   $("#audio-update").innerHTML = parts.join(" · ");
 }
 
-async function loadHead(name) {
-  const record = heads.find((h) => h.name === name) || heads[0];
+async function loadHead() {
+  const record = head;
   if (!record) return;
   const bytes = await fetch(`decoders/${record.url}`).then((r) => r.arrayBuffer());
   spatial.setDecoder({ order: record.order, channels: record.channels, taps: record.taps, filters: new Float32Array(bytes) });
@@ -166,9 +169,17 @@ function selectSource(id) {
 }
 
 /** The plots of one source's response at a cell, from the field itself. */
+/** The mirror's paths at the selected source's cell: only while its view is shown. */
+function showMirrorCell() {
+  if (state.view !== "mirror") return;
+  const source = sourceById(state.selected);
+  const position = source && source.cell !== undefined ? source.cell : null;
+  mirrorLayers.showCell(state.selected, position);
+  mirrorAudit.setCell(position, mirrorLayers.pathsAt(state.selected, position));
+}
+
 function showPlots(id, position) {
-  mirrorLayers.showCell(id, position);
-  mirrorAudit.setCell(position, mirrorLayers.pathsAt(id, position));
+  showMirrorCell();
   const field = spatial.fieldOf(id);
   if (!field) return;
   const earlySamples = Math.round((settings.earlyMs / 1000) * field.index.sample_rate_hz);
@@ -266,6 +277,9 @@ function setView(view) {
   if (view === "mirror") {
     busy("loading the mirror solver's scene");
     mirrorLayers.ensure().then(() => busy(""), (error) => busy(`mirror: ${error.message}`));
+    showMirrorCell();
+  } else {
+    mirrorLayers.showCell(null, null);
   }
   if (view === "acoustic") reconcileMesh();
   else $("#hud-tier").textContent = "";
@@ -390,7 +404,7 @@ async function openRun(run) {
     data.baseUrl = run.url;
     $("#simulation").textContent =
       data.simulation === "hybrid"
-        ? "simulation: wave solver under 1 kHz, mirror solver above"
+        ? `simulation: wave solver under ${data.crossover_hz / 1000} kHz, mirror solver above`
         : "simulation: wave solver";
     mirrorLayers
       .load(data)
@@ -542,14 +556,14 @@ async function boot() {
   voices = voices.map((voice) => ({ ...voice, url: `voices/${voice.url}` }));
   players.setVoices(voices);
 
-  heads = await fetch("decoders/decoders.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  [head = null] = await fetch("decoders/decoders.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
   const level = $("#level");
   level.addEventListener("input", () => {
     engine.setMasterDb(Number(level.value));
     $("#level-read").textContent = `${level.value} dB`;
   });
   engine.setMasterDb(Number(level.value));
-  await loadHead(heads.length ? heads[0].name : null);
+  await loadHead();
 
   const runs = await fetch("runs.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
   for (const run of runs) {
