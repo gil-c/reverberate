@@ -1,26 +1,38 @@
 /** The Web Audio graph: a voice per source, convolved with the listener's
  * binaural response, summed to the output.
  *
- * Each source has two rings of the browser's `ConvolverNode`s. The `early`
- * ring carries the first part of the cell's response, rotated to the head at
- * every update; the `tail` ring carries the rest, delayed to where the early
- * part hands over. A new response goes to a convolver that is silent and
- * takes over by a crossfade: a response swapped on a live convolver clicks,
- * and a crossfade over a few tens of milliseconds does not.
+ * Each source has two convolutions. The `early` one carries the first part of
+ * the cell's response, rotated to the head at every update: it is an
+ * `AudioWorklet` of this page's own (`early.worklet.js`, `partitioned.js`),
+ * which keeps one history of the input and applies every response to it, so
+ * a new response sounds from its first sample as though it had always been
+ * there. The `tail` carries the rest, delayed to where the early part hands
+ * over, on a ring of the browser's `ConvolverNode`s.
+ *
+ * **Why the early part is not on `ConvolverNode`s any more.** A convolver
+ * given a buffer has no past: it convolves only what arrives after, as if the
+ * voice had been switched on at that instant, and each tap of the response
+ * adds a small step as the input reaches it, heard at whatever gain the fade
+ * in has reached. Replaced twenty-five times a second while the listener
+ * moves, that was a faint crackle no shape or length of crossfade removed
+ * (ADR 0013). The tail is replaced every few seconds at most, its taps are
+ * a second of diffuse reverberation, and it stays where it was.
  *
  * **A new response takes over by a crossfade longer than the interval
  * between responses**, so one is always fading into the next and the filter
- * the listener hears never stops moving; `ring.js` schedules every gain.
+ * the listener hears never stops moving; `ring.js` schedules the gains, in
+ * the worklet for the early part and here for the tail.
  *
- * **The time it takes the sound to reach the listener is not in the
- * convolvers.** It is a delay line in front of them, which follows the
+ * **The time it takes the sound to reach the listener is not in either
+ * convolution.** It is a delay line in front of them, which follows the
  * listener continuously, and every response is handed over already aligned
  * on its own direct arrival (`spatial.js`). Without that, walking a lattice
  * of cells forty centimetres apart steps the arrival by up to a millisecond
  * and a half at every cell, and two responses a millisecond apart comb
- * filter each other for the whole crossfade. With it, the walk shifts the
- * delay smoothly instead, which is also what gives a walk towards a source
- * its Doppler.
+ * filter each other for the whole crossfade: measured at fourteen decibels
+ * of level jerk while walking, against three with the delay line
+ * (`tests/js/smoothness.mjs`). With it, the walk shifts the delay smoothly
+ * instead, which is also what gives a walk towards a source its Doppler.
  */
 import { createRing } from "./ring.js";
 import { SOUND_SPEED_M_S } from "./spatial.js";
@@ -39,9 +51,10 @@ export const FADE_S = 0.12;
 //: second makes the dip shallow enough not to be heard. The tail is diffuse,
 //: so nothing is lost by taking longer over it.
 export const TAIL_FADE_S = 0.25;
-//: Convolvers in the early ring and in the tail ring. Six early, because a
-//: slot is given a new response only once its fade is over, and a 120 ms
-//: fade at the 40 ms interval keeps four or five busy; see `ring.js`. The tail keeps two: it is swapped only when the cell
+//: Responses the early convolution holds at once, and convolvers in the tail
+//: ring. Six early, because a slot is given a new response only once its
+//: fade is over, and a 120 ms fade at the 40 ms interval keeps four or five
+//: busy; see `ring.js`. The tail keeps two: it is swapped only when the cell
 //: changes or the head settles, so its fades never overlap, and a convolver a
 //: second and a half long is not free.
 export const EARLY_SLOTS = 6;
@@ -73,10 +86,13 @@ export function propagationRamp(current, target, age) {
   return { seconds: Math.max(PROPAGATION_RAMP_S[0], Math.min(PROPAGATION_RAMP_S[1], PROPAGATION_LEAD_S - age)) };
 }
 
-export function createEngine() {
+/** The Web Audio graph. `onError` is told, once, of anything that stops the
+ *  early part from sounding, which is otherwise silent: the tail plays on. */
+export function createEngine({ onError = (message) => console.error(message) } = {}) {
   let context = null;
   let master = null;
   let masterGain = 1;
+  let worklet = null; // the early convolver's module, once added
   const sources = new Map();
   const voices = new Map(); // url -> Promise<AudioBuffer>
 
@@ -86,6 +102,13 @@ export function createEngine() {
       master = context.createGain();
       master.gain.value = masterGain;
       master.connect(context.destination);
+      // An `AudioWorklet` exists only in a secure context: https, or the
+      // loopback address. Served over plain http to another machine, the page
+      // has none, and the early part cannot sound.
+      worklet = context.audioWorklet
+        ? context.audioWorklet.addModule(new URL("./early.worklet.js", import.meta.url))
+        : Promise.reject(new Error(`no AudioWorklet at ${location.origin}: open the page over https or localhost`));
+      worklet.catch((error) => onError(`early convolver: ${error.message}`));
     }
     if (context.state === "suspended") context.resume();
     return context;
@@ -115,13 +138,32 @@ export function createEngine() {
       // the responses behind it are aligned on their own direct arrival.
       const propagation = ctx.createDelay(MAX_PROPAGATION_S);
       const delay = ctx.createDelay(2.0);
-      const early = ring(EARLY_SLOTS, FADE_S);
+      // The early convolution is a worklet node, which exists only once its
+      // module has loaded; a response that arrives first waits for it.
+      const early = { node: null, waiting: null };
       const tail = ring(TAIL_SLOTS, TAIL_FADE_S);
       input.connect(propagation);
-      for (const slot of early.slots) {
-        propagation.connect(slot.convolver);
-        slot.gain.connect(volume);
-      }
+      worklet.then(
+        () => {
+          early.node = new AudioWorkletNode(ctx, "early-convolver", {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            channelCount: 1,
+            channelCountMode: "explicit",
+            processorOptions: { slots: EARLY_SLOTS, fade: FADE_S },
+          });
+          propagation.connect(early.node);
+          early.node.connect(volume);
+          early.node.port.onmessage = (event) => {
+            // "spent" gives a filter's buffers back to be collected here.
+            if (event.data.type === "error") onError(event.data.message);
+          };
+          if (early.waiting) send(early, early.waiting);
+          early.waiting = null;
+        },
+        () => {} // reported once, above
+      );
       propagation.connect(delay);
       for (const slot of tail.slots) {
         delay.connect(slot.convolver);
@@ -172,6 +214,17 @@ export function createEngine() {
     next.convolver.buffer = buffer;
     clearTimeout(next.timer);
     play(target, curves, index);
+  }
+
+  /** A message to a source's early convolver, or kept for it if it is not
+   *  there yet: only the latest matters, so a later one replaces it. */
+  function send(early, message) {
+    if (!early.node) {
+      early.waiting = message;
+      return;
+    }
+    const transfer = message.filter ? [message.filter.re.buffer, message.filter.im.buffer] : [];
+    early.node.port.postMessage(message, transfer);
   }
 
   /** Put the ring's curves on the gains, replacing what each was doing. */
@@ -299,9 +352,10 @@ export function createEngine() {
       time.setValueAtTime(current, now);
       time.linearRampToValueAtTime(target, now + ramp.seconds);
     },
-    /** A new early response for a source, two ears. */
-    setEarly(id, response) {
-      swap(entry(id).early, response);
+    /** A new early response for a source, as `partitioned.partitionFilter`
+     *  returns it; its buffers are handed over, not copied. */
+    setEarly(id, filter) {
+      send(entry(id).early, { type: "filter", filter });
     },
     /** A new tail for a source, delayed to `startSamples` after the early part begins. */
     setTail(id, response, startSamples) {
@@ -318,7 +372,8 @@ export function createEngine() {
       const source = sources.get(id);
       if (!source) return;
       const ctx = ensureContext();
-      for (const target of [source.early, source.tail]) play(target, target.order.silence(ctx.currentTime));
+      send(source.early, { type: "silence" });
+      play(source.tail, source.tail.order.silence(ctx.currentTime));
     },
   };
 }

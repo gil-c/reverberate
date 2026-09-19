@@ -140,7 +140,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
     state.pendingEarly = false;
     if (!message.missing) {
       state.lastEarly = message.early;
-      engine.setEarly(id, message.early);
+      engine.setEarly(id, message.filter);
       state.earlyMs = message.ms;
       report(id, state);
     }

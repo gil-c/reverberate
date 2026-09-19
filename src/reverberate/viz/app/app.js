@@ -52,7 +52,7 @@ const mirrorAudit = createMirrorAudit($("#audit"), THREE, {
 });
 
 // --- sound --------------------------------------------------------------------
-const engine = createEngine();
+const engine = createEngine({ onError: busy });
 const plots = createPlots({
   spectrogram: $("#spectrogram"),
   decay: $("#decay"),

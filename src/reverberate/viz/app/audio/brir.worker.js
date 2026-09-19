@@ -3,7 +3,8 @@
  * Two instances of this script run, in two roles the messages give them:
  *
  * - **early**: a cell's first `earlyMs` are kept as spectra and re-decoded
- *   for every head orientation, in one go.
+ *   for every head orientation, in one go, and handed back already cut into
+ *   the blocks the early convolver works in (`partitioned.js`).
  * - **late**: the rest of the response. Decoded at the head orientation of
  *   the moment when a cell is entered, then again, exactly, once the head has
  *   been still. A late decode is ten times the early one, so it runs in steps
@@ -13,6 +14,7 @@
  * no browser; nothing here does more than order the work and answer.
  */
 import { createDecoder } from "./decode.js";
+import { partitionFilter } from "./partitioned.js";
 
 const decoder = createDecoder();
 const cancelled = new Set();
@@ -25,9 +27,14 @@ function renderEarly(message) {
     self.postMessage({ type: "brir", id: message.id, missing: message.cell });
     return;
   }
-  self.postMessage({ type: "brir", id: message.id, early, ms: performance.now() - started }, [
+  // Cut and transformed here, for the early convolver, so the audio thread
+  // only multiplies and adds. The two ears go too, for the page's readout.
+  const filter = partitionFilter(early);
+  self.postMessage({ type: "brir", id: message.id, early, filter, ms: performance.now() - started }, [
     early[0].buffer,
     early[1].buffer,
+    filter.re.buffer,
+    filter.im.buffer,
   ]);
 }
 
