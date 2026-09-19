@@ -1,9 +1,12 @@
 """The walk-through engine's rules, through node.
 
-The ones that are plain functions: which cell a listener is given, and when
-the late part of the response moves. Each is something this engine once got
-wrong -- a listener fell silent in every hole of the solved air, and the late
-part restarted its reverberation at every cell.
+``audio/ring.js``, which decides which slot a response goes to and every
+slot's gain: fades that were re-ramped at every swap approached zero and
+never got there, a ring choosing the slot free longest collapsed three slots
+into two, and every early response was cut short. Pinned under the intervals
+the app really produces. And the rules that are plain functions: which cell a
+listener is given, when the late part of the response moves, how the
+propagation delay ramps.
 
 Skipped where node is not installed, as the other JavaScript tests are.
 """
@@ -30,6 +33,55 @@ def _node(tmp_path: Path, script: str, *args: str) -> Any:
     out = subprocess.run(["node", str(path), *args], capture_output=True, text=True, check=False)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
+
+
+RING = """
+const { createRing } = await import(process.argv[2] + "/ring.js");
+const { EARLY_SLOTS, FADE_S } = await import(process.argv[2] + "/engine.js");
+const ring = createRing(EARLY_SLOTS, FADE_S);
+// The intervals between early responses measured in the app, milliseconds:
+// forty as scheduled, and the pairs the worker makes of it when a decode runs
+// long and the next is released at once.
+const gaps = [42, 38, 66, 18, 40, 53, 29, 42, 58, 24, 89, 4, 61, 22, 78, 4, 65, 53, 7, 71, 15];
+let t = 0;
+let audible = 0;
+let sumError = 0;
+const used = new Set();
+for (let k = 0; k < 500; k++) {
+  const before = Array.from({ length: EARLY_SLOTS }, (_, i) => ring.gainAt(i, t));
+  const { slot } = ring.take(t);
+  used.add(slot);
+  if (before[slot] > 1e-6) audible++;
+  const next = t + gaps[k % gaps.length] / 1000;
+  // After the first response has had one fade to rise to its share.
+  if (t > FADE_S) {
+    for (let s = t; s < next; s += 0.0005) {
+      let sum = 0;
+      for (let i = 0; i < EARLY_SLOTS; i++) sum += ring.gainAt(i, s);
+      sumError = Math.max(sumError, Math.abs(sum - 1));
+    }
+  }
+  t = next;
+}
+ring.silence(t);
+let left = 0;
+for (let i = 0; i < EARLY_SLOTS; i++) left = Math.max(left, ring.gainAt(i, t + FADE_S));
+console.log(JSON.stringify({ slots: EARLY_SLOTS, used: used.size, audible, sumError, left }));
+"""
+
+
+@needs_node
+def test_a_response_never_lands_on_a_slot_that_is_still_sounding(tmp_path: Path) -> None:
+    """Every slot used, none given a response while it sounds, gains summing
+    to one throughout, and silence reached in one fade -- as the engine is
+    configured, under the intervals the app produces."""
+    got = _node(tmp_path, RING, str(AUDIO))
+    assert got["used"] == got["slots"]
+    assert got["audible"] == 0
+    # Linear interpolation between curves sampled on different grids: a few
+    # thousandths of a decibel, not a fade that loses its way.
+    assert got["sumError"] < 1e-3
+    assert got["left"] == 0
 
 
 CELLS = """
@@ -111,3 +163,24 @@ def test_when_the_late_part_moves(tmp_path: Path) -> None:
         "threeMetresOnTooSoon": 0.4,
         "intoAnotherRoom": 0,
     }
+
+
+RAMP = """
+const { propagationRamp } = await import(process.argv[2] + "/engine.js");
+const c = 343.2;
+console.log(JSON.stringify({
+  aStep: propagationRamp(1 / c, 1.05 / c, 0),
+  aStepFromAnOldPose: propagationRamp(1 / c, 1.05 / c, 0.05),
+  acrossTheRoom: propagationRamp(1 / c, 4 / c, 0),
+}));
+"""
+
+
+@needs_node
+def test_how_the_delay_line_ramps(tmp_path: Path) -> None:
+    """A ramp lands a constant after its pose was taken, so an older pose is
+    given a shorter one and the delay slides at the walking speed; a change
+    nobody could have walked is a jump."""
+    got = _node(tmp_path, RAMP, str(AUDIO))
+    assert got["aStep"]["seconds"] > got["aStepFromAnOldPose"]["seconds"] > 0
+    assert got["acrossTheRoom"] == {"jump": True}

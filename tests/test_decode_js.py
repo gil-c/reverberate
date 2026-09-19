@@ -27,6 +27,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from reverberate.viz.decoders import export_decoders
@@ -169,3 +170,33 @@ def test_the_early_and_late_parts_sum_to_the_whole_response(tmp_path: Path) -> N
     # below would not be testing the placement of the late part at all.
     assert got["lead"] > 0
     assert got["error"] < 1e-5, got
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_solver_latency_is_where_the_response_starts(tmp_path: Path) -> None:
+    """The pulse delay a solver puts before the direct sound, less the guard."""
+    script = tmp_path / "latency.mjs"
+    script.write_text(
+        """
+const { solverLatency, LATENCY_GUARD } = await import(process.argv[2]);
+const omni = new Float32Array(4000);
+// The direct sound 300 samples after its geometric arrival at 1000, a little
+// run-up in front of it, then a room.
+for (let i = 1280; i < 1300; i++) omni[i] = 0.001;
+omni[1300] = 1;
+for (let i = 1400; i < 4000; i++) omni[i] = 0.2 * Math.exp(-(i - 1400) / 500) * Math.sin(i);
+console.log(JSON.stringify({ latency: solverLatency(omni, 1000), guard: LATENCY_GUARD }));
+"""
+    )
+    out = subprocess.run(
+        ["node", str(script), str(AUDIO / "decode.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    # The run-up at a thousandth of the peak is under the 40 dB threshold;
+    # the onset is the direct sound itself.
+    assert got["latency"] == 300 - got["guard"]
+    assert np.isfinite(got["latency"])

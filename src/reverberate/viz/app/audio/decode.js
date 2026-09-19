@@ -33,6 +33,11 @@ const fadeIn = (i, fade) => Math.sin((Math.PI / 2) * (i / fade)) ** 2;
 //: The decoder is the same for every cell, so this needs no room for spread.
 const DECODER_GUARD = 32;
 
+//: How far before a cell's own onset its response is cut, samples. The
+//: latency is measured on one cell and the others vary around it; this is
+//: the margin that keeps every cell's direct sound inside its response.
+export const LATENCY_GUARD = 96;
+
 /** Forward transforms of `channels`, zero padded to `size`, half spectra. */
 function spectraOf(channels, size) {
   const half = size / 2 + 1;
@@ -83,6 +88,23 @@ export function decoderLead(filters, channels, taps) {
   let first = 0;
   while (first < taps && energy[first] <= peak * 1e-4) first++;
   return Math.max(0, first - DECODER_GUARD);
+}
+
+/** The samples between the geometric arrival and where a response starts.
+ *
+ * A solver's response does not start when the direct sound geometrically
+ * arrives: its source pulse has a delay of its own, a few hundred samples,
+ * the same at every cell, and like the decoder's it is latency nothing needs.
+ * Measured on the omnidirectional channel of the cell nearest the source,
+ * where the direct sound is clearest, as the first sample within 40 dB of its
+ * peak, less `LATENCY_GUARD`.
+ */
+export function solverLatency(omni, directSamples) {
+  let peak = 0;
+  for (let i = 0; i < omni.length; i++) peak = Math.max(peak, Math.abs(omni[i]));
+  let onset = 0;
+  while (onset < omni.length && Math.abs(omni[onset]) <= peak * 0.01) onset++;
+  return Math.max(0, Math.round(onset - directSamples) - LATENCY_GUARD);
 }
 
 export function createDecoder() {
