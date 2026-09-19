@@ -4,7 +4,7 @@ Status: accepted, 2026-09-14.
 
 ## Context
 
-ADR 0011 made a field one resumable campaign and measured what it cost: on
+ADR 0015 made a field one resumable campaign and measured what it cost: on
 hssd_0076 the card solved for 1.3 h and billed 3 h, four CPU boxes encoded
 for 2 to 3 h, a fifth box had voxelised for 2 h the day before, and 128 GB
 of pressure crossed the network between them at 22 MB/s on the card's
@@ -74,7 +74,7 @@ from spherical Bessel functions for every one of a thousand points: 16 to
   2026-09-14 has 12 460 fewer triangles than the one of 2026-09-12, so a
   campaign that must reproduce an earlier field starts from that earlier
   export (``prepare_bundle(models_from=...)``), and the cache key says so.
-- The engine's float64 output is not float32-exact; the shrink of ADR 0011
+- The engine's float64 output is not float32-exact; the shrink of ADR 0015
   rounded it, and the card path rounds it the same way so the encoded
   signals match. Keeping the full precision is a one-line change that
   would change every field by about one part in ten million, and is not

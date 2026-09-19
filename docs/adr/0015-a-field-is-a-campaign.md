@@ -1,4 +1,4 @@
-# 0011: a field is a campaign, solved on the whole storey and cut by points
+# 0015: a field is a campaign, solved on the whole storey and cut by points
 
 Status: accepted; the driver that spread a campaign over five machines, which this
 record describes, was retired on 2026-09-15 (ADR 0012). The plan and the assembly stay.
