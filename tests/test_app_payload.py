@@ -107,3 +107,71 @@ def test_a_mesh_of_another_flat_is_refused(tmp_path: Path) -> None:
 
     assert any("scene 999" in problem for problem in check_run(run.path))
     assert build_run(run, tmp_path / "site")["meshes"] == {}
+
+
+def manifest(tmp_path: Path, **extra: object) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / WALK_MANIFEST).write_text(
+        json.dumps(
+            {"scene_id": "102344403", "sources": [{"id": "S1", "position": [0, 1, 0]}], **extra}
+        )
+    )
+    return tmp_path
+
+
+def test_a_run_says_what_made_it_and_defaults_to_the_wave_solver(tmp_path: Path) -> None:
+    plain = WalkRun.read(manifest(tmp_path / "a"))
+    assert plain.simulation == "wave" and plain.crossover_hz is None and plain.mirror == {}
+    hybrid = WalkRun.read(
+        manifest(
+            tmp_path / "b",
+            simulation="hybrid",
+            crossover_hz=1000,
+            mirror_solver={"scene": "mirror/scene", "paths": {"S1": "mirror/paths_S1.npz"}},
+        )
+    )
+    assert hybrid.simulation == "hybrid" and hybrid.crossover_hz == 1000
+    assert hybrid.mirror["paths"] == {"S1": "mirror/paths_S1.npz"}
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ({"simulation": "rays"}, "simulation"),
+        ({"simulation": "hybrid"}, "crossover_hz"),
+        ({"mirror_solver": {"paths": {}}}, "mirror_solver"),
+    ],
+)
+def test_a_manifest_that_does_not_say_it_right_is_refused_and_skipped(
+    tmp_path: Path, extra: dict[str, object], message: str
+) -> None:
+    run = manifest(tmp_path / "bad", **extra)
+    with pytest.raises(ValueError, match=message):
+        WalkRun.read(run)
+    manifest(tmp_path / "good")
+    assert [r.name for r in discover_walk_runs(tmp_path)] == ["good"]
+
+
+def test_a_run_with_a_mirror_carries_its_audit_into_the_site(tmp_path: Path) -> None:
+    from reverberate.mirror.files import write_paths
+    from reverberate.mirror.geometry import write_derived
+    from reverberate.mirror.ism import grow_tree, paths_for
+    from test_mirror_ism import RECEIVER, SOURCE, box_scene
+
+    run_dir = write_synthetic_run(tmp_path / "run", fields=False).path
+    scene = box_scene(alpha=0.3)
+    write_derived(scene, run_dir / "mirror" / "scene")
+    write_paths(
+        [paths_for(scene, grow_tree(scene, SOURCE), RECEIVER)], run_dir / "mirror" / "paths_S1.npz"
+    )
+    walk = json.loads((run_dir / WALK_MANIFEST).read_text())
+    walk.update(
+        simulation="hybrid",
+        crossover_hz=1000,
+        mirror_solver={"scene": "mirror/scene", "paths": {"S1": "mirror/paths_S1.npz"}},
+    )
+    (run_dir / WALK_MANIFEST).write_text(json.dumps(walk))
+    record = build_run(WalkRun.read(run_dir), tmp_path / "site")
+    assert record["simulation"] == "hybrid" and record["crossover_hz"] == 1000
+    assert record["mirror"]["key"] == scene.key
+    assert (tmp_path / "site" / record["mirror"]["paths"]["S1"]).is_file()

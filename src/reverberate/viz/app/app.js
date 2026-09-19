@@ -1,6 +1,8 @@
 /** Boot: wire the panels, the viewport, the plan, the sound and the run. */
 import { createViewport, roomAt } from "./viewport.js";
 import { createMeshViews } from "./grid.js";
+import { createMirrorLayers } from "./mirror.js";
+import { createMirrorAudit } from "./mirror-audit.js";
 import { createSourceGlyphs } from "./sources.js";
 import { createMinimap } from "./minimap.js";
 import { createListenerTab } from "./listener.js";
@@ -36,6 +38,19 @@ const minimap = createMinimap($("#map"), {
 });
 const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => viewport.moveTo(pose) });
 
+// The mirror solver's view: the derived scene it read, its paths at the listener's cell.
+const mirrorLayers = createMirrorLayers(THREE, {
+  onLoaded: () => viewport.invalidate(),
+  onPaths: () => showMirrorCell(),
+});
+mirrorLayers.onRedraw(() => viewport.invalidate());
+viewport.setMirror(mirrorLayers.group);
+viewport.onResize((width, height) => mirrorLayers.setSize(width, height));
+const mirrorAudit = createMirrorAudit($("#audit"), THREE, {
+  onSwitch: (name, on) => mirrorLayers.setWanted(name, on),
+  onColourBy: (mode) => mirrorLayers.setColourBy(mode),
+});
+
 // --- sound --------------------------------------------------------------------
 const engine = createEngine();
 const plots = createPlots({
@@ -64,7 +79,7 @@ const spatial = createSpatial({
     audioStatus();
   },
 });
-let heads = [];
+let head = null; // the measured head's decoder record
 
 function audioStatus() {
   const source = sourceById(state.selected);
@@ -76,8 +91,8 @@ function audioStatus() {
   $("#audio-update").innerHTML = parts.join(" · ");
 }
 
-async function loadHead(name) {
-  const record = heads.find((h) => h.name === name) || heads[0];
+async function loadHead() {
+  const record = head;
   if (!record) return;
   const bytes = await fetch(`decoders/${record.url}`).then((r) => r.arrayBuffer());
   spatial.setDecoder({ order: record.order, channels: record.channels, taps: record.taps, filters: new Float32Array(bytes) });
@@ -154,7 +169,17 @@ function selectSource(id) {
 }
 
 /** The plots of one source's response at a cell, from the field itself. */
+/** The mirror's paths at the selected source's cell: only while its view is shown. */
+function showMirrorCell() {
+  if (state.view !== "mirror") return;
+  const source = sourceById(state.selected);
+  const position = source && source.cell !== undefined ? source.cell : null;
+  mirrorLayers.showCell(state.selected, position);
+  mirrorAudit.setCell(position, mirrorLayers.pathsAt(state.selected, position));
+}
+
 function showPlots(id, position) {
+  showMirrorCell();
   const field = spatial.fieldOf(id);
   if (!field) return;
   const earlySamples = Math.round((settings.earlyMs / 1000) * field.index.sample_rate_hz);
@@ -224,7 +249,9 @@ const tierText = (status) => {
 function renderViewButtons() {
   for (const button of $("#view").querySelectorAll("button")) {
     button.classList.toggle("on", button.dataset.view === state.view);
+    if (button.dataset.view === "mirror") button.disabled = !mirrorLayers.record();
   }
+  $("#audit-fold").hidden = state.view !== "mirror";
   $("#fmax").replaceChildren(
     ...(meshViews ? meshViews.bands : []).map((band) => {
       const button = document.createElement("button");
@@ -245,7 +272,15 @@ $("#view").addEventListener("click", (event) => {
 
 function setView(view) {
   if (view === "acoustic" && !meshViews) return;
+  if (view === "mirror" && !mirrorLayers.record()) return;
   state.view = view;
+  if (view === "mirror") {
+    busy("loading the mirror solver's scene");
+    mirrorLayers.ensure().then(() => busy(""), (error) => busy(`mirror: ${error.message}`));
+    showMirrorCell();
+  } else {
+    mirrorLayers.showCell(null, null);
+  }
   if (view === "acoustic") reconcileMesh();
   else $("#hud-tier").textContent = "";
   viewport.show(state.view);
@@ -357,13 +392,28 @@ async function openRun(run) {
   plots.clear();
   lastRender = null;
   $("#hud-tier").textContent = "";
-  if (state.view === "acoustic") setView("colour");
+  if (state.view !== "colour") setView("colour");
+  mirrorLayers.clear();
+  mirrorAudit.setScene(null);
+  $("#simulation").textContent = "";
   state.sources = [];
   state.selected = null;
   if (run) {
     const data = await fetch(`${run.url}/run.json`).then((r) => r.json());
     if (state.run !== run) return;
     data.baseUrl = run.url;
+    $("#simulation").textContent =
+      data.simulation === "hybrid"
+        ? `simulation: wave solver under ${data.crossover_hz / 1000} kHz, mirror solver above`
+        : "simulation: wave solver";
+    mirrorLayers
+      .load(data)
+      .then((scene) => {
+        if (state.run !== run) return;
+        mirrorAudit.setScene(scene);
+        renderViewButtons();
+      })
+      .catch((error) => busy(`mirror audit: ${error.message}`));
     state.sources = data.sources.map((source, i) => ({
       ...source,
       on: true,
@@ -384,6 +434,7 @@ async function openRun(run) {
         .then((field) => {
           if (mine !== generation) return;
           spatial.setField(source.id, field);
+          if (data.mirror) mirrorLayers.setReceivers(field.index.positions);
           plots.setReference(field).catch((error) => busy(`${source.id} reference: ${error.message}`));
           points.set(audibleIds().map((id) => spatial.fieldOf(id)).filter(Boolean));
           minimap.setPoints(points.positions());
@@ -405,7 +456,6 @@ async function openRun(run) {
   renderSources();
   audioStatus();
   renderViewButtons();
-  if (meshViews && meshViews.bands.length) setView("acoustic");
 }
 
 /** The walkable outline's extent on each axis, and its area by the shoelace formula. */
@@ -506,24 +556,14 @@ async function boot() {
   voices = voices.map((voice) => ({ ...voice, url: `voices/${voice.url}` }));
   players.setVoices(voices);
 
-  heads = await fetch("decoders/decoders.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
-  const headSelect = $("#head");
-  headSelect.replaceChildren(
-    ...heads.map((record) => {
-      const option = document.createElement("option");
-      option.value = record.name;
-      option.textContent = record.name;
-      return option;
-    })
-  );
-  headSelect.addEventListener("change", () => loadHead(headSelect.value));
+  [head = null] = await fetch("decoders/decoders.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
   const level = $("#level");
   level.addEventListener("input", () => {
     engine.setMasterDb(Number(level.value));
     $("#level-read").textContent = `${level.value} dB`;
   });
   engine.setMasterDb(Number(level.value));
-  await loadHead(heads.length ? heads[0].name : null);
+  await loadHead();
 
   const runs = await fetch("runs.json").then((r) => (r.ok ? r.json() : [])).catch(() => []);
   for (const run of runs) {

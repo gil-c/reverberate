@@ -153,6 +153,8 @@ class SiteBuilder:
 
         # The page decodes with the library's own filters, designed here at
         # start: a second of work, and the one place the head is chosen.
+        if measured_head is None:
+            raise SystemExit("set measured_head in walk.toml: the page listens with that head only")
         heads = export_decoders(target / "decoders", measured_path=measured_head)
         print("decoders: " + ", ".join(f"{h['name']} (order {h['order']})" for h in heads))
         # Voices are fetched by `python -m reverberate.viz.voices`, once; the

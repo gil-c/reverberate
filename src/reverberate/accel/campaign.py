@@ -27,13 +27,13 @@ from typing import Any
 
 import numpy as np
 
-from reverberate.accel.backend import device_report, xp_for
 from reverberate.accel.solve import (
     host_memory_gb,
     output_sample_bytes,
     slices_for,
     solve_slices,
 )
+from reverberate.compute import device_report, xp_for
 
 __all__ = ["Campaign", "run_campaign", "slice_rows"]
 
