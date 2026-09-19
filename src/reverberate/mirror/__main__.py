@@ -5,6 +5,7 @@ python -m reverberate.mirror run --run DIR --models DIR --source S1 --position X
 python -m reverberate.mirror calibrate --run DIR --source S1 --position X Y Z
     [--parameters START.json] [--points 24] [--iterations 8] [--cpu]
 python -m reverberate.mirror hybrid --run DIR --source S1 [--high field_mirror]
+python -m reverberate.mirror judge --run DIR --source S1 --field field_hybrid [--every 2]
 """
 
 from __future__ import annotations
@@ -42,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--low", default="field", help="folder of the wave field")
     p.add_argument("--high", default="field_mirror", help="folder of the mirror field")
     p.add_argument("--out", default="field_hybrid")
+
+    p = sub.add_parser("judge", help="a field judged against the wave field, point by point")
+    p.add_argument("--run", type=Path, required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--field", required=True, help="folder of the field judged, in the run")
+    p.add_argument("--every", type=int, default=1, help="judge every n-th point")
+    p.add_argument("--workers", type=int, default=1)
     return parser
 
 
@@ -57,6 +65,21 @@ def main(argv: list[str] | None = None) -> int:
             crossover=Crossover(),
         )
         print(json.dumps(summary, indent=1))
+        return 0
+
+    if args.command == "judge":
+        from reverberate.mirror.calibration.judge import judge_field
+
+        summary = judge_field(
+            args.run / "field" / f"{args.source}.h5",
+            args.run / args.field / f"{args.source}.h5",
+            every=args.every,
+            workers=args.workers,
+        )
+        target = args.run / "mirror" / f"judged_{args.field}_{args.source}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(summary, indent=1))
+        print(target, "criteria met", summary["criteria_met"])
         return 0
 
     from reverberate.compute import Devices

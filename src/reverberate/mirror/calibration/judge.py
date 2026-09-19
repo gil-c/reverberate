@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -159,3 +160,60 @@ def aggregate(reports: list[PointReport]) -> dict[str, Any]:
         for k in range(len(reports[0].echogram_distance_db))
     ]
     return out
+
+
+def _judge_pair(args: tuple[Ambisonic, Ambisonic, CriteriaSettings]) -> PointReport | None:
+    reference, candidate, settings = args
+    if float(np.max(np.abs(candidate.signals))) == 0.0:
+        return None
+    try:
+        return judge(reference, candidate, Criteria(settings=settings))
+    except ValueError:
+        return None
+
+
+def judge_field(
+    reference: Path,
+    candidate: Path,
+    *,
+    settings: CriteriaSettings | None = None,
+    every: int = 1,
+    workers: int = 1,
+) -> dict[str, Any]:
+    """Every ``every``-th point of a field judged against the wave field; the summary.
+
+    Both are fields of ``docs/formats/ambisonic-field.md`` over one lattice.
+    The summary is :func:`aggregate`'s, with ``criteria_met``: the mean over
+    points of the share of criteria each passes.
+    """
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    import h5py
+
+    settings = settings or CriteriaSettings()
+    reports: list[PointReport] = []
+    with h5py.File(reference, "r") as a, h5py.File(candidate, "r") as b:
+        rate = float(a.attrs["sample_rate_hz"])
+        order = int(a.attrs["order"])
+        indices = list(range(0, int(a["ir"].shape[0]), max(1, every)))
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=max(1, workers), mp_context=context) as pool:
+            for start in range(0, len(indices), max(1, workers)):
+                batch = indices[start : start + max(1, workers)]
+                jobs = [
+                    (
+                        Ambisonic(np.asarray(a["ir"][i], dtype=float), rate, order, np.zeros(3)),
+                        Ambisonic(np.asarray(b["ir"][i], dtype=float), rate, order, np.zeros(3)),
+                        settings,
+                    )
+                    for i in batch
+                ]
+                reports.extend(r for r in pool.map(_judge_pair, jobs) if r is not None)
+    summary = aggregate(reports)
+    summary["criteria_met"] = round(
+        float(np.mean([sum(r.verdicts.values()) / len(r.verdicts) for r in reports])), 4
+    )
+    summary["every"] = every
+    summary["settings"] = settings.record()
+    return summary

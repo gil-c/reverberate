@@ -214,3 +214,28 @@ def test_the_judgement_is_the_same_in_two_processes() -> None:
         )
         digests.append(out.stdout.strip())
     assert digests[0] == digests[1]
+
+
+def test_a_field_judged_against_itself_meets_every_criterion(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import h5py
+
+    from reverberate.mirror.calibration.judge import judge_field
+    from reverberate.viz.field_payload import mock_field
+
+    field = mock_field(
+        tmp_path / "S1.h5",
+        source_id="S1",
+        source_position=[0.3, 0.8, 0.4],
+        box_lo=[-1.0, 0.0, -1.0],
+        box_hi=[1.0, 1.5, 1.0],
+        step_m=1.0,
+        margin_m=0.0,
+        heights_m=(1.0,),
+        order=3,
+        total_s=0.4,
+    )
+    with h5py.File(field, "a") as handle:
+        for point in range(handle["ir"].shape[0]):
+            handle["ir"][point] = planted(order=3, reflections=PLANTED, seed=point).signals
+    summary = judge_field(field, field, every=2)
+    assert summary["points"] > 0 and summary["criteria_met"] == 1.0
