@@ -16,6 +16,7 @@
  * One request in flight per source and stage; a pose that arrives while one
  * is pending replaces the pending pose, so the newest is always next.
  */
+import { decoderLead } from "./decode.js";
 import { headMatrix } from "./sh.js";
 
 //: Fastest the early part is re-rendered while the listener turns, seconds.
@@ -32,6 +33,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
   const pendingEarly = new Map(); // request id -> source id
   let nextId = 1;
   let decoderMessage = null;
+  let lead = 0;
 
   const sampleRate = () => engine.sampleRate;
   const earlySamples = () => Math.round((settings.earlyMs / 1000) * sampleRate());
@@ -75,6 +77,9 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
   const copyDecoder = () => ({ ...decoderMessage, filters: Float32Array.from(decoderMessage.filters) });
 
   function setDecoder(decoder) {
+    // What the early worker will cut from the front of every early part, so
+    // the late part can be placed that much earlier to meet it.
+    lead = decoderLead(decoder.filters, decoder.channels, decoder.taps);
     decoderMessage = {
       type: "decoder",
       order: decoder.order,
@@ -102,18 +107,27 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
     state.lastLate = message.brir;
     state.lateMs = message.ms;
     state.lateHead = state.lateHeadRequested;
-    engine.setTail(state.id, message.brir, state.tailStart);
+    engine.setTail(state.id, message.brir, state.tailStart - lead);
     report(state.id, state);
     onStatus(state.id, { late: "exact" });
   }
 
   async function keepEarly(id, state, position) {
-    const key = `${id}:${position}:${earlySamples()}`;
+    const key = `${id}:${position}:${earlySamples()}:${fadeSamples()}`;
     if (state.keptEarly.has(key)) return key;
     const channels = await state.field.cell(position);
     const cut = Math.min(channels[0].length, earlySamples());
     // Copies, so the chunk's own buffer is not detached by the transfer.
-    early.postMessage({ type: "cell", key, channels: channels.map((c) => Float32Array.from(c.subarray(0, cut))) });
+    // Faded out on the field where the late part fades in, when there is
+    // one (`lateFor`); see `decode.js`.
+    const split = state.field.index.samples > earlySamples() + fadeSamples();
+    early.postMessage({
+      type: "cell",
+      key,
+      channels: channels.map((c) => Float32Array.from(c.subarray(0, cut))),
+      fadeOutFrom: earlySamples() - fadeSamples(),
+      fadeOut: split ? fadeSamples() : 0,
+    });
     state.keptEarly.add(key);
     if (state.keptEarly.size > 64) {
       const oldest = state.keptEarly.values().next().value;
@@ -134,7 +148,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
         type: "keep",
         key,
         channels: channels.map((c) => Float32Array.from(c.subarray(start))),
-        crossfade: fadeSamples(),
+        fadeIn: fadeSamples(),
         limit: 3,
       });
       state.keptLate.add(key);
@@ -207,11 +221,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
     try {
       const cellKey = await keepEarly(id, state, position);
       const late = await lateFor(id, state, position);
-      let fadeStart = 0;
-      let crossfade = 0;
       if (late) {
-        fadeStart = late.start;
-        crossfade = late.fade;
         state.tailStart = late.start;
         if (late.key !== state.lateKey) {
           // A new cell or room: its late part at this head, now; never
@@ -229,7 +239,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
       state.cell = position;
       const requestId = nextId++;
       pendingEarly.set(requestId, id);
-      early.postMessage({ type: "render", id: requestId, cell: cellKey, head, fadeStart, crossfade });
+      early.postMessage({ type: "render", id: requestId, cell: cellKey, head });
       moved(state, pose);
       onStatus(id, { cell: position, ...state.field.describe(position), late: "entry" });
       for (const [dx, dz] of [[0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]]) {
