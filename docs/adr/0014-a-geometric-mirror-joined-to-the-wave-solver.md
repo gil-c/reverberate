@@ -1,6 +1,6 @@
 # 0014: a geometric mirror, calibrated on the wave solver and joined to it above 1 kHz
 
-Status: accepted. Reopens the question ADR 0004 closed for third party engines:
+Status: proposed. Reopens the question ADR 0004 closed for third party engines:
 this one is the project's own, so no licence stands in the way.
 
 ## Context
@@ -21,9 +21,10 @@ above.** `reverberate.mirror`:
 - **Early part.** Image sources on the facets to order 3, with the parallel
   pairs followed to order 6; each validated path is a band limited pulse from
   its direction, laid through the project's octave bank.
-- **Tail.** 100 000 rays leave the image sources' specular paths alone and
-  fill a directional energy histogram in 2 ms bins; the tail is noise bursts
-  per bin, drawn from the directions the bin's moments give.
+- **Tail.** 100 000 rays leave the image sources' specular paths alone (to
+  their order, 3, within their 80 ms window) and fill a directional energy
+  histogram in 2 ms bins; the tail is noise bursts per bin, drawn from the
+  directions the bin's moments give.
 - **Points in shadow.** The geodesic round the occluders on a 10 cm grid with
   Maekawa's loss per bend, its corners pulled onto real edges, the other edges
   the point sees the source round, and the last corner's reflections in the
@@ -37,8 +38,12 @@ above.** `reverberate.mirror`:
   pressure over the onset, where both carry the same arrival, and in power
   after it; the mirror levelled onto the wave field over the crossover band.
 - **Devices.** Every stage runs on the host's cores, one card or several
-  (`reverberate.compute.Devices`), with the same result on each: shares come
-  back in order and the histogram is a sum of integers.
+  (`reverberate.compute.Devices`). The paths and the histogram are the same on
+  all of them: shares come back in order and the histogram is a sum of
+  integers binned with one divisor. The responses are the same on any number
+  of cards, and on any number of cores; between the host and a card they are
+  equal in law only, the tail's noise being drawn by a different generator and
+  the low cut applied as a spectrum on the card.
 
 ## Rejected
 
@@ -57,7 +62,13 @@ not the one a reading can resolve).
 
 - By ear on hssd_0076 the joined field is the closest of the geometric renders
   to the wave field, and so are its criteria: 0.366 of the sixteen met against
-  0.357 for the mirror alone.
+  0.357 for the mirror alone. Measured on the fields rendered on 2026-09-18
+  by the code before review, every second point (219 of 437), with the
+  criteria reading from 1 kHz as they then did; `python -m reverberate.mirror
+  judge --every 2` is that procedure, on the whole band. Two fixes made in
+  review change those fields and are not yet rendered: a facet reflecting on
+  both sides now sends images to its back (116 662 images to 128 352 on
+  0076), and a rim line no longer spans a doorway (651 edges to 720).
 - A campaign needs the wave solve under 1 kHz only.
 - **Open:** the calibration is fitted on one dwelling. Whether its parameters
   transfer to another is not measured; until it is, the mirror is only as good
