@@ -5,6 +5,14 @@ The record the mirror's development kept, 2026-09-16 to 18, moved here from
 some settings it describes were later reverted or removed, and it says so
 where that was known then. The decision itself is ADR 0014.
 
+The last figures of that record: on the fields of 2026-09-18, every second
+point (219 of 437), the criteria reading from 1 kHz on the worst band, the
+joined field met 0.366 of the sixteen criteria and the mirror alone 0.357.
+The review of #47 then corrected the image tree (a facet reflecting on both
+sides sends images to its back) and the edges (a rim line stops at a
+doorway), which changes those fields; they were rendered again on
+2026-09-19 with calibration `c3cec6aab28bb582` and are not yet measured.
+
 ## 2026-09-17: what the model needed to meet the reference
 
 Measured on hssd_0076 against the same wave field; the numbers are in the

@@ -65,14 +65,9 @@ not the one a reading can resolve).
 ## Consequences
 
 - By ear on hssd_0076 the joined field is the closest of the geometric renders
-  to the wave field, and so are its criteria: 0.366 of the sixteen met against
-  0.357 for the mirror alone. Measured on the fields rendered on 2026-09-18
-  by the code before review, every second point (219 of 437), with the
-  criteria reading from 1 kHz as they then did; `python -m reverberate.mirror
-  judge --every 2` is that procedure, on the whole band. Two fixes made in
-  review change those fields and are not yet rendered: a facet reflecting on
-  both sides now sends images to its back (116 662 images to 128 352 on
-  0076), and a rim line no longer spans a doorway (651 edges to 720).
+  to the wave field. Its criteria, measured on the code before review, are in
+  the appendix; the fields of this code are measured with the campaign that
+  runs it (`python -m reverberate.mirror judge`).
 - A campaign needs the wave solve under 1 kHz only.
 - **Open:** the calibration is fitted on one dwelling. Whether its parameters
   transfer to another is not measured; until it is, the mirror is only as good
