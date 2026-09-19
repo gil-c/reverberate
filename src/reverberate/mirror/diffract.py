@@ -22,7 +22,7 @@ from reverberate.mirror.edges import (
     snap_to_edges,
 )
 from reverberate.mirror.geometry import DerivedScene
-from reverberate.mirror.ism import Paths
+from reverberate.mirror.ism import Paths, occluder_grid
 from reverberate.mirror.occupancy import (
     CLEAR_CELLS,
     MIN_DETOUR_M,
@@ -131,12 +131,13 @@ def diffracted_paths(
     reflected = 0
     trees = 0
     edge_record: dict[str, Any] = {}
-    if settings.edges:
+    grid = occluder_grid(scene) if (settings.edges or settings.reflections > 0) else None
+    if settings.edges and grid is not None:
         out, secondary, edge_record = _through_the_edges(
-            scene, source, receivers, out, secondary, sound_speed_m_s, settings
+            scene, source, receivers, out, secondary, sound_speed_m_s, settings, selected, grid
         )
-    if settings.reflections > 0 and secondary:
-        out, trees, reflected = _reflect_the_edges(scene, receivers, out, secondary, settings)
+    if settings.reflections > 0 and secondary and grid is not None:
+        out, trees, reflected = _reflect_the_edges(scene, receivers, out, secondary, settings, grid)
     record = {
         "settings": settings.record(),
         "grid": list(shape),

@@ -155,11 +155,15 @@ def _in_front(scene: DerivedScene, normals: np.ndarray, offsets: np.ndarray) -> 
     """
     count = len(scene.facets)
     front = np.zeros((count, count), dtype=bool)
+    behind = np.zeros((count, count), dtype=bool)
     for j, facet in enumerate(scene.facets):
         vertices = scene.reflector_vertices[facet.triangles].reshape(-1, 3)
         heights = vertices @ normals.T - offsets[None, :]  # [vertex, i]
         front[:, j] = np.any(heights > 1e-9, axis=0)
-    return front
+        behind[:, j] = np.any(heights < -1e-9, axis=0)
+    # A facet that reflects on both sides sends sound to either of them.
+    both = np.asarray([f.sides == BOTH_SIDES for f in scene.facets], dtype=bool)
+    return front | (both[:, None] & behind)
 
 
 def _through_the_beam(

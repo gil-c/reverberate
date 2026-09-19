@@ -19,6 +19,7 @@ from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import Paths
 from reverberate.mirror.occupancy import DiffractionSettings, maekawa_db
+from reverberate.mirror.rays import UniformGrid
 
 __all__ = ["Edges", "diffracting_edges", "edge_paths", "snap_to_edges"]
 
@@ -68,8 +69,9 @@ def _lines_of(
 
     A facet is a merged plane of many triangles; an edge shared by two of
     them is inside it, and one held by a single triangle is its rim. The rim
-    is made of many short collinear pieces, so the pieces on one line are
-    taken together and only the whole is kept.
+    is made of many short collinear pieces, so the touching pieces on one
+    line are taken together; a gap along the line, such as a doorway, ends
+    one edge and starts the next.
     """
     tri = facet_triangles
     a = np.concatenate([tri[:, 0], tri[:, 1], tri[:, 2]])
@@ -94,15 +96,24 @@ def _lines_of(
     for i in range(unit.shape[0]):
         marker = (tuple(np.round(unit[i], 3)), tuple(np.round(foot[i], 2)))
         groups.setdefault(marker, []).append(i)
-    out = []
+    out: list[tuple[np.ndarray, np.ndarray]] = []
     for members in groups.values():
         axis = unit[members[0]]
-        along = np.concatenate([p[members] @ axis, q[members] @ axis])
-        low, high = float(along.min()), float(along.max())
-        if high - low < min_length_m:
-            continue
         origin = foot[members[0]]
-        out.append((origin + low * axis, origin + high * axis))
+        # Pieces that touch make one edge; a gap (a doorway) starts another.
+        start = np.minimum(p[members] @ axis, q[members] @ axis)
+        stop = np.maximum(p[members] @ axis, q[members] @ axis)
+        order = np.argsort(start)
+        low, high = float(start[order[0]]), float(stop[order[0]])
+        runs = []
+        for k in order[1:]:
+            if start[k] <= high + 1e-3:
+                high = max(high, float(stop[k]))
+            else:
+                runs.append((low, high))
+                low, high = float(start[k]), float(stop[k])
+        runs.append((low, high))
+        out.extend((origin + a * axis, origin + b * axis) for a, b in runs if b - a >= min_length_m)
     return out
 
 
@@ -327,6 +338,8 @@ def _through_the_edges(
     secondary: dict[int, tuple[np.ndarray, float, np.ndarray]],
     sound_speed_m_s: float,
     settings: DiffractionSettings,
+    edges: Edges,
+    grid: UniformGrid,
 ) -> tuple[dict[int, Paths], dict[int, tuple[np.ndarray, float, np.ndarray]], dict[str, Any]]:
     """Every selected edge tried for every shadowed receiver, beside the geodesic.
 
@@ -336,10 +349,6 @@ def _through_the_edges(
     geodesic is kept only when it is shorter than every single edge path: a
     way round two corners that no one edge gives.
     """
-    from reverberate.mirror.ism import occluder_grid
-
-    edges = diffracting_edges(scene)
-    grid = occluder_grid(scene)
     bands = len(OCTAVE_BANDS)
     found = 0
     per_point: list[int] = []
@@ -416,6 +425,7 @@ def _reflect_the_edges(
     out: dict[int, Paths],
     secondary: dict[int, tuple[np.ndarray, float, np.ndarray]],
     settings: DiffractionSettings,
+    grid: UniformGrid,
 ) -> tuple[dict[int, Paths], int, int]:
     """Give each diffracted onset the reflections of its own edge in the receiver's room.
 
@@ -429,9 +439,8 @@ def _reflect_the_edges(
     Edges within ``CLUSTER_M`` of each other share one tree: the points in
     shadow stand behind a few doorways, not hundreds of edges.
     """
-    from reverberate.mirror.ism import IsmSettings, grow_tree, occluder_grid, paths_for
+    from reverberate.mirror.ism import IsmSettings, grow_tree, paths_for
 
-    grid = occluder_grid(scene)
     ism = IsmSettings(max_order=settings.reflections, flutter_order=0)
     order = sorted(secondary)
     taken: list[np.ndarray] = []
@@ -489,7 +498,8 @@ def _reflect_the_edges(
                 points=merged.points[pick],
                 sequence=merged.sequence[pick],
             )
-            reflected += int(keep_n) - 1
+            # The onset's own paths come first in ``merged``; the rest are reflections.
+            reflected += int(np.count_nonzero(pick >= onset.count))
     return out, len(taken), reflected
 
 
