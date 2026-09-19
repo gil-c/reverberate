@@ -22,10 +22,69 @@ import { headMatrix } from "./sh.js";
 //: Fastest the early part is re-rendered while the listener turns, seconds.
 const MIN_INTERVAL_S = 0.06;
 
+//: How far a listener may be from a cell and still be given it, and how far
+//: they must get before they are given nothing at all.
+//:
+//: The flat's air is holey -- the solver wrote no cell inside the furniture
+//: or against the walls, and on `hssd_0076` there are more empty lattice
+//: points than full ones -- while the picture lets the listener stand
+//: anywhere a room contains them. Walking a room therefore crosses places
+//: with no cell underneath, and cutting the sound at each of them is what a
+//: walk was heard to crackle on: a fade out and a fade in every tenth of a
+//: second as the listener grazes the edge of the solved air. Being given the
+//: room from a metre away is wrong; being given silence is more wrong, and
+//: unlike the first it is audible. The two distances differ so that grazing
+//: the boundary cannot chatter across it.
+export const REACH_M = 1.1;
+export const HOLD_M = 2.2;
+//: How far the listener walks before the late part is fetched from a nearer
+//: cell.
+//:
+//: Giving a `ConvolverNode` a buffer clears it, so every swap of the late
+//: part throws away a second of reverberation that was sounding and starts
+//: building the next one from nothing. Swapping it at every cell means doing
+//: that five times a second at walking pace: the reverberation never
+//: finishes building, and what is heard is a flutter at the rate of the
+//: crossing, which was measured as the loudest thing left in a walk. The
+//: late field is diffuse -- it is the part ADR 0013 says has no direction to
+//: lag by -- and within a room it hardly changes over a couple of metres, so
+//: it is fetched every two instead, and again whenever the room changes. The
+//: early part, which carries the direction and the direct sound, still
+//: follows every cell.
+const TAIL_STEP_M = 2.0;
+//: And no sooner than this, whatever the distance. Two convolvers share the
+//: late part and its crossfade is a quarter of a second, so one of them has
+//: to be silent again before the next arrives.
+const TAIL_INTERVAL_S = 0.7;
+
+//: Where the cells about to be needed are fetched from ahead of time: half a
+//: metre off in each direction, a step and a bit of the usual lattice.
+const PREFETCH_AT = [
+  [0.5, 0],
+  [-0.5, 0],
+  [0, 0.5],
+  [0, -0.5],
+];
+
 /** Adjustable from the page. `earlyMs` is where a whole response is split;
  *  `stillMs` how long the head must be still before the late part is
  *  re-decoded for it; `fadeMs` the crossfade between the two parts. */
 export const settings = { earlyMs: 150, stillMs: 200, fadeMs: 10 };
+
+/** Seconds before the late part is to be fetched again, from `position`,
+ *  for a listener at `pose` at `now` seconds: zero for now, Infinity for not
+ *  until the listener moves on. `tail` is where and when it was last
+ *  fetched, `{ position, at, fetchedAt }`, and `rooms` the field's own. */
+export function tailWait(tail, pose, position, rooms, now) {
+  if (tail.position === null) return 0;
+  const room = (cell) => (rooms ? rooms[cell] : null);
+  const far =
+    Math.hypot(pose.x - tail.at.x, pose.y - tail.at.y, pose.z - tail.at.z) > TAIL_STEP_M ||
+    // A doorway is narrower than a metre, and the reverberation either side
+    // of one is not the same reverberation.
+    room(position) !== room(tail.position);
+  return far ? Math.max(0, tail.fetchedAt + TAIL_INTERVAL_S - now) : Infinity;
+}
 
 export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell }) {
   const early = new Worker(workerUrl, { type: "module" });
@@ -205,7 +264,12 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
       }
       return;
     }
-    const position = state.field.cellAt(pose.x, pose.y, pose.z);
+    const position = state.field.cellAt(
+      pose.x,
+      pose.y,
+      pose.z,
+      state.cell === null ? REACH_M : HOLD_M
+    );
     if (position === null) {
       if (state.cell !== null) {
         state.cell = null;
@@ -220,12 +284,22 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
     const head = headMatrix(pose.yaw, pose.pitch);
     try {
       const cellKey = await keepEarly(id, state, position);
-      const late = await lateFor(id, state, position);
+      // The late part follows at its own pace: every two metres, or a new room.
+      const wait = tailWait(state.tail, pose, position, state.field.index.rooms, now);
+      clearTimeout(state.tailTimer);
+      if (wait === 0) {
+        state.tail = { position, at: { x: pose.x, y: pose.y, z: pose.z }, fetchedAt: now };
+      } else if (Number.isFinite(wait)) {
+        // Due, but too soon after the last: come back for it then, since a
+        // listener who steps through a door and stops sends no more poses.
+        state.tailTimer = setTimeout(() => request(id, pose), wait * 1000 + 1);
+      }
+      const late = await lateFor(id, state, state.tail.position);
       if (late) {
         state.tailStart = late.start;
         if (late.key !== state.lateKey) {
-          // A new cell or room: its late part at this head, now; never
-          // cancelled by movement, only superseded by a newer cell.
+          // A new late cell or room: its part at this head, now; never
+          // cancelled by movement, only superseded by a newer one.
           state.lateKey = late.key;
           state.lastLate = null;
           state.lateHead = null;
@@ -242,8 +316,8 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
       early.postMessage({ type: "render", id: requestId, cell: cellKey, head });
       moved(state, pose);
       onStatus(id, { cell: position, ...state.field.describe(position), late: "entry" });
-      for (const [dx, dz] of [[0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]]) {
-        state.field.prefetch(state.field.cellAt(pose.x + dx, pose.y, pose.z + dz));
+      for (const [dx, dz] of PREFETCH_AT) {
+        state.field.prefetch(state.field.cellAt(pose.x + dx, pose.y, pose.z + dz, REACH_M));
       }
     } catch (error) {
       state.pendingEarly = false;
@@ -268,6 +342,7 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
       const previous = fields.get(id);
       if (previous) {
         clearTimeout(previous.stillTimer);
+        clearTimeout(previous.tailTimer);
         if (previous.late) previous.late.terminate();
       }
       if (!field) {
@@ -290,6 +365,8 @@ export function createSpatial({ engine, workerUrl, onRendered, onStatus, onCell 
         lastEarly: null,
         lastLate: null,
         tailStart: 0,
+        tail: { position: null, at: null, fetchedAt: -Infinity },
+        tailTimer: null,
         earlyMs: null,
         lateMs: null,
         pendingEarly: false,
