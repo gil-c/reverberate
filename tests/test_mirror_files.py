@@ -9,6 +9,7 @@ lead and a gain planted in the reference.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -17,14 +18,11 @@ import pytest
 
 from reverberate.mirror.files import (
     align_to_reference,
-    load_histogram,
     load_paths,
     write_field,
-    write_histogram,
     write_paths,
 )
 from reverberate.mirror.ism import grow_tree, paths_for
-from reverberate.mirror.rays import RaySettings, trace
 from reverberate.spatial.encode import Ambisonic
 from reverberate.viz.field_payload import check, mock_field, read_header
 
@@ -93,19 +91,26 @@ def test_the_alignment_reads_the_reference_s_lead_and_gain(reference: Path) -> N
     assert alignment.points_used == 9
 
 
-def test_the_paths_and_the_histogram_come_back_as_written(tmp_path: Path) -> None:
+def test_the_paths_come_back_as_written(tmp_path: Path) -> None:
     from test_mirror_ism import RECEIVER, SOURCE, box_scene
 
     scene = box_scene(alpha=0.3, scattering=0.2)
     tree = grow_tree(scene, SOURCE)
-    every = [paths_for(scene, tree, RECEIVER), paths_for(scene, tree, RECEIVER + 0.3)]
+    first = paths_for(scene, tree, RECEIVER)
+    # A point with no path at all keeps its receiver too.
+    empty = replace(
+        first,
+        **{
+            k: getattr(first, k)[:0]
+            for k in ("image", "order", "length_m", "direction", "gain", "points", "sequence")
+        },
+        receiver=RECEIVER + 1.0,
+    )
+    every = [first, empty, paths_for(scene, tree, RECEIVER + 0.3)]
     back = load_paths(write_paths(every, tmp_path / "paths"))
+    assert [p.count for p in back] == [p.count for p in every]
     for a, b in zip(every, back, strict=True):
+        np.testing.assert_array_equal(a.receiver, b.receiver)
         np.testing.assert_array_equal(a.image, b.image)
         np.testing.assert_array_equal(a.gain, b.gain)
         np.testing.assert_array_equal(a.points, b.points)
-    histogram = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(rays=100, duration_s=0.05))
-    again = load_histogram(write_histogram(histogram, tmp_path / "histogram"))
-    np.testing.assert_array_equal(again.energy, histogram.energy)
-    np.testing.assert_array_equal(again.moments, histogram.moments)
-    assert again.bands_hz == histogram.bands_hz

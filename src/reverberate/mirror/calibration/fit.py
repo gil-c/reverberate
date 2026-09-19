@@ -17,6 +17,7 @@ that also holds the ray and tail settings it was fitted under, written to
 from __future__ import annotations
 
 import json
+import multiprocessing
 import time
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
@@ -175,6 +176,11 @@ def _reflection_gaps(reports: list[PointReport]) -> dict[int, float]:
     return {band: float(np.median(v)) for band, v in gaps.items()}
 
 
+def _nearest(band: int, table: dict[int, float]) -> float:
+    """The value of the band in ``table`` nearest ``band`` on a log scale."""
+    return table[min(table, key=lambda b: abs(np.log2(b / band)))]
+
+
 def _mean_absorption(scene: DerivedScene) -> np.ndarray:
     """The area weighted absorption per band of the reflecting facets."""
     areas = np.zeros(len(scene.materials.labels))
@@ -236,16 +242,16 @@ def fixed_point(
         gain = list(candidate.tail_gain_db)
         image = list(candidate.image_absorption_scale or candidate.absorption_scale)
         for k, band in enumerate(bands):
-            judged = band if band in ratios else 250
-            if judged in ratios:
-                scale[k] = float(np.clip(scale[k] * ratios[judged] ** damping, 0.05, 20.0))
-            if judged in gaps:
-                gain[k] = float(np.clip(gain[k] + damping * gaps[judged], -30.0, 30.0))
-            reflected = band if band in levels else 250
-            if reflected in levels:
+            # A band the judgement does not read (125 Hz) follows the nearest one it does.
+            if ratios:
+                scale[k] = float(np.clip(scale[k] * _nearest(band, ratios) ** damping, 0.05, 20.0))
+            if gaps:
+                gain[k] = float(np.clip(gain[k] + damping * _nearest(band, gaps), -30.0, 30.0))
+            if levels:
                 # A matched reflection has about two bounces: its energy goes as
                 # (1 - s a)^2, so a gap of g dB asks (1 - s a) to move by g / 20 dB.
-                kept = (1.0 - image[k] * alpha[k]) * 10.0 ** (damping * levels[reflected] / 20.0)
+                gap = _nearest(band, levels)
+                kept = (1.0 - image[k] * alpha[k]) * 10.0 ** (damping * gap / 20.0)
                 image[k] = float(np.clip((1.0 - kept) / max(alpha[k], 1e-6), 0.05, 20.0))
         return replace(
             candidate,
@@ -255,7 +261,12 @@ def fixed_point(
             note="candidate",
         )
 
-    pool = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    # Spawned, not forked: the tracer may have initialised CUDA in this process.
+    pool = (
+        ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+        if workers > 1
+        else None
+    )
     try:
         for _ in range(iterations):
             parameters = step(parameters, evaluate(parameters, pool))
@@ -373,7 +384,7 @@ def calibrate(
             tail_gain_db=np.asarray(parameters.tail_gain_db, dtype=float),
             receiver_radius_m=rays.receiver_radius_m,
             sound_speed_m_s=settings.sound_speed_m_s,
-            seed=settings.seed + local[index],
+            seed=settings.seed + index,
             signature=signature,
         )
         return response

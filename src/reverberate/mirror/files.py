@@ -20,23 +20,19 @@ import numpy as np
 
 from reverberate.mirror.direct import DIRECT_WINDOW_S, direct_arrival
 from reverberate.mirror.ism import Paths
-from reverberate.mirror.rays import Histogram
 from reverberate.spatial.encode import Ambisonic
 
 __all__ = [
     "Alignment",
     "align_to_reference",
     "lattice_of",
-    "load_histogram",
     "load_paths",
     "read_omni",
     "write_field",
-    "write_histogram",
     "write_paths",
 ]
 
 _PATH_COLUMNS = (
-    "receiver",
     "image",
     "order",
     "length_m",
@@ -97,7 +93,7 @@ def write_paths(every: list[Paths], target: Path) -> Path:
     np.savez_compressed(
         target,
         offsets=offsets,
-        receiver=stack("receiver", (), np.int64),
+        receivers=np.asarray([p.receiver for p in every], dtype=float).reshape(-1, 3),
         image=stack("image", (), np.int64),
         order=stack("order", (), np.int64),
         length_m=stack("length_m", (), float),
@@ -110,43 +106,22 @@ def write_paths(every: list[Paths], target: Path) -> Path:
 
 
 def load_paths(target: Path) -> list[Paths]:
-    """The inverse of :func:`write_paths`."""
+    """The inverse of :func:`write_paths`.
+
+    Files written before ``receivers`` existed give each point a receiver of NaN.
+    """
     with np.load(Path(target)) as arrays:
         offsets = arrays["offsets"]
         columns = {name: arrays[name] for name in _PATH_COLUMNS}
+        count = len(offsets) - 1
+        receivers = arrays["receivers"] if "receivers" in arrays else np.full((count, 3), np.nan)
     return [
-        Paths(**{name: columns[name][offsets[i] : offsets[i + 1]] for name in _PATH_COLUMNS})
-        for i in range(len(offsets) - 1)
-    ]
-
-
-def write_histogram(histogram: Histogram, target: Path) -> Path:
-    target = Path(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        target,
-        energy=histogram.energy,
-        moments=histogram.moments,
-        hits=histogram.hits,
-        bin_s=histogram.bin_s,
-        bands_hz=np.asarray(histogram.bands_hz, dtype=np.int64),
-        order=histogram.order,
-        rays=histogram.rays,
-    )
-    return target.with_suffix(".npz")
-
-
-def load_histogram(target: Path) -> Histogram:
-    with np.load(Path(target)) as arrays:
-        return Histogram(
-            arrays["energy"],
-            arrays["moments"],
-            arrays["hits"],
-            float(arrays["bin_s"]),
-            tuple(int(v) for v in arrays["bands_hz"]),
-            int(arrays["order"]),
-            int(arrays["rays"]),
+        Paths(
+            receiver=np.asarray(receivers[i], dtype=float),
+            **{name: columns[name][offsets[i] : offsets[i + 1]] for name in _PATH_COLUMNS},
         )
+        for i in range(count)
+    ]
 
 
 @dataclass(frozen=True)

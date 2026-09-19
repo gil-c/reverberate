@@ -9,6 +9,7 @@ host's cores, one card or several.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -85,17 +86,25 @@ class MirrorSettings:
 def derive_scene(
     models: Path, cache: Path, rules: GeometryRules, seed: int = 0, say: Any = None
 ) -> DerivedScene:
-    """The derived geometry of ``models/apartment_full.json``; ``cache`` when its rules match."""
-    if Path(cache).with_suffix(".json").is_file():
-        found = load_derived(cache)
-        if found.rules == rules:
-            return found
+    """The derived geometry of ``models/apartment_full.json``.
+
+    From ``cache`` when it was derived from the same model files under the
+    same rules; the model's digest is kept beside it in ``<cache>.model``.
+    """
+    model = Path(models) / "apartment_full.json"
     manifest_path = Path(models) / "manifest.json"
+    digest = hashlib.sha256(model.read_bytes())
+    if manifest_path.is_file():
+        digest.update(manifest_path.read_bytes())
+    stamp = Path(cache).with_suffix(".model")
+    if Path(cache).with_suffix(".json").is_file() and stamp.is_file():
+        found = load_derived(cache)
+        if found.rules == rules and stamp.read_text() == digest.hexdigest():
+            return found
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else None
-    derived = derive(
-        Path(models) / "apartment_full.json", rules=rules, manifest=manifest, seed=seed, say=say
-    )
+    derived = derive(model, rules=rules, manifest=manifest, seed=seed, say=say)
     write_derived(derived, cache)
+    stamp.write_text(digest.hexdigest())
     return derived
 
 
@@ -126,9 +135,10 @@ def trace(
     tree = grow_tree(scene, source, ism, region=region)
     grid = occluder_grid(scene, rays.cell_m)
     every = paths_on_devices(scene, tree, positions, ism, devices=devices, grid=grid, say=say)
-    if settings.parameters.image_absorption_scale is not None:
-        images = image_scene(catalogue, settings.parameters)
-        every = [regain(p, images) for p in every]
+    # The image sources read their own materials: their absorption scale, and
+    # the class's scattering where the rays read the shell's own.
+    images = image_scene(catalogue, settings.parameters)
+    every = [regain(p, images) for p in every]
     histogram = histogram_on_devices(
         scene, source, positions, rays, devices=devices, grid=grid, say=say
     )
@@ -217,8 +227,7 @@ def render(
     record["tail_scale_fallback"] = None if fallback_scale is None else fallback_scale.tolist()
 
     def fallback_of(index: int) -> Any:
-        if fallback_scale is None:
-            return None
+        # Without a point to read the tail's scale from, the onset alone.
         straight = float(np.linalg.norm(positions[index] - source))
         return (fallback_scale, straight / c, onsets.get(index))
 

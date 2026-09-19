@@ -40,8 +40,6 @@ LOWCUT_HZ = 40.0
 LOWCUT_ORDER = 8
 #: Half length of the windowed sinc that places a pulse between samples.
 DELAY_HALF_TAPS = 16
-#: How long the tail fades in from where it starts, s.
-TAIL_FADE_S = 0.010
 
 
 @dataclass(frozen=True)
@@ -340,8 +338,9 @@ def render_point(
     radius ``receiver_radius_m`` at that distance catches of rays of energy
     1/N, against the direct pulse's whole energy per band. Without one,
     ``fallback`` is ``(scale_per_band, straight_line_s, onset)``: the scale the
-    other points read, the straight line time, and the point's diffracted
-    onset (a one path :class:`Paths`, or ``None``), whose arrival starts the tail.
+    other points read (``None`` when no point had one: the onset alone), the
+    straight line time, and the point's diffracted onset (a :class:`Paths`, or
+    ``None``), whose arrival starts the tail.
     """
     from reverberate.accel.dsp import air_absorption, sosfilt
 
@@ -372,9 +371,9 @@ def render_point(
             **tail_args,
         )
         signals = signals + tail
-    elif fallback is not None and not direct.any() and heard:
+    elif fallback is not None and not direct.any():
         scale, straight_s = fallback[0], fallback[1]
-        onset = fallback[2] if len(fallback) > 2 else None
+        onset = fallback[2]
         # The rays' own first arrival round the doorway starts the tail; the
         # straight line through the wall is not a clock here.
         arrived = np.any(histogram.energy[index] > 0.0, axis=1)
@@ -388,16 +387,18 @@ def render_point(
                 "length_m": round(float(onset.length_m[0]), 4),
                 "gain_db": [round(float(v), 2) for v in 20.0 * np.log10(onset.gain[0])],
             }
-        tail, tail_record = tail_from_histogram(
-            histogram,
-            index,
-            settings,
-            start_s=start_s,
-            scale_per_band=scale,
-            **tail_args,
-        )
-        signals = signals + tail
-        record["tail"] = {**tail_record, "starts_s": round(start_s, 4)}
+        record["tail"] = None
+        if heard and scale is not None:
+            tail, tail_record = tail_from_histogram(
+                histogram,
+                index,
+                settings,
+                start_s=start_s,
+                scale_per_band=scale,
+                **tail_args,
+            )
+            signals = signals + tail
+            record["tail"] = {**tail_record, "starts_s": round(start_s, 4)}
     else:
         record["tail"] = None if not direct.any() else "no ray reached this receiver"
     signals = air_absorption(signals, rate, xp, sound_speed_m_s=sound_speed_m_s)
