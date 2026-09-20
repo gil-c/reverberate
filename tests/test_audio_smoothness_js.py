@@ -207,7 +207,13 @@ const { rows } = await harness.run({
   decoderName: "measured",
   seconds: 2,
   cases: { walk: harness.CASES.walk },
-  variants: harness.VARIANTS,
+  // The cost of a decode is given, not timed, so a slow machine reads the same.
+  variants: Object.fromEntries(
+    Object.entries(harness.VARIANTS).map(([name, variant]) => [
+      name,
+      { earlyCostMs: 8, lateCostMs: 30, ...variant },
+    ]),
+  ),
 });
 console.log(JSON.stringify(Object.fromEntries(rows.map((row) => [row.variant, row]))));
 """

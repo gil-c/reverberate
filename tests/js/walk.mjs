@@ -52,6 +52,10 @@ export const SHIPPED = {
   //: How many decodes are timed before the walk to fix what one costs, so
   //: two variants measured an hour apart still compare.
   calibrate: 7,
+  //: What a decode costs, in milliseconds, when it is given rather than
+  //: timed: a test then reads the same on a fast machine and a slow one.
+  earlyCostMs: null,
+  lateCostMs: null,
   //: How often the filter is looked at, and from when.
   traceHopS: 0.01,
   traceSkipS: 0.5,
@@ -125,8 +129,8 @@ export async function renderWalk({ field, decoderFilters, poses, sampleRate, var
   }
 
   // --- the scheduler, as `spatial.js` runs it ------------------------------
-  let earlyCost = null;
-  let lateCost = null;
+  let earlyCost = settings.earlyCostMs;
+  let lateCost = settings.lateCostMs;
   let lastIssue = -Infinity;
   let earlyFreeAt = 0;
   let lateFreeAt = 0;
