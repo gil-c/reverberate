@@ -23,7 +23,8 @@ def test_the_host_runs_every_share_and_keeps_their_order() -> None:
     assert [p[0] for p in parts] == [-1, -1, -1]
     assert [x for p in parts for x in p[2]] == list(range(7))
     if sys.platform.startswith("linux"):
-        assert len({p[1] for p in parts}) == 3 and os.getpid() not in {p[1] for p in parts}
+        # A pool starts its processes as work arrives, so a quick one may take two shares.
+        assert os.getpid() not in {p[1] for p in parts}
 
 
 def test_one_share_runs_here() -> None:

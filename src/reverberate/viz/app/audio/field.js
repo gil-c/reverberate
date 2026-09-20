@@ -4,6 +4,7 @@
  * each cell's response in the file; a cell is one range request of its
  * `cell_bytes`, kept under a byte cap, oldest out first.
  */
+import { createLattice } from "./lattice.js";
 
 //: Bytes of cells kept per field. At order 7 and 1.2 s a cell is 14.7 MB, so
 //: this holds about twenty-five cells: a few metres of walk in every direction.
@@ -15,50 +16,9 @@ export async function loadField(url) {
     return r.json();
   });
   const file = `${url}/${index.file}`;
-  const byCell = new Map();
-  index.cell_index.forEach(([i, j, k], position) => byCell.set(`${i},${j},${k}`, position));
-  const origin = index.grid_origin_m;
-  const step = index.grid_step_m;
-  const shape = index.grid_shape;
+  const { cellAt } = createLattice(index);
   const cells = new Map(); // position -> { promise, buffer, at }
   let held = 0;
-
-  // An axis with one layer has no step to divide by; every point maps to it.
-  const along = (value, axis) =>
-    shape[axis] <= 1 || !step[axis] ? 0 : Math.round((value - origin[axis]) / step[axis]);
-  const lattice = (x, y, z) => [along(x, 0), along(y, 1), along(z, 2)];
-
-  /** The nearest held cell to a point, searching outward from its lattice cell. */
-  function cellAt(x, y, z) {
-    const [i, j, k] = lattice(x, y, z);
-    for (let radius = 0; radius <= 2; radius++) {
-      let best = null;
-      let bestDistance = Infinity;
-      for (let di = -radius; di <= radius; di++) {
-        for (let dj = -radius; dj <= radius; dj++) {
-          for (let dk = -radius; dk <= radius; dk++) {
-            if (Math.max(Math.abs(di), Math.abs(dj), Math.abs(dk)) !== radius) continue;
-            const ci = i + di;
-            const cj = j + dj;
-            const ck = k + dk;
-            if (ci < 0 || cj < 0 || ck < 0 || ci >= shape[0] || cj >= shape[1] || ck >= shape[2]) {
-              continue;
-            }
-            const position = byCell.get(`${ci},${cj},${ck}`);
-            if (position === undefined) continue;
-            const [px, py, pz] = index.positions[position];
-            const distance = Math.hypot(px - x, py - y, pz - z);
-            if (distance < bestDistance) {
-              bestDistance = distance;
-              best = position;
-            }
-          }
-        }
-      }
-      if (best !== null) return best;
-    }
-    return null;
-  }
 
   async function range(offset, bytes) {
     const response = await fetch(file, { headers: { Range: `bytes=${offset}-${offset + bytes - 1}` } });
