@@ -54,6 +54,7 @@ __all__ = [
     "NumpyStepper",
     "State",
     "drive_for",
+    "node_masks",
     "reference_step",
     "solve",
     "steps_for",
@@ -143,7 +144,14 @@ def drive_for(
 
 @dataclass
 class State:
-    """A batch's fields, ``[node, source]``, and its branches, ``[node, branch, source]``."""
+    """A batch's fields, ``[node, source]``, and its branches, ``[source, branch, node]``.
+
+    The branches are stored a source, then a branch, then the lossy nodes in
+    their order: a kernel's neighbouring threads are neighbouring nodes, and
+    read neighbouring floats. Stored ``[node, branch, source]`` the same
+    kernel took 2.1 ms a step for one source on an RTX 3080 and 15 ms a
+    source for eight.
+    """
 
     u0: Any
     u1: Any
@@ -153,7 +161,7 @@ class State:
     @classmethod
     def zeros(cls, problem: Problem, batch: int, xp: Any) -> State:
         shape = (problem.nodes, batch)
-        branches = (problem.lossy, problem.max_branches, batch)
+        branches = (batch, problem.max_branches, problem.lossy)
         return cls(
             u0=xp.zeros(shape, dtype=xp.float32),
             u1=xp.zeros(shape, dtype=xp.float32),
@@ -241,17 +249,18 @@ class NumpyStepper:
                 fac = self.fac[:, None]
                 for m in range(p.max_branches):
                     x = x - fac * (
-                        (_TWO * q[:, m, 2])[:, None] * state.vh[:, m]
-                        - q[:, m, 3][:, None] * state.gh[:, m]
+                        (_TWO * q[:, m, 2])[:, None] * state.vh[:, m].T
+                        - q[:, m, 3][:, None] * state.gh[:, m].T
                     )
                 du = x - before
                 for m in range(p.max_branches):
-                    vh1 = state.vh[:, m]
+                    vh1 = state.vh[:, m].T
+                    gh1 = state.gh[:, m].T
                     vh0 = (q[:, m, 0][:, None] * du + q[:, m, 1][:, None] * vh1) - (
                         _TWO * q[:, m, 3]
-                    )[:, None] * state.gh[:, m]
-                    state.gh[:, m] = state.gh[:, m] + (vh0 + vh1) / _TWO
-                    state.vh[:, m] = vh0
+                    )[:, None] * gh1
+                    state.gh[:, m] = (gh1 + (vh0 + vh1) / _TWO).T
+                    state.vh[:, m] = vh0.T
                 partial[rows] = x
             u0[p.bn_index] = partial
         np.add.at(u0, self.inject_at, self.drive.inject_signal[:, n])
@@ -314,8 +323,8 @@ def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np
                 lo2kbg = f32(f32(p.lo2 * ssaf) * p.beta[k])
                 fac = f32(f32(f32(_TWO * p.lo2) * ssaf) / f32(_ONE + lo2kbg))
                 x = f32(f32(partial + f32(lo2kbg * previous)) / f32(_ONE + lo2kbg))
-                held_v = [state.vh[row, m, b] for m in range(int(p.branches[k]))]
-                held_g = [state.gh[row, m, b] for m in range(int(p.branches[k]))]
+                held_v = [state.vh[b, m, row] for m in range(int(p.branches[k]))]
+                held_g = [state.gh[b, m, row] for m in range(int(p.branches[k]))]
                 for m in range(int(p.branches[k])):
                     _, _, bdh, bfh = p.quads[k, m]
                     x = f32(
@@ -327,8 +336,8 @@ def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np
                     vh0 = f32(
                         f32(f32(bb * du) + f32(bd * held_v[m])) - f32(f32(_TWO * bfh) * held_g[m])
                     )
-                    state.gh[row, m, b] = f32(held_g[m] + f32(f32(vh0 + held_v[m]) / _TWO))
-                    state.vh[row, m, b] = vh0
+                    state.gh[b, m, row] = f32(held_g[m] + f32(f32(vh0 + held_v[m]) / _TWO))
+                    state.vh[b, m, row] = vh0
                 partial = x
             u0[at, b] = partial
     for row in range(drive.inject_index.size):
@@ -341,81 +350,84 @@ def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np
 # the card
 # --------------------------------------------------------------------------
 
+#: A node's mask on the card: its adjacency in the low twelve bits, the absorbing layer's
+#: ``Q`` above them, and a flag on a boundary node. Zero is a node that is never written.
+MASK_Q_SHIFT = 12
+MASK_BOUNDARY = 0x4000
+
 _AIR_KERNEL = r"""
 extern "C" __global__ void lowband_air(
     float* __restrict__ u0, const float* __restrict__ u1,
-    const unsigned char* __restrict__ kind, const int* __restrict__ lateral,
-    int nz, int batch, int laterals, float a1, float a2, float l)
+    const unsigned short* __restrict__ mask, const int* __restrict__ lateral,
+    int nz, int batch, int laterals, float a1, float a2, float sl2, float l)
 {
     int column = blockIdx.x;
     int t = blockIdx.y * blockDim.x + threadIdx.x;
     int nzb = nz * batch;
     if (t >= nzb) return;
-    unsigned char k = kind[(long long)column * nz + t / batch];
+    unsigned int k = mask[(long long)column * nz + t / batch];
     if (k == 0) return;
     const int* nb = lateral + (long long)column * laterals;
     long long own = (long long)column * nzb;
     float previous = u0[own + t];
-    float partial = a1 * u1[own + t] - previous;
-%(stencil)s
-    if (k > 1) {
-        float lq = l * (float)(k - 1);
-        partial = (partial + lq * previous) / (1.0f + lq);
+    float partial;
+    if (k & 0x4000u) {
+        // a boundary node's rigid update: the neighbours its adjacency allows
+        unsigned int adjacency = k & 0x0FFFu;
+        float b1 = 2.0f - sl2 * (float)__popc(adjacency);
+        partial = b1 * u1[own + t] - previous;
+%(boundary)s
+    } else {
+        partial = a1 * u1[own + t] - previous;
+%(air)s
+        unsigned int q = (k >> 12) & 3u;
+        if (q > 0) {
+            float lq = l * (float)q;
+            partial = (partial + lq * previous) / (1.0f + lq);
+        }
     }
     u0[own + t] = partial;
 }
 """
 
-_BOUNDARY_KERNEL = r"""
-extern "C" __global__ void lowband_boundary(
-    float* __restrict__ u0, const float* __restrict__ u1,
-    const int* __restrict__ bn_column, const int* __restrict__ bn_z,
-    const unsigned short* __restrict__ bn_adjacency, const int* __restrict__ bn_lossy,
-    const int* __restrict__ lateral,
+_LOSSY_KERNEL = r"""
+extern "C" __global__ void lowband_lossy(
+    float* __restrict__ u0, float* __restrict__ before,
+    const int* __restrict__ lossy_column, const int* __restrict__ lossy_z,
     const int* __restrict__ lossy_material, const float* __restrict__ lossy_ssaf,
     const signed char* __restrict__ branches, const float* __restrict__ quads,
     const float* __restrict__ beta, float* __restrict__ vh, float* __restrict__ gh,
-    int count, int nz, int batch, int laterals, int max_branches,
-    float a2, float sl2, float lo2)
+    int nz, int batch, int max_branches, int lossy, float lo2)
 {
-    int node = blockIdx.x * blockDim.x + threadIdx.x;
-    if (node >= count) return;
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= lossy) return;
     int b = blockIdx.y;
-    int column = bn_column[node];
-    long long nzb = (long long)nz * batch;
-    long long t = (long long)bn_z[node] * batch + b;
-    long long own = (long long)column * nzb;
-    const int* nb = lateral + (long long)column * laterals;
-    unsigned int adjacency = bn_adjacency[node];
-    float b1 = 2.0f - sl2 * (float)__popc(adjacency);
-    float previous = u0[own + t];
-    float partial = b1 * u1[own + t] - previous;
-%(stencil)s
-    int row = bn_lossy[node];
-    if (row >= 0) {
-        int k = lossy_material[row];
-        float ssaf = lossy_ssaf[row];
-        float lo2kbg = lo2 * ssaf * beta[k];
-        float fac = 2.0f * lo2 * ssaf / (1.0f + lo2kbg);
-        float x = (partial + lo2kbg * previous) / (1.0f + lo2kbg);
-        const float* q = quads + (long long)k * max_branches * 4;
-        int mb = branches[k];
-        long long first = (long long)row * max_branches * batch + b;
-        float held_v[%(most)d], held_g[%(most)d];
-        for (int m = 0; m < mb; ++m) {
-            held_v[m] = vh[first + (long long)m * batch];
-            held_g[m] = gh[first + (long long)m * batch];
-            x -= fac * (2.0f * q[m * 4 + 2] * held_v[m] - q[m * 4 + 3] * held_g[m]);
-        }
-        float du = x - previous;
-        for (int m = 0; m < mb; ++m) {
-            float vh0 = q[m * 4] * du + q[m * 4 + 1] * held_v[m] - 2.0f * q[m * 4 + 3] * held_g[m];
-            gh[first + (long long)m * batch] = held_g[m] + (vh0 + held_v[m]) / 2.0f;
-            vh[first + (long long)m * batch] = vh0;
-        }
-        partial = x;
+    long long at = ((long long)lossy_column[row] * nz + lossy_z[row]) * batch + b;
+    long long held = (long long)b * lossy + row;
+    float partial = u0[at];
+    float previous = before[held];
+    int k = lossy_material[row];
+    float ssaf = lossy_ssaf[row];
+    float lo2kbg = lo2 * ssaf * beta[k];
+    float fac = 2.0f * lo2 * ssaf / (1.0f + lo2kbg);
+    float x = (partial + lo2kbg * previous) / (1.0f + lo2kbg);
+    const float* q = quads + (long long)k * max_branches * 4;
+    int mb = branches[k];
+    long long first = (long long)b * max_branches * lossy + row;
+    float held_v[%(most)d], held_g[%(most)d];
+    for (int m = 0; m < mb; ++m) {
+        held_v[m] = vh[first + (long long)m * lossy];
+        held_g[m] = gh[first + (long long)m * lossy];
+        x -= fac * (2.0f * q[m * 4 + 2] * held_v[m] - q[m * 4 + 3] * held_g[m]);
     }
-    u0[own + t] = partial;
+    float du = x - previous;
+    for (int m = 0; m < mb; ++m) {
+        float vh0 = q[m * 4] * du + q[m * 4 + 1] * held_v[m] - 2.0f * q[m * 4 + 3] * held_g[m];
+        gh[first + (long long)m * lossy] = held_g[m] + (vh0 + held_v[m]) / 2.0f;
+        vh[first + (long long)m * lossy] = vh0;
+    }
+    u0[at] = x;
+    before[held] = x;
 }
 """
 
@@ -457,12 +469,32 @@ def _stencil_source(problem: Problem, *, boundary: bool) -> str:
         base = "own" if slot < 0 else f"(long long)nb[{slot}] * nzb"
         shift = "" if dz == 0 else (" + batch" if dz > 0 else " - batch")
         weight = f"a2 * (float)((adjacency >> {j}) & 1u)" if boundary else "a2"
-        lines.append(f"    partial += {weight} * u1[{base} + t{shift}];")
+        lines.append(f"        partial += {weight} * u1[{base} + t{shift}];")
     return "\n".join(lines)
 
 
+def node_masks(problem: Problem) -> np.ndarray:
+    """Every stored node's mask for the card, ``[column, z]`` uint16; see :data:`MASK_BOUNDARY`."""
+    full = (1 << len(problem.stencil)) - 1
+    kind = problem.kind.astype(np.uint16)
+    mask = np.where(kind > 0, full | ((kind - (kind > 0)) << MASK_Q_SHIFT), 0).astype(np.uint16)
+    flat = mask.reshape(-1)
+    flat[problem.bn_index] = problem.bn_adjacency | np.uint16(MASK_BOUNDARY)
+    return mask
+
+
 class CardStepper:
-    """The step on a card: five kernels a step, every source of the batch in each launch."""
+    """The step on a card: every source of the batch in each launch.
+
+    The air's kernel walks every stored node and writes a boundary node's
+    rigid update too, from the adjacency in its mask: the node's neighbours
+    are then read in the stream of its column, not gathered one node at a
+    time. What is left for the lossy nodes is their branches, and the value
+    each held two steps before, which the air's kernel has by then
+    overwritten and is therefore kept beside the branches. As a kernel of
+    its own over the boundary nodes, gathering seven values a node, the
+    boundary was 2.0 ms of a 3.2 ms step on an RTX 3080.
+    """
 
     THREADS = 256
 
@@ -472,31 +504,40 @@ class CardStepper:
         self.problem, self.drive, self.xp = problem, drive, xp
         p, batch = problem, drive.batch
         self.air = raw_kernel(
-            _AIR_KERNEL % {"stencil": _stencil_source(p, boundary=False)}, "lowband_air"
+            _AIR_KERNEL
+            % {
+                "air": _stencil_source(p, boundary=False),
+                "boundary": _stencil_source(p, boundary=True),
+            },
+            "lowband_air",
         )
-        self.boundary = raw_kernel(
-            _BOUNDARY_KERNEL % {"stencil": _stencil_source(p, boundary=True), "most": MAX_BRANCHES},
-            "lowband_boundary",
-        )
+        self.lossy_kernel = raw_kernel(_LOSSY_KERNEL % {"most": MAX_BRANCHES}, "lowband_lossy")
         self.copy = raw_kernel(_SMALL_KERNELS, "lowband_copy")
         self.inject = raw_kernel(_SMALL_KERNELS, "lowband_inject")
         self.record = raw_kernel(_SMALL_KERNELS, "lowband_record")
-        self.kind = xp.asarray(p.kind.reshape(-1))
+        self.mask = xp.asarray(node_masks(p).reshape(-1))
         self.lateral = xp.asarray(np.ascontiguousarray(p.lateral).reshape(-1))
-        self.bn = tuple(xp.asarray(a) for a in (p.bn_column, p.bn_z, p.bn_adjacency, p.bn_lossy))
-        self.lossy = (xp.asarray(p.lossy_material), xp.asarray(p.lossy_ssaf))
+        rows = np.flatnonzero(p.bn_lossy >= 0)
+        self.lossy = tuple(
+            xp.asarray(a) for a in (p.bn_column[rows], p.bn_z[rows], p.lossy_material, p.lossy_ssaf)
+        )
         self.materials = (
             xp.asarray(p.branches),
             xp.asarray(np.ascontiguousarray(p.quads).reshape(-1)),
             xp.asarray(p.beta),
         )
+        # What each lossy node held one and two steps before, ``[source, node]``.
+        self.before = [
+            xp.zeros((batch, p.lossy), dtype=xp.float32),
+            xp.zeros((batch, p.lossy), dtype=xp.float32),
+        ]
         self.copies = [(xp.asarray(dst), xp.asarray(src), int(dst.size)) for dst, src in p.copies]
         self.inject_at = xp.asarray(drive.inject_index * batch + drive.inject_source)
         self.inject_signal = xp.asarray(np.ascontiguousarray(drive.inject_signal).reshape(-1))
         self.record_at = xp.asarray(drive.record_index * batch + drive.record_source)
         threads = self.THREADS
         self.air_grid = (p.column_count, (p.nz * batch + threads - 1) // threads)
-        self.bn_grid = ((int(p.bn_index.size) + threads - 1) // threads, batch)
+        self.lossy_grid = ((p.lossy + threads - 1) // threads, batch)
 
     def state(self) -> State:
         return State.zeros(self.problem, self.drive.batch, self.xp)
@@ -506,9 +547,51 @@ class CardStepper:
             (self.drive.record_index.size, self.drive.steps), dtype=self.xp.float32
         )
 
+    def launch_air(self, state: State) -> None:
+        p, i32, f32 = self.problem, np.int32, np.float32
+        self.air(
+            self.air_grid,
+            (self.THREADS,),
+            (
+                state.u0,
+                state.u1,
+                self.mask,
+                self.lateral,
+                i32(p.nz),
+                i32(self.drive.batch),
+                i32(len(p.lateral_offsets)),
+                f32(p.a1),
+                f32(p.a2),
+                f32(p.sl2),
+                f32(p.l32),
+            ),
+        )
+
+    def launch_lossy(self, state: State) -> None:
+        p, i32 = self.problem, np.int32
+        self.lossy_kernel(
+            self.lossy_grid,
+            (self.THREADS,),
+            (
+                state.u0,
+                self.before[0],
+                *self.lossy,
+                *self.materials,
+                state.vh,
+                state.gh,
+                i32(p.nz),
+                i32(self.drive.batch),
+                i32(p.max_branches),
+                i32(p.lossy),
+                np.float32(p.lo2),
+            ),
+        )
+        # The value just written is the one held a step before, next step.
+        self.before.reverse()
+
     def step(self, state: State, n: int, out: Any) -> None:
         p, batch, threads = self.problem, self.drive.batch, self.THREADS
-        i32, f32, i64 = np.int32, np.float32, np.int64
+        i32, i64 = np.int32, np.int64
         steps = i64(self.drive.steps)
         rows = int(self.drive.record_index.size)
         if rows:
@@ -523,47 +606,10 @@ class CardStepper:
                 (threads,),
                 (state.u1, dst, src, i32(count), i32(batch)),
             )
-        laterals = i32(len(p.lateral_offsets))
         if p.column_count:
-            self.air(
-                self.air_grid,
-                (threads,),
-                (
-                    state.u0,
-                    state.u1,
-                    self.kind,
-                    self.lateral,
-                    i32(p.nz),
-                    i32(batch),
-                    laterals,
-                    f32(p.a1),
-                    f32(p.a2),
-                    f32(p.l32),
-                ),
-            )
-        if p.bn_index.size:
-            self.boundary(
-                self.bn_grid,
-                (threads,),
-                (
-                    state.u0,
-                    state.u1,
-                    *self.bn,
-                    self.lateral,
-                    *self.lossy,
-                    *self.materials,
-                    state.vh,
-                    state.gh,
-                    i32(p.bn_index.size),
-                    i32(p.nz),
-                    i32(batch),
-                    laterals,
-                    i32(p.max_branches),
-                    f32(p.a2),
-                    f32(p.sl2),
-                    f32(p.lo2),
-                ),
-            )
+            self.launch_air(state)
+        if p.lossy:
+            self.launch_lossy(state)
         injected = int(self.drive.inject_index.size)
         self.inject(
             ((injected + threads - 1) // threads,),

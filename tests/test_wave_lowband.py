@@ -376,7 +376,7 @@ class TestTheGrid:
         room = 17 * 14 * 10
         assert cut.reached == room and cut.updated == room
         assert cut.record["lossy_nodes_reached"] == cut.lossy
-        assert cut.bytes_per_source() == 8 * cut.nodes + 8 * cut.lossy * 3
+        assert cut.bytes_per_source() == 8 * cut.nodes + 8 * cut.lossy * (3 + 1)
         # A node outside the room reads the column of zeros, whatever is solved.
         outside = cut.compact(np.array([node(grid, (2, 2, 2))]))
         assert outside[0] == -1

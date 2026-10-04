@@ -10,6 +10,8 @@ python -m reverberate.wave.lowband line --field S1.h5 --plan plan.json --out DIR
 python -m reverberate.wave.lowband compare --bundle B --out O [--scheme S] [--ppw P]
         (--reference O_REF [--pffdtd DIR] | --line DIR/line.npz) [--rate USD_PER_H]
     the pairs of the bundle on the batched solver, then their error against the reference
+python -m reverberate.wave.lowband between --reference O_A --candidate O_B
+    two campaigns' pair caches against each other, pairs matched by their positions
 python -m reverberate.wave.lowband cost --bundle B --out O [--scheme S] [--ppw P]
         [--batches 1,4,16,64] [--steps 400] [--cells 10] --rate USD_PER_H
     node updates a second, seconds and USD per source position and per pair, per batch size
@@ -77,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--batches", default="1,2,4,8,16,32,64")
             p.add_argument("--steps", type=int, default=400)
             p.add_argument("--cells", type=int, default=10)
+
+    p = sub.add_parser("between", help="two campaigns' pair caches against each other")
+    p.add_argument("--reference", type=Path, required=True)
+    p.add_argument("--candidate", type=Path, required=True)
 
     p = sub.add_parser("counts", help="forward, reciprocal and mixed solve counts")
     p.add_argument("--heard", type=Path, required=True)
@@ -274,6 +280,14 @@ def main(argv: list[str] | None = None) -> int:
         return _compare(args)
     if args.command == "cost":
         return _cost(args)
+    if args.command == "between":
+        from reverberate.wave.lowband.harness import compare_caches, format_table
+
+        table = compare_caches(args.reference, args.candidate)
+        (args.candidate / "between.json").write_text(json.dumps(table, indent=1))
+        print(f"{args.candidate} against {args.reference}")
+        print(format_table(table))
+        return 0
     if args.command == "counts":
         from reverberate.wave.lowband.reciprocity import solve_counts
 

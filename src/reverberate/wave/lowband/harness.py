@@ -48,6 +48,7 @@ from reverberate.wave.lowband.solver import drive_for, solve, steps_for
 
 __all__ = [
     "THIRD_OCTAVES_HZ",
+    "compare_caches",
     "compare_responses",
     "cost_table",
     "extract_line",
@@ -197,8 +198,49 @@ def verify(
             )
         report[scheme.name] = record
         say(f"{scheme.name}: {json.dumps(record)}")
+    if xp is not np:
+        report["per_pair_path"] = _verify_filters(xp)
+        say(f"per pair path: {json.dumps(report['per_pair_path'])}")
     (out / "verify.json").write_text(json.dumps(report, indent=1))
     return report
+
+
+def _verify_filters(xp: Any) -> dict[str, Any]:
+    """The kept resampler against the table's, and several cells a launch against one."""
+    from reverberate.accel import dsp
+    from reverberate.spatial.encode import EncoderSettings
+    from reverberate.wave.lowband.fit import CellEncoder, Resampler
+
+    rng = np.random.default_rng(7)
+    rate, steps = 27307.107326536352, 6000
+    signals = xp.asarray(rng.standard_normal((40, steps)))
+    kept = Resampler.prepare(steps, rate, LOW_RATE_HZ, xp).apply(signals, xp)
+    table = dsp.resample(signals, rate, LOW_RATE_HZ, xp)
+    offsets = rng.uniform(-0.3, 0.3, size=(40, 3))
+    offsets[0] = 0.0
+    encoder = CellEncoder(
+        scheme=CARTESIAN,
+        grid_rate_hz=rate,
+        grid_step_m=0.0218,
+        sound_speed_m_s=343.2,
+        fmax_hz=1500.0,
+        settings=EncoderSettings(order=2, fit_order=3, max_frequency_hz=1500.0),
+        xp=xp,
+        samples=round(steps / rate * LOW_RATE_HZ),
+        scale=1.0,
+    )
+    records = xp.asarray(rng.standard_normal((120, steps)).astype(np.float32))
+    together = encoder.cells(records, [offsets] * 3)
+    alone = [encoder.cell(records[40 * i : 40 * i + 40], offsets) for i in range(3)]
+    peak = max(float(np.abs(a).max()) for a in alone)
+    return {
+        "resampler_equals_table": bool(xp.array_equal(kept, table)),
+        "resampler_max_difference": float(xp.abs(kept - table).max()),
+        "cells_against_cell_over_peak": max(
+            float(np.abs(t - a).max()) for t, a in zip(together, alone, strict=True)
+        )
+        / peak,
+    }
 
 
 def _against_engine(
@@ -311,6 +353,41 @@ def stored_of_cache(cache: Any, key: str, *, atmosphere: Atmosphere | None = Non
     return np.asarray(
         to_stored(response, LOW_RATE_HZ, atmosphere=atmosphere or Atmosphere()), dtype=np.float64
     )
+
+
+def compare_caches(reference: Path, candidate: Path) -> dict[str, Any]:
+    """Two campaigns' pair caches against each other, whatever engine or grid made each.
+
+    ``reference`` and ``candidate`` are campaigns' output directories. Their
+    pairs are matched by the two positions each record names, so the keys,
+    which name the solver and the grid, need not agree.
+    """
+    from reverberate.accel.pairs import PairCache
+
+    def held(out: Path) -> tuple[Any, dict[tuple[float, ...], tuple[str, list[float]]]]:
+        grids = sorted(p.name for p in (Path(out) / "pairs").iterdir() if p.is_dir())
+        if len(grids) != 1:
+            raise ValueError(f"{out} holds the pairs of {len(grids)} grids, not of one")
+        cache = PairCache(Path(out) / "pairs", grids[0])
+        found = {
+            (*record["source_m"], *record["cell_m"]): (key, record["centre_m"])
+            for key, record in cache.records().items()
+        }
+        return cache, found
+
+    theirs, there = held(reference)
+    ours, here = held(candidate)
+    shared = sorted(set(there) & set(here))
+    if not shared:
+        raise ValueError("the two caches share no pair")
+    table = compare_responses(
+        np.stack([stored_of_cache(theirs, there[pair][0]) for pair in shared]),
+        np.stack([stored_of_cache(ours, here[pair][0]) for pair in shared]),
+        reference_centres=[(0.0, np.asarray([there[pair][1] for pair in shared], dtype=float))],
+        candidate_centres=np.asarray([here[pair][1] for pair in shared], dtype=float),
+    )
+    table["reference"], table["candidate"] = str(reference), str(candidate)
+    return table
 
 
 def _band_edges(centre: float) -> tuple[float, float]:

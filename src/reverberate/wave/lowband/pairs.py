@@ -32,6 +32,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
@@ -62,6 +63,20 @@ SOLVER = "reverberate.wave.lowband/1"
 MEMORY_SHARE = 0.8
 #: The most sources of one launch: the boundary kernel's second grid axis.
 BATCH_LIMIT = 4096
+
+
+def cores_lent() -> int:
+    """The cores this process may really use: the cgroup's quota where there is one."""
+    import os
+
+    count = os.cpu_count() or 1
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            count = min(count, max(1, int(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, count - 2)
 
 
 def solver_name(scheme: Scheme, ppw: float) -> str:
@@ -180,8 +195,9 @@ class LowbandPairs(PairsCampaign):
             return {"low": {"cached": True}}
         t0 = time.time()
         if self.grid_scheme.fcc:
-            # The card's voxeliser makes the Cartesian grid only: PFFDTD's own, on the host.
-            entry = voxelise(scene)
+            # The card's voxeliser makes the Cartesian grid only: PFFDTD's own, on the host,
+            # on the cores the machine really lends (a container counts its host's).
+            entry = voxelise(scene, nprocs=cores_lent())
             record: dict[str, Any] = dict(entry.manifest)
             record["computed_on"] = "host"
         else:
@@ -288,30 +304,26 @@ class LowbandPairs(PairsCampaign):
         records = solve(problem, drive, xp, say=lambda m: self.say(f"    {m}"), timing=timing)
         solve_s = time.time() - t0
         t0 = time.time()
-        row = 0
-        pairs = 0
-        for item in batch:
-            for cell in item.cells:
-                design = self.designs[cell]
-                assert design is not None
-                count = int(self.cell_nodes(cell).size)
-                response = encoder.cell(
-                    records[row : row + count], design.positions - design.centre
-                )
-                row += count
-                self.cache.write(
-                    self.key_of(item.source, cell),
-                    response,
-                    {
-                        "source_m": [float(v) for v in self.sources[item.source]],
-                        "cell_m": [float(v) for v in self.cells[cell]],
-                        "centre_m": [float(v) for v in design.centre],
-                        "fmax_hz": self.fmax_hz["low"],
-                        "scale": self.scale,
-                        "solver": str(self.spec["solver"]),
-                    },
-                )
-                pairs += 1
+        spans = [(item.source, cell) for item in batch for cell in item.cells]
+        designs = [self.designs[cell] for _, cell in spans]
+        responses = encoder.cells(
+            records, [d.positions - d.centre for d in designs if d is not None]
+        )
+        for (source, cell), design, response in zip(spans, designs, responses, strict=True):
+            assert design is not None
+            self.cache.write(
+                self.key_of(source, cell),
+                response,
+                {
+                    "source_m": [float(v) for v in self.sources[source]],
+                    "cell_m": [float(v) for v in self.cells[cell]],
+                    "centre_m": [float(v) for v in design.centre],
+                    "fmax_hz": self.fmax_hz["low"],
+                    "scale": self.scale,
+                    "solver": str(self.spec["solver"]),
+                },
+            )
+        pairs = len(spans)
         del records
         return {
             "sources": [item.source for item in batch],
@@ -436,6 +448,9 @@ class LowbandPairs(PairsCampaign):
                 thread.join()
         else:
             work(cards[0] if cards else None)
+        if self.xp is not np:
+            # What the pool still holds is given back: another engine may follow on this card.
+            self.xp.get_default_memory_pool().free_all_blocks()
         if failures:
             raise failures[0]
         self.batches = records

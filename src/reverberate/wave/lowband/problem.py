@@ -322,11 +322,13 @@ class Problem:
 
     def bytes_per_source(self) -> int:
         """Card memory of one source: two fields and the boundary branches' two states."""
-        return 8 * self.nodes + 8 * self.lossy * self.max_branches
+        return 8 * self.nodes + 8 * self.lossy * (self.max_branches + 1)
 
     def bytes_shared(self) -> int:
         """Card memory of the grid itself, whatever the number of sources."""
+        # A node's mask on the card is two bytes, and a lossy node's own value is kept twice.
         arrays = (
+            self.kind,
             self.kind,
             self.lateral,
             self.bn_column,
