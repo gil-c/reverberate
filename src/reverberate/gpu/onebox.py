@@ -11,6 +11,13 @@ restarted once from its state on disk, a machine that vanished is reported
 with what it had done, and a machine whose work is home is destroyed and
 verified destroyed.
 
+A host is looked at before it is used. Its cards are queried the moment ssh
+answers, and a host on which another tenant holds memory is destroyed and the
+next offer taken: one such host carried about 70 GB in use on each card, and
+the campaign died at the encode, out of memory, after the solves were paid
+for. Hosts refused or silent in a run are not offered to it again, and a list
+of offers and machines to avoid can be given from outside.
+
 Two campaigns cost five to ten times their compute to idle cards, transfers
 on the card's clock and boxes rented after the solves. Here there is one
 rental, the transfers are the bundle up (a few hundred megabytes) and the
@@ -22,6 +29,7 @@ from __future__ import annotations
 import json
 import shlex
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,9 +49,11 @@ __all__ = [
     "MachineNeed",
     "Watch",
     "campaign_need",
+    "cards_in_use",
     "choose_offers",
     "fetch",
     "monitor_once",
+    "occupied_cards",
     "provision_machine",
     "rent",
     "run",
@@ -56,6 +66,13 @@ IMAGE = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
 #: VRAM per grid node and the engine's fixed overhead, measured on an A100 80 GB.
 VRAM_PER_NODE_B = 9.027
 VRAM_FIXED_GB = 2.13
+
+#: What a card may hold before anything of ours runs on it, in MiB. An idle
+#: card reports a few MiB, a desktop session some hundreds; another tenant's
+#: job reports gigabytes.
+CARD_USED_LIMIT_MIB = 1024.0
+#: One line a card: memory in use, memory in total, in MiB.
+CARD_QUERY = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
 
 #: Where the campaign lives on the machine.
 REMOTE_ROOT = "/root/campaign"
@@ -158,15 +175,19 @@ def choose_offers(
     min_ram_gb: float = 60.0,
     min_cores: int = 8,
     gpu: str = "",
+    avoid: Collection[int] = (),
 ) -> list[Any]:
     """Offers whose cards together hold the grid, cheapest first, sized by the whole host.
 
     ``gpu`` restricts the card's name to those containing it (``A100``).
+    ``avoid`` drops the offers named there, by their own id or their host's.
     """
+    avoided = set(avoid)
     good = [
         o
         for o in offers
-        if o.num_gpus * o.gpu_ram_gb >= need.vram_gb
+        if not vast.offer_ids(o) & avoided
+        and o.num_gpus * o.gpu_ram_gb >= need.vram_gb
         and (not gpu or gpu.lower() in o.gpu_name.lower())
         and o.ram_gb >= min_ram_gb
         and o.cpu_cores >= min_cores
@@ -327,6 +348,39 @@ def _launch_command(
     )
 
 
+def cards_in_use(text: str) -> list[tuple[float, float]]:
+    """Memory in use and in total on each card, in MiB, from :data:`CARD_QUERY`'s answer."""
+    cards = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        used, total = (float(value) for value in line.split(","))
+        cards.append((used, total))
+    return cards
+
+
+def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT_MIB) -> str | None:
+    """Why the host's cards cannot be used, or ``None`` when every one of them is empty.
+
+    Asked once, before anything is built or pushed. A host whose cards do not
+    answer the query is refused like one whose cards are held.
+    """
+    try:
+        cards = cards_in_use(run_on(machine, CARD_QUERY, what="cards", timeout=90))
+    except Exception as error:  # noqa: BLE001 - a host that cannot be asked is not used
+        return f"the cards did not answer: {str(error)[:120]}"
+    if not cards:
+        return "the host reports no card"
+    say(
+        "card memory in use before anything runs: "
+        + ", ".join(f"{used:.0f} of {total:.0f} MiB" for used, total in cards)
+    )
+    held = [f"card {i} {used:.0f} MiB" for i, (used, _) in enumerate(cards) if used > limit_mib]
+    if held:
+        return f"cards held by someone else, over {limit_mib:.0f} MiB in use: {', '.join(held)}"
+    return None
+
+
 def rent(
     client: Any,
     identity: Any,
@@ -337,8 +391,16 @@ def rent(
     min_ram_gb: float,
     gpu: str,
     say: Any,
+    avoid: set[int] | None = None,
 ) -> tuple[Any, int, Any]:
-    """The cheapest host that holds the campaign: the machine, its id and the offer taken."""
+    """The cheapest host that holds the campaign: the machine, its id and the offer taken.
+
+    Offers named in ``avoid``, by their own id or their host's, are not
+    rented. A host whose cards are not empty when ssh answers is destroyed and
+    the next offer tried; it and any host that stayed silent are added to
+    ``avoid``, which the caller keeps.
+    """
+    avoid = set() if avoid is None else avoid
     offers: list[Any] = []
     for count in (1, 2, 4):
         offers += client.search(
@@ -353,16 +415,27 @@ def rent(
             ),
             limit=400,
         )
-    good = choose_offers(offers, need, max_dph=max_dph, min_ram_gb=min_ram_gb, gpu=gpu)
+    good = choose_offers(offers, need, max_dph=max_dph, min_ram_gb=min_ram_gb, gpu=gpu, avoid=avoid)
     if not good:
         raise SystemExit(f"no offer under {max_dph} USD/h fits: {need.describe()}")
     for offer in good[:6]:
         say("  " + offer.describe())
     say(f"  cap {hours:g} h -> at most {vast.estimate_cost_usd(good[0].dph_total, hours):.2f} USD")
+    # ``rent_one`` removes every offer it tries from the list, so the one it
+    # kept is the last it removed, and the list is empty when that was the last.
+    ranked = list(good)
     machine, instance = vast.rent_one(
-        client, identity, good, hours=hours, disk_gb=need.disk_gb, image=IMAGE, say=say
+        client,
+        identity,
+        good,
+        hours=hours,
+        disk_gb=need.disk_gb,
+        image=IMAGE,
+        avoid=avoid,
+        refuse=lambda machine: occupied_cards(machine, say),
+        say=say,
     )
-    return machine, instance, good[0]
+    return machine, instance, ranked[len(ranked) - len(good) - 1]
 
 
 def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[str, float]:
@@ -493,12 +566,16 @@ def run(
     min_ram_gb: float = 60.0,
     gpu: str = "",
     campaign_args: str = "",
+    avoid: Collection[int] = (),
     say: Any = print,
 ) -> dict[str, Any]:
-    """Rent, provision, push, launch, watch every five minutes, fetch, destroy.
+    """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
 
     ``instance`` resumes on a machine already rented (the campaign resumes
-    from its state on disk). Returns the record written to ``home/onebox.json``.
+    from its state on disk). ``avoid`` names offers and machines not to rent;
+    the record's ``avoided`` is that list and the hosts this run refused,
+    ready to be given to the next. Returns the record written to
+    ``home/onebox.json``.
     """
     bundle, home, repo = Path(bundle), Path(home), Path(repo)
     home.mkdir(parents=True, exist_ok=True)
@@ -513,16 +590,23 @@ def run(
         if not yes:
             say("nothing rented: pass --yes")
             return record
-        machine, instance, offer = rent(
-            client,
-            identity,
-            need,
-            hours=hours,
-            max_dph=max_dph,
-            min_ram_gb=min_ram_gb,
-            gpu=gpu,
-            say=say,
-        )
+        avoided = set(avoid)
+        try:
+            machine, instance, offer = rent(
+                client,
+                identity,
+                need,
+                hours=hours,
+                max_dph=max_dph,
+                min_ram_gb=min_ram_gb,
+                gpu=gpu,
+                say=say,
+                avoid=avoided,
+            )
+        finally:
+            # Kept even when no offer produced a machine: the next run needs it most then.
+            record["avoided"] = sorted(avoided)
+            (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
         record["instance"] = instance
         record["offer"] = offer.id
         (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
@@ -587,6 +671,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--gpu", default="", help="only cards whose name contains this")
     parser.add_argument(
+        "--avoid",
+        type=int,
+        nargs="*",
+        default=[],
+        metavar="ID",
+        help="offer or machine ids never to rent; hosts refused in the run are added",
+    )
+    parser.add_argument(
         "--campaign-args", default="", help="extra flags for the campaign, e.g. a flow test's bands"
     )
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[3])
@@ -606,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         min_ram_gb=args.min_ram_gb,
         gpu=args.gpu,
         campaign_args=args.campaign_args,
+        avoid=args.avoid,
     )
     return 0
 

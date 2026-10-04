@@ -289,6 +289,13 @@ class TestClient:
         offer = Offer.from_api({"id": 1, "geolocation": None})
         assert offer.location == "unknown"
 
+    def test_an_offer_is_named_by_its_host_as_well_as_by_itself(self) -> None:
+        offer = Offer.from_api({"id": 31, "machine_id": 9001})
+        assert vast.offer_ids(offer) == {31, 9001}
+        assert "machine 9001" in offer.describe()
+        # An API that does not say leaves the offer's own id, and no 0 to match on.
+        assert vast.offer_ids(Offer.from_api({"id": 31})) == {31}
+
 
 def test_build_script_pins_the_commit_b1_measured() -> None:
     """The cost table only describes one PFFDTD tree; the script must pin it."""
