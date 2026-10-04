@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--models-from", type=Path, default=None, help="an earlier export to reuse")
     p.add_argument("--hssd-root", type=Path, default=None)
     p.add_argument("--recipe", type=Path, default=None, help="a scene recipe: its positions")
+    p.add_argument(
+        "--all-positions",
+        action="store_true",
+        help="with --recipe: every position the sources pass through, not only the audible ones",
+    )
     p.add_argument("--sources", type=Path, default=None, help="[position, 3] as .npy")
     p.add_argument("--cells", type=Path, required=True, help="[cell, 3] as .npy")
     p.add_argument(
@@ -144,7 +149,11 @@ def main(argv: list[str] | None = None) -> int:
         if (args.recipe is None) == (args.sources is None):
             raise SystemExit("give the source positions as --recipe or as --sources, not both")
         if args.recipe is not None:
-            sources = source_positions(json.loads(args.recipe.read_text()))["positions"]
+            from reverberate.scenes import load_recipe
+
+            sources = source_positions(
+                load_recipe(args.recipe), audible_only=not args.all_positions
+            )["positions"]
         else:
             sources = np.load(args.sources)
         record = prepare_pairs_bundle(

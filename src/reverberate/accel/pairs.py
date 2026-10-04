@@ -255,57 +255,30 @@ def install_pairs(pulled: Path, *, publish: bool = False) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def source_positions(recipe: dict[str, Any]) -> dict[str, Any]:
+def source_positions(recipe: Any, *, audible_only: bool = True) -> dict[str, Any]:
     """Every position the low band is solved from for a recipe, in whole millimetres.
 
-    The stations where a source dwells, the samples of the rails it travels
-    (``j * pitch_m`` from ``a``, and ``b`` itself) and of the vertical rail
-    of a seat it rises on, as ``docs/formats/scene-recipe.md`` defines them.
+    ``recipe`` is a :class:`reverberate.scenes.Recipe`, or its JSON tree. The
+    positions are those of :func:`reverberate.scenes.low_band_source_positions`,
+    the recipe's own kinematics: the stations where a source dwells, the
+    samples of the rails it travels and of the vertical rail of a seat it
+    rises on. **Only the positions a source is audible at** are given, the
+    two solved samples either side of it at every audible step: a wave solve
+    is what a campaign pays for, and a rail walked in silence needs none.
+    With ``audible_only`` false every position the sources pass through is
+    given, which fills the dwelling's cache for the rails whole.
+
     Returns ``positions`` as ``[position, 3]`` in metres, each once, and
-    ``by_source``: the rows each source passes through.
+    ``by_source``: the rows each source reads.
     """
-    floor = float(recipe["dwelling"]["floor_y_m"])
-    standing = floor + float(recipe["heights"]["standing_m"])
-    seated = floor + float(recipe["heights"]["seated_m"])
-    stations = {s["id"]: s for s in recipe["stations"]}
-    rails = {r["id"]: r for r in recipe["rails"]}
-    rows: dict[tuple[int, int, int], int] = {}
-    by_source: dict[str, list[int]] = {}
+    from reverberate.scenes import Recipe, low_band_source_positions
 
-    def row_of(position: Any) -> int:
-        key = tuple(round(float(v) * 1000.0) for v in position)
-        return rows.setdefault((key[0], key[1], key[2]), len(rows))
-
-    def along(points: np.ndarray, pitch: float) -> np.ndarray:
-        """The samples of a polyline at ``j * pitch`` from its start, and its end."""
-        steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
-        arc = np.concatenate([[0.0], np.cumsum(steps)])
-        wanted = np.append(np.arange(int(np.floor(arc[-1] / pitch + 1e-9)) + 1) * pitch, arc[-1])
-        return np.stack(
-            [np.interp(wanted, arc, points[:, j]) for j in range(points.shape[1])], axis=1
-        )
-
-    for source in recipe["sources"]:
-        mine: list[int] = []
-        for segment in source["segments"]:
-            if segment["type"] == "dwell":
-                x, _, z = stations[segment["station"]]["position"]
-                y = seated if segment.get("height") == "seated" else standing
-                mine.append(row_of((x, y, z)))
-            elif segment["type"] == "travel":
-                rail = rails[segment["rail"]]
-                flat = along(np.asarray(rail["points"], dtype=float), float(rail["pitch_m"]))
-                mine.extend(row_of((x, standing, z)) for x, z in flat)
-            elif segment["type"] == "rise":
-                x, _, z = stations[segment["station"]]["position"]
-                pitch = float(recipe["rails"][0]["pitch_m"]) if recipe["rails"] else 0.08
-                heights = along(np.array([[seated], [standing]]), pitch)[:, 0]
-                mine.extend(row_of((x, y, z)) for y in heights)
-            else:
-                raise ValueError(f"unknown segment type {segment['type']!r}")
-        by_source[str(source["id"])] = sorted(set(mine))
-    positions = np.array(sorted(rows, key=rows.__getitem__), dtype=float).reshape(-1, 3) / 1000.0
-    return {"positions": positions, "by_source": by_source}
+    held = recipe if isinstance(recipe, Recipe) else Recipe.from_dict(recipe)
+    found = low_band_source_positions(held, audible_only=audible_only)
+    return {
+        "positions": found.positions,
+        "by_source": {name: list(rows) for name, rows in found.by_source.items()},
+    }
 
 
 def estimate(

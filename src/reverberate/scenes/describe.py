@@ -6,9 +6,8 @@ import numpy as np
 
 from reverberate.scenes.kinematics import (
     listener_state,
-    rail_arc_lengths,
+    low_band_source_positions,
     rail_length,
-    seat_rail_heights,
     source_state,
 )
 from reverberate.scenes.recipe import Dwell, Recipe, Rise, Travel, canonical_bytes, recipe_sha256
@@ -19,26 +18,16 @@ __all__ = ["describe", "low_band_positions"]
 def low_band_positions(recipe: Recipe) -> dict[str, int]:
     """How many source positions the low band is solved at for this recipe.
 
-    A station dwelt at is one; a rail travelled is its samples; a seat a
-    source rises at is the samples of its vertical rail. The ends a rail
-    shares with a station are counted with the rail.
+    ``all`` is every position the sources pass through, each once: a station
+    dwelt at, the samples of a rail travelled, the samples of the vertical
+    rail of a seat a source rises at; ``stations``, ``rail_samples`` and
+    ``seat_rail_samples`` split it, an end a rail shares with a station being
+    the rail's. ``audible`` is how many of them a source is audible at, which
+    is what a trace solves (:func:`~.kinematics.low_band_source_positions`).
     """
-    dwelt: set[tuple[str, str]] = set()
-    rails: set[str] = set()
-    risen: set[str] = set()
-    for source in recipe.sources:
-        for segment in source.segments:
-            if isinstance(segment, Dwell):
-                dwelt.add((segment.station, segment.height))
-            elif isinstance(segment, Travel):
-                rails.add(segment.rail)
-            else:
-                risen.add(segment.station)
-    return {
-        "stations": len(dwelt),
-        "rail_samples": sum(len(rail_arc_lengths(recipe.rail(rail))) for rail in sorted(rails)),
-        "seat_rail_samples": len(risen) * len(seat_rail_heights(recipe)),
-    }
+    every = low_band_source_positions(recipe, audible_only=False)
+    heard = low_band_source_positions(recipe, audible_only=True)
+    return {**every.counts(), "all": every.count, "audible": heard.count}
 
 
 def describe(recipe: Recipe) -> str:
@@ -59,9 +48,10 @@ def describe(recipe: Recipe) -> str:
     ]
     positions = low_band_positions(recipe)
     lines.append(
-        f"  low band source positions: {sum(positions.values())} "
+        f"  low band source positions: {positions['all']} "
         f"({positions['stations']} stations, {positions['rail_samples']} on rails, "
-        f"{positions['seat_rail_samples']} on seats' vertical rails)"
+        f"{positions['seat_rail_samples']} on seats' vertical rails), "
+        f"{positions['audible']} where a source is audible"
     )
     if recipe.generator is not None:
         lines.append(f"  generator {recipe.generator.name} {recipe.generator.version}")

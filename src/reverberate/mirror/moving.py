@@ -45,7 +45,6 @@ diffracted onset of a step without a direct path
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -69,6 +68,13 @@ from reverberate.mirror.ism import (
 from reverberate.mirror.parameters import apply_parameters, image_scene
 from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.render import RenderSettings, early_signals
+from reverberate.render.pack import (
+    KIND_DIFFRACTED,
+    KIND_DIFFRACTED_REFLECTED,
+    KIND_DIRECT,
+    KIND_SPECULAR,
+    path_id,
+)
 
 __all__ = [
     "KIND_DIFFRACTED",
@@ -85,12 +91,6 @@ __all__ = [
     "render_early",
     "trace_early",
 ]
-
-#: The pack's ``kind`` of a row.
-KIND_DIRECT = 0
-KIND_SPECULAR = 1
-KIND_DIFFRACTED = 2
-KIND_DIFFRACTED_REFLECTED = 3
 
 
 @dataclass(frozen=True)
@@ -869,37 +869,6 @@ def _validate(
 # --------------------------------------------------------------------------
 # the table
 # --------------------------------------------------------------------------
-
-_IDS: dict[bytes, int] = {}
-
-
-def path_id(
-    kind: int,
-    facets: np.ndarray | tuple[int, ...] = (),
-    edges: np.ndarray | tuple[int, ...] | None = None,
-    *,
-    rank: int | None = None,
-) -> int:
-    """A path's identity, the same at every step it exists (``scene-pack.md``).
-
-    The first eight bytes, little endian, of the SHA-256 of: the kind as one
-    byte; the facets in bounce order as little endian ``int32``; and, for a
-    diffracted path, ``-1`` then the edges it bends round in order from the
-    source. A diffracted path whose corners are not all on edges has no such
-    name: it gives ``rank``, its rank by delay among the step's such paths,
-    and is named by ``-1, -1, rank`` in place of the edges.
-    """
-    words = [int(f) for f in facets]
-    if rank is not None:
-        words += [-1, -1, int(rank)]
-    elif edges is not None:
-        words += [-1, *(int(e) for e in edges)]
-    key = bytes([int(kind)]) + np.asarray(words, dtype="<i4").tobytes()
-    found = _IDS.get(key)
-    if found is None:
-        found = int.from_bytes(hashlib.sha256(key).digest()[:8], "little")
-        _IDS[key] = found
-    return found
 
 
 @dataclass(frozen=True)

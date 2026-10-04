@@ -36,7 +36,7 @@ from reverberate.render.early import EarlyPart
 from reverberate.render.low import LowPart
 from reverberate.render.pack import ScenePack, Source, sources_of
 from reverberate.render.tail import TailPart
-from reverberate.render.translate import PlaneWaveFusion, Translation
+from reverberate.render.translate import SpatialTranslation, Translation
 
 __all__ = ["PARTS", "Engine", "RenderSettings", "SourceRenderer"]
 
@@ -185,7 +185,7 @@ class Engine:
         self.dry = dict(dry or {})
         self.clips = clips
         h = pack.header
-        self.translation = translation or PlaneWaveFusion.from_fusion(
+        self.translation = translation or SpatialTranslation.from_fusion(
             h.fusion, h.order, h.sound_speed_m_s
         )
         self._renderers: dict[str, SourceRenderer] = {}

@@ -48,6 +48,15 @@ distance read to stay under 0.15 of the cell's distance to the source
 (0.25 for the pressure alone). :func:`serving_radius_m` is that rule and
 :func:`choose_cells` applies it.
 
+**Applied without being formed.** An operator is 64 by 64, or 64 by 128,
+complex numbers a frequency, and a product with it is the cost of a render
+that moves. Both operators are a sum over the quadrature's plane waves, so
+:func:`apply_translation` and :func:`apply_fusion` spread the cells' fields
+on the plane waves, turn each by its own phase and gather: the same
+``T(f) b`` and ``G(f) [b_0; b_1]`` to rounding, in a twentieth of the time.
+The signal engine reads a head through those two
+(``reverberate.render.translate``).
+
 **Arrays.** Every operator is computed in the array namespace of its
 arguments, ``numpy`` or ``cupy``, or in ``xp`` when given; the harmonics of
 the quadrature are evaluated once on the host.
@@ -77,6 +86,8 @@ __all__ = [
     "TRANSLATE_WITHIN_M",
     "SOURCE_SHARE",
     "SURFACE_SHARE",
+    "apply_fusion",
+    "apply_translation",
     "cell_stride",
     "choose_cells",
     "clearance_m",
@@ -350,6 +361,84 @@ def fusion_weights(
             operator.shape[0], offsets.shape[0], channels
         )
     return weights
+
+
+def _gathered(
+    spread: Any, offsets: Any, k: Any, order: int, quadrature_degree: int, xp: Any
+) -> Any:
+    """``Y' W sum_j diag(exp(+i k s . d_j)) Y z_j``: ``[cell, channel, f]`` to ``[channel, f]``."""
+    directions, weights, basis = _plane_waves(order, quadrature_degree)
+    projection = offsets @ _on(xp, directions, xp.float64).T  # [cell, direction]
+    phase = xp.exp(1j * projection[:, :, None] * k[None, None, :])  # [cell, direction, f]
+    waves = xp.matmul(_on(xp, basis, xp.complex128)[None], spread) * phase
+    gather = _on(xp, np.ascontiguousarray((basis * weights[:, None]).T), xp.complex128)
+    return xp.matmul(gather, waves.sum(axis=0))
+
+
+def apply_translation(
+    field: Any,
+    offset_scene: Any,
+    freqs_hz: Any,
+    order: int,
+    *,
+    sound_speed_m_s: float = SOUND_SPEED_M_S,
+    quadrature_degree: int = QUADRATURE_DEGREE,
+    xp: Any = None,
+) -> Any:
+    """``T(f) b(f)`` of :func:`translation_operator`, without forming ``T``.
+
+    ``field`` is ``[channel, frequency]``, one cell's expansion in the
+    ``rfft`` convention; ``offset_scene`` is ``d = target - centre``. Returns
+    the expansion about the target, the same shape, complex128.
+    """
+    xp = namespace_of(field, xp=xp)
+    offsets = xp.asarray(offset_scene, dtype=xp.float64).reshape(1, 3)
+    k = _wavenumbers(freqs_hz, sound_speed_m_s, xp)
+    spread = xp.asarray(field, dtype=xp.complex128)[None]
+    return _gathered(spread, offsets, k, order, quadrature_degree, xp)
+
+
+def apply_fusion(
+    fields: Any,
+    offsets_scene: Any,
+    freqs_hz: Any,
+    order: int,
+    *,
+    inverse: Any = None,
+    regularisation: float = REGULARISATION,
+    sound_speed_m_s: float = SOUND_SPEED_M_S,
+    quadrature_degree: int = QUADRATURE_DEGREE,
+    xp: Any = None,
+) -> Any:
+    """``G(f) [b_0(f); b_1(f); ...]`` of :func:`fusion_operator`, without forming ``G``.
+
+    ``fields`` is ``[cell, channel, frequency]`` and ``offsets_scene``
+    ``[cell, 3]``, ``d_j = target - cell j``. The stacked fields are solved
+    against the cells' Gram matrix (``inverse``, :func:`fusion_inverse` of
+    the same cells on the same frequencies; made here when not given), and
+    what comes out is spread on the plane waves, each turned by its phase
+    for the target, and gathered. Returns ``[channel, frequency]``,
+    complex128.
+    """
+    xp = namespace_of(fields, inverse, xp=xp)
+    offsets = xp.asarray(offsets_scene, dtype=xp.float64)
+    stacked = xp.asarray(fields, dtype=xp.complex128)
+    cells, channels, count = stacked.shape
+    if inverse is None:
+        inverse = fusion_inverse(
+            -offsets,
+            freqs_hz,
+            order,
+            regularisation=regularisation,
+            sound_speed_m_s=sound_speed_m_s,
+            quadrature_degree=quadrature_degree,
+            xp=xp,
+        )
+    k = _wavenumbers(freqs_hz, sound_speed_m_s, xp)
+    columns = xp.swapaxes(stacked.reshape(cells * channels, count), 0, 1)[:, :, None]
+    solved = xp.swapaxes(xp.matmul(xp.asarray(inverse), columns)[:, :, 0], 0, 1)
+    spread = solved.reshape(cells, channels, count)
+    return _gathered(spread, offsets, k, order, quadrature_degree, xp)
 
 
 def kernels(operator: Any, taps: int, *, xp: Any = None) -> Any:

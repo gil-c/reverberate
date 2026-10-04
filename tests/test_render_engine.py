@@ -39,8 +39,10 @@ from reverberate.render.pack import (
     synthetic_free_field,
     write_pack,
 )
-from reverberate.render.translate import OperatorTranslation, PlaneWaveFusion
+from reverberate.render.translate import OperatorTranslation, SpatialTranslation
+from reverberate.spatial.lowband import from_stored, to_stored
 from reverberate.spatial.sh import degrees_of, real_sh, scene_to_ambisonic
+from reverberate.spatial.translate import fusion_operator, translation_operator
 
 C = 343.2
 FS = 48000
@@ -224,8 +226,9 @@ def reference_low(pack: ScenePack, dry: np.ndarray, source: np.ndarray) -> np.nd
     head = np.asarray(pack.listener.position[0])
     response = monopole_low_response(source - head, pack.header, pack.crossover).astype(float)
     n = dry.size + 2 * FS  # the response is 1.2 s long
-    # The response's transform on the 48 kHz grid: the low rate's, padded to the same bins.
-    low = np.fft.rfft(response, n // 12, axis=1)
+    # The response's transform on the 48 kHz grid: the low rate's, padded to the same
+    # bins, times the ratio of the rates, the stored samples being the 48 kHz response's.
+    low = 12.0 * np.fft.rfft(response, n // 12, axis=1)
     transfer = np.zeros((64, n // 2 + 1), dtype=complex)
     transfer[:, : low.shape[1]] = low
     return np.asarray(np.fft.irfft(np.fft.rfft(dry, n)[None] * transfer, n)[:, : dry.size])
@@ -274,7 +277,7 @@ def test_level_b_under_the_crossover_is_the_analytic_monopole() -> None:
     for name, made in (("moved", moved), ("fused", fused)):
         got = Engine(made, {"s1": dry}).stem("s1", parts=("low",))[:, middle]
         errors[name] = degree_error_db(got, reference_low(made, dry, source)[:, middle])
-    # Measured: moved -56 -54 -53 -51 -43 -31 -19 -8; fused -52 -54 -58 -51 -45 -44 -35 -23.
+    # Measured: moved -59 -56 -54 -53 -44 -31 -19 -9; fused -52 -54 -58 -51 -45 -44 -35 -23.
     assert np.all(errors["moved"][:4] < -45.0) and errors["moved"][7] > -15.0
     assert np.all(errors["fused"][:6] < -40.0) and errors["fused"][7] < -18.0
 
@@ -295,31 +298,72 @@ def test_level_b_joins_the_two_sides_into_the_whole_band() -> None:
     assert np.abs(out - expected).max() < 5e-3 * np.abs(expected).max()
 
 
-def test_the_operator_form_of_a_translation_is_the_same_translation() -> None:
-    fusion = PlaneWaveFusion(2, C, quadrature_degree=8)
+def test_the_engine_s_translation_is_the_library_s_operators_applied() -> None:
+    """``SpatialTranslation`` never forms ``T`` or ``G``; it is them all the same."""
+    applied = SpatialTranslation(2, C, quadrature_degree=8)
     freqs = np.array([200.0, 700.0])
     rng = np.random.default_rng(1)
 
     def operator(offsets: np.ndarray, at: np.ndarray) -> np.ndarray:
-        cells = offsets.shape[0]
-        columns = []
-        for column in range(9 * cells):
-            unit = np.zeros((cells * 9, at.size), dtype=complex)
-            unit[column] = 1.0
-            columns.append(fusion.to_head(unit.reshape(cells, 9, -1), offsets, at, np).T)
-        return np.stack(columns, axis=-1)
+        if offsets.shape[0] == 1:
+            made = translation_operator(offsets[0], at, 2, sound_speed_m_s=C, quadrature_degree=8)
+        else:
+            made = fusion_operator(offsets, at, 2, sound_speed_m_s=C, quadrature_degree=8)
+        return np.asarray(made)
 
     for cells in (1, 2):
         fields = rng.standard_normal((cells, 9, 2)) + 1j * rng.standard_normal((cells, 9, 2))
         offsets = np.array([[0.1, 0.0, 0.05], [-0.3, 0.0, 0.05]])[:cells]
-        direct = fusion.to_head(fields, offsets, freqs, np)
+        direct = applied.to_head(fields, offsets, freqs, np)
         via = OperatorTranslation(operator).to_head(fields, offsets, freqs, np)
-        np.testing.assert_allclose(via, direct, atol=1e-12)
-    # A head on its cell is the cell, less the regularisation.
-    still = fusion.to_head(fields[:1], np.zeros((1, 3)), freqs, np)
-    np.testing.assert_allclose(still, fields[0] / 1.001, atol=1e-12)
+        # The operators are kept in single precision.
+        np.testing.assert_allclose(via, direct, atol=2e-6)
+    # A head on its cell is the cell: one cell is translated, not regularised.
+    still = applied.to_head(fields[:1], np.zeros((1, 3)), freqs, np)
+    np.testing.assert_allclose(still, fields[0], atol=1e-12)
     with pytest.raises(ValueError, match="one cell or from two"):
-        fusion.to_head(np.zeros((3, 9, 2), dtype=complex), np.zeros((3, 3)), freqs, np)
+        applied.to_head(np.zeros((3, 9, 2), dtype=complex), np.zeros((3, 3)), freqs, np)
+
+
+def test_a_response_stored_by_the_low_band_library_is_rendered_at_its_own_level() -> None:
+    """``spatial.lowband.to_stored`` in, the engine out: the 48 kHz response's low side."""
+    pack = synthetic_free_field(
+        level="B", source=(0.5, 1.5, 3.0), listener_start=(0, 1.5, 0), duration_s=0.5
+    )
+    source = pack.sources["s1"]
+    assert source.low is not None
+    # A wave response at 48 kHz: a few arrivals on 64 channels, band limited as a solve is.
+    rng = np.random.default_rng(3)
+    response = np.zeros((64, 57600))
+    for at in (2400, 2700, 3500, 6000):
+        response[:, at] = rng.standard_normal(64) / at
+    spectrum = np.fft.rfft(response, axis=1)
+    freqs = np.fft.rfftfreq(57600, 1.0 / FS)
+    edges = np.clip((1700.0 - freqs) / 200.0, 0, 1)
+    response = np.fft.irfft(spectrum * edges, 57600, axis=1)
+    stored = to_stored(response, FS, pack.crossover)
+    assert stored.shape == (64, 4800) and stored.dtype == np.float32
+    # What the pack holds is what the library gives back at 48 kHz, to float32.
+    low_side = from_stored(stored, FS)
+    held = dataclasses.replace(source.low, ir=np.stack([stored, stored]))
+    pack = dataclasses.replace(pack, sources={"s1": dataclasses.replace(source, low=held)})
+    dry = band_noise(0.5, 100.0, 1400.0)
+    got = Engine(pack, {"s1": dry}).stem("s1", parts=("low",))
+    n = dry.size + 2 * FS
+    want = np.fft.irfft(np.fft.rfft(dry, n)[None] * np.fft.rfft(low_side, n, axis=1), n)[
+        :, : dry.size
+    ]
+    middle = slice(2400, 21000)
+    assert np.abs(got - want)[:, middle].max() < 1e-5 * np.abs(want[:, middle]).max()
+    # And that is the response's own level: the masks pass what lies under the ramp.
+    under = np.fft.irfft(spectrum * edges * (freqs < 600.0), 57600, axis=1)
+    quiet = band_noise(0.5, 150.0, 500.0)
+    got = Engine(pack, {"s1": quiet}).stem("s1", parts=("low",))
+    want = np.fft.irfft(np.fft.rfft(quiet, n)[None] * np.fft.rfft(under, n, axis=1), n)[
+        :, : quiet.size
+    ]
+    level = 10 * np.log10((got[:, middle] ** 2).sum() / (want[:, middle] ** 2).sum())
+    assert abs(level) < 0.05
 
 
 def test_the_tail_reads_through_the_bank_at_the_energy_the_histogram_holds() -> None:

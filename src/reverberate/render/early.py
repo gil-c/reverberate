@@ -30,12 +30,14 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, TypeVar
 
 import numpy as np
 from scipy.fft import next_fast_len
 
 from reverberate.metrics import octave_bank
+from reverberate.mirror.directivity import directivity_gain
 from reverberate.render import delay
 from reverberate.render.dry import DryTrack
 from reverberate.render.pack import JUMP_M, ScenePack, Source, band_map
@@ -154,7 +156,18 @@ class EarlyPart:
         # A row's coefficients on the variants, [row, mask, band, node], at its own step.
         gain = np.asarray(early.gain, dtype=float)[:, self.picks]
         if directivity and rows:
-            gain = gain * self._directivity(step_of)[:, self.picks]
+            # The pattern of the source's model at each row's own departure and facing,
+            # read in the pack's single precision: a pack in memory renders as its file.
+            pattern = pack.directivity[source.directivity_model]
+            pattern = replace(pattern, gain_db=np.asarray(pattern.gain_db, dtype=np.float32))
+            gain = (
+                gain
+                * directivity_gain(
+                    pattern,
+                    np.asarray(early.departure, dtype=float),
+                    np.asarray(source.yaw_deg, dtype=float)[step_of],
+                )[:, self.picks]
+            )
         gain = (
             gain * (10.0 ** (np.asarray(source.level.high_gain_db, float)[step_of] / 20.0))[:, None]
         )
@@ -185,19 +198,6 @@ class EarlyPart:
         self.sound_speed = h.sound_speed_m_s
         atmosphere = pack.air.atmosphere
         self._attenuation = atmosphere.attenuation_np_per_m
-
-    def _directivity(self, step_of: np.ndarray) -> np.ndarray:
-        """``[row, band]`` linear gains of the source's pattern, on the pack's bands."""
-        pattern = self.pack.directivity[self.source.directivity_model]
-        yaw = np.radians(np.asarray(self.source.yaw_deg, dtype=float)[step_of])
-        facing = np.stack([np.cos(yaw), np.zeros_like(yaw), -np.sin(yaw)], axis=1)
-        cosine = np.sum(np.asarray(self.source.early.departure, dtype=float) * facing, axis=1)
-        angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
-        table = np.asarray(pattern.gain_db, dtype=float)
-        decibels = np.stack(
-            [np.interp(angle, pattern.angles_deg, table[b]) for b in range(table.shape[0])], axis=1
-        )
-        return np.asarray(10.0 ** (decibels / 20.0))
 
     # ----------------------------------------------------------------------
 

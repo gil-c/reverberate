@@ -31,7 +31,17 @@ from reverberate.accel.pairs import (
     prepare_pairs_bundle,
     source_positions,
 )
+from reverberate.scenes import (
+    Recipe,
+    audible_steps,
+    low_band_positions,
+    rail_samples,
+    sample_times,
+    source_state,
+)
+from reverberate.scenes.recipe import Travel
 from reverberate.spatial.lowband import pair_key
+from test_scenes import hand_tree
 
 C = 343.2
 H = 0.0327
@@ -264,43 +274,37 @@ class TestTheCache:
             PairCache(tmp_path, KEY).read("ab" * 32)
 
 
-RECIPE: dict[str, Any] = {
-    "dwelling": {"floor_y_m": 0.0},
-    "heights": {"standing_m": 1.7, "seated_m": 1.2},
-    "stations": [
-        {"id": "armchair", "kind": "seat", "position": [0.0, 1.2, 0.0]},
-        {"id": "counter", "kind": "stand", "position": [1.0, 1.7, 0.0]},
-        {"id": "tv", "kind": "stand", "position": [3.0, 1.7, 3.0]},
-    ],
-    "rails": [
-        {"id": "r", "a": "armchair", "b": "counter", "points": [[0, 0], [1, 0]], "pitch_m": 0.08}
-    ],
-    "sources": [
-        {
-            "id": "v1",
-            "segments": [
-                {"type": "dwell", "station": "armchair", "height": "seated"},
-                {"type": "rise", "station": "armchair", "to": "standing"},
-                {"type": "travel", "rail": "r", "from": "armchair", "to": "counter"},
-                {"type": "dwell", "station": "counter", "height": "standing"},
-            ],
-        },
-        {"id": "n1", "segments": [{"type": "dwell", "station": "tv", "height": "standing"}]},
-    ],
-}
-
-
 class TestTheBundle:
-    def test_a_recipe_s_positions_are_its_stations_and_its_rails_every_pitch(self) -> None:
-        found = source_positions(RECIPE)
-        positions = found["positions"]
-        # The seat, six more up its vertical rail (0.08 to 0.48, then the top),
-        # thirteen along the rail past its start (0.08 to 0.96, then the end), the television.
-        assert positions.shape == (1 + 7 + 13 + 1, 3)
-        assert positions[0].tolist() == [0.0, 1.2, 0.0]
-        assert [1.0, 1.7, 0.0] in positions.tolist() and [0.96, 1.7, 0.0] in positions.tolist()
-        assert len(found["by_source"]["v1"]) == 21 and len(found["by_source"]["n1"]) == 1
-        assert len({tuple(p) for p in positions.tolist()}) == positions.shape[0]
+    def test_a_recipe_s_positions_are_the_ones_its_sources_are_audible_at(self) -> None:
+        """The recipe's own kinematics, and by default no solve where nobody is heard."""
+        recipe = Recipe.from_dict(hand_tree())
+        walker = recipe.source("walker")
+        rail = recipe.rail(next(s.rail for s in walker.segments if isinstance(s, Travel)))
+        samples = len(rail_samples(rail))
+
+        every = source_positions(recipe, audible_only=False)
+        assert every["positions"].shape[0] == low_band_positions(recipe)["all"]
+        # The walker's rail whole; its two ends are the stations it rests at.
+        assert len(every["by_source"]["walker"]) == samples
+        # The sitter: its seat, the vertical rail above it, the rail it leaves by.
+        assert len(every["by_source"]["sitter"]) > samples
+        assert len({tuple(p) for p in every["positions"].tolist()}) == every["positions"].shape[0]
+
+        heard = source_positions(recipe)
+        assert source_positions(hand_tree())["positions"].tolist() == heard["positions"].tolist()
+        assert heard["positions"].shape[0] == low_band_positions(recipe)["audible"]
+        # The sitter never speaks. The walker speaks at its first station, falls
+        # silent, and speaks again from the middle of the rail on: half the rail.
+        assert heard["by_source"]["sitter"] == []
+        assert samples // 2 <= len(heard["by_source"]["walker"]) - 1 <= samples // 2 + 2
+        assert {tuple(p) for p in heard["positions"].tolist()} <= {
+            tuple(p) for p in every["positions"].tolist()
+        }
+        # Every audible step lies between two of the positions given.
+        times = sample_times(recipe)[audible_steps(recipe, "walker")]
+        at = source_state(recipe, "walker", times).position
+        gap = np.linalg.norm(at[:, None, :] - heard["positions"][None, :, :], axis=2).min(axis=1)
+        assert gap.max() <= rail.pitch_m / 2 + 1e-9
 
     def test_the_bundle_is_a_campaign_the_rental_can_size(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -4,9 +4,12 @@ Everything here runs at the pack's low rate, 4 kHz, and is brought to the
 output rate at the end by the filter of :func:`~reverberate.render.dry.band_filter`.
 
 **A step's responses** are the pack's pairs: two source positions by one or
-two cells. The dry signal is convolved with each cell's response, the two
-source positions weighted by ``position_weight``, in one transform a step
-(the pairs' spectra are kept while they are in use).
+two cells, each on the scale of :func:`reverberate.spatial.lowband.to_stored`
+(the 48 kHz response's samples, so ``sample_rate_hz / low_sample_rate_hz``
+times them is what a convolution at 4 kHz needs). The dry signal is
+convolved with each cell's response, the two source positions weighted by
+``position_weight``, in one transform a step (the pairs' spectra are kept
+while they are in use).
 
 **The head** is reached in frames one step long, four to a step, under a
 square root Hann window at both ends, so the frames add to one. A frame
@@ -105,7 +108,10 @@ class LowPart:
             self._spectra.move_to_end(row)
             return self._spectra[row]
         xp = self.xp
-        response = xp.asarray(np.asarray(self.low.ir[row], dtype=float))
+        # ``low/ir`` holds the 48 kHz response's own samples, one in ``factor``
+        # (``spatial.lowband.to_stored``): a convolution at the low rate sums
+        # ``factor`` times fewer of them, and is brought back to level here.
+        response = xp.asarray(np.asarray(self.low.ir[row], dtype=float) * self.factor)
         made = fft_module(xp).rfft(response, self.n, axis=-1, **workers_of(xp, self.workers))
         self._spectra[row] = made
         while len(self._spectra) > self._pairs_held:

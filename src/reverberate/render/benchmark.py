@@ -28,13 +28,13 @@ import numpy as np
 
 from reverberate.audio import Atmosphere
 from reverberate.metrics import band_centres
+from reverberate.mirror.directivity import omni, voice_v1
 from reverberate.mirror.hybrid import Crossover
 from reverberate.render.engine import PARTS, Engine, RenderSettings
 from reverberate.render.pack import (
     STEP_S,
     Air,
     Cells,
-    Directivity,
     Early,
     Header,
     Level,
@@ -62,16 +62,6 @@ class Repeated:
 
     def __getitem__(self, row: int) -> np.ndarray:
         return np.asarray(self.base[int(row) % self.base.shape[0]])
-
-
-def _voice(bands: int) -> Directivity:
-    """A pattern 12 dB down behind at the top band, unit mean power over the sphere."""
-    angles = np.arange(0.0, 180.0 + 1e-9, 5.0)
-    depth = np.linspace(2.0, 12.0, bands)[:, None]
-    gain = 10.0 ** (-depth * (1.0 - np.cos(np.radians(angles)))[None, :] / 2.0 / 20.0)
-    weight = np.sin(np.radians(angles))
-    power = (gain**2 * weight).sum(axis=1) / weight.sum()
-    return Directivity((20.0 * np.log10(gain / np.sqrt(power)[:, None])).astype(np.float32), angles)
 
 
 def density_pack(
@@ -270,7 +260,7 @@ def density_pack(
         ),
         crossover=crossover,
         air=Air(Atmosphere(), enabled=True),
-        directivity={"voice": _voice(bands), "omni": Directivity.omni(bands)},
+        directivity={"voice": voice_v1(), "omni": omni()},
     )
     validate(pack)
     return pack

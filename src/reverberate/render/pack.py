@@ -31,10 +31,24 @@ import numpy as np
 from reverberate.acoustics import OCTAVE_BANDS
 from reverberate.audio import Atmosphere
 from reverberate.metrics import band_centres
+from reverberate.mirror.directivity import Directivity, omni
 from reverberate.mirror.hybrid import Crossover
 from reverberate.spatial.sh import channel_count
+from reverberate.spatial.translate import (
+    EXACT_UNDER_M,
+    FUSE_WITHIN_M,
+    QUADRATURE_DEGREE,
+    REGULARISATION,
+    SOURCE_SHARE,
+    SURFACE_SHARE,
+    TRANSLATE_WITHIN_M,
+)
 
 __all__ = [
+    "KIND_DIFFRACTED",
+    "KIND_DIFFRACTED_REFLECTED",
+    "KIND_DIRECT",
+    "KIND_SPECULAR",
     "SCHEMA",
     "SCHEMA_VERSION",
     "STEP_S",
@@ -53,6 +67,7 @@ __all__ = [
     "Source",
     "Tail",
     "band_map",
+    "default_fusion",
     "path_id",
     "read_pack",
     "synthetic_free_field",
@@ -77,18 +92,69 @@ class PackError(ValueError):
     """A pack that breaks an invariant of the format; the message names it."""
 
 
-def path_id(kind: int, facets: Iterable[int] = (), edges: Iterable[int] = ()) -> int:
-    """A path's identity: eight bytes of the digest of its kind, facets and edges."""
-    payload = bytes([int(kind)])
-    payload += np.asarray(list(facets), dtype="<i4").tobytes()
-    payload += np.asarray(list(edges), dtype="<i4").tobytes()
-    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little")
+#: The ``kind`` of a row of ``early``.
+KIND_DIRECT = 0
+KIND_SPECULAR = 1
+KIND_DIFFRACTED = 2
+KIND_DIFFRACTED_REFLECTED = 3
+
+_IDS: dict[bytes, int] = {}
+
+
+def path_id(
+    kind: int,
+    facets: Iterable[int] = (),
+    edges: Iterable[int] | None = None,
+    *,
+    rank: int | None = None,
+) -> int:
+    """A path's identity, the same at every step it exists: the format's one definition.
+
+    The first eight bytes, little endian, of the SHA-256 of: the kind as one
+    byte; the facets in bounce order as little endian ``int32``; and, for a
+    diffracted path, ``-1`` then the edges it bends round in order from the
+    source, the ``-1`` keeping a facet from being read as an edge. A
+    diffracted path whose corners are not all on edges has no such name: it
+    gives ``rank``, its rank by delay among the step's such paths, and is
+    named by ``-1, -1, rank`` in place of the edges. The trace
+    (:mod:`reverberate.mirror.moving`) names its rows with this function.
+    """
+    words = [int(f) for f in facets]
+    if rank is not None:
+        words += [-1, -1, int(rank)]
+    elif edges is not None:
+        words += [-1, *(int(e) for e in edges)]
+    key = bytes([int(kind)]) + np.asarray(words, dtype="<i4").tobytes()
+    found = _IDS.get(key)
+    if found is None:
+        found = int.from_bytes(hashlib.sha256(key).digest()[:8], "little")
+        _IDS[key] = found
+    return found
 
 
 def tail_seed(seed: int | str, source_id: str) -> int:
     """A source's tail seed: eight bytes, little endian, of ``sha256("<seed>:tail:<id>")``."""
     digest = hashlib.sha256(f"{seed}:tail:{source_id}".encode()).digest()
     return int.from_bytes(digest[:8], "little")
+
+
+def default_fusion() -> dict[str, float]:
+    """``fusion_json`` as the library's constants give it: the estimator, and which cells serve.
+
+    The quadrature and the regularisation are what the engine's translation
+    reads; the two distances and the two shares are the rule the trace chose
+    the cells by (:func:`reverberate.spatial.translate.choose_cells`), kept
+    with the pack so a reader knows what its ``mode`` means.
+    """
+    return {
+        "quadrature_degree": QUADRATURE_DEGREE,
+        "lambda": REGULARISATION,
+        "exact_under_m": EXACT_UNDER_M,
+        "translate_within_m": TRANSLATE_WITHIN_M,
+        "fuse_within_m": FUSE_WITHIN_M,
+        "source_share": SOURCE_SHARE,
+        "surface_share": SURFACE_SHARE,
+    }
 
 
 def band_map(bands_hz: Iterable[float], bank_bands_hz: Iterable[float]) -> np.ndarray:
@@ -122,9 +188,7 @@ class Header:
     has_tail: bool = False
     low_sample_rate_hz: float = 4000.0
     low_samples: int = 4800
-    fusion: Mapping[str, float] = field(
-        default_factory=lambda: {"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001}
-    )
+    fusion: Mapping[str, float] = field(default_factory=default_fusion)
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -274,22 +338,6 @@ class Air:
 
     atmosphere: Atmosphere = field(default_factory=Atmosphere)
     enabled: bool = False
-
-
-@dataclass(frozen=True)
-class Directivity:
-    """One model: ``gain_db[band, angle]`` on ``angles_deg`` from the facing."""
-
-    gain_db: np.ndarray
-    angles_deg: np.ndarray
-
-    @classmethod
-    def omni(cls, bands: int = len(OCTAVE_BANDS)) -> Directivity:
-        angles = np.arange(0.0, 180.0 + 1e-9, 5.0)
-        return cls(np.zeros((bands, angles.size), dtype=np.float32), angles)
-
-    def digest(self) -> str:
-        return hashlib.sha256(np.asarray(self.gain_db, dtype="<f4").tobytes()).hexdigest()
 
 
 @dataclass
@@ -608,7 +656,10 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
         )
         directivity = {
             model: Directivity(
-                np.asarray(group["gain_db"][...]), np.asarray(group.attrs["angles_deg"], float)
+                name=model,
+                gain_db=np.asarray(group["gain_db"][...]),
+                angles_deg=np.asarray(group.attrs["angles_deg"], float),
+                bands_hz=header.bands_hz,
             )
             for model, group in f["directivity"].items()
         }
@@ -963,7 +1014,9 @@ def monopole_low_response(
     ``offset_scene`` is the source seen from the point. The interior
     expansion of ``e^{-ikR} / R`` divided by ``i^n`` per degree, through the
     crossover's low pressure mask (a single arrival lies wholly in the onset
-    window) and a raised cosine high pass between ``highpass_hz``.
+    window) and a raised cosine high pass between ``highpass_hz``. On the
+    scale of ``low/ir``: the samples of the 48 kHz response, which
+    :func:`reverberate.spatial.lowband.from_stored` gives back.
     """
     from reverberate.spatial.field import monopole_coefficients
     from reverberate.spatial.sh import degrees_of, scene_to_ambisonic
@@ -986,7 +1039,10 @@ def monopole_low_response(
     # The masks are those of the 48 kHz transform, read at the bins the low rate keeps.
     low_mask, _ = crossover.masks(samples, rate, power=False)
     spectrum *= low_mask[:, None]
-    return np.asarray(np.fft.irfft(spectrum.T, n=samples, axis=-1), dtype=np.float32)
+    # The spectrum is the response's own: its 48 kHz samples are this transform
+    # over the ratio of the two rates.
+    scale = rate / header.sample_rate_hz
+    return np.asarray(np.fft.irfft(spectrum.T, n=samples, axis=-1) * scale, dtype=np.float32)
 
 
 def synthetic_free_field(
@@ -1126,7 +1182,7 @@ def synthetic_free_field(
         mirror=Mirror(),
         crossover=crossover,
         air=Air(enabled=False),
-        directivity={"omni": Directivity.omni()},
+        directivity={"omni": omni()},
     )
     validate(pack)
     return pack

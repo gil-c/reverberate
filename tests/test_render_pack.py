@@ -125,7 +125,7 @@ def test_a_dense_pack_goes_through_the_writer_a_source_at_a_time(tmp_path: Path)
             assert list(again.sources) == ["s1", "s2"]
             for name in held.sources:
                 same(again.sources[name], held.sources[name])
-            assert again.directivity["voice"].digest() == pack.directivity["voice"].digest()
+            assert again.directivity["voice"].digest == pack.directivity["voice"].digest
             assert again.mirror.signature.size == 128 and again.air.enabled
 
 
