@@ -16,6 +16,11 @@ def main(argv: list[str] | None = None) -> int:
     bench.add_argument("--duration", type=float, default=5.0, help="seconds of scene")
     bench.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     bench.add_argument("--gpu", action="store_true", help="on the card, with cupy")
+    bench.add_argument(
+        "--processes", default="", help="also render stems in these many processes: 1,4,8"
+    )
+    bench.add_argument("--save", type=Path, help="write the report here")
+    bench.add_argument("--against", type=Path, help="an earlier report to print this one beside")
     error = commands.add_parser("interpolator", help="the delay line's measured error")
     error.set_defaults(command="interpolator")
     check = commands.add_parser("validate", help="check a pack against the format")
@@ -23,10 +28,17 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--deep", action="store_true", help="read every low band response")
     args = parser.parse_args(argv)
     if args.command == "benchmark":
-        from reverberate.render.benchmark import measure
+        from reverberate.render.benchmark import measure, scaling, table
 
         report = measure(duration_s=args.duration, workers=args.workers, gpu=args.gpu)
+        if args.processes:
+            counts = [int(count) for count in args.processes.split(",")]
+            report["scaling"] = scaling(duration_s=args.duration, processes=counts)
         print(json.dumps(report, indent=2))
+        before = json.loads(args.against.read_text()) if args.against else None
+        print(table(report, before))
+        if args.save:
+            args.save.write_text(json.dumps(report, indent=2))
     elif args.command == "interpolator":
         from reverberate.render.delay import worst_error
 
