@@ -404,9 +404,10 @@ and per step:
 | `position_weight` | float32 | `[step]` | weight of source slot 1, in energy |
 | `cell_weight` | float32 | `[step]` | weight of cell slot 1, in energy |
 
-600 bins of `histogram_bin_s`, on the geometric clock. The step's histogram
-is the weighted sum of the four, energies and moments alike: an
-interpolation in energy, never of waveforms. Rays are traced from every
+600 bins of `histogram_bin_s`, on the geometric clock. The step's tail
+holds the weighted sum of the four's energies, bin by bin, band by band and
+direction by direction: an interpolation in energy, never of waveforms (the
+engine adds four independent noises, see below). Rays are traced from every
 station and from rail positions every 0.80 m; the receiver spheres stand on
 cells of `/cells` no nearer one another than 0.80 m, and on every seat:
 the trace chooses them among `/cells` and `hist_cell` is their row there.
@@ -420,38 +421,127 @@ field gives its points without a direct path. The late level measured between ne
 differs by 0.3 to 0.7 dB in the median, so the tail is sampled more coarsely
 than anything else in the pack.
 
-The engine makes the tail as `mirror.render.tail_from_histogram` does: per
-bin and band, `tail_bursts` noise bursts from directions drawn from the
-moments' density, starting `tail_from_s` after the smallest `delay_s` of the
-step's rows (at the histogram's first bin holding energy when the step has
-none, with nothing added), the calibration's `tail_gain_db` on top of
-`scale`. Each histogram's energy is multiplied by **its own** `scale`
-before the four are weighted and summed; the moments are summed unscaled,
-being read as a density only. The bins are on the geometric clock and the
-tail is laid `lead_s` later, rounded to a whole sample. **The noise is one carrier
-per source**, drawn from `tail_seed` by a generator that gives the same
-numbers on the host and on a card, and shaped by the step's envelope; it is
+The engine makes the tail from the same quantities as
+`mirror.render.tail_from_histogram`: per bin and bank band an energy, the
+calibration's `tail_gain_db` on top of `scale`, through the inverse of the
+bank's own reading (clipped at zero), times the air's share, and a density
+over the 45 directions of `spatial.sh.quadrature(2 * histogram_order + 2)`,
+the moments' reconstruction clipped at zero times the quadrature's weights
+(the weights alone where nothing is left). Each histogram's energy is
+multiplied by **its own** `scale`; the moments are read as a density only.
+The bins are on the geometric clock and the tail is laid `lead_s` later,
+rounded to a whole sample. `tail_bursts` is the reference renderer's and is
+not read by the engine.
+
+**One carrier per source, already through the bank.** For every bank band
+`b` and direction `d` the source has one stream of noise, drawn from
+`tail_seed`, passed through the band's filter once and brought to unit
+variance. A histogram's response is, on each direction, the sum over the
+bands of the stream times a gain that is constant over a bin: the square
+root of the energy the bin holds for that band and direction, over the
+bin's 96 samples. The energy is first spread over the neighbouring bins
+with the shares the band's filter gives a bin of white noise (at 125 Hz
+half of it goes to the two bins either side and two thousandths to the
+third; at 16 kHz six thousandths go to the next), so that **the expected energy of
+every bin, band and direction is that of shaped white noise through the
+bank**, which is what the reference renderer makes. The bands are then
+scaled, one gain a band, so that **the octave bank reads on the first
+channel of the rendered response what the histogram holds**: what the
+reference renderer's tail reads in expectation (the energies asked, through
+the bank's reading of white noise shaped by each band's filter), against the
+reading of this very draw, each band's share and what two shares have in
+common, both through the crossover's power mask when the pack has a low
+band, since that is how the tail is heard. A band of which the mask leaves
+less than a thousandth (125 and 250 Hz) keeps a gain of one, and a band the
+others already fill past its due is given none. One draw of the reference
+renderer's tail reads within 0.8 dB of its expectation (1.2 dB once in
+eight draws of a 0.1 s tail); the engine's reads it to 2e-6. The noise is
 not drawn again at each step, or the tail would be a different room twenty
 times a second.
 
 **The generator** (`reverberate.render.noise`) is Threefry 2x32 with twenty
 rounds: 32 bit additions, rotations and exclusive ors, the same on every
 array library, checked against Random123's known answers. The key is
-`tail_seed`'s low and high words; the counter is `(index, stream)`. Burst
-`u` of bank band `b` reads the stream `b * tail_bursts + u`: its noise at
-the sample `index` after the emission is the sum of the eight bytes of the
-two words, less 1020, over `sqrt(43690)` (unit variance, normal to an
-excess kurtosis of -0.15; exact in integers, where a logarithm would round
-differently on a card). The uniform that picks its direction in the bin
-`index` is the first word of the stream `2^31 + b * tail_bursts + u`, plus a
-half, over `2^32`; the direction is the first of the 45 of
-`spatial.sh.quadrature(2 * histogram_order + 2)` whose cumulative density
-passes it.
+`tail_seed`'s low and high words; the counter is `(index, stream)`.
+Direction `d` of bank band `b` reads the stream `45 b + d`: its noise at
+`index` is the sum of the eight bytes of the two words, less 1020, over
+`sqrt(43690)` (unit variance, normal to an excess kurtosis of -0.15; exact
+in integers, where a logarithm would round differently on a card). The
+sample `t` of the carrier is the full convolution of the stream with the
+band's 512 taps at `t + 511`, over the root of the taps' energy.
+
+**A step's response is the sum of its histograms' responses, each times
+the square root of its weight.** That is the interpolation in energy
+because the histograms of one step read the carrier from different
+**places**: place `p` starts `6 p` bins into the carrier (576 samples, more
+than the filter's 511, so two places hold independent noise), and there
+are 16. A histogram's place is fixed for the scene: the histograms are
+taken in the order of their rows and each takes the lowest place that no
+lower row it shares a step with holds (its row modulo 16 if every place is
+held, in which case the step's response is multiplied by the one gain that
+brings its expected energy back to the weighted sum). The energies of
+independent noises add, so the energy of the step is the weighted sum of
+the four in every bin, band and direction, and a histogram is the same
+noise each time the scene comes back to it.
+
+**Where the tail starts.** `tail_from_s` after the smallest `delay_s` of
+the step's rows: the energy of the bins before it is removed before it is
+spread. A step with no row starts at its histograms' own first bins, with
+nothing removed.
 
 **Between two steps** the outputs of the two steps' responses are
 cross-faded linearly, each times its own `high_gain_db`: the quasi-static
-rule. A response is kept while the step's `hist`, its two weights and the
-bin the tail starts at do not change.
+rule.
+
+**What this replaced, and what it changes in the samples** (lot L7b,
+2026-10). The first engine made one response per step from the four
+histograms mixed in energy: 24 bursts of white noise per bin and band, each
+on a direction drawn from the density, then the band's filter, 8 transforms
+of 45 by 62 500 points for every step whose weights had moved. A walk cost
+3.3 s of one core per second of scene and source, and four processes
+rendered 0.7 s of stem a second together. The tail is now a different draw of the same law, so it is
+compared by its energies, on the `synthetic-density` pack with everything
+moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
+0.6 s per band):
+
+- *Expected energy of a step's whole tail, new over old, worst step*: 0.00
+  to 0.01 dB in every band from 500 Hz to 16 kHz. In the 250 Hz band, 1.2 dB
+  at the worst step and 0.1 dB in the mean: the bank's inverted reading is
+  clipped at zero per histogram and no longer once for the mix, and the two
+  differ where a band holds less than the ninth of its lower neighbour that
+  the bank leaks into it. After the first 100 ms of the tail, for the same
+  reason, 0.8 dB at the worst step and band (2 kHz), 0.1 dB in the mean;
+  and at 250 Hz there are steps where the old tail held nothing by then and
+  the new one holds what one of the histograms is left with.
+- *Directions*: at the worst step and band 1 per cent of the energy lies on
+  other directions than before (9 per cent at 250 Hz, the same clipping).
+- *The rendered signal through the bank*, six draws of each engine, white
+  noise in, quarter seconds, first channel, new over old: worst quarter
+  second 0.74, 0.69, 0.36, 0.23 and 0.20 dB at 1, 2, 4, 8 and 16 kHz, where
+  two halves of the old engine's own draws differ by 0.96, 0.61, 0.50, 0.24
+  and 0.52 dB; over the 5 s, +0.18, -0.40, -0.13, +0.05 and +0.06 dB. Under
+  the crossover the tail holds nothing to compare.
+- *The channels above the first*: the sixteen first channels together, over
+  sixteen times the first, read -0.28, -0.35 and -0.19 dB at 1, 2 and 4 kHz
+  in the old engine while everything moved, and -0.16, +0.32 and +0.14 dB
+  now; at rest both read within 0.1 dB of it. The old engine drew some
+  bursts on another direction whenever the weights moved and cross-faded
+  the two, which is the likely cost; a histogram's directions no longer
+  move.
+- *One thing is different by design*: between two histograms the old tail
+  was one noise whose envelope moved; it is now two noises cross-faded in
+  energy over the 0.80 m that separate them, as the fine structure of a
+  real room's tail changes over half a wavelength. Two histograms that hold
+  the same energy are not the same samples.
+- *The ring of the bank before the tail's first bin* is as before in
+  expectation: two bins at 125 Hz and a trace in the third.
+- *Against the reference renderer*, where the old engine was one more draw
+  of the same law: on the traced room of `tests/test_trace.py` the bank
+  reads the engine's tail within 0.30 dB of the reference's draw in every
+  band (0.68 before), and on the box of
+  `tests/test_scene_pack_integration.py` within 0.41 dB (0.56 before). The
+  500 Hz band after the crossover is a residue 30 dB under the 1 kHz band,
+  in which two draws of the reference itself differ by up to 2.4 dB.
 
 ### `level`
 
@@ -590,6 +680,27 @@ one source and directivity off, steps 1 to 4 are
   seek are slices of those runs: blocks of any size give the same samples to
   the bit. The run's length is a setting of the render; another length moves
   the samples by 2e-8 of the peak.
+
+- *What it costs*, on the laptop the audit runs on (ten cores, four of them
+  fast), measured by `python -m reverberate.render benchmark --workers 1
+  --processes 1,4,6,8,10` on the `synthetic-density` pack: seconds of one
+  core per second of scene and source, then seconds of stem rendered per
+  second of wall clock by processes of one thread each, a run at a time as
+  the audit renders them.
+
+  | scene | early | low | tail | total | 1 process | 4 | 6 | 8 | 10 |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | at rest | 0.13 | 0.04 | 0.05 | 0.22 | 5.0 | 14.0 | 16.5 | 17.2 | 16.3 |
+  | everything moving | 0.15 | 0.18 | 0.48 | 0.81 | 1.3 | 3.5 | 4.1 | 4.0 | 3.5 |
+
+  Six processes are the most that help: the four fast cores give three
+  times one, the six slow ones a little more, and beyond that the processes
+  wait on one another. The scene of the size table below is 8 400 seconds
+  of stem: 8 minutes at rest, 34 with everything moving. A process holds
+  0.7 GB at rest and 1.2 GB moving besides the pack. In the moving scene
+  six new histograms a second each cost a response (30 ms), and each of the
+  six to eight histograms a run reads costs a convolution (14 ms); a scene
+  that comes back to its histograms pays the first once.
 
 The signal is written as `docs/formats/scene-signal.md` says.
 

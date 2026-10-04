@@ -43,6 +43,8 @@ __all__ = ["FRAMES_PER_STEP", "LowPart"]
 
 #: Frames of the head's translation in one step.
 FRAMES_PER_STEP = 4
+#: Channels brought to the output rate at once.
+CHANNELS_AT_ONCE = 8
 
 
 class LowPart:
@@ -201,4 +203,9 @@ class LowPart:
         if not heard:
             return xp.zeros((channels, (k1 - k0) * self.step * self.factor))
         windows = xp.lib.stride_tricks.sliding_window_view(low, 2 * self.reach + 1, axis=1)
-        return xp.matmul(windows, self.poly).reshape(channels, -1)
+        out = xp.zeros((channels, (k1 - k0) * self.step * self.factor))
+        # A few channels at a time: the product lays its windows out, 1 MB a channel.
+        for lo in range(0, channels, CHANNELS_AT_ONCE):
+            hi = min(lo + CHANNELS_AT_ONCE, channels)
+            out[lo:hi] = xp.matmul(windows[lo:hi], self.poly).reshape(hi - lo, -1)
+        return out

@@ -90,10 +90,11 @@ class SourceRenderer:
         if h.has_low:
             # Over the onset the two sides are joined in pressure, after it in power.
             press = high.masked(mask_kernel(pack.crossover, h.sample_rate_hz, False))
-            power = high.masked(mask_kernel(pack.crossover, h.sample_rate_hz, True))
+            tail_mask = mask_kernel(pack.crossover, h.sample_rate_hz, True)
+            power = high.masked(tail_mask)
             early_tracks, tail_track = [press, power], power
         else:
-            early_tracks, tail_track = [high], high
+            early_tracks, tail_track, tail_mask = [high], high, None
         directivity = (
             source.directivity_enabled if settings.directivity is None else settings.directivity
         ) and source.directivity_model in pack.directivity
@@ -120,7 +121,9 @@ class SourceRenderer:
                 workers=settings.workers,
             )
         if h.has_tail:
-            self.parts["tail"] = TailPart(pack, source, tail_track, xp, workers=settings.workers)
+            self.parts["tail"] = TailPart(
+                pack, source, tail_track, xp, workers=settings.workers, mask=tail_mask
+            )
         self.step = h.step_samples
         self.chunk_samples = settings.chunk_steps * self.step
         self._chunks: OrderedDict[tuple[int, tuple[str, ...]], Any] = OrderedDict()

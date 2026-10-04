@@ -17,8 +17,8 @@ a half over ``2^32``. A carrier sample is the sum of the eight bytes of the
 two words, centred and scaled to unit variance: an Irwin-Hall variate,
 normal to an excess kurtosis of -0.15 and bounded at 4.9 standard
 deviations. A logarithm and a cosine would make it exactly normal and would
-round differently on a card; the tail normalises every burst to the energy
-its bin holds, so the carrier's law is not heard and its bits are what
+round differently on a card; the tail brings every band to the energy its
+histogram holds, so the carrier's law is not heard and its bits are what
 matter.
 """
 
