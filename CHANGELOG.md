@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its solves, lost at the encode to an out of memory. `--avoid` names offers and
   machines never to rent; hosts refused or silent in a run join that list, by their
   machine id as well, and `onebox.json` keeps it as `avoided`.
+- `reverberate.experiments.w44_interpolation`, the measurements of what a response
+  between solved points can be predicted from, moved out of the run folder they
+  were written in: leave-one-out on a lattice, the plane wave fusion of neighbours,
+  the error against the spacing on a line solved every 2 cm, and where a translation
+  fails round 500 Hz. Its `translate` module holds the two functions the rest reads,
+  the weights that evaluate an order 7 expansion away from its centre and the
+  minimum norm operator that fuses several, tested against plane waves in closed
+  form.
 
 ### Changed
 
