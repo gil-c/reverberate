@@ -6,7 +6,8 @@ python -m reverberate.accel voxelise --model M --materials DIR --fmax F --out DI
 python -m reverberate.accel compare-entries A B
 
 The low band pairs of a scene (:mod:`reverberate.accel.pairs`); ``campaign``
-runs such a bundle too, by what its ``campaign.json`` says it is:
+runs such a bundle too, by what its ``campaign.json`` says it is, and the
+bundle of a scene trace (:mod:`reverberate.trace`) likewise:
 
 python -m reverberate.accel pairs-bundle --out B --scene-id S --models-from DIR
     (--recipe R.json | --sources P.npy) --cells C.npy [--heard-at H.json] [--fmax F]
@@ -106,6 +107,19 @@ def main(argv: list[str] | None = None) -> int:
         # A bundle says what it is; one that cannot be read is the campaign's to refuse.
         spec_file = args.bundle / "campaign.json"
         kind = json.loads(spec_file.read_text()).get("kind") if spec_file.is_file() else None
+        if kind == "scene-trace":
+            # A recipe's pack (:mod:`reverberate.trace`): the pairs, then the mirror, then the file.
+            from reverberate.trace.run import run_trace
+
+            run_trace(
+                args.bundle,
+                args.out,
+                pffdtd_dir=args.pffdtd,
+                devices=args.devices,
+                gpu=False if args.cpu else None,
+                solvers=args.solvers,
+            )
+            return 0
         if kind == KIND:
             run_pairs(
                 args.bundle,

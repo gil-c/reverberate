@@ -46,6 +46,7 @@ __all__ = [
     "pair_key",
     "solve_fmax_hz",
     "to_stored",
+    "with_air",
 ]
 
 #: The rate, the length and the window of a stored low band response.
@@ -167,6 +168,38 @@ def _onset_window(onset: float, samples: int, rate_hz: float, crossover: Crossov
     return window
 
 
+def with_air(
+    ir: Any,
+    rate_hz: float,
+    atmosphere: Atmosphere,
+    *,
+    sound_speed_m_s: float = SOUND_SPEED_M_S,
+    xp: Any = None,
+) -> Any:
+    """A wave response with the air's absorption, at the rate it comes at: float64.
+
+    What :func:`low_side` takes its masks of, and what the onset and the seam
+    of a pair are read on (:mod:`reverberate.trace.level`): the cache holds a
+    response before its air, and ``blend`` joins one that carries it.
+    """
+    from reverberate.accel.dsp import air_absorption
+
+    xp = namespace_of(ir, xp=xp)
+    block = xp.asarray(ir, dtype=xp.float64)
+    samples = int(block.shape[-1])
+    # The frame of :func:`frame_for` is in samples at 48 kHz; the same
+    # span of time at this rate, a multiple of four.
+    frame = max(32, 4 * round(frame_for(samples / rate_hz) * rate_hz / 48000.0 / 4))
+    return air_absorption(
+        block,
+        rate_hz,
+        xp,
+        sound_speed_m_s=sound_speed_m_s,
+        atmosphere=atmosphere,
+        frame=frame,
+    )
+
+
 def low_side(
     ir: Any,
     rate_hz: float,
@@ -187,24 +220,12 @@ def low_side(
     is taken as it is, which is right for one that already carries its air.
     Returns float64, the shape and the rate of ``ir``.
     """
-    from reverberate.accel.dsp import air_absorption
-
     xp = namespace_of(ir, xp=xp)
     crossover = crossover or Crossover()
     block = xp.asarray(ir, dtype=xp.float64)
     samples = int(block.shape[-1])
     if atmosphere is not None:
-        # The frame of :func:`frame_for` is in samples at 48 kHz; the same
-        # span of time at this rate, a multiple of four.
-        frame = max(32, 4 * round(frame_for(samples / rate_hz) * rate_hz / 48000.0 / 4))
-        block = air_absorption(
-            block,
-            rate_hz,
-            xp,
-            sound_speed_m_s=sound_speed_m_s,
-            atmosphere=atmosphere,
-            frame=frame,
-        )
+        block = with_air(block, rate_hz, atmosphere, sound_speed_m_s=sound_speed_m_s, xp=xp)
     together = xp.asarray(
         _onset_window(onset_s(block[0], rate_hz, xp=xp), samples, rate_hz, crossover)
     )

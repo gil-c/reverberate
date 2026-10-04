@@ -51,6 +51,10 @@ HOME_ITEMS = (
     # A campaign of low band pairs (:mod:`reverberate.accel.pairs`): its cache and its arrays.
     "pairs",
     "pairs_plan.json",
+    # A scene trace (:mod:`reverberate.trace`): the pack, its report, the pairs' levelling.
+    "pack.h5",
+    "trace_report.json",
+    "level.jsonl",
 )
 
 
