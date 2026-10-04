@@ -2,7 +2,10 @@
 
 Status: proposed with [ADR 0016](../adr/0016-a-scene-moves-and-one-engine-renders-it.md).
 Written by the trace stage on a rented card (lot L6, from L4 and L5), read by
-the signal engine (`reverberate.render`, L7). Nothing writes it yet.
+the signal engine (`reverberate.render`, L7). Nothing writes it yet; the
+tables of `early`, `tail` and `/directivity` are made, in memory, by
+`reverberate.mirror.moving`, `mirror.tails` and `mirror.directivity`, whose
+`pack()` methods give the datasets below in the types below.
 
 A pack is everything the acoustics of one recipe
 ([`scene-recipe.md`](scene-recipe.md)) come to, sampled along the
@@ -142,13 +145,30 @@ Within a step the rows are sorted by `path_id`, and no `path_id` repeats.
 **`path_id`** is the first eight bytes, little endian, of the SHA-256 of:
 the `kind` as one byte, then the facets of the path in bounce order as
 little endian `int32` (`Paths.sequence` without its padding), then for kinds
-2 and 3 the indices of the edges it bends round in order from the source
-(`mirror.edges`), as `int32`. An image is its facet sequence wherever the
-source stands, so the identity survives the tree being grown again at every
-position. A diffracted path whose corners are the grid's and not an edge's
-has no stable name: it takes the digest of its kind and its rank by delay
-among the step's such paths, and the jump rule below catches a rank that
-changed hands.
+2 and 3 one `int32` of `-1` and the indices of the edges it bends round in
+order from the source (`mirror.edges.diffracting_edges`), as `int32`. The
+`-1` keeps a facet from being read as an edge. An image is its facet
+sequence wherever the source stands, so the identity survives the tree
+being grown again at every position. A diffracted path one of whose corners
+is the grid's and not an edge's has no stable name: in place of the edges it
+takes `-1, -1` and its rank by delay among the step's such paths of its
+kind, and the jump rule below catches a rank that changed hands. A
+diffracted then reflected path (kind 3) names the edge its reflection is
+taken from, the one nearest the listener. `mirror.moving.path_id` is the
+function.
+
+**`departure`**, for an image path, points from the source at its first
+reflection point; for the direct path, at the listener; for a diffracted
+path, at the first corner the path bends round, counted from the source.
+
+**A step without a direct path** holds the reflections that reach it and
+the diffracted onset the mirror gives a point its source does not see
+(`mirror.diffract`), as kinds 2 and 3: at most 24 rows, the shortest.
+The onset is computed for the step's source and listener alone. The lattice
+field of ADR 0014 computed it for all its points together, which shares
+one image tree between edges 0.25 m apart and frees the occupancy grid round
+every point; so at such a point the pack's onset is the mirror's own on that
+pair, and may differ from that field's in its reflected rows.
 
 **Between two steps** the engine moves each path as follows, with
 `u = (t - t_k) / step_s`, `l(t)` the listener's position and `c` the sound
@@ -288,7 +308,12 @@ interpolation in energy, never of waveforms. Rays are traced from every
 station and from rail positions every 0.80 m; the receiver spheres stand on
 every second lattice cell in `x` and `z`, 0.80 m apart, and on every seat.
 The weights are linear in arc length on the source side and in distance on
-the listener's. The late level measured between neighbours 0.40 m apart
+the listener's: slot 1 of the cells has `d0 / (d0 + d1)`. The two cells are
+the nearest two the head sees, among the six nearest (a cell behind a wall
+is near and is another room's tail); where it sees none, the nearest alone.
+`scale` is the cell's own where it sees the source position and rays reached
+it; elsewhere the median of the position's cells that do, as the lattice
+field gives its points without a direct path. The late level measured between neighbours 0.40 m apart
 differs by 0.3 to 0.7 dB in the median, so the tail is sampled more coarsely
 than anything else in the pack.
 
@@ -348,8 +373,19 @@ departure direction and the source's facing, `(cos yaw, 0, -sin yaw)` in the
 scene frame. A model is a figure of revolution about the facing. **It is
 normalised to unit mean power over the sphere in every band**, so a
 directional source radiates what the omnidirectional one does, and the tail
-and the low band, which are omnidirectional, keep their level. `omni` is
-zeros. A model's digest, in the recipe's `assets.directivity`, is the
+and the low band, which are omnidirectional, keep their level. The table is
+read linearly in decibels between its angles, and the mean power is that of
+the table so read. `omni` is zeros.
+
+`voice_v1` (`mirror.directivity.voice_v1`) is **a parametric fit, to be
+confirmed by the owner**: `-back_db (1 - cos angle) / 2` before
+normalisation, with `back_db = 2, 3, 5, 7, 10, 14, 18` on the seven bands,
+round figures for the front to back difference of speech of the order
+reported by Chu and Warnock, *Detailed directivity of sound fields around
+human talkers*, NRC Canada, IRC-RR-104, 2002, and, at 8 kHz, by Monson,
+Hunter and Story, J. Acoust. Soc. Am. 132 (1), 2012. Their tables were not
+reproduced; replacing the figures by them changes the digest and nothing
+else. A model's digest, in the recipe's `assets.directivity`, is the
 SHA-256 of `gain_db`'s bytes.
 
 ## What the engine does with it
@@ -425,7 +461,9 @@ down a 6 m rail is 75 positions, each heard from one or two cells.
 
 What the trace computes, counted and not priced: 14 sources by 12 000
 audible steps is 168 000 path validations, 67 minutes of one RTX 3090 at the
-24 ms a pair measured on 2026-09-17, before L5 batches them.
+24 ms a pair measured on 2026-09-17 for the lattice pipeline. The batched
+trace of L5 and what it is expected to cost are in
+[the cost appendix](../adr/0016-appendix-moving-mirror-cost.md).
 
 ## What a reader may assume
 
