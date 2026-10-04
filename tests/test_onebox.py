@@ -284,7 +284,7 @@ class TestRent:
 
     @pytest.fixture
     def hosts(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-        """Scripted hosts: which offers refuse to rent, and what each machine's cards hold."""
+        """Scripted hosts: which offers refuse to rent, and which were rented."""
         script: dict[str, Any] = {"refused": set(), "rented": []}
 
         def rent(client: Any, offer: RentableOffer, **_: object) -> Rented:
@@ -300,9 +300,13 @@ class TestRent:
             client.destroyed.append(instance)
             return True
 
+        from reverberate.gpu import onebox
+
         monkeypatch.setattr(vast, "rent", rent)
         monkeypatch.setattr(vast, "wait_for_ssh", wait_for_ssh)
         monkeypatch.setattr(vast, "teardown", teardown)
+        # Empty cards unless a test says otherwise.
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "3, 81559\n17, 81559\n")
         return script
 
     def rent(self, client: RentingClient, **kwargs: Any) -> tuple[Any, int, Any]:
@@ -336,6 +340,116 @@ class TestRent:
         hosts["refused"] = {1}
         offers = [RentableOffer(1, 1.0), RentableOffer(2, 1.5), RentableOffer(3, 2.0)]
         assert self.rent(RentingClient(offers))[2].id == 2
+
+    def test_a_host_whose_cards_are_held_is_destroyed_and_the_next_offer_taken(
+        self, hosts: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from reverberate.gpu import onebox
+
+        # Two cards a host; another tenant holds 70 GB on each of the first's.
+        cards = {"machine-1001": "70123, 81559\n69877, 81559\n"}
+        asked: list[tuple[str, str]] = []
+
+        def fake_run_on(machine: str, command: str, *, what: str, timeout: Any = None) -> str:
+            asked.append((machine, command))
+            return cards.get(machine, "3, 81559\n17, 81559\n")
+
+        monkeypatch.setattr(onebox, "run_on", fake_run_on)
+        client = RentingClient([RentableOffer(1, 1.0), RentableOffer(2, 1.5)])
+        avoid: set[int] = set()
+        machine, instance, offer = self.rent(client, avoid=avoid)
+        assert (machine, instance, offer.id) == ("machine-1002", 1002, 2)
+        assert client.destroyed == [1001], "the occupied host is destroyed before the next"
+        assert avoid == {1, 101}, "refused under its offer's id and its machine's"
+        assert [m for m, _ in asked] == ["machine-1001", "machine-1002"]
+        assert all(command == onebox.CARD_QUERY for _, command in asked)
+
+    def test_another_offer_of_a_refused_host_is_not_rented(
+        self, hosts: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from reverberate.gpu import onebox
+
+        cards = {"machine-1001": "70123, 81559\n"}
+        monkeypatch.setattr(
+            onebox, "run_on", lambda machine, command, **_: cards.get(machine, "0, 81559\n")
+        )
+        # Offers 1 and 2 are the same machine, advertised with two and four cards.
+        offers = [
+            RentableOffer(1, 1.0, machine_id=500),
+            RentableOffer(2, 1.2, machine_id=500),
+            RentableOffer(3, 1.5, machine_id=501),
+        ]
+        machine, instance, offer = self.rent(RentingClient(offers))
+        assert offer.id == 3
+        assert hosts["rented"] == [1, 3], "the host's second offer was never rented"
+
+    def test_a_silent_host_is_not_offered_again(
+        self, hosts: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def wait_for_ssh(client: Any, instance: int, identity: Any, timeout: float = 0.0) -> str:
+            if instance == 1001:
+                raise TimeoutError("never answered on ssh")
+            return f"machine-{instance}"
+
+        monkeypatch.setattr(vast, "wait_for_ssh", wait_for_ssh)
+        client = RentingClient([RentableOffer(1, 1.0), RentableOffer(2, 1.5)])
+        avoid = {7}
+        assert self.rent(client, avoid=avoid)[2].id == 2
+        assert avoid == {7, 1, 101} and client.destroyed == [1001]
+
+    def test_offers_to_avoid_are_never_rented(self, hosts: dict[str, Any]) -> None:
+        offers = [
+            RentableOffer(1, 1.0),
+            RentableOffer(2, 1.2, machine_id=500),
+            RentableOffer(3, 1.5),
+        ]
+        # One by its offer id, one by its machine id.
+        machine, instance, offer = self.rent(RentingClient(offers), avoid={1, 500})
+        assert offer.id == 3 and hosts["rented"] == [3]
+
+    def test_a_refused_host_that_is_not_verified_destroyed_stops_the_run(
+        self, hosts: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from reverberate.gpu import onebox
+
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "70123, 81559\n")
+        monkeypatch.setattr(vast, "teardown", lambda client, instance: False)
+        client = RentingClient([RentableOffer(1, 1.0), RentableOffer(2, 1.5)])
+        with pytest.raises(SystemExit, match="not verified destroyed"):
+            self.rent(client)
+        assert hosts["rented"] == [1], "no second host beside one that may still bill"
+
+
+class TestCards:
+    def test_the_query_is_read_a_card_a_line(self) -> None:
+        from reverberate.gpu.onebox import cards_in_use
+
+        assert cards_in_use("3, 81559\n70123, 81559\n\n") == [(3.0, 81559.0), (70123.0, 81559.0)]
+
+    def test_empty_cards_are_accepted_and_the_threshold_is_the_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from reverberate.gpu import onebox
+
+        said: list[str] = []
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "3, 24576\n1024, 24576\n")
+        assert onebox.occupied_cards(object(), said.append) is None
+        assert "3 of 24576 MiB, 1024 of 24576 MiB" in said[0]
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "3, 24576\n1025, 24576\n")
+        reason = onebox.occupied_cards(object(), said.append)
+        assert reason is not None and "card 1 1025 MiB" in reason and "card 0" not in reason
+
+    def test_a_host_that_cannot_be_asked_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from reverberate.gpu import onebox
+
+        def broken(*args: object, **kwargs: object) -> str:
+            raise RuntimeError("nvidia-smi: command not found")
+
+        monkeypatch.setattr(onebox, "run_on", broken)
+        reason = onebox.occupied_cards(object(), lambda m: None)
+        assert reason is not None and "did not answer" in reason
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "\n")
+        assert onebox.occupied_cards(object(), lambda m: None) == "the host reports no card"
 
 
 class TestRunEndToEnd:
@@ -451,9 +565,11 @@ class TestRunEndToEnd:
             yes=True,
             repo=Path(__file__).parents[1],
             poll_s=0.0,
+            avoid=[41, 42],
             say=lambda m: None,
         )
         assert record["outcome"] == "done" and record["destroyed"] is True
+        assert record["avoided"] == [41, 42]
         assert record["instance"] == 7 and record["offer"] == 99
         assert calls.count("launch") == 2, "relaunched once after the stall"
         assert calls.index("kill") < calls.index("launch", calls.index("launch") + 1)

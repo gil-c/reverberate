@@ -118,6 +118,10 @@ class Offer:
     reliability: float
     inet_down_mbps: float
     location: str
+    #: The host behind the offer. One host is advertised as several offers, one
+    #: per count of its cards, so a host to avoid is named by this and not by
+    #: ``id``. 0 when the API does not say.
+    machine_id: int = 0
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Offer:
@@ -136,6 +140,7 @@ class Offer:
             reliability=float(raw.get("reliability2", 0.0)),
             inet_down_mbps=float(raw.get("inet_down", 0.0)),
             location=str(raw.get("geolocation") or "unknown"),
+            machine_id=int(raw.get("machine_id") or 0),
         )
 
     def describe(self) -> str:
@@ -147,6 +152,7 @@ class Offer:
             f"({self.cpu_name or 'unnamed'}), {self.ram_gb:.0f} GB RAM, "
             f"{self.disk_gb:.0f} GB disk, CUDA {self.cuda_max}, "
             f"reliability {self.reliability:.3f}, {self.location}"
+            f"{f', machine {self.machine_id}' if self.machine_id else ''}"
         )
 
 
@@ -752,6 +758,12 @@ def credit_of(client: Any) -> float:
         return float("nan")
 
 
+def offer_ids(offer: Any) -> set[int]:
+    """What names an offer in a list of hosts to avoid: its own id and its host's."""
+    machine = int(getattr(offer, "machine_id", 0) or 0)
+    return {int(offer.id), machine} if machine else {int(offer.id)}
+
+
 def rent_one(
     client: Any,
     identity: Any,
@@ -761,17 +773,32 @@ def rent_one(
     disk_gb: int,
     image: str,
     remaining_usd: float = 0.0,
+    avoid: set[int] | None = None,
+    refuse: Callable[[Any], str | None] | None = None,
     say: Callable[[str], None] = print,
 ) -> tuple[Any, int]:
-    """Down the list until one rents and answers; the machine and its id.
+    """Down the list until one rents, answers and is accepted; the machine and its id.
 
     Every offer tried is removed from ``offers`` in place, rented or not, so a
     caller renting several boxes from one list never returns to a host that
     stayed silent (two did on 2026-09-12). The credit is read before each
     rental against ``remaining_usd``.
+
+    ``avoid`` holds offer and machine ids never to rent; an offer named there
+    is dropped without counting as a try. ``refuse`` looks at a machine that
+    answered and returns why it is not to be used, or ``None``: a refused host
+    is destroyed, verified destroyed, and the next offer is tried. A host that
+    stayed silent or was refused is added to ``avoid``, under both its ids, so
+    neither another of its offers nor a later rental of the same run takes it.
     """
-    for candidate in list(offers[:8]):
-        offers.remove(candidate)
+    avoid = set() if avoid is None else avoid
+    tried = 0
+    while offers and tried < 8:
+        candidate = offers.pop(0)
+        if offer_ids(candidate) & avoid:
+            say(f"  {candidate.id} is on a host to avoid; skipped")
+            continue
+        tried += 1
         credit = credit_of(client)
         if not enough_credit(credit, remaining_usd=max(remaining_usd, candidate.dph_total + 0.5)):
             raise SystemExit(
@@ -789,7 +816,20 @@ def rent_one(
             machine = wait_for_ssh(client, rental.instance_id, identity, timeout=420.0)
         except (TimeoutError, VastError) as silence:
             say(f"  {rental.instance_id} never answered ({silence}); destroying, next")
+            avoid |= offer_ids(candidate)
             teardown(client, rental.instance_id)
+            continue
+        reason = refuse(machine) if refuse is not None else None
+        if reason is not None:
+            avoid |= offer_ids(candidate)
+            gone = teardown(client, rental.instance_id)
+            say(f"  {rental.instance_id} refused ({reason}); destroyed={gone}")
+            if not gone:
+                # A second rental beside one that may still be billing is how
+                # a night costs double; the watchdog holds the first meanwhile.
+                raise SystemExit(
+                    f"instance {rental.instance_id} was refused and is not verified destroyed"
+                )
             continue
         return machine, rental.instance_id
     raise SystemExit("no offer produced a machine that answered")

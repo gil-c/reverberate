@@ -118,6 +118,18 @@ log through ssh. It relaunches a stalled campaign once from its state on
 disk, fetches the run and the grids when `campaign.done` appears, and
 destroys the host only after the fetch is verified.
 
+A host is checked before it is used. The moment ssh answers, the driver asks
+`nvidia-smi` for the memory in use on every card; over 1 GiB on any of them
+(`onebox.CARD_USED_LIMIT_MIB`) the host is destroyed, verified destroyed, and
+the next offer is taken. On 2026-10-04 a host whose cards each carried about
+70 GB of another tenant's work was provisioned and solved on, and the
+campaign died at the encode, out of memory. A host refused that way, or one
+that never answered on ssh, is not rented again in the run: the same machine
+is advertised as several offers, one per count of its cards, so it is named
+by its machine id as well as by the offer's. `--avoid ID ...` gives the
+driver offers and machines to skip from the start, and `onebox.json` carries
+`avoided`, that list with the hosts the run refused, for the next run.
+
 ### What runs where, and how it was checked
 
 | stage | before | now | checked by |

@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `#n/a` in the material table: one part of a garden bistro set carries it in HSSD's
   metadata; it is the set's second chair, the same size as its sibling `seat`, and
   takes the same class.
+- `gpu.onebox` checks a rented host's cards are empty before anything is built or
+  pushed: over 1 GiB in use on any card, the host is destroyed, verified destroyed,
+  and the next offer taken. A host whose cards another tenant held cost a campaign
+  its solves, lost at the encode to an out of memory. `--avoid` names offers and
+  machines never to rent; hosts refused or silent in a run join that list, by their
+  machine id as well, and `onebox.json` keeps it as `avoided`.
 
 ### Changed
 
@@ -60,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `B2Store` presigns with SigV4 (B2 refused the SigV2 URLs botocore produced) and
   gives small uploads a unique staging name: identical bytes staged under one digest
   name deleted each other's upload under concurrency.
+- `gpu.onebox.rent` reports the offer it rented. It read the head of a list that
+  `vast.rent_one` had emptied: the wrong offer, or an `IndexError` after the host was
+  rented when the offer kept was the last.
 
 ### Removed
 
