@@ -16,6 +16,7 @@ Measured 2026-09-09. `data/` is not versioned; this page is.
 | `cache/carve`, `cache/scenes` | 680 MB | Derived from HSSD and the code. | Recompute. |
 | `cache/colliders` | 3.0 GB | One simulated mesh per HSSD template, 15 684 of them, shared by every apartment that places the piece. **The expensive one**: about 266 hours of one core for the whole dataset, which is why it was built on rented machines and published. | Re-fetch from the store, or two days of rented cores. |
 | `cache/scene_assets` | 0 B here | The render pool. On this machine each entry is a symlink into `raw/hssd-hab`, so it costs nothing; on a machine without the dataset it holds the 8.5 GB fetched from the store. | Re-fetch, or re-link. |
+| `clips/clarify_v1` | 555 MB (2026-10-04) | The dry clips a scene's recipe names, 96 files: derived from the sibling project's audio library by the manifest in the package (`docs/formats/clip-library.md`). | `python -m reverberate.scenes clips fetch`, five minutes. |
 | `runs` | 10 GB | The measurements. See below. | **Some of it, everything.** |
 | `vendor` | 419 MB | PFFDTD source and its virtualenv. | Rebuild. |
 | `interim/materials` | 204 KB | Impedance fits per material class. | Recompute. |
