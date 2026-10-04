@@ -164,6 +164,9 @@ class Boundary:
             + (axes[1][iy] - centre[1]) ** 2
             + (axes[2][iz] - centre[2]) ** 2
         ) <= radius**2
+        if grid.fcc:
+            # Only the nodes of even index sum exist; the others fold onto nodes far away.
+            inside &= (ix + iy + iz) % 2 == 0
         flat = (ix * (ny * nz) + iy * nz + iz)[inside]
         return engine_indices(flat, grid)
 
