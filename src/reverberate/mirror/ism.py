@@ -36,7 +36,9 @@ __all__ = [
     "ImageTree",
     "IsmSettings",
     "Paths",
+    "dot3",
     "grow_tree",
+    "norm3",
     "occluder_grid",
     "paths_for",
     "ray_triangles",
@@ -124,6 +126,30 @@ class Paths:
 
 
 # --------------------------------------------------------------------------
+# the arithmetic
+# --------------------------------------------------------------------------
+
+
+def dot3(a: Any, b: Any) -> Any:
+    """The scalar product over a last axis of three, written out: ``(a0 b0 + a1 b1) + a2 b2``.
+
+    Every quantity that decides whether a path exists is computed through
+    this function, here and in :mod:`reverberate.mirror.moving`. A matrix
+    product or an ``einsum`` gives the same sum in an order, and with or
+    without a fused multiply, that the linear algebra library and the
+    processor choose; three products and two sums are the same bits
+    everywhere. A leg that grazes a facet's edge is then a path on every
+    machine or on none, and for the tree as for the batched trace.
+    """
+    return a[..., 0] * b[..., 0] + a[..., 1] * b[..., 1] + a[..., 2] * b[..., 2]
+
+
+def norm3(a: Any) -> Any:
+    """The length over a last axis of three: the square root of :func:`dot3` of a vector."""
+    return np.sqrt(a[..., 0] * a[..., 0] + a[..., 1] * a[..., 1] + a[..., 2] * a[..., 2])
+
+
+# --------------------------------------------------------------------------
 # the tree
 # --------------------------------------------------------------------------
 
@@ -180,7 +206,7 @@ def _through_the_beam(
     the last facet. Conservative: it never prunes a reachable facet.
     """
     axis = centres[last] - parents  # [parent, 3]
-    distance = np.linalg.norm(axis, axis=1)
+    distance = norm3(axis)
     axis = axis / np.maximum(distance, 1e-12)[:, None]
     # An apex inside the sphere sees the facet in every direction of its air
     # side: the cone is the whole space and only the air side test prunes. A
@@ -190,8 +216,8 @@ def _through_the_beam(
         inside, np.pi, np.arcsin(np.clip(radii[last] / np.maximum(distance, 1e-12), 0.0, 1.0))
     )
     to_facet = centres[None, :, :] - parents[:, None, :]  # [parent, facet, 3]
-    reach = np.linalg.norm(to_facet, axis=2)
-    cosine = np.einsum("pfk,pk->pf", to_facet, axis) / np.maximum(reach, 1e-12)
+    reach = norm3(to_facet)
+    cosine = dot3(to_facet, axis[:, None, :]) / np.maximum(reach, 1e-12)
     angle = np.arccos(np.clip(cosine, -1.0, 1.0))
     subtended = np.arcsin(np.clip(radii[None, :] / np.maximum(reach, 1e-12), 0.0, 1.0))
     return np.asarray(angle <= half_angle[:, None] + subtended)
@@ -200,7 +226,7 @@ def _through_the_beam(
 def _box_distance(points: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
     """Distance from each point to an axis aligned box, zero inside it."""
     gap = np.maximum(np.maximum(lo[None, :] - points, points - hi[None, :]), 0.0)
-    return np.asarray(np.linalg.norm(gap, axis=1))
+    return np.asarray(norm3(gap))
 
 
 def grow_tree(
@@ -239,7 +265,7 @@ def grow_tree(
         if count == 0 or parent_pos.shape[0] == 0:
             break
         # Signed distance of every parent to every facet's plane: [parent, facet].
-        height = parent_pos @ normals.T - offsets[None, :]
+        height = dot3(parent_pos[:, None, :], normals[None, :, :]) - offsets[None, :]
         allowed = (height > 0.0) | both[None, :]
         # A facet never follows itself, and the next facet must have some of
         # itself on the air side of the last one and inside the beam the last
@@ -286,15 +312,12 @@ def grow_tree(
         before = parent_seq[:, level_done - 2]
         facing = (last >= 0) & (before >= 0)
         facing &= ~furniture[np.maximum(last, 0)] & ~furniture[np.maximum(before, 0)]
-        facing &= (
-            np.einsum("ij,ij->i", normals[np.maximum(last, 0)], normals[np.maximum(before, 0)])
-            < -0.99
-        )
+        facing &= dot3(normals[np.maximum(last, 0)], normals[np.maximum(before, 0)]) < -0.99
         rows = np.flatnonzero(facing)
         if rows.size == 0:
             break
         cols = np.asarray(before[rows], dtype=np.int64)
-        height = np.einsum("ij,ij->i", parent_pos[rows], normals[cols]) - offsets[cols]
+        height = dot3(parent_pos[rows], normals[cols]) - offsets[cols]
         keep = (height > 0.0) | both[cols]
         rows, cols, height = rows[keep], cols[keep], height[keep]
         if rows.size == 0:
@@ -348,14 +371,14 @@ def ray_triangles(
     e2 = triangles[:, 2] - v0
     # [s, t, 3]
     p = np.cross(direction[:, None, :], e2[None, :, :])
-    det = np.einsum("tk,stk->st", e1, p)
+    det = dot3(e1[None, :, :], p)
     parallel = np.abs(det) < 1e-12
     inv = np.where(parallel, 0.0, 1.0 / np.where(parallel, 1.0, det))
     t_vec = origins[:, None, :] - v0[None, :, :]
-    u = np.einsum("stk,stk->st", t_vec, p) * inv
+    u = dot3(t_vec, p) * inv
     q = np.cross(t_vec, e1[None, :, :])
-    v = np.einsum("sk,stk->st", direction, q) * inv
-    t = np.einsum("tk,stk->st", e2, q) * inv
+    v = dot3(direction[:, None, :], q) * inv
+    t = dot3(e2[None, :, :], q) * inv
     hit = (~parallel) & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0)
     hit &= (t >= strict) & (t <= 1.0 - strict)
     return np.asarray(hit.any(axis=1))
@@ -378,7 +401,7 @@ def _segment_hits(
     """
     out = np.zeros(origins.shape[0], dtype=bool)
     for i in range(origins.shape[0]):
-        length = float(np.linalg.norm(ends[i] - origins[i]))
+        length = float(norm3(ends[i] - origins[i]))
         if length <= 2.0 * epsilon_m:
             continue
         strict = epsilon_m / length
@@ -398,8 +421,8 @@ def _plane_crossing(
     origins: np.ndarray, ends: np.ndarray, normal: np.ndarray, offset: float
 ) -> tuple[np.ndarray, np.ndarray]:
     """Parameter and point where each segment crosses the plane; NaN when it does not."""
-    heights_a = origins @ normal - offset
-    heights_b = ends @ normal - offset
+    heights_a = dot3(origins, normal[None, :]) - offset
+    heights_b = dot3(ends, normal[None, :]) - offset
     denominator = heights_a - heights_b
     with np.errstate(divide="ignore", invalid="ignore"):
         t = np.where(np.abs(denominator) > 1e-12, heights_a / denominator, np.nan)
@@ -499,7 +522,7 @@ def paths_for(
         )
         alive[kept[blocked]] = False
     kept = np.flatnonzero(alive)
-    lengths = np.linalg.norm(tree.positions[kept] - receiver[None, :], axis=1)
+    lengths = norm3(tree.positions[kept] - receiver[None, :])
     direction = (tree.positions[kept] - receiver[None, :]) / np.maximum(lengths, 1e-12)[:, None]
     gain = _gains(scene, tree.sequence[kept], lengths)
     return Paths(

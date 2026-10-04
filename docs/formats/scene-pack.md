@@ -2,7 +2,14 @@
 
 Status: proposed with [ADR 0016](../adr/0016-a-scene-moves-and-one-engine-renders-it.md).
 Written by the trace stage on a rented card (lot L6, from L4 and L5), read by
-the signal engine (`reverberate.render`, L7). Nothing writes it yet.
+the signal engine (`reverberate.render`, L7). `reverberate.render.pack` is
+the one implementation of this document: its types, its writer
+(`PackWriter`, `write_pack`), its reader (`read_pack`) and its invariants
+(`validate`, which both the writer and the reader run). No trace writes one
+yet; the tables of `early`, `tail` and `/directivity` are made, in memory,
+by `reverberate.mirror.moving`, `mirror.tails` and `mirror.directivity`,
+whose `pack()` methods give the datasets below in the types below, and
+`low/ir` by `reverberate.spatial.lowband.to_stored`.
 
 A pack is everything the acoustics of one recipe
 ([`scene-recipe.md`](scene-recipe.md)) come to, sampled along the
@@ -29,6 +36,7 @@ addition:
 | positions and directions | scene frame, `(x, y up, z)`; a direction is a unit vector |
 | ambisonic frame | reached by `spatial.sh.scene_to_ambisonic` in the engine, nowhere in the pack |
 | step | `step_s = 0.05`; step `k` is the scene at `t_k = k step_s`; `steps = round(duration_s / step_s) + 1` |
+| output | `steps - 1` intervals of one step each, `(steps - 1) * 2400` samples: the last step ends the scene |
 | bands | `bands_hz = (125, 250, 500, 1000, 2000, 4000, 8000)`, `acoustics.OCTAVE_BANDS`: what a path's gain and a histogram are written on |
 | bank bands | `bank_bands_hz = metrics.band_centres(48000)`, eight, the last at 16 kHz; bank band `i` reads the band nearest its centre, as `mirror.render._band_map` |
 | gains | pressure, linear, unless the name ends in `_db` |
@@ -58,7 +66,7 @@ Attributes:
 | --- | --- | --- |
 | `schema` | str | `"reverberate.scene-pack"` |
 | `schema_version` | int | `1` |
-| `profile` | str | `"trace"` or `"synthetic-free-field"` |
+| `profile` | str | `"trace"`, `"synthetic-free-field"`, or `"synthetic-density"`: random tables at a real pack's size, for the cost benchmark, whose render means nothing |
 | `recipe_sha256` | str | the recipe's identity |
 | `dwelling`, `scene_id` | str | as the recipe |
 | `duration_s`, `step_s` | float | |
@@ -71,7 +79,7 @@ Attributes:
 | `has_low`, `has_tail` | bool | whether the two groups exist in every source |
 | `low_sample_rate_hz` | float | `4000` |
 | `low_samples` | int | `4800`, 1.2 s |
-| `fusion_json` | str | how two cells are fused: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001}` |
+| `fusion_json` | str | how two cells are fused and which may serve: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001, "translate_within_m": 0.2, "fuse_within_m": 0.3, "source_share": 0.15, "surface_share": 0.5}` |
 | `provenance_json` | str | see Provenance |
 
 Dataset `/recipe`, `uint8 [byte]`: the recipe's canonical bytes, whose
@@ -97,27 +105,33 @@ order 7 array stood at each. Shared by every source.
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `position` | float64 | `[cell, 3]` | the array's centre |
-| `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added where the lattice is too coarse for the clearance |
+| `position` | float64 | `[cell, 3]` | the array's centre: the node of the low grid the array stood on, not the point asked for |
+| `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added: on the listener's path, or where the lattice is too coarse |
 | `lattice_index` | int32 | `[cell, 3]` | `(i, layer, k)` on the lattice; `-1, -1, -1` off it |
 | `clearance_m` | float32 | `[cell]` | distance from the centre to the nearest surface of `mirror/scene.npz` |
 | `room` | str | `[cell]` | by ADR 0010 |
 
 Attributes `grid_origin_m`, `grid_step_m` (0.40 in `x` and `z`) and
-`layers_y_m` (the two heights). A seat's cell is at the seat exactly.
+`layers_y_m` (the two heights). A seat's cell is asked for at the seat
+exactly; its `position` is the node the array got, half a grid step's
+diagonal away at most (19 mm on the grid to 1500 Hz), or up to 0.10 m aside
+where the seat leaves the array's ball no free air. The engine translates
+from `position`, so the difference costs nothing; a field that recorded the
+point asked for instead carried a floor of -25 dB
+(`docs/open-questions/low-band-translation.md`).
 
 ## `/sources/<id>`
 
 One group per source of the recipe, named by its `id`. Attributes: `kind`,
 `subtype` (empty for a voice), `directivity_model`, `directivity_enabled`,
-`gain_db`, `tail_seed` (uint64, the first eight bytes of
-`sha256("<seed>:tail:<id>")`).
+`gain_db`, `tail_seed` (uint64, the first eight bytes, little endian, of
+`sha256("<seed>:tail:<id>")`, the seed written in decimal).
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
 | `position` | float64 | `[step, 3]` | the mouth |
 | `yaw_deg` | float32 | `[step]` | the facing, not wrapped |
-| `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one |
+| `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one (`scenes.audible_steps`) |
 
 A step that is not `audible` has no arrivals and `-1` in every index below;
 the trace does not compute it.
@@ -142,13 +156,30 @@ Within a step the rows are sorted by `path_id`, and no `path_id` repeats.
 **`path_id`** is the first eight bytes, little endian, of the SHA-256 of:
 the `kind` as one byte, then the facets of the path in bounce order as
 little endian `int32` (`Paths.sequence` without its padding), then for kinds
-2 and 3 the indices of the edges it bends round in order from the source
-(`mirror.edges`), as `int32`. An image is its facet sequence wherever the
-source stands, so the identity survives the tree being grown again at every
-position. A diffracted path whose corners are the grid's and not an edge's
-has no stable name: it takes the digest of its kind and its rank by delay
-among the step's such paths, and the jump rule below catches a rank that
-changed hands.
+2 and 3 one `int32` of `-1` and the indices of the edges it bends round in
+order from the source (`mirror.edges.diffracting_edges`), as `int32`. The
+`-1` keeps a facet from being read as an edge. An image is its facet
+sequence wherever the source stands, so the identity survives the tree
+being grown again at every position. A diffracted path one of whose corners
+is the grid's and not an edge's has no stable name: in place of the edges it
+takes `-1, -1` and its rank by delay among the step's such paths of its
+kind, and the jump rule below catches a rank that changed hands. A
+diffracted then reflected path (kind 3) names the edge its reflection is
+taken from, the one nearest the listener. `render.pack.path_id` is the
+function, and the trace (`mirror.moving`) names its rows with it.
+
+**`departure`**, for an image path, points from the source at its first
+reflection point; for the direct path, at the listener; for a diffracted
+path, at the first corner the path bends round, counted from the source.
+
+**A step without a direct path** holds the reflections that reach it and
+the diffracted onset the mirror gives a point its source does not see
+(`mirror.diffract`), as kinds 2 and 3: at most 24 rows, the shortest.
+The onset is computed for the step's source and listener alone. The lattice
+field of ADR 0014 computed it for all its points together, which shares
+one image tree between edges 0.25 m apart and frees the occupancy grid round
+every point; so at such a point the pack's onset is the mirror's own on that
+pair, and may differ from that field's in its reflected rows.
 
 **Between two steps** the engine moves each path as follows, with
 `u = (t - t_k) / step_s`, `l(t)` the listener's position and `c` the sound
@@ -156,6 +187,9 @@ speed.
 
 - The path's **apparent source** at a step is
   `q_k = l_k + c delay_s arrival`: the image itself for kinds 0 and 1.
+  `arrival` is float32 and unit to 1e-7 only; the engine makes it unit in
+  float64 first, so that the delay at a step is `delay_s` and not `delay_s`
+  times that error.
   `q(t)` is linear from `q_k` to `q_{k+1}` and `l(t)` linear from `l_k` to
   `l_{k+1}`.
 - **Delay**: `|q(t) - l(t)| / c`, plus `lead_s`. Continuous, equal to the
@@ -165,9 +199,13 @@ speed.
 - **Arrival direction**: `(q(t) - l(t))` normalised, then
   `scene_to_ambisonic`, then `real_sh` at order 7. On the sphere by
   construction.
-- **Departure direction**: the two stored vectors interpolated linearly and
-  normalised.
-- **Gain**: linear in `u`, band by band.
+- **Gain**: linear in `u`, band by band. Everything else that scales a
+  path is read at the two steps and multiplied into that gain before it is
+  interpolated: the directivity's gain for the step's `departure` and
+  `yaw_deg`, the air's loss for the step's `delay_s`, the crossover's
+  window for the step's `delay_s` and `level/onset_s`, and `high_gain_db`.
+  The product is linear in `u`; none of its factors is interpolated on its
+  own, and the departure direction is not interpolated at all.
 - **Birth and death**: a `path_id` present at one of the two steps only has
   gain zero at the other and keeps the apparent source of the step where it
   exists, so it fades over one step and its delay still follows the
@@ -180,6 +218,21 @@ A path's delay line therefore belongs to its `path_id`: it is created at
 birth, read at the moving delay with an interpolator of the engine's choice
 (the mirror's own is a 33 tap windowed sinc, `mirror.render.DELAY_HALF_TAPS`),
 and released after death.
+
+**The engine's interpolator** (`reverberate.render.delay`) is a Kaiser
+windowed sinc of 12 taps (shape 11) on the filtered dry signal held at
+twice the rate, tabulated at 1024 fractions of a sample and read linearly
+between two. Measured against the exact delayed tone, worst over the
+fraction and the frequency: **-94.0 dB (2.0e-5) from 1 kHz to 20 kHz**,
+-115.6 dB under 1 kHz, and 0.0002 dB of level. A delay of a whole number of
+samples is exact. Holding the signal at twice the rate needs its band to end
+before its Nyquist frequency: the early part is faded out by a raised cosine
+from 22 kHz to 24 kHz, which `mirror.render` does not do, so at rest the two
+agree to the pack's float32 (3e-7) under 22 kHz and differ above.
+
+**The direction** is evaluated at 8 instants a step and its harmonics are
+linear between two: a path that turns by `a` radians in a step errs by
+`(7 a / 8)^2 / 8` of its top order at most.
 
 ### `low`: the band under the crossover
 
@@ -203,8 +256,17 @@ and per step:
 | `cell` | int32 | `[step, 2]` | rows of `/cells`, slot 0 the nearer |
 | `mode` | uint8 | `[step]` | `0` inaudible, `1` exact, `2` translated from one cell, `3` fused from two |
 
-**What `ir` is.** The wave response with the crossover's low side already
-taken, as `mirror.hybrid.blend` takes it: the part within the onset window
+**What `ir` is, and its scale.** `spatial.lowband.to_stored` of the pair's
+response in the dwelling's cache, which holds it at 4 kHz before its masks
+and its air. **Its samples are the 48 kHz response's own**, read every
+twelfth: the kept bins transformed back at 4800 samples and divided by 12
+(`spatial.lowband.decimate`), so the cache, the pack and a field are on one
+scale and `spatial.lowband.from_stored` gives the 48 kHz response back. The
+engine therefore multiplies by `sample_rate_hz / low_sample_rate_hz`, 12,
+when it convolves at 4 kHz: the dry signal decimated at unit gain and
+convolved with `12 ir` at 4 kHz is at the response's level. It
+is the wave response with the crossover's low side already taken, as
+`mirror.hybrid.blend` takes it: the part within the onset window
 through the pressure mask, the rest through the power mask
 (`Crossover.masks`), and the air absorption of `/atmosphere` applied
 (`audio.apply_air_absorption`). Its spectrum is therefore zero above
@@ -255,12 +317,47 @@ factored once per vector and frequency, and a step costs one product. So
 the offsets cost the engine little and the weights would cost the pack
 everything.
 
-The trace chooses the cells **by clearance**: a cell may serve a head at
-distance `d` only if `d` is under the cell's free radius, the smaller of
-`clearance_m` and its distance to the source. Slot 0 is the nearest cell
-that may serve; slot 1 the next that may, on the other side of the head
-where there is one. With one, `mode` is 2; with none, the trace fails and
-names the step: the lattice needs a cell there (`kind` 2).
+For one cell `A W A^H` is the identity and the estimator is the plain
+translation over `1 + lambda`. Mode 2 takes the plain translation,
+`T(f) = Y^T W diag(exp(+i k s . r_0)) Y`
+(`spatial.translate.translation_operator`), without the `1 + lambda`: a
+head on its cell is then the cell itself.
+
+**Between two steps** the engine renders the low band in frames one step
+long, four to a step (centred every 12.5 ms), under a square root Hann
+window at analysis and at synthesis, so the frames add to one. A frame
+takes the `pair`, the `position_weight`, the `cell` and the `mode` of **the
+step nearest its centre**, and the listener's offsets `d_j` **at its
+centre**, `l(t)` being linear between steps. The passage from one step's
+responses to the next is therefore the frames' own overlap, a raised cosine
+one step long, and nothing of the low band is interpolated by index: a
+weight or a cell that changes hands between two steps is two sets of frames
+cross-fading. The frame's transform has 101 bins of 20 Hz, of which the 75
+under `1.05 * 1414` Hz are given to the operator.
+
+**The translation is behind one interface**
+(`reverberate.render.translate.Translation`): the cells' fields and the
+head's offsets in, the head's field out. Its default (`SpatialTranslation`)
+is `reverberate.spatial.translate`, the one implementation of the
+mathematics above, applied without forming `T` or `G`
+(`apply_translation`, `apply_fusion`): the fields are solved against
+`(A W A^H + mu I)`, which depends only on the vector between the two cells
+and is inverted once per vector (`fusion_inverse`), spread on the
+quadrature's 378 plane waves, each turned by its own phase, and gathered.
+Forming `G` first gives the same field at twenty times the cost. A function
+that returns `G` is swapped in through `OperatorTranslation`.
+
+The trace chooses the cells **by clearance**
+(`spatial.translate.choose_cells`): a cell may serve a head at distance `d`
+only if `d` is under its serving radius, the smaller of `surface_share` of
+`clearance_m` and `source_share` of its distance to the source, and under
+`fuse_within_m`. Slot 0 is the nearest cell that may serve; slot 1 the
+nearest that may on the other side of the head. With both, `mode` is 3;
+with slot 0 alone and within `translate_within_m`, 2; otherwise the trace
+fails and names the step: a cell is needed there (`kind` 2). The shares
+are measured: inside the free ball itself, past 0.15 of the source's
+distance, the 64 channels are no prediction
+(`docs/open-questions/low-band-translation.md`).
 
 ### `tail`: what the late part is made from
 
@@ -286,21 +383,50 @@ and per step:
 is the weighted sum of the four, energies and moments alike: an
 interpolation in energy, never of waveforms. Rays are traced from every
 station and from rail positions every 0.80 m; the receiver spheres stand on
-every second lattice cell in `x` and `z`, 0.80 m apart, and on every seat.
+cells of `/cells` no nearer one another than 0.80 m, and on every seat:
+the trace chooses them among `/cells` and `hist_cell` is their row there.
 The weights are linear in arc length on the source side and in distance on
-the listener's. The late level measured between neighbours 0.40 m apart
+the listener's: slot 1 of the cells has `d0 / (d0 + d1)`. The two cells are
+the nearest two the head sees, among the six nearest (a cell behind a wall
+is near and is another room's tail); where it sees none, the nearest alone.
+`scale` is the cell's own where it sees the source position and rays reached
+it; elsewhere the median of the position's cells that do, as the lattice
+field gives its points without a direct path. The late level measured between neighbours 0.40 m apart
 differs by 0.3 to 0.7 dB in the median, so the tail is sampled more coarsely
 than anything else in the pack.
 
 The engine makes the tail as `mirror.render.tail_from_histogram` does: per
 bin and band, `tail_bursts` noise bursts from directions drawn from the
 moments' density, starting `tail_from_s` after the smallest `delay_s` of the
-step's rows (the histogram's first bin holding energy when the step has
-none), the calibration's `tail_gain_db` on top of `scale`. **The noise is one carrier
+step's rows (at the histogram's first bin holding energy when the step has
+none, with nothing added), the calibration's `tail_gain_db` on top of
+`scale`. Each histogram's energy is multiplied by **its own** `scale`
+before the four are weighted and summed; the moments are summed unscaled,
+being read as a density only. The bins are on the geometric clock and the
+tail is laid `lead_s` later, rounded to a whole sample. **The noise is one carrier
 per source**, drawn from `tail_seed` by a generator that gives the same
 numbers on the host and on a card, and shaped by the step's envelope; it is
 not drawn again at each step, or the tail would be a different room twenty
 times a second.
+
+**The generator** (`reverberate.render.noise`) is Threefry 2x32 with twenty
+rounds: 32 bit additions, rotations and exclusive ors, the same on every
+array library, checked against Random123's known answers. The key is
+`tail_seed`'s low and high words; the counter is `(index, stream)`. Burst
+`u` of bank band `b` reads the stream `b * tail_bursts + u`: its noise at
+the sample `index` after the emission is the sum of the eight bytes of the
+two words, less 1020, over `sqrt(43690)` (unit variance, normal to an
+excess kurtosis of -0.15; exact in integers, where a logarithm would round
+differently on a card). The uniform that picks its direction in the bin
+`index` is the first word of the stream `2^31 + b * tail_bursts + u`, plus a
+half, over `2^32`; the direction is the first of the 45 of
+`spatial.sh.quadrature(2 * histogram_order + 2)` whose cumulative density
+passes it.
+
+**Between two steps** the outputs of the two steps' responses are
+cross-faded linearly, each times its own `high_gain_db`: the quasi-static
+rule. A response is kept while the step's `hist`, its two weights and the
+bin the tail starts at do not change.
 
 ### `level`
 
@@ -315,8 +441,9 @@ source slots and by inverse distance across cells, in decibels. It is the
 scalar of `mirror.hybrid.blend`, one per point there, one per step here.
 `onset_s` is the step's smallest `delay_s` plus what the wave response's
 loudest sample trails its own direct arrival by: each pair's `low/onset_s`
-less its geometric direct delay, under the same weighting. Between steps
-both are linear in time.
+less its geometric direct delay, under the same weighting. Neither is
+interpolated between steps on its own: each is read at the step and enters
+the path's gain there (see `early`), and the tail's.
 
 ## `/mirror`, `/crossover`, `/atmosphere`
 
@@ -348,8 +475,19 @@ departure direction and the source's facing, `(cos yaw, 0, -sin yaw)` in the
 scene frame. A model is a figure of revolution about the facing. **It is
 normalised to unit mean power over the sphere in every band**, so a
 directional source radiates what the omnidirectional one does, and the tail
-and the low band, which are omnidirectional, keep their level. `omni` is
-zeros. A model's digest, in the recipe's `assets.directivity`, is the
+and the low band, which are omnidirectional, keep their level. The table is
+read linearly in decibels between its angles, and the mean power is that of
+the table so read. `omni` is zeros.
+
+`voice_v1` (`mirror.directivity.voice_v1`) is **a parametric fit, to be
+confirmed by the owner**: `-back_db (1 - cos angle) / 2` before
+normalisation, with `back_db = 2, 3, 5, 7, 10, 14, 18` on the seven bands,
+round figures for the front to back difference of speech of the order
+reported by Chu and Warnock, *Detailed directivity of sound fields around
+human talkers*, NRC Canada, IRC-RR-104, 2002, and, at 8 kHz, by Monson,
+Hunter and Story, J. Acoust. Soc. Am. 132 (1), 2012. Their tables were not
+reproduced; replacing the figures by them changes the digest and nothing
+else. A model's digest, in the recipe's `assets.directivity`, is the
 SHA-256 of `gain_db`'s bytes.
 
 ## What the engine does with it
@@ -368,12 +506,41 @@ Per source, at every output sample, in this order:
    The tail starts after the window and takes the power mask.
 4. **Low side.** The dry signal at `low_sample_rate_hz` convolved with the
    step's responses, crossfaded by `position_weight`, moved to the head by
-   `mode`, brought to 48 kHz.
+   `mode`, brought to 48 kHz, times the ratio of the two rates (see the
+   scale of `ir`).
 5. **Sum**, times the source's `gain_db` and the interval's.
 
-and the sources are summed. At rest, with one source and directivity off,
-steps 1 to 4 are `mirror.render.render_point` followed by
-`mirror.hybrid.blend`.
+and the sources are summed, in the order the pack holds them. At rest, with
+one source and directivity off, steps 1 to 4 are
+`mirror.render.render_point` followed by `mirror.hybrid.blend`.
+
+**What the engine does in another order, and what it costs.**
+
+- *The fixed filters are applied to the dry signal, before the delay line*:
+  the octave bank, the signature, the low cut, the crossover's masks, the
+  air. A fixed filter and a delay that moves commute to the order of the
+  speed over the sound speed, 0.4 per cent, the error the quasi-static rule
+  already has; at rest they commute exactly. It is one filtering of a mono
+  clip instead of one per output channel.
+- *The crossover's masks are filters of 85 ms* (4097 taps under a Hann
+  window, from the mask on the 1.2 s grid `mirror.hybrid.blend` uses), a
+  mask being a spectrum and a scene having no length to take one over. The
+  mask is smoothed by 23 Hz; on the synthetic level B the two sides add
+  back to the whole band within 0.5 per cent.
+- *The air* on a path is `exp(-m(f) c delay)` exactly at distances 8 m
+  apart (further apart beyond 88 m, twelve at most) and linear between two:
+  3 per cent of the 20 kHz component at worst, 0.1 per cent at 8 kHz. On the
+  tail it is one factor per bin and bank band, the share of the band's
+  energy the air leaves at the bin's time.
+- *The tail* takes the power mask and has no window: it starts after it.
+- *The output does not depend on how it is asked for.* A source is rendered
+  in runs of ten steps that start at multiples of ten from the scene's
+  start, each from the pack and the dry signal alone. A block, a stem and a
+  seek are slices of those runs: blocks of any size give the same samples to
+  the bit. The run's length is a setting of the render; another length moves
+  the samples by 2e-8 of the peak.
+
+The signal is written as `docs/formats/scene-signal.md` says.
 
 ## Provenance
 
@@ -396,8 +563,11 @@ not written (roadmap constraint 10).
 
 **A pair's key** is the first 64 hexadecimal characters of the SHA-256 of
 the canonical JSON of: `voxel_low_key`, the source position and the cell's
-position in millimetres as integers, the encoder's settings, the solver's
-version, the window in seconds. It is the same for every recipe that uses
+position (the one asked for) in millimetres as integers, the encoder's
+settings, the solver's version, the window in seconds
+(`spatial.lowband.pair_key`). `voxel_low_key` is the key of a grid to
+1500 Hz, not of a field's low grid to 1 kHz, which stops under the
+crossover's ramp. It is the same for every recipe that uses
 the pair, which is what makes the dwelling's cache fill once.
 
 ## Size
@@ -425,7 +595,9 @@ down a 6 m rail is 75 positions, each heard from one or two cells.
 
 What the trace computes, counted and not priced: 14 sources by 12 000
 audible steps is 168 000 path validations, 67 minutes of one RTX 3090 at the
-24 ms a pair measured on 2026-09-17, before L5 batches them.
+24 ms a pair measured on 2026-09-17 for the lattice pipeline. The batched
+trace of L5 and what it is expected to cost are in
+[the cost appendix](../adr/0016-appendix-moving-mirror-cost.md).
 
 ## What a reader may assume
 
@@ -454,7 +626,11 @@ audible steps is 168 000 path validations, 67 minutes of one RTX 3090 at the
 ## The synthetic profile
 
 `profile = "synthetic-free-field"`: a pack a test builds in memory, with no
-trace, whose render is known in closed form. Lot L7 is developed against it.
+trace, whose render is known in closed form. Lot L7 is developed against
+it. Its two cells are where the builder is told to put them and its `mode`
+is what the builder is asked for: it does not follow the rule a trace
+chooses cells by, so that one cell can be measured further than a trace
+would read it.
 
 - No room: one source, omnidirectional, at a fixed position; a listener at
   rest or on a straight line at constant speed.
@@ -473,9 +649,37 @@ trace, whose render is known in closed form. Lot L7 is developed against it.
 - **Level B**, `has_low = true`: `/cells` holds two cells 0.40 m apart on
   the listener's line; `low/ir` is the monopole's interior expansion at each
   (`spatial.field.monopole_coefficients`, divided by `i^n` per degree to make
-  it the ambisonic signal, scaled by `4 pi` so its far field is `1 / d`)
-  through the low masks; `seam_db` is 0. The translated and fused fields at
-  the head are then known from the same function at the head itself.
+  it the ambisonic signal, scaled by `4 pi` so its far field is `1 / d`,
+  on the scale of `ir`)
+  through the low **pressure** mask (one arrival lies wholly in the onset
+  window, and `level/onset_s` is its delay, so the early part takes the high
+  pressure mask and the two add to one) and through a raised cosine high
+  pass from 80 to 160 Hz: under it the expansion of a source at `r` grows as
+  `(k r)^-(n + 1)` and no float32 holds degree 7. `seam_db` is 0. The
+  translated and fused fields at the head are then known from the same
+  function at the head itself. A head within `exact_under_m` of a cell is
+  mode 1; elsewhere mode 2 from the nearer cell, or mode 3 from both when
+  the builder is asked to fuse.
+- `/recipe` holds a recipe of the sources and no activity; a test gives the
+  engine its dry signal directly.
+
+Measured on level B, source 3 m away, dry noise from 200 to 1300 Hz, the
+error's energy over the monopole's at the head, per ambisonic degree 0 to 7,
+in dB (`tests/test_render_engine.py`):
+
+| the head | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| on a cell, mode 1 | -120 | -120 | -120 | -120 | -120 | -120 | -120 | -120 |
+| 0.10 m from one cell, mode 2 | -59 | -56 | -54 | -53 | -44 | -31 | -19 | -9 |
+| 0.20 m from one cell, mode 2 | -51 | -49 | -41 | -32 | -23 | -16 | -9 | -4 |
+| 0.20 m from each of two, mode 3 | -52 | -54 | -58 | -51 | -45 | -44 | -35 | -23 |
+
+Mode 1 is the filter between the two rates (1e-6 of ripple). **An order 7
+expansion moved from one cell keeps its low degrees and loses its top
+ones**: what reaches degree 7 at the head comes from degrees the cell does
+not hold. Two cells fused recover them to -23 dB. This is the estimator of
+this document measured on all 64 channels, which ADR 0016 lists as its
+risk 6; a free field says nothing of a room.
 
 A synthetic pack carries `provenance_json` with `"cost": []` and
 `code_version` of the test.

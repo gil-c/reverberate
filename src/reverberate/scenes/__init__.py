@@ -32,10 +32,14 @@ from reverberate.scenes.generate import (
     placeholder_clips,
 )
 from reverberate.scenes.kinematics import (
+    AUDIBLE_TAIL_S,
     YAW_STEP_S,
     ListenerState,
+    LowBandPositions,
     SourceState,
+    audible_steps,
     listener_state,
+    low_band_source_positions,
     rail_arc_lengths,
     rail_length,
     rail_samples,
@@ -66,6 +70,7 @@ from reverberate.scenes.recipe import (
 from reverberate.scenes.validate import Violation, check, validate, validate_text
 
 __all__ = [
+    "AUDIBLE_TAIL_S",
     "GENERATOR_NAME",
     "GENERATOR_VERSION",
     "YAW_STEP_S",
@@ -81,8 +86,10 @@ __all__ = [
     "RecipeError",
     "Room",
     "SeatObject",
+    "LowBandPositions",
     "SourceState",
     "Violation",
+    "audible_steps",
     "build_layout",
     "canonical_bytes",
     "check",
@@ -94,6 +101,7 @@ __all__ = [
     "load_hssd_layout",
     "load_recipe",
     "low_band_positions",
+    "low_band_source_positions",
     "parse_recipe",
     "placeholder_assets",
     "placeholder_clips",

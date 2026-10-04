@@ -23,10 +23,14 @@ from numpy.typing import ArrayLike
 from reverberate.scenes.recipe import Dwell, Rail, Recipe, Rise, Source
 
 __all__ = [
+    "AUDIBLE_TAIL_S",
     "YAW_STEP_S",
     "ListenerState",
+    "LowBandPositions",
     "SourceState",
+    "audible_steps",
     "listener_state",
+    "low_band_source_positions",
     "polyline_length",
     "rail_arc_lengths",
     "rail_length",
@@ -40,6 +44,10 @@ __all__ = [
 #: The step a source's yaw is advanced on, and the step rules 6 to 9 are
 #: sampled at: the scene pack's.
 YAW_STEP_S = 0.05
+
+#: A source stays audible this long after an activity interval ends: the
+#: length of a low band response, the pack's ``low_samples / low_sample_rate_hz``.
+AUDIBLE_TAIL_S = 1.2
 
 #: A last sample closer than this to ``b`` is ``b``; a micrometre.
 _SAME_M = 1e-6
@@ -345,4 +353,143 @@ def source_state(recipe: Recipe, source_id: str, t: ArrayLike) -> SourceState:
         sample_a=sample_a,
         sample_b=sample_b,
         weight=weight,
+    )
+
+
+# --------------------------------------------------------------------------
+# what the low band is solved from
+# --------------------------------------------------------------------------
+
+
+def audible_steps(
+    recipe: Recipe, source_id: str, *, step_s: float = YAW_STEP_S, tail_s: float = AUDIBLE_TAIL_S
+) -> np.ndarray:
+    """Per step of :func:`sample_times`, whether the source is audible: the pack's ``audible``.
+
+    A step is audible when it lies in an activity interval or within
+    ``tail_s`` after one (``docs/formats/scene-pack.md``): the sound a source
+    made still rings for the length of a response after it falls silent.
+    """
+    times = sample_times(recipe, step_s)
+    heard = np.zeros(times.size, dtype=bool)
+    for interval in recipe.source(source_id).activity:
+        heard |= (times >= interval.start_s - 1e-9) & (times <= interval.end_s + tail_s + 1e-9)
+    return heard
+
+
+@dataclass(frozen=True)
+class LowBandPositions:
+    """The source positions the band under the crossover is solved from, each once."""
+
+    #: ``[position, 3]`` in metres, scene frame, on whole millimetres.
+    positions: np.ndarray
+    #: Per position: ``"station"``, ``"rail"`` or ``"seat_rail"``. An end a rail
+    #: shares with a station is the rail's.
+    kind: tuple[str, ...]
+    #: The rows each source reads, sorted.
+    by_source: dict[str, tuple[int, ...]]
+
+    @property
+    def count(self) -> int:
+        return int(self.positions.shape[0])
+
+    def counts(self) -> dict[str, int]:
+        return {
+            "stations": self.kind.count("station"),
+            "rail_samples": self.kind.count("rail"),
+            "seat_rail_samples": self.kind.count("seat_rail"),
+        }
+
+
+_KIND_RANK = {"rail": 0, "seat_rail": 1, "station": 2}
+
+
+def low_band_source_positions(
+    recipe: Recipe,
+    *,
+    audible_only: bool = True,
+    step_s: float = YAW_STEP_S,
+    tail_s: float = AUDIBLE_TAIL_S,
+) -> LowBandPositions:
+    """Every position a wave solve is needed from for this recipe.
+
+    A source at rest is at its station, at its height; on a ``travel`` it
+    lies between two of :func:`rail_samples`; on a ``rise`` between two of
+    :func:`seat_rail_heights`. With ``audible_only`` a position counts only
+    if some audible step (:func:`audible_steps`) reads it, the two samples
+    either side of the source at that step: a rail walked in silence costs
+    nothing. Without it every station dwelt at and every sample of every
+    rail travelled counts, heard or not, which is what a cache filled once
+    per rail would hold.
+
+    Positions are told apart to the millimetre, so a rail's end and the
+    standing station it starts from are one solve.
+    """
+    floor = recipe.dwelling.floor_y_m
+    standing = floor + recipe.heights.standing_m
+    rungs = floor + seat_rail_heights(recipe)
+    found: dict[tuple[int, int, int], tuple[int, str]] = {}
+    by_source: dict[str, set[tuple[int, int, int]]] = {}
+
+    def add(mine: set[tuple[int, int, int]], points: np.ndarray, kind: str) -> None:
+        for point in np.asarray(points, dtype=float).reshape(-1, 3):
+            key = (
+                round(float(point[0]) * 1000.0),
+                round(float(point[1]) * 1000.0),
+                round(float(point[2]) * 1000.0),
+            )
+            held = found.get(key)
+            if held is None:
+                found[key] = (len(found), kind)
+            elif _KIND_RANK[kind] < _KIND_RANK[held[1]]:
+                found[key] = (held[0], kind)
+            mine.add(key)
+
+    def on_rail(rail: Rail, chosen: np.ndarray) -> np.ndarray:
+        flat = rail_samples(rail)[chosen]
+        return np.stack([flat[:, 0], np.full(flat.shape[0], standing), flat[:, 1]], axis=1)
+
+    for source in recipe.sources:
+        mine = by_source.setdefault(source.id, set())
+        if audible_only:
+            times = sample_times(recipe, step_s)
+            heard = audible_steps(recipe, source.id, step_s=step_s, tail_s=tail_s)
+            if not heard.any():
+                continue
+            position, _, index, sample_a, sample_b, weight = _place(
+                recipe, source, times[heard], None
+            )
+        for number, segment in enumerate(source.segments):
+            if audible_only:
+                here = index == number
+                if not here.any():
+                    continue
+                # Slot 1 is read only where it has a weight, slot 0 only where it has one.
+                chosen = np.unique(
+                    np.concatenate(
+                        [sample_a[here][weight[here] < 1.0], sample_b[here][weight[here] > 0.0]]
+                    )
+                )
+            if isinstance(segment, Dwell):
+                x, z = recipe.station(segment.station).xz
+                add(mine, np.array([x, floor + recipe.heights.of(segment.height), z]), "station")
+            elif isinstance(segment, Rise):
+                x, z = recipe.station(segment.station).xz
+                heights = rungs[chosen] if audible_only else rungs
+                points = np.stack(
+                    [np.full(heights.size, x), heights, np.full(heights.size, z)], axis=1
+                )
+                add(mine, points, "seat_rail")
+            else:
+                rail = recipe.rail(segment.rail)
+                every = np.arange(len(rail_arc_lengths(rail)))
+                add(mine, on_rail(rail, chosen if audible_only else every), "rail")
+    order = sorted(found, key=lambda key: found[key][0])
+    row = {key: n for n, key in enumerate(order)}
+    return LowBandPositions(
+        positions=np.array(order, dtype=float).reshape(-1, 3) / 1000.0,
+        kind=tuple(found[key][1] for key in order),
+        by_source={
+            name: tuple(sorted(row[key] for key in keys)) for name, keys in by_source.items()
+        },
     )

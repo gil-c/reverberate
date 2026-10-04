@@ -15,9 +15,10 @@ import h5py
 import numpy as np
 import pytest
 
-from reverberate.experiments.w44_interpolation import fusion_operator, translation_weights
+from reverberate.experiments.w44_interpolation import fusion_weights, translation_weights
 from reverberate.experiments.w44_interpolation.__main__ import main
 from reverberate.experiments.w44_interpolation.leave_one_out import leave_one_out
+from reverberate.experiments.w44_interpolation.line_channels import line_channels
 from reverberate.experiments.w44_interpolation.scoring import (
     BANDS,
     band_energy,
@@ -25,9 +26,9 @@ from reverberate.experiments.w44_interpolation.scoring import (
     early_window,
     onset_of,
 )
-from reverberate.experiments.w44_interpolation.translate import SOUND_SPEED_M_S
 from reverberate.experiments.w44_interpolation.translation_failures import THIRDS
 from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
+from reverberate.spatial.translate import SOUND_SPEED_M_S
 
 ORDER = 7
 
@@ -118,15 +119,16 @@ class TestFusion:
         below = self.field.coefficients(self.target - self.step, freqs)
         above = self.field.coefficients(self.target + self.step, freqs)
         translated = np.einsum("fc,fc->f", translation_weights(self.step, freqs, ORDER), below)
-        one = fusion_operator(np.stack([-self.step]), freqs, ORDER)
-        pair = fusion_operator(np.stack([-self.step, self.step]), freqs, ORDER)
+        # An offset is the target seen from the cell: +step from the cell below.
+        one = fusion_weights(np.stack([self.step]), freqs, ORDER)
+        pair = fusion_weights(np.stack([self.step, -self.step]), freqs, ORDER)
         fused_one = np.einsum("fc,fc->f", one[:, 0], below)
         fused = np.einsum("fc,fc->f", pair[:, 0], below) + np.einsum("fc,fc->f", pair[:, 1], above)
         return error_db(translated, truth), error_db(fused_one, truth), error_db(fused, truth)
 
     def test_the_operator_is_a_filter_per_frequency_neighbour_and_channel(self) -> None:
-        operator = fusion_operator(
-            np.stack([-self.step, self.step]), np.array([200.0, 400.0]), ORDER
+        operator = fusion_weights(
+            np.stack([self.step, -self.step]), np.array([200.0, 400.0]), ORDER
         )
         assert operator.shape == (2, 2, channel_count(ORDER)) and operator.dtype == np.complex64
 
@@ -147,7 +149,7 @@ class TestFusion:
         freqs = np.array([300.0, 900.0])
         offsets = np.stack([-self.step, self.step])
         assert np.array_equal(
-            fusion_operator(offsets, freqs, ORDER), fusion_operator(offsets, freqs, ORDER)
+            fusion_weights(offsets, freqs, ORDER), fusion_weights(offsets, freqs, ORDER)
         )
 
 
@@ -300,3 +302,30 @@ class TestOnASyntheticField:
         assert summary["median_good"][THIRDS.index(250)] < -40.0
         assert summary["by_cells_missing_round_target"]["0"]["cases"] == 4, "from the centre"
         assert np.load(tmp_path / "diag_rows.npy").shape == (24, 3)
+
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    def test_all_channels_on_the_line_between_the_arrays_centres(
+        self, line: Path, tmp_path: Path
+    ) -> None:
+        assert main(["line-channels", "--field", str(line), "--out", str(tmp_path / "a")]) == 0
+        summary = json.loads((tmp_path / "a" / "summary_channels.json").read_text())
+        assert summary["centres"] == 45 and summary["columns"][-2:] == ["all channels", "channel 0"]
+        near, wide = summary["distances"]["0.020"], summary["distances"]["0.240"]
+        assert near["translate"]["far_cases"] == near["cases"], "the source is 1.8 m away"
+        # On the head's sphere a translation of 2 cm is exact on every channel.
+        assert max(near["translate"]["far_all_channels"]["worst"]) < -60.0
+        assert max(near["translate"]["far_per_degree_worst_band"]["worst"]) < -60.0
+        # At 0.24 m and 1 kHz, k d = 4.4: two cells hold more than one does.
+        one = wide["translate"]["far_all_channels"]["median"][BANDS.index(1000)]
+        two = wide["fuse"]["far_all_channels"]["median"][BANDS.index(1000)]
+        assert two < one and two < -20.0
+        shares = summary["by_share_of_source_distance"]["translate"]
+        assert sum(row["cases"] for row in shares.values()) > 0
+        # A plan whose arrays stand where the field says they do changes nothing.
+        with h5py.File(line, "r") as f:
+            centres = f["positions"][:].tolist()
+        plan = tmp_path / "plan.json"
+        band_record = {"centres": centres, "grid_step_m": 0.02}
+        plan.write_text(json.dumps({"bands": {"low": band_record, "mid": band_record}}))
+        again = line_channels(line, tmp_path / "b", plan=plan, steps=(1,), say=lambda m: None)
+        assert again["distances"]["0.020"] == near

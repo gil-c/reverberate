@@ -26,9 +26,9 @@ from reverberate.experiments.w44_interpolation.scoring import (
     percentiles,
     write_summary,
 )
-from reverberate.experiments.w44_interpolation.translate import (
+from reverberate.spatial.translate import (
     SOUND_SPEED_M_S,
-    fusion_operator,
+    fusion_weights,
     translation_weights,
 )
 
@@ -78,7 +78,7 @@ def line_gaps(field: Path, out: Path, *, say: Callable[[str], None] = print) -> 
     for half in HALF_SPACINGS:
         off = np.array([0.0, 0.0, half * STEP_M])
         w_plus = translation_weights(off, fk, order)  # from the point below, a step up
-        op = fusion_operator(np.stack([-off, off]), fk, order)
+        op = fusion_weights(np.stack([off, -off]), fk, order)  # the target seen from each
         rows: dict[str, list[list[float]]] = {
             k: [] for k in ("nearest", "linear", "aligned", "translate", "fusion")
         }

@@ -122,7 +122,18 @@ def stream(seed: int, label: str) -> np.random.Generator:
 class Parameters:
     """The ranges a scene is drawn from. A two element value is ``(min, max)``.
 
-    The defaults are the first scene's: twenty minutes, fourteen sources.
+    The defaults are the first scene's: twenty minutes, fourteen sources, and
+    **a domestic scene**: people mostly stay where they are, sitting or
+    standing, talk, and move a few times. A far voice keeps a station for
+    ``dwell_s``, minutes; the listener rests for ``listener_rest_s``, minutes
+    too, and the near voices, who follow the listener, move when the listener
+    does. Some speech still falls on a walk, a small share of it. What the
+    ranges cost is the number of source positions the band under the crossover
+    is solved from, one wave solve each: every metre of rail a source is heard
+    on is 12.5 of them (``describe`` prints the count). With ``dwell_s`` of 20
+    to 180 s and rests of 15 to 120 s, near voices walked 160 to 200 m each
+    and the first scene on hssd_0076 asked for 1646 audible positions; with
+    these defaults, 375.
     """
 
     duration_s: float = 1200.0
@@ -137,11 +148,11 @@ class Parameters:
     far_distance_m: Range = (2.5, 15.0)
     #: A voice's walking speed, the time it stays at a station, its level.
     speed_m_s: Range = (0.5, 1.1)
-    dwell_s: Range = (20.0, 180.0)
+    dwell_s: Range = (400.0, 1500.0)
     gain_db: Range = (-6.0, 0.0)
     noise_gain_db: Range = (-18.0, -6.0)
     #: The share of a voice's stations that are seats.
-    seated_share: Range = (0.3, 0.7)
+    seated_share: Range = (0.5, 0.9)
     #: A talk spurt and the pause after it.
     speech_s: Range = (1.5, 12.0)
     pause_s: Range = (0.5, 6.0)
@@ -156,9 +167,9 @@ class Parameters:
     noise_off_s: Range = (10.0, 120.0)
     noise_steady_share: float = 0.4
     listener_speed_m_s: Range = (0.4, 1.0)
-    listener_rest_s: Range = (15.0, 120.0)
+    listener_rest_s: Range = (240.0, 720.0)
     listener_turn_rate_deg_s: Range = (40.0, 160.0)
-    listener_seated_share: Range = (0.3, 0.6)
+    listener_seated_share: Range = (0.5, 0.8)
     listener_pitch_deg: Range = (-20.0, 10.0)
     #: Standard deviation of where the head stops short of, or past, a talker.
     listener_gaze_jitter_deg: float = 12.0

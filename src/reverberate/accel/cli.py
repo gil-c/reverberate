@@ -4,6 +4,14 @@ python -m reverberate.accel campaign --bundle B --out O [--pffdtd DIR] [--device
 python -m reverberate.accel bundle --out B --hssd-root H --scene-id S --sources sources.json
 python -m reverberate.accel voxelise --model M --materials DIR --fmax F --out DIR [--cpu]
 python -m reverberate.accel compare-entries A B
+
+The low band pairs of a scene (:mod:`reverberate.accel.pairs`); ``campaign``
+runs such a bundle too, by what its ``campaign.json`` says it is:
+
+python -m reverberate.accel pairs-bundle --out B --scene-id S --models-from DIR
+    (--recipe R.json | --sources P.npy) --cells C.npy [--heard-at H.json] [--fmax F]
+python -m reverberate.accel pairs-estimate --sources N --pairs M [--fmax F] [--rate USD_PER_H]
+python -m reverberate.accel pairs-install --pulled DIR [--publish]
 """
 
 from __future__ import annotations
@@ -27,6 +35,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--solve-bands", default=None, help="comma separated bands to solve, for a flow test"
     )
+    p.add_argument(
+        "--solvers", type=int, default=None, help="low band pairs: source positions at once"
+    )
+
+    p = sub.add_parser("pairs-bundle", help="a bundle of low band pairs, on the laptop")
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--scene-id", required=True)
+    p.add_argument("--models-from", type=Path, default=None, help="an earlier export to reuse")
+    p.add_argument("--hssd-root", type=Path, default=None)
+    p.add_argument("--recipe", type=Path, default=None, help="a scene recipe: its positions")
+    p.add_argument(
+        "--all-positions",
+        action="store_true",
+        help="with --recipe: every position the sources pass through, not only the audible ones",
+    )
+    p.add_argument("--sources", type=Path, default=None, help="[position, 3] as .npy")
+    p.add_argument("--cells", type=Path, required=True, help="[cell, 3] as .npy")
+    p.add_argument(
+        "--heard-at", type=Path, default=None, help="JSON: the cells of each source position"
+    )
+    p.add_argument("--fmax", type=float, default=None, help="the grid's top, 1500 Hz by default")
+
+    p = sub.add_parser("pairs-estimate", help="seconds and USD of a campaign of pairs")
+    p.add_argument("--sources", type=int, required=True)
+    p.add_argument("--pairs", type=int, required=True)
+    p.add_argument("--fmax", type=float, default=None)
+    p.add_argument("--rate", type=float, default=1.74, help="USD an hour")
+
+    p = sub.add_parser("pairs-install", help="pairs brought home, into this machine's cache")
+    p.add_argument("--pulled", type=Path, required=True, help="the run's pairs directory")
+    p.add_argument("--publish", action="store_true")
 
     p = sub.add_parser("bundle", help="prepare what the machine needs, on the laptop")
     p.add_argument("--out", type=Path, required=True)
@@ -62,7 +101,21 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "campaign":
         from reverberate.accel.campaign import run_campaign
+        from reverberate.accel.pairs import KIND, run_pairs
 
+        # A bundle says what it is; one that cannot be read is the campaign's to refuse.
+        spec_file = args.bundle / "campaign.json"
+        kind = json.loads(spec_file.read_text()).get("kind") if spec_file.is_file() else None
+        if kind == KIND:
+            run_pairs(
+                args.bundle,
+                args.out,
+                pffdtd_dir=args.pffdtd,
+                devices=args.devices,
+                gpu=False if args.cpu else None,
+                solvers=args.solvers,
+            )
+            return 0
         run_campaign(
             args.bundle,
             args.out,
@@ -87,6 +140,46 @@ def main(argv: list[str] | None = None) -> int:
             models_from=args.models_from,
         )
         print(json.dumps({k: v for k, v in record.items() if k != "labels"}, indent=1))
+        return 0
+    if args.command == "pairs-bundle":
+        import numpy as np
+
+        from reverberate.accel.pairs import prepare_pairs_bundle, source_positions
+
+        if (args.recipe is None) == (args.sources is None):
+            raise SystemExit("give the source positions as --recipe or as --sources, not both")
+        if args.recipe is not None:
+            from reverberate.scenes import load_recipe
+
+            sources = source_positions(
+                load_recipe(args.recipe), audible_only=not args.all_positions
+            )["positions"]
+        else:
+            sources = np.load(args.sources)
+        record = prepare_pairs_bundle(
+            args.out,
+            scene_id=args.scene_id,
+            sources=sources,
+            cells=np.load(args.cells),
+            heard_at=json.loads(args.heard_at.read_text()) if args.heard_at else None,
+            models_from=args.models_from,
+            hssd_root=args.hssd_root,
+            fmax_hz=args.fmax,
+        )
+        print(json.dumps(record, indent=1))
+        return 0
+    if args.command == "pairs-estimate":
+        from reverberate.accel.pairs import estimate
+        from reverberate.spatial.lowband import solve_fmax_hz
+
+        fmax = args.fmax if args.fmax is not None else solve_fmax_hz()
+        priced = estimate(args.sources, args.pairs, fmax_hz=fmax, rate_usd_per_hour=args.rate)
+        print(json.dumps(priced, indent=1))
+        return 0
+    if args.command == "pairs-install":
+        from reverberate.accel.pairs import install_pairs
+
+        print(json.dumps(install_pairs(args.pulled, publish=args.publish), indent=1))
         return 0
     if args.command == "voxelise":
         import numpy as np

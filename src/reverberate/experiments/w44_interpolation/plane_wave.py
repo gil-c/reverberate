@@ -1,6 +1,7 @@
 """Leave-one-out with a plane wave fit: the neighbours' expansions fused per frequency.
 
-Each point of the lattice is predicted by :func:`~.translate.fusion_operator`
+Each point of the lattice is predicted by
+:func:`~reverberate.spatial.translate.fusion_weights`
 from one neighbour, from the two opposite neighbours of an axis, and from all
 four, and judged like :mod:`.leave_one_out` judges its predictors: the early
 part of the W channel, per octave, in dB. The fields are low passed at
@@ -29,7 +30,7 @@ from reverberate.experiments.w44_interpolation.scoring import (
     percentiles,
     write_summary,
 )
-from reverberate.experiments.w44_interpolation.translate import REGULARISATION, fusion_operator
+from reverberate.spatial.translate import REGULARISATION, fusion_weights
 
 __all__ = ["FMAX_HZ", "leave_one_out_fusion"]
 
@@ -56,12 +57,13 @@ def leave_one_out_fusion(
         fk = freqs[keep]
         names = list(DIRS)
         off = {d: np.array(DIRS[d], float) * pitch for d in names}
-        # A neighbour on side d of the target sits at +off[d] from it.
+        # A neighbour on side d of the target sits at +off[d] from it, so the
+        # target is at -off[d] from the neighbour: the offset the weights take.
         ops = {
-            "pair_x": fusion_operator(np.stack([off["x-"], off["x+"]]), fk, order),
-            "pair_z": fusion_operator(np.stack([off["z-"], off["z+"]]), fk, order),
-            "four": fusion_operator(np.stack([off[d] for d in names]), fk, order),
-            "one": fusion_operator(np.stack([off["x-"]]), fk, order),
+            "pair_x": fusion_weights(-np.stack([off["x-"], off["x+"]]), fk, order),
+            "pair_z": fusion_weights(-np.stack([off["z-"], off["z+"]]), fk, order),
+            "four": fusion_weights(-np.stack([off[d] for d in names]), fk, order),
+            "one": fusion_weights(-np.stack([off["x-"]]), fk, order),
         }
         say(f"operators in {time.time() - started:.1f} s")
         side = {"x-": ("pair_x", 0), "x+": ("pair_x", 1), "z-": ("pair_z", 0), "z+": ("pair_z", 1)}

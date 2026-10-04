@@ -16,14 +16,16 @@ What it found on hssd_0076: a mean of two responses fails from 500 Hz at
 and translation fails where a surface or the source is nearer than the
 distance translated.
 
-:mod:`.translate` is the mathematics, two functions that read no file:
-:func:`~.translate.translation_weights` and
-:func:`~.translate.fusion_operator`. :mod:`.scoring` is what every
+:mod:`reverberate.spatial.translate` is the mathematics, which reads no file:
+:func:`~reverberate.spatial.translate.translation_weights` and
+:func:`~reverberate.spatial.translate.fusion_weights` give the pressure, and
+its operators all 64 channels. :mod:`.scoring` is what every
 measurement here shares: the octave bands, the early window, the error in
 decibels. :mod:`.leave_one_out` and :mod:`.plane_wave` leave each point of a
 lattice out in turn, :mod:`.line_gaps` reads the error against the spacing on
-a line solved every 2 cm, and :mod:`.translation_failures` looks at where the
-translation fails round 500 Hz.
+a line solved every 2 cm, :mod:`.translation_failures` looks at where the
+translation fails round 500 Hz, and :mod:`.line_channels` reads all 64
+channels on that line between the centres the arrays really stood at.
 
 Usage::
 
@@ -32,11 +34,10 @@ Usage::
     python -m reverberate.experiments.w44_interpolation plane-wave --field ... --out ...
     python -m reverberate.experiments.w44_interpolation line-gaps --field ... --out ...
     python -m reverberate.experiments.w44_interpolation failures --field ... --out ...
+    python -m reverberate.experiments.w44_interpolation line-channels --field ... --out ... \\
+        --plan <the line campaign's plan.json> --scene <mirror/scene.npz>
 """
 
-from reverberate.experiments.w44_interpolation.translate import (
-    fusion_operator,
-    translation_weights,
-)
+from reverberate.spatial.translate import fusion_weights, translation_weights
 
-__all__ = ["fusion_operator", "translation_weights"]
+__all__ = ["fusion_weights", "translation_weights"]
