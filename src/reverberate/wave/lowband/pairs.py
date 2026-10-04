@@ -51,6 +51,7 @@ __all__ = [
     "Item",
     "LowbandPairs",
     "batch_capacity",
+    "estimate",
     "node_indices",
     "pack_batches",
     "solver_name",
@@ -63,6 +64,62 @@ SOLVER = "reverberate.wave.lowband/1"
 MEMORY_SHARE = 0.8
 #: The most sources of one launch: the boundary kernel's second grid axis.
 BATCH_LIMIT = 4096
+
+
+#: Measured on one RTX 3080 20 GB at 0.136 USD/h, instance 54201838, 2026-10-05, on the
+#: bundle's grid of hssd_0076 to 1500 Hz (47.4 M reached nodes of 63.3 M, 2.69 M lossy nodes
+#: of 11 branches, 32 769 steps): card seconds a source position, card seconds a pair
+#: (filters, resampling, fit, the file), and what is done once (the grid cut to its sources'
+#: reach, the fit's operator).
+MEASURED_ON = "1 x RTX 3080 20 GB"
+MEASURED_RATE_USD_PER_HOUR = 0.136
+SOLVE_S_AT_1500 = 110.0
+PAIR_S = 0.31
+ONCE_S = 95.0
+REACHED_NODES_AT_1500 = 47_371_003
+STEPS_AT_1500 = 32_769
+
+
+def estimate(
+    sources: int,
+    pairs: int,
+    *,
+    fmax_hz: float,
+    duration_s: float = 1.2,
+    rate_usd_per_hour: float = MEASURED_RATE_USD_PER_HOUR,
+    cards: int = 1,
+) -> dict[str, Any]:
+    """Seconds and USD of ``sources`` solves and ``pairs`` responses on the batched solver.
+
+    The terms are this module's constants, measured on :data:`MEASURED_ON`;
+    another card needs its own, and ``rate_usd_per_hour`` is then that
+    card's. A solve goes as the fourth power of ``fmax`` and as the window;
+    ``cards`` of the measured kind each run their own batches. The keys are
+    those of :func:`reverberate.accel.pairs.estimate`.
+    """
+    scale = fmax_hz / 1500.0
+    solve_s = SOLVE_S_AT_1500 * scale**4 * duration_s / 1.2
+    seconds = ONCE_S + (sources * solve_s + pairs * PAIR_S) / max(1, cards)
+    per_second = rate_usd_per_hour / 3600.0
+    return {
+        "fmax_hz": fmax_hz,
+        "grid_nodes": REACHED_NODES_AT_1500 * scale**3,
+        "steps": STEPS_AT_1500 * scale * duration_s / 1.2,
+        "stencil_s_per_source": round(solve_s, 2),
+        "per_cell_s": {"filters_and_fit_s": PAIR_S},
+        "cell_s": PAIR_S,
+        "prepare_s": ONCE_S,
+        "seconds": round(seconds, 1),
+        "hours": round(seconds / 3600.0, 3),
+        "billed_rate_usd_per_hour": rate_usd_per_hour,
+        "usd": round(seconds * per_second, 2),
+        "usd_per_source": round(solve_s / max(1, cards) * per_second, 5),
+        "usd_per_pair": round(PAIR_S / max(1, cards) * per_second, 6),
+        "cache_gb": round(pairs * 64 * duration_s * LOW_RATE_HZ * 4 / 1e9, 2),
+        "measured_on": MEASURED_ON,
+        "cards": cards,
+        "solver": SOLVER,
+    }
 
 
 def cores_lent() -> int:

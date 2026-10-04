@@ -2,11 +2,146 @@
 
 Date: 2026-10-04
 
-Status: written and proved on `numpy`, on small grids. **Nothing below has
-run on a card**: every speed is a prediction with its assumptions beside it,
-and the commands that replace them with measurements are at the end. Written
-for lot L10a of ADR 0016. The code is `reverberate.wave.lowband`; the
+Status: **measured on one card**, an RTX 3080 20 GB at 0.136 USD/h (instance
+54201838, 2026-10-05), on the dense line of hssd_0076: one source, 341 cells.
+The measurements are the next section and they overrule the predictions
+further down, which are kept as they were written, with what each got wrong.
+Written for lot L10a of ADR 0016. The code is `reverberate.wave.lowband`; the
 question it answers was left open by `low-band-pairs-cost.md`.
+
+## Measured on a card
+
+**The kernels are the `numpy` step, bit for bit**, on both grids, a batch
+is its sources alone, and PFFDTD's binary on the same small lossy rooms
+differs by 4e-5 (Cartesian) and 1e-4 (face centred) of the peak of the raw
+records (`verify`). The kept resampler equals the table's, bit for bit.
+
+**On the bundle's grid the pairs are the present engine's.** 341 cells, the
+batched solver against `accel.pairs` on the same grid and the same arrays:
+
+| third octave | error dB: median | p90 | worst | level dB: worst |
+| --- | --- | --- | --- | --- |
+| 100 Hz | -56.2 | -51.6 | -47.6 | 0.01 |
+| 125 Hz | -56.9 | -52.8 | -51.9 | 0.01 |
+| 160 Hz | -59.7 | -54.3 | -50.5 | 0.00 |
+| 200 Hz | -62.2 | -55.4 | -51.2 | 0.00 |
+| 250 Hz | -61.1 | -57.2 | -54.8 | 0.00 |
+| 315 Hz | -62.9 | -59.5 | -57.9 | 0.00 |
+| 400 Hz | -66.4 | -61.0 | -57.4 | 0.00 |
+| 500 Hz | -70.5 | -64.0 | -61.9 | 0.00 |
+| 630 Hz | -72.0 | -63.8 | -62.7 | 0.00 |
+| 800 Hz | -73.8 | -65.8 | -64.5 | 0.00 |
+| 1000 Hz | -72.0 | -65.2 | -62.1 | 0.00 |
+| 1250 Hz | -64.7 | -58.1 | -55.0 | 0.00 |
+
+Per degree, 0 to 7, worst cell: -56.8, -54.8, -55.2, -47.2, -38.3, -41.3,
+-45.9, -48.1 dB (medians -65 to -44). **Worst third octave -47.6 dB, worst
+degree -38.3 dB, level within 0.01 dB.**
+
+**The bar.** A difference from the present engine is inaudible by
+construction when it is well under what the pipeline already carries: the
+translation of an expansion, -21 to -25 dB in its worst case, and the
+levelling of the seam, 0.1 to 0.4 dB. The bar is therefore -30 dB in the
+worst third octave and the worst degree over the 50 ms after the onset, and
+0.5 dB of level. The bundle's grid passes with 8 dB to spare on its worst
+degree and 17 dB on its worst band.
+
+**No other grid passes, and none can.** Cartesian at 7.2 points per
+wavelength, 341 cells against the present engine:
+
+| third octave | 100 | 125 | 160 | 200 | 250 | 315 | 400 | 500 | 630 | 800 | 1000 | 1250 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| error, median | -18.7 | -17.7 | -18.5 | -15.1 | -11.1 | -13.9 | -14.2 | -11.9 | -9.0 | -8.5 | -4.3 | 0.5 |
+| error, worst | -7.5 | -9.1 | -9.6 | -3.2 | -6.2 | -8.7 | -6.3 | -7.4 | -3.1 | -2.3 | 0.4 | 7.7 |
+| level, worst | 1.02 | 1.09 | 1.46 | 1.19 | 1.40 | 1.12 | 0.90 | 1.42 | 1.01 | 1.15 | 1.31 | 3.06 |
+
+It fails at 100 Hz, where its dispersion is a tenth of a per cent: what
+differs is the room. Another step puts every wall on other nodes, up to half
+a step away, seals other pockets and stands the arrays elsewhere. So an
+intermediate grid cannot pass either, and the question was put the other
+way round: **how far is the present grid from a finer one?** 57 cells of the
+line, each grid on the batched solver, against 14 points per wavelength:
+
+| grid against 14 points | error median, 100 Hz to 1250 Hz | worst band, worst cell | level, worst |
+| --- | --- | --- | --- |
+| 10.5, the present engine's | -24 to -7 dB | 0.6 dB | 1.7 dB |
+| 9 | -22 to 0 dB | 8.7 dB | 2.3 dB |
+| 7.2 | -22 to 1 dB | 10.7 dB | 2.3 dB |
+
+**The present engine is itself 7 to 24 dB, not 30, from a finer grid**, by
+the measure the bar is written in, and 9 points are worse than 7.2 under
+400 Hz: the staircase, not the dispersion, rules. A cheaper grid is
+therefore not shown to be worse than the present one for the listener, and
+not shown to be as good either: the bar as written admits the present grid
+and nothing else. The face centred grid was not measured: PFFDTD's
+voxeliser on the host's nine cores had not finished the storey after 80
+minutes, which alone rules it out of a campaign until the card's voxeliser
+makes that grid. Its wall correction (a wall node's mass scaled to its
+remaining links) was not tried: it changes the grid as any other step does.
+
+**Against the three band line** (`compare --line`) the level agrees within
+2.7 dB in the worst band and the error is 0 dB at every band, 100 Hz
+included: the two are not aligned in time or in what they are, a field's
+low side being its 1 kHz grid under 800 Hz and its 4 kHz grid above, with a
+field's own clock. That reference cannot judge a solver until it is
+aligned, and the pairs of the present engine, which can, were used.
+
+**Speed, one RTX 3080, the bundle's grid** (47.4 M reached nodes of 63.3 M,
+2.69 M lossy nodes, 32 769 steps):
+
+| | card s a source position | US cents |
+| --- | --- | --- |
+| PFFDTD, 10 cells read | 135 | 0.51 |
+| batched, 1 at once | 110 | 0.41 |
+| batched, 2 | 118 | 0.44 |
+| batched, 4 | 109 | 0.41 |
+| batched, 8 | 105 | 0.40 |
+
+1.4e10 node updates a second, whatever the batch: **a batch buys nothing
+on a card whose memory is the limit**, it only spares the launches. A step
+is 3.3 ms: 1.5 ms for the air with the boundary's rigid update in the same
+kernel, 1.8 ms for the 11 branches of the lossy nodes (0.24 ms and 0.14 ms a
+branch). The boundary is more than half, as counted. Two layouts were
+measured and dropped: the branches stored a node then a source (2.1 ms a
+source for one, 15 ms for eight), and the boundary as a kernel of its own
+gathering its neighbours (2.0 ms).
+
+| a pair | card s |
+| --- | --- |
+| PFFDTD on this machine: the host's copy and write 7.0, the fit 1.4 | 8.4 |
+| batched, one cell at a time | 0.43 |
+| batched, eight cells a launch | 0.29, of which the resampler 0.26 |
+
+The resampler is 4e9 products a pair in double precision and is bound by
+its reads; keeping its weights did not help. It is 3 % of a scene and was
+left there.
+
+**The realistic recipe on this card** (1646 positions, 16 529 pairs): 1763
+solves, the 117 more because a 20 GB card holds the records of 57 cells a
+solve; 199 000 s, **55 h and 7.5 USD on one card**, 14 h on four. PFFDTD on
+the same card: 361 000 s, 13.6 USD. PFFDTD on 2 x A100: 19.5 USD. So the
+batched solver on the present grid is 1.8 times cheaper on the same card and
+2.6 times cheaper than the fitted A100 figure, of which the card's price is
+a part. **The order of magnitude is not reached with the present grid and
+boundary.**
+
+**The response has not decayed.** Of the 341 pairs, the energy of channel 0
+left after 0.8 s is -55 dB (worst -45 dB) of the whole, and under 200 Hz it
+is -20 dB (worst -9 dB) from 0.4 s to 1.1 s without falling. The window
+cannot be shortened on this evidence.
+
+**Chosen**: the batched solver on the bundle's grid, which `trace rent` now
+uses unless `--low-engine pffdtd` is given; its dry run prices the low band
+from the constants above and names the card.
+
+**Next, in the order the measurements give**: (1) the boundary, 55 % of a
+step: a fit of fewer branches for the band under 1500 Hz, with its proof on
+a furnished room, would take a step from 3.3 to about 2.2 ms; (2) the bar
+itself, which is the owner's: a grid at 7 to 9 points is 3 to 5 times
+cheaper and is as far from a finer grid as the present one is in half the
+bands, and only a reference finer than both can say which is right; (3) a
+card with more memory traffic a dollar, measured by `cost` in two minutes;
+(4) records decimated on the card, 7 % of the solves on a 20 GB card.
 
 ## The use, on the recipe the owner wants
 
@@ -150,7 +285,11 @@ time signal, 130 MB a solve). Ten cells are heard from more than 64
 positions; only three are heard from enough positions that are heard
 nowhere else. Not built.
 
-## What it should cost, and on what assumption
+## What it was predicted to cost, before a card
+
+Kept as written. The card said otherwise on two points: the traffic of a
+lossy node moves at 0.3 TB/s on an RTX 3080, not at the air's 0.5, and a
+batch does not raise either.
 
 The assumption: a card's speed is its memory traffic, 12 bytes a node of air
 and 192 a lossy node a step, as the present engine's 15.9 s is 1.37 GB a

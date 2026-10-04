@@ -7,7 +7,8 @@ python -m reverberate.trace rent --recipe R.json --home H
      | --mirror DIR)
     [--models-from EXPORT/storey | --hssd-root DIR]
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
-    [--rate USD_PER_H] [--hours H] [--max-dph D] [--gpu NAME] [--avoid ID ...]
+    [--low-engine lowband|pffdtd] [--rate USD_PER_H] [--hours H] [--max-dph D] [--gpu NAME]
+    [--avoid ID ...]
     [--publish-pairs] [--allow-asset-mismatch] [--yes]
 
 ``--dry-run`` prints the plan and its cost and rents nothing. Besides:
@@ -56,7 +57,19 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         metavar="XZ",
         help="add the dense validation patch; its centre x z, or nothing for the nearest a surface",
     )
-    p.add_argument("--rate", type=float, default=1.74, help="USD an hour, for the estimate")
+    p.add_argument(
+        "--low-engine",
+        choices=("lowband", "pffdtd"),
+        default="lowband",
+        help="what solves the low band: the batched solver, or PFFDTD a source position",
+    )
+    p.add_argument(
+        "--rate",
+        type=float,
+        default=None,
+        help="USD an hour, for the estimate; left out, the rate of the card the low band's"
+        " engine was measured on",
+    )
     p.add_argument("--allow-asset-mismatch", action="store_true")
 
 
@@ -121,6 +134,17 @@ def _assets(args: argparse.Namespace) -> Any:
         lead_s=args.lead_s,
         gain=args.gain,
     )
+
+
+def _rate(args: argparse.Namespace) -> float:
+    """The hourly rate of the estimate: the one given, or the measured card's."""
+    if args.rate is not None:
+        return float(args.rate)
+    if args.low_engine == "lowband":
+        from reverberate.wave.lowband.pairs import MEASURED_RATE_USD_PER_HOUR
+
+        return MEASURED_RATE_USD_PER_HOUR
+    return 1.74
 
 
 def _profile(args: argparse.Namespace, recipe: Any) -> tuple[Any, tuple[float, float] | None]:
@@ -224,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.trace.plan import estimate, make_plan
 
         plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=centre)
-        print(describe(plan, estimate(plan, rate_usd_per_hour=args.rate)))
+        priced = estimate(plan, rate_usd_per_hour=_rate(args), low_engine=args.low_engine)
+        print(describe(plan, priced))
         build_bundle(
             args.out,
             recipe,
@@ -233,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
             models_from=args.models_from,
             hssd_root=args.hssd_root,
             allow_asset_mismatch=args.allow_asset_mismatch,
-            rate_usd_per_hour=args.rate,
+            rate_usd_per_hour=_rate(args),
+            low_engine=args.low_engine,
         )
         print(args.out)
         return 0
@@ -247,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         patch_centre_xz=centre,
         models_from=args.models_from,
         hssd_root=args.hssd_root,
-        rate_usd_per_hour=args.rate,
+        rate_usd_per_hour=_rate(args),
+        low_engine=args.low_engine,
         dry_run=args.dry_run,
         allow_asset_mismatch=args.allow_asset_mismatch,
         yes=args.yes,

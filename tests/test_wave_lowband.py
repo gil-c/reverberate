@@ -734,3 +734,42 @@ class TestTheCommands:
             assert spectrum[freqs > 1450].max() < 1e-4 * spectrum.max()
         assert np.load(tmp_path / "L" / "sources.npy").tolist() == [[1.0, 1.5, 2.0]]
         assert np.load(tmp_path / "L" / "cells.npy").shape == (2, 3)
+
+
+class TestTheEstimate:
+    def test_a_scene_is_priced_on_the_card_the_solver_was_measured_on(self) -> None:
+        from reverberate.trace.plan import estimate as plan_estimate
+        from reverberate.wave.lowband.pairs import (
+            MEASURED_ON,
+            MEASURED_RATE_USD_PER_HOUR,
+            ONCE_S,
+            PAIR_S,
+            SOLVE_S_AT_1500,
+            estimate,
+        )
+
+        priced = estimate(1646, 16529, fmax_hz=1500.0)
+        assert priced["measured_on"] == MEASURED_ON
+        assert priced["billed_rate_usd_per_hour"] == MEASURED_RATE_USD_PER_HOUR
+        seconds = ONCE_S + 1646 * SOLVE_S_AT_1500 + 16529 * PAIR_S
+        assert priced["seconds"] == pytest.approx(seconds, abs=0.1)
+        assert priced["usd"] == pytest.approx(seconds / 3600 * MEASURED_RATE_USD_PER_HOUR, abs=0.01)
+        # A solve goes as the fourth power of fmax, and several cards share the work.
+        assert estimate(10, 0, fmax_hz=750.0)["stencil_s_per_source"] == pytest.approx(
+            SOLVE_S_AT_1500 / 16, abs=0.01
+        )
+        four = estimate(1646, 16529, fmax_hz=1500.0, cards=4)
+        assert four["seconds"] == pytest.approx(ONCE_S + (seconds - ONCE_S) / 4, abs=0.1)
+        record = {
+            "source_positions": 1646,
+            "pairs": 16529,
+            "tail_sites": 211,
+            "tail_cells": 53,
+            "step_pairs": 45023,
+        }
+        ours = plan_estimate(record, rate_usd_per_hour=0.136)
+        theirs = plan_estimate(record, rate_usd_per_hour=1.74, low_engine="pffdtd")
+        assert ours["measured_on"] == MEASURED_ON and ours["low_engine"] == "lowband"
+        assert theirs["measured_on"] == "2 x A100" and theirs["usd"]["low"] > ours["usd"]["low"]
+        with pytest.raises(ValueError, match="unknown low band engine"):
+            plan_estimate(record, rate_usd_per_hour=1.0, low_engine="other")

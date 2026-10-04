@@ -669,7 +669,10 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert main([*arguments, "--mirror", str(tmp_path / "mirror"), "--patch", "1.2", "1.3"]) == 0
     campaign = json.loads((tmp_path / "b" / "campaign.json").read_text())
     assert campaign["kind"] == "scene-trace" and campaign["trace"]["profile"]["patch"]
-    assert campaign["estimate"]["billed_rate_usd_per_hour"] == 1.74
+    # Priced for the batched low band solver, at the rate of the card it was measured on.
+    assert campaign["estimate"]["billed_rate_usd_per_hour"] == 0.136
+    assert campaign["estimate"]["low_engine"] == "lowband"
+    assert campaign["estimate"]["measured_on"] == "1 x RTX 3080 20 GB"
     assert not (tmp_path / "b" / "pairs").exists()
     assert sorted(p.name for p in (tmp_path / "b" / "trace").iterdir()) == [
         "mirror",
