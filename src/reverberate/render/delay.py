@@ -69,14 +69,17 @@ def read(signals: Any, position: np.ndarray, xp: Any = np) -> Any:
     blend = xp.asarray(scaled - phase)[..., None]
     table = xp.asarray(kernel_table())
     phase_x = xp.asarray(phase)
-    kernel = table[phase_x] * (1.0 - blend) + table[phase_x + 1] * blend  # [p, n, tap]
+    # Linear between two rows of the table: the row, plus the step to the next.
+    kernel = xp.take(table, phase_x, axis=0)  # [p, n, tap]
+    kernel += (xp.take(table, phase_x + 1, axis=0) - kernel) * blend
     paths, width, values = signals.shape
     first = base.astype(np.int64) - (TAPS // 2 - 1)
     if first.size and (first.min() < 0 or first.max() + TAPS > width):
         raise ValueError("a delay line was read outside the signal it holds")
     index = (np.arange(paths)[:, None] * width + first)[..., None] + np.arange(TAPS)
-    taken = signals.reshape(paths * width, values)[xp.asarray(index)]  # [p, n, tap, v]
-    return xp.einsum("pnt,pntv->pnv", kernel, taken)
+    taken = xp.take(signals.reshape(paths * width, values), xp.asarray(index), axis=0)
+    # [p, n, 1, tap] by [p, n, tap, v]: one small product a read, in the library's own.
+    return xp.matmul(kernel[:, :, None, :], taken)[:, :, 0, :]
 
 
 def worst_error(

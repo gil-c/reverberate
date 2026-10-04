@@ -229,7 +229,8 @@ class EarlyPart:
         # Twice the rate: the same spectrum in a transform twice as long, its
         # own Nyquist bin shared between the two it becomes.
         padded[:, :, freqs.size - 1] *= 0.5
-        doubled = fft.irfft(padded.reshape(self.variants, n + 1), 2 * n, axis=-1, **kw) * 2.0
+        doubled = fft.irfft(padded.reshape(self.variants, n + 1), 2 * n, axis=-1, **kw)
+        doubled *= 2.0
         return doubled[:, 2 * MARGIN : 2 * (MARGIN + last - first)]
 
     def render(self, k0: int, k1: int) -> Any:
@@ -296,9 +297,15 @@ class EarlyPart:
                 )
             )
             pieces = signal.reshape(paths, self.nodes, within)
-            encoded = xp.einsum(
-                "pic,pin->cin", harmonics[:, :-1], pieces * (1.0 - v)[None, None, :]
-            ) + xp.einsum("pic,pin->cin", harmonics[:, 1:], pieces * v[None, None, :])
+            # Per node, the paths' harmonics at its two ends by the paths' signals
+            # under the two ramps: [node, channel, 2 path] by [node, 2 path, sample].
+            ends = xp.concatenate([harmonics[:, :-1], harmonics[:, 1:]], axis=0)
+            ramps = xp.concatenate(
+                [pieces * (1.0 - v)[None, None, :], pieces * v[None, None, :]], axis=0
+            )
+            encoded = xp.matmul(
+                xp.ascontiguousarray(ends.transpose(1, 2, 0)), ramps.transpose(1, 0, 2)
+            ).transpose(1, 0, 2)
             return encoded.reshape(channels, step)
 
         # The intervals are independent: a thread each on the host.
