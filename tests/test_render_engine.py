@@ -488,6 +488,30 @@ def test_between_two_histograms_the_tail_holds_the_weighted_sum_of_their_energie
     assert abs(level) < 0.5
 
 
+def test_the_bank_reads_on_the_rendered_first_channel_what_the_histogram_holds() -> None:
+    """With a low band the dry signal comes through the crossover mask: that is what is read."""
+    pack = density_pack(duration_s=1.6, moving=False)
+    plain = dataclasses.replace(pack.mirror, signature=np.ones(1), lowcut_hz=0.0, lead_s=0.0)
+    click = np.zeros(int(0.2 * FS))
+    click[4800] = 1.0
+    engine = Engine(dataclasses.replace(pack, mirror=plain), {"s1": click})
+    tail = engine.stem("s1", parts=("tail",))
+    part = engine.source("s1").parts["tail"]
+    assert part.mask is not None
+    asked = part._energy(0)[int(part.earliest[0]) :].sum(axis=(0, 2))
+    # What the reference renderer's tail reads in expectation, through the same mask.
+    wanted = part.nominal @ asked
+    got = through_the_bank(tail[0])
+    # From 500 Hz up, where the mask leaves something to hear: to the rounding of the
+    # carrier's single precision. One draw of the noise left alone is 1 dB off at 1 kHz.
+    np.testing.assert_allclose(got[2:], wanted[2:], rtol=2e-6)
+    np.testing.assert_allclose(part.rendered[4:], 1.0, atol=1e-3)
+    assert part.rendered[1] < 1e-3 < part.rendered[2] < 0.01 < part.rendered[3] < 0.7
+    # Under the crossover nothing is heard, and the bands keep the gain of their expectation.
+    np.testing.assert_array_equal(part._norm(0)[:2], 1.0)
+    assert np.all(np.abs(20 * np.log10(part._norm(0)[3:])) < 3.0)
+
+
 def tail_part(pack: ScenePack, dry: np.ndarray) -> TailPart:
     return TailPart(pack, pack.sources["s1"], DryTrack.from_array(dry), np, workers=1)
 

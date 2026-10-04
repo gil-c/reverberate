@@ -445,14 +445,19 @@ half of it goes to the two bins either side and two thousandths to the
 third; at 16 kHz six thousandths go to the next), so that **the expected energy of
 every bin, band and direction is that of shaped white noise through the
 bank**, which is what the reference renderer makes. The bands are then
-scaled, one gain a band, so that **the octave bank reads on the response's
-first channel what the histogram holds**: the energies asked through the
-bank's nominal reading, against the reading of this very draw, each band's
-share and what two shares have in common. One draw of the reference
-renderer's tail reads within 0.8 dB of that (1.2 dB once in eight draws of
-a 0.1 s tail); the engine's reads it to rounding. The noise is not drawn
-again at each step, or the tail would be a different room twenty times a
-second.
+scaled, one gain a band, so that **the octave bank reads on the first
+channel of the rendered response what the histogram holds**: what the
+reference renderer's tail reads in expectation (the energies asked, through
+the bank's reading of white noise shaped by each band's filter), against the
+reading of this very draw, each band's share and what two shares have in
+common, both through the crossover's power mask when the pack has a low
+band, since that is how the tail is heard. A band of which the mask leaves
+less than a thousandth (125 and 250 Hz) keeps a gain of one, and a band the
+others already fill past its due is given none. One draw of the reference
+renderer's tail reads within 0.8 dB of its expectation (1.2 dB once in
+eight draws of a 0.1 s tail); the engine's reads it to 2e-6. The noise is
+not drawn again at each step, or the tail would be a different room twenty
+times a second.
 
 **The generator** (`reverberate.render.noise`) is Threefry 2x32 with twenty
 rounds: 32 bit additions, rotations and exclusive ors, the same on every
@@ -512,13 +517,13 @@ moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
   other directions than before (9 per cent at 250 Hz, the same clipping).
 - *The rendered signal through the bank*, six draws of each engine, white
   noise in, quarter seconds, first channel, new over old: worst quarter
-  second 0.83, 0.71, 0.35, 0.23 and 0.20 dB at 1, 2, 4, 8 and 16 kHz, where
+  second 0.74, 0.69, 0.36, 0.23 and 0.20 dB at 1, 2, 4, 8 and 16 kHz, where
   two halves of the old engine's own draws differ by 0.96, 0.61, 0.50, 0.24
-  and 0.52 dB; over the 5 s, +0.21, -0.41, -0.11, +0.04 and +0.06 dB. Under
+  and 0.52 dB; over the 5 s, +0.18, -0.40, -0.13, +0.05 and +0.06 dB. Under
   the crossover the tail holds nothing to compare.
 - *The channels above the first*: the sixteen first channels together, over
   sixteen times the first, read -0.28, -0.35 and -0.19 dB at 1, 2 and 4 kHz
-  in the old engine while everything moved, and -0.19, +0.32 and +0.14 dB
+  in the old engine while everything moved, and -0.16, +0.32 and +0.14 dB
   now; at rest both read within 0.1 dB of it. The old engine drew some
   bursts on another direction whenever the weights moved and cross-faded
   the two, which is the likely cost; a histogram's directions no longer
@@ -530,6 +535,13 @@ moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
   the same energy are not the same samples.
 - *The ring of the bank before the tail's first bin* is as before in
   expectation: two bins at 125 Hz and a trace in the third.
+- *Against the reference renderer*, where the old engine was one more draw
+  of the same law: on the traced room of `tests/test_trace.py` the bank
+  reads the engine's tail within 0.30 dB of the reference's draw in every
+  band (0.68 before), and on the box of
+  `tests/test_scene_pack_integration.py` within 0.41 dB (0.56 before). The
+  500 Hz band after the crossover is a residue 30 dB under the 1 kHz band,
+  in which two draws of the reference itself differ by up to 2.4 dB.
 
 ### `level`
 
@@ -678,15 +690,15 @@ one source and directivity off, steps 1 to 4 are
 
   | scene | early | low | tail | total | 1 process | 4 | 6 | 8 | 10 |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | at rest | 0.13 | 0.04 | 0.05 | 0.22 | 4.9 | 14.0 | 17.1 | 17.4 | 17.1 |
-  | everything moving | 0.15 | 0.18 | 0.47 | 0.80 | 1.4 | 3.7 | 4.2 | 3.9 | 3.7 |
+  | at rest | 0.13 | 0.04 | 0.05 | 0.22 | 5.0 | 14.0 | 16.5 | 17.2 | 16.3 |
+  | everything moving | 0.15 | 0.18 | 0.48 | 0.81 | 1.3 | 3.5 | 4.1 | 4.0 | 3.5 |
 
   Six processes are the most that help: the four fast cores give three
   times one, the six slow ones a little more, and beyond that the processes
   wait on one another. The scene of the size table below is 8 400 seconds
-  of stem: 8 minutes at rest, 33 with everything moving. A process holds
-  0.7 GB at rest and 1.1 GB moving besides the pack. In the moving scene
-  six new histograms a second each cost a response (25 ms), and each of the
+  of stem: 8 minutes at rest, 34 with everything moving. A process holds
+  0.7 GB at rest and 1.2 GB moving besides the pack. In the moving scene
+  six new histograms a second each cost a response (30 ms), and each of the
   six to eight histograms a run reads costs a convolution (14 ms); a scene
   that comes back to its histograms pays the first once.
 

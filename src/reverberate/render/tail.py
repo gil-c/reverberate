@@ -15,8 +15,8 @@ direction hold in the bin, the energy being spread over the neighbouring
 bins as the band's filter would spread it. The expected energy of every
 bin, band and direction is what filtering shaped white noise gives, and the
 filter is paid once a source instead of once a response. The bands are
-then scaled so that the bank reads, on the response's first channel, what
-the histogram holds.
+then scaled so that the bank reads, on the first channel of the response as
+it is rendered, what the histogram holds.
 
 **A histogram has one response; a step mixes them, in energy.** A step's
 response is the sum of its histograms' responses, each times the square
@@ -81,6 +81,9 @@ PLACES = 16
 #: The share of a band filter's energy left out at each end of the frequencies it is
 #: read over, when a response is brought to what the bank reads.
 SKIRT = 1e-9
+#: The share of a band's energy the dry signal's mask must leave for the band to be
+#: brought to what the bank reads of it: under it the band is not heard.
+RENDERED = 1e-3
 #: Directions transformed at once by a host thread: a block that stays in a core's
 #: cache, so that processes side by side do not queue on the memory bus.
 HOST_BLOCK = 4
@@ -149,6 +152,7 @@ class TailPart:
         xp: Any,
         *,
         workers: int,
+        mask: np.ndarray | None = None,
     ) -> None:
         if source.tail is None:
             raise ValueError(f"the source {source.id!r} has no tail")
@@ -176,6 +180,9 @@ class TailPart:
         #: What a unit white noise holds after each band's filter, a sample.
         self.kept = np.sum(self.kernels**2, axis=1)
         self.spread = self._spread()
+        #: The zero phase filter the dry signal came through, if any: the crossover's.
+        self.mask = None if mask is None else np.asarray(mask, dtype=float)
+        self.nominal, self.rendered = self._nominal()
         #: Bins between two places of the carrier: no shorter than the bank's filter.
         self.apart = -(-(self.taps - 1) // self.bin_samples)
         grid, weights = quadrature(2 * m.histogram_order + 2)
@@ -369,28 +376,51 @@ class TailPart:
             spread[to] += share * energy[of]
         return np.asarray(np.sqrt(spread / self.bin_samples).transpose(1, 2, 0))
 
-    def _bank_power(self, n: int) -> list[tuple[slice, Any]]:
-        """Per band, what its filter keeps of a spectrum of ``n`` points, and where.
+    def _through(self, n: int) -> np.ndarray:
+        """``[f]``: what is rendered of a spectrum of ``n`` points, as an energy.
 
-        The frequencies that hold all of the filter's energy but
-        :data:`SKIRT`, and its weight on each of them: times a signal's
-        ``abs(rfft) ** 2`` there and summed, the signal's energy through the
-        band's filter.
+        The dry signal's mask, with the weights that turn a sum over the
+        frequencies of ``rfft`` into an energy: times a signal's
+        ``abs(rfft) ** 2`` and summed, the energy of the signal once rendered.
+        """
+        weights = np.full(n // 2 + 1, 2.0 / n)
+        weights[0] = 1.0 / n
+        if n % 2 == 0:
+            weights[-1] = 1.0 / n
+        if self.mask is not None:
+            weights = weights * np.abs(np.fft.rfft(self.mask, n)) ** 2
+        return weights
+
+    def _nominal(self) -> tuple[np.ndarray, np.ndarray]:
+        """What the bank is to read, and what is rendered of each band.
+
+        ``[b, k]``: the energy the bank's band ``b`` reads, once rendered, of
+        unit energy of white noise through band ``k``'s filter, which is the
+        reference renderer's tail in expectation; and ``[k]``, the share of
+        that unit energy the dry signal's mask leaves.
+        """
+        n = next_fast_len(16 * max(self.taps, 0 if self.mask is None else self.mask.size))
+        power = np.abs(np.fft.rfft(self.kernels, n, axis=1)) ** 2
+        through = self._through(n)
+        shape = power / self.kept[:, None]
+        return np.asarray((power * through[None, :]) @ shape.T), np.asarray(shape @ through)
+
+    def _bank_power(self, n: int) -> list[tuple[slice, Any]]:
+        """Per band, what its filter keeps of what is rendered, and where.
+
+        The band's filter times :meth:`_through`, over the frequencies that
+        hold all of the filter's energy but :data:`SKIRT` at each end.
         """
         if self._bank is None or self._bank[0] != n:
             power = np.abs(np.fft.rfft(self.kernels, n, axis=1)) ** 2
-            twice = np.full(power.shape[1], 2.0)
-            twice[0] = 1.0
-            if n % 2 == 0:
-                twice[-1] = 1.0
-            power = power * twice[None, :] / n
-            kept = []
+            kept = power * self._through(n)[None, :]
+            held = []
             for band in range(self.bands):
                 share = np.cumsum(power[band]) / power[band].sum()
                 lo = int(np.searchsorted(share, SKIRT))
                 hi = int(np.searchsorted(share, 1.0 - SKIRT)) + 1
-                kept.append((slice(lo, hi), self.xp.asarray(power[band, lo:hi])))
-            self._bank = (n, kept)
+                held.append((slice(lo, hi), self.xp.asarray(kept[band, lo:hi])))
+            self._bank = (n, held)
         return self._bank[1]
 
     def _norm(self, row: int) -> np.ndarray:
@@ -400,35 +430,40 @@ class TailPart:
         noise shaped by each band's filter. The carrier is that noise times
         gains that move from bin to bin, which widens its band a little, and
         one draw of it reads off its expectation, the more so the shorter
-        the tail and the lower the band. So the bank reads the response, the
-        one from the histogram's earliest start, on the sum of its directions
-        (the first channel): each band's share and what two shares have in
+        the tail and the lower the band. So the bank reads the response as
+        it is rendered: the one from the histogram's earliest start, on the
+        sum of its directions (the first channel), through the mask the dry
+        signal came through; each band's share and what two shares have in
         common. The bands are then scaled, one gain each, so that every band
-        of the bank reads what it was to.
+        of the bank reads what the reference renderer's tail reads in
+        expectation. A band of which the mask leaves under :data:`RENDERED`
+        is not heard and keeps its gain of one.
         """
         if row not in self._norms:
             xp = self.xp
             start = int(self.earliest[row])
             raw = xp.asarray(self._raw(row, start).astype(np.float32))
             omni = xp.einsum("bdj,bdjs->bjs", raw, self._noise(row)).astype(xp.float64)
-            n = next_fast_len(self.span + self.taps, real=True)
+            # Room for the response, the band's filter and the mask: nothing comes round.
+            masked = 0 if self.mask is None else self.mask.size
+            n = next_fast_len(self.span + self.taps + masked, real=True)
             spectrum = fft_module(xp).rfft(omni.reshape(self.bands, self.span), n, axis=-1)
-            keeps = self._bank_power(n)
             # read[b, j, k]: what the bank's band b reads of the response's bands j and k
             # together, over the frequencies its filter keeps.
             read = np.zeros((self.bands, self.bands, self.bands))
-            for band, (where, weight) in enumerate(keeps):
+            for band, (where, weight) in enumerate(self._bank_power(n)):
                 shares = spectrum[:, where]
                 read[band] = np.asarray(
                     to_numpy(((shares * weight[None, :]) @ shares.conj().T).real)
                 )
             asked = self._energy(row)[start:].sum(axis=(0, 2))
             heard = (asked > 0.0) & (np.einsum("bbb->b", read) > 0.0)
-            scale = np.zeros(self.bands)
-            if heard.any():
-                wanted = (self.reading @ np.where(heard, asked, 0.0))[heard]
-                scale[heard] = _gains(read[heard][:, heard][:, :, heard], wanted)
-            self._norms[row] = scale
+            free = heard & (self.rendered >= RENDERED)
+            gains = np.where(heard & ~free, 1.0, 0.0)
+            if free.any():
+                wanted = self.nominal @ np.where(heard, asked, 0.0)
+                gains = _gains(read, wanted, gains, free)
+            self._norms[row] = gains
         return self._norms[row]
 
     def _amplitude(self, row: int, start: int) -> np.ndarray:
@@ -623,26 +658,39 @@ class TailPart:
             waves[lo:hi] += made[:, n - length :] * share[None, :]
 
 
-def _gains(read: np.ndarray, wanted: np.ndarray) -> np.ndarray:
-    """The gains ``a`` with ``a read[b] a = wanted[b]`` for every band ``b``, none negative.
+def _gains(read: np.ndarray, wanted: np.ndarray, gains: np.ndarray, free: np.ndarray) -> np.ndarray:
+    """``gains`` with those of the ``free`` bands set so that ``a read[b] a = wanted[b]`` there.
 
     From the gains that would do were the bands' shares to have nothing in
     common, by Newton's method: the shares in common are small beside a
-    band's own. Where it does not settle on gains that are all positive,
-    those first gains are kept.
+    band's own. A band the others already fill past what is wanted of it
+    would need a gain under zero: it is given none, its own reading is
+    left as the others make it, and the rest are set again.
     """
+    made = np.array(gains, dtype=float)
+    free = np.array(free, dtype=bool)
     own = np.einsum("bjj->bj", read)
-    first = np.sqrt(np.maximum(np.linalg.solve(own, wanted), 0.0))
-    gains = first
-    for _ in range(30):
-        off = np.einsum("j,bjk,k->b", gains, read, gains) - wanted
-        if np.all(np.abs(off) <= 1e-13 * wanted):
-            return np.asarray(gains)
-        slope = 2.0 * np.einsum("bjk,k->bj", read, gains)
-        try:
-            gains = gains - np.linalg.solve(slope, off)
-        except np.linalg.LinAlgError:
-            break
-        if not np.all(np.isfinite(gains)) or np.any(gains <= 0.0):
-            break
-    return np.asarray(first)
+    while free.any():
+        rest = wanted[free] - own[free][:, ~free] @ made[~free] ** 2
+        first = np.linalg.solve(own[free][:, free], rest)
+        if np.any(first < 0.0):
+            lowest = np.flatnonzero(free)[int(np.argmin(first))]
+            free[lowest], made[lowest] = False, 0.0
+            continue
+        made[free] = np.sqrt(first)
+        start = made.copy()
+        for _ in range(30):
+            off = (np.einsum("j,bjk,k->b", made, read, made) - wanted)[free]
+            if np.all(np.abs(off) <= 1e-12 * np.abs(wanted[free])):
+                return made
+            slope = 2.0 * np.einsum("bjk,k->bj", read, made)[free][:, free]
+            made[free] = made[free] - np.linalg.solve(slope, off)
+            if np.any(made[free] <= 0.0) or not np.all(np.isfinite(made)):
+                break
+        if not np.all(np.isfinite(made)) or np.all(made[free] > 0.0):
+            # It did not settle: the gains it started from.
+            return start
+        lowest = np.flatnonzero(free)[int(np.argmin(made[free]))]
+        made = start
+        free[lowest], made[lowest] = False, 0.0
+    return made
