@@ -26,11 +26,18 @@ The result is validated against every rule of the format; a draw that fails is
 drawn again under the next attempt's labels, and the attempt that passed is
 recorded with the parameters.
 
-**Clips.** A voice or a noise names clips of a :class:`ClipLibrary`. No
-library of pinned clips exists on this machine (the speech library is read
-over the network and its digests are those of the bytes as fetched), so
-:func:`placeholder_clips` stands in, **only when asked for by name**: its
-names say ``placeholder`` and its digests are of those names, not of audio.
+**Clips.** A voice or a noise names clips of a :class:`ClipLibrary`, read
+from a manifest of :mod:`reverberate.scenes.clips` (``--clips``). Where the
+library says where a voice's utterances are, **a talk spurt is whole
+utterances**: as many in a row as come nearest the length drawn, so no word
+is cut, and the spurt lasts what they last. A noise reads on through its
+clip and, where the clip loops, round it again; a noise keeps one looping
+clip for the whole scene (a tap does not become a shower), and walks through
+clips that do not loop (a programme, a playlist). The kinds of the noises
+are dealt from the kinds the library holds, without one coming twice before
+all have come once. Without a library, :func:`placeholder_clips` stands in,
+**only when asked for by name**: its names say ``placeholder`` and its
+digests are of those names, not of audio.
 """
 
 from __future__ import annotations
@@ -85,7 +92,7 @@ __all__ = [
 
 GENERATOR_NAME = "reverberate.scenes"
 #: A change of the output for one seed changes this.
-GENERATOR_VERSION = "0.1.0"
+GENERATOR_VERSION = "0.2.0"
 
 #: What the generator keeps beyond the format's clearances, so that a position
 #: rounded to its step, or one between two samples, still has them.
@@ -284,6 +291,11 @@ class ClipEntry:
     kind: str = "voice"
     #: Who speaks; a voice of the scene keeps to one speaker.
     speaker: str = ""
+    #: Where a voice's clip may be cut: ``(start_s, end_s)`` of each
+    #: utterance, in order, none overlapping. Empty: nothing is known.
+    utterances: tuple[tuple[float, float], ...] = ()
+    #: Whether the clip's end runs into its start without a seam.
+    loop: bool = False
 
 
 @dataclass(frozen=True)
@@ -320,8 +332,27 @@ def placeholder_clips(duration_s: float, speakers: int = 32) -> ClipLibrary:
 
 
 def load_clip_library(path: Path) -> ClipLibrary:
-    """A library from a JSON list of ``{library, name, sha256, duration_s, kind, speaker}``."""
-    items = json.loads(Path(path).read_text())
+    """A library from a manifest (``docs/formats/clip-library.md``).
+
+    Also read: a bare JSON list of
+    ``{library, name, sha256, duration_s, kind, speaker}``, each optionally
+    with ``utterances`` and ``loop``, where ``kind`` is ``"voice"`` or a
+    noise's subtype.
+    """
+    data = json.loads(Path(path).read_text())
+    if isinstance(data, dict):
+        if data.get("schema") != "reverberate.clip-library" or data.get("schema_version") != 1:
+            raise ValueError(f"{path} is not a clip library this generator reads")
+        items = [
+            {
+                **item,
+                "library": data["library"],
+                "kind": "voice" if item["kind"] == "voice" else item["subtype"],
+            }
+            for item in data["clips"]
+        ]
+    else:
+        items = data
     return ClipLibrary(
         tuple(
             ClipEntry(
@@ -331,10 +362,68 @@ def load_clip_library(path: Path) -> ClipLibrary:
                 float(item["duration_s"]),
                 str(item.get("kind", "voice")),
                 str(item.get("speaker", "")),
+                tuple((float(a), float(b)) for a, b in item.get("utterances", ())),
+                bool(item.get("loop", False)),
             )
             for item in items
         )
     )
+
+
+class _Voice:
+    """A speaker's clips, read on from one talk spurt to the next."""
+
+    def __init__(self, shelf: list[ClipEntry]) -> None:
+        self.shelf = shelf
+        self.which = 0
+        self.offset = 0.0
+        self.next = 0
+
+    def take(self, start: float, wanted: float, limit: float) -> Activity | None:
+        """The spurt that starts at ``start``, about ``wanted`` long, over by ``limit``.
+
+        ``None`` when the scene ends before the next utterance would.
+        """
+        start = round(start, 3)
+        for _ in range(len(self.shelf)):
+            spoken = self.shelf[self.which].utterances
+            if not spoken or self.next < len(spoken):
+                break
+            self.which, self.offset, self.next = (self.which + 1) % len(self.shelf), 0.0, 0
+        entry = self.shelf[self.which]
+        clip = Clip(entry.library, entry.name, entry.sha256)
+        if not entry.utterances:
+            # Nothing is known of the clip: the spurt is the length drawn.
+            end = round(min(start + wanted, limit), 3)
+            span = end - start
+            if span <= 0:
+                return None
+            for _ in range(len(self.shelf)):
+                if self.offset + span <= self.shelf[self.which].duration_s:
+                    break
+                self.which, self.offset = (self.which + 1) % len(self.shelf), 0.0
+            entry = self.shelf[self.which]
+            clip = Clip(entry.library, entry.name, entry.sha256)
+            if span > entry.duration_s:
+                # No clip is that long: the interval ends with the clip.
+                end = round(start + math.floor(entry.duration_s * 1000) / 1000, 3)
+                span = end - start
+            activity = Activity(start, end, clip, round(self.offset, 3), 0.0)
+            self.offset = round(self.offset + span, 3)
+            return activity
+        spoken = entry.utterances
+        first, last = spoken[self.next][0], self.next
+        while (
+            last + 1 < len(spoken)
+            and abs(spoken[last + 1][1] - first - wanted) < abs(spoken[last][1] - first - wanted)
+            and start + spoken[last + 1][1] - first <= limit
+        ):
+            last += 1
+        span = round(spoken[last][1] - first, 3)
+        if round(start + span, 3) > limit:
+            return None
+        self.next = last + 1
+        return Activity(start, round(start + span, 3), clip, round(first, 3), 0.0)
 
 
 def placeholder_assets() -> Assets:
@@ -591,10 +680,14 @@ class _Scene:
                 break
         else:
             raise _Stuck("no placement of the noises leaves the floor in one piece")
+        # The kinds are dealt, not drawn each on its own: five noises drawn
+        # one by one are three taps and two streets as readily as a home.
+        held = [s for s in NOISE_SUBTYPES if self.clips.noises(s)] or list(NOISE_SUBTYPES)
+        deal = [held[int(i)] for i in self.rng("noise:subtypes").permutation(len(held))]
         sources = []
         for number, station in enumerate(picked, start=1):
             draws = self.rng(f"source:noise_{number}")
-            subtype = NOISE_SUBTYPES[int(draws.integers(len(NOISE_SUBTYPES)))]
+            subtype = deal[(number - 1) % len(deal)]
             yaw = round(float(draws.uniform(-180.0, 180.0)), 2)
             segment = Dwell(station.id, "standing", 0.0, self.duration, Facing("fixed", yaw))
             track = np.tile(np.asarray(station.position), (self.times.size, 1))
@@ -947,7 +1040,15 @@ class _Scene:
 
     def speak(self, voices: list[Source], noises: list[Source]) -> list[Source]:
         duration = self.duration
-        spurts: dict[str, list[tuple[float, float]]] = {v.id: [] for v in [*voices, *noises]}
+        spurts: dict[str, list[tuple[float, float]]] = {n.id: [] for n in noises}
+        spoken: dict[str, list[Activity]] = {v.id: [] for v in voices}
+        speakers = self.clips.speakers()
+        if voices and not speakers:
+            raise GenerationError("the clip library holds no voice")
+        readers = {
+            voice.id: _Voice(speakers[number % len(speakers)])
+            for number, voice in enumerate(voices)
+        }
 
         # One conversation: the near voices and the listener take turns.
         rng = self.rng("conversation")
@@ -960,10 +1061,14 @@ class _Scene:
             others = [ident for ident in table if ident != previous] or table
             speaker = others[int(rng.integers(len(others)))]
             start = max(t, last_end[speaker] + 0.2)
-            end = min(start + self.draw(rng, self.p.speech_s), duration)
+            wanted = self.draw(rng, self.p.speech_s)
+            end = min(start + wanted, duration)
+            if speaker != "listener":
+                spurt = readers[speaker].take(start, wanted, duration)
+                end = start if spurt is None else spurt.end_s
+                if spurt is not None and end - start >= 0.3:
+                    spoken[speaker].append(spurt)
             if end - start >= 0.3:
-                if speaker != "listener":
-                    spurts[speaker].append((start, end))
                 last_end[speaker] = end
                 previous = speaker
             if end >= duration:
@@ -980,10 +1085,11 @@ class _Scene:
             rng = self.rng(f"activity:{voice.id}")
             t = float(rng.uniform(0.0, 10.0))
             while t < duration:
-                spell = self.draw(rng, self.p.speech_s)
-                end = min(t + spell, duration)
-                if end - t >= 0.3:
-                    spurts[voice.id].append((t, end))
+                spurt = readers[voice.id].take(t, self.draw(rng, self.p.speech_s), duration)
+                end = t if spurt is None else spurt.end_s
+                spell = end - t
+                if spurt is not None and spell >= 0.3:
+                    spoken[voice.id].append(spurt)
                 t = end + self.draw(rng, self.p.pause_s) + spell * float(rng.uniform(0.5, 2.0))
 
         for noise in noises:
@@ -998,40 +1104,49 @@ class _Scene:
                     spurts[noise.id].append((t, end))
                 t = end + self.draw(rng, self.p.noise_off_s)
 
-        speakers = self.clips.speakers()
-        out = []
-        for number, source in enumerate([*voices, *noises]):
-            if source.kind == "noise":
-                shelf = self.clips.noises(source.subtype or "other")
-            else:
-                shelf = speakers[number % len(speakers)] if speakers else []
+        out = [replace(voice, activity=tuple(spoken[voice.id])) for voice in voices]
+        first: dict[str, int] = {}
+        for noise in noises:
+            kind = noise.subtype or "other"
+            shelf = self.clips.noises(kind)
             if not shelf:
-                raise GenerationError(f"the clip library holds nothing for {source.id}")
-            out.append(replace(source, activity=tuple(self.cut(spurts[source.id], shelf))))
+                raise GenerationError(f"the clip library holds nothing for {noise.id}")
+            # Which clip a kind starts on is drawn; two noises of one kind
+            # start on two clips, while the shelf has two.
+            if kind not in first:
+                first[kind] = int(self.rng(f"clips:{kind}").integers(len(shelf)))
+            out.append(
+                replace(noise, activity=tuple(self.cut(spurts[noise.id], shelf, first[kind])))
+            )
+            first[kind] += 1
         return out
 
     @staticmethod
-    def cut(spurts: list[tuple[float, float]], shelf: list[Any]) -> list[Activity]:
-        """Intervals reading on through the source's clips, one after the other."""
+    def cut(
+        spurts: list[tuple[float, float]], shelf: list[ClipEntry], first: int = 0
+    ) -> list[Activity]:
+        """A noise's intervals: its clip read on, looped, or followed by the next.
+
+        An interval that outruns its clip is cut there and goes on, with no
+        gap, at the start of the same clip when it loops and of the shelf's
+        next when it does not. A placeholder is as long as the scene.
+        """
         intervals = []
-        which, offset = 0, 0.0
+        which, offset = first % len(shelf), 0.0
         for start, end in spurts:
-            start, end = round(start, 3), round(end, 3)
-            span = end - start
-            if span <= 0:
-                continue
-            for _ in range(len(shelf)):
-                if offset + span <= shelf[which].duration_s:
-                    break
-                which, offset = (which + 1) % len(shelf), 0.0
-            entry = shelf[which]
-            if span > entry.duration_s:
-                # No clip is that long: the interval ends with the clip.
-                end = round(start + math.floor(entry.duration_s * 1000) / 1000, 3)
-                span = end - start
-            clip = Clip(entry.library, entry.name, entry.sha256)
-            intervals.append(Activity(start, end, clip, round(offset, 3), 0.0))
-            offset = round(offset + span, 3)
+            t, end = round(start, 3), round(end, 3)
+            while end - t > 5e-4:
+                entry = shelf[which]
+                length = math.floor(entry.duration_s * 1000 + 1e-6) / 1000
+                left = round(length - offset, 3)
+                if left <= 0:
+                    which = which if entry.loop else (which + 1) % len(shelf)
+                    offset = 0.0
+                    continue
+                span = min(round(end - t, 3), left)
+                clip = Clip(entry.library, entry.name, entry.sha256)
+                intervals.append(Activity(t, round(t + span, 3), clip, round(offset, 3), 0.0))
+                t, offset = round(t + span, 3), round(offset + span, 3)
         return intervals
 
     # -- the head -----------------------------------------------------------

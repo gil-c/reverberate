@@ -182,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.free_field:
             import numpy as np
 
+            from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
             from reverberate.trace.assets import MirrorAssets
             from reverberate.trace.engines import FreeFieldPairs
 
@@ -189,13 +190,13 @@ def main(argv: list[str] | None = None) -> int:
             with np.load(held / "plan.npz") as plan:
                 cells = np.concatenate([plan["cells"], plan["patch_cells"].reshape(-1, 3)])
             mirror = MirrorAssets.load(held / "mirror")
+            # In the cache form: on the geometric clock and the field's scale.
             engine = FreeFieldPairs(
                 np.load(held / "positions.npy"),
                 cells,
                 args.out,
                 sound_speed_m_s=mirror.settings.sound_speed_m_s,
-                lead_s=mirror.pack_lead_s,
-                gain=mirror.gain,
+                gain=FIELD_UNIT_AT_1M,
             )
         Trace(
             bundle=args.bundle,

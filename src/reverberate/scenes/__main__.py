@@ -5,6 +5,17 @@ python -m reverberate.scenes generate --dwelling hssd_0076 --seed N --out recipe
     [--clips CLIPS.json | --placeholder-clips] [--placeholder-assets] [--hssd-root DIR]
 python -m reverberate.scenes validate recipe.json [--hssd-root DIR] [--no-floor]
 python -m reverberate.scenes describe recipe.json
+python -m reverberate.scenes clips fetch [--manifest MANIFEST.json] [--root DIR] [--jobs N]
+python -m reverberate.scenes clips check [--manifest MANIFEST.json] [--root DIR]
+python -m reverberate.scenes clips curate --selection SELECTION.json --out MANIFEST.json
+    [--root DIR] [--jobs N]
+
+``clips fetch`` builds the library's files under ``<data root>/clips`` from
+the bucket and refuses any whose digest is not the manifest's; ``clips
+check`` measures them, one row a clip, and fails on a limit; ``clips curate``
+makes a manifest from a selection. The manifest is ``clarify_v1`` of this
+package unless one is named. ``fetch`` and ``curate`` read the bucket; no
+other command opens the network.
 
 ``generate`` and ``validate`` read the dwelling's geometry from the HSSD
 download, ``<data root>/raw/hssd-hab`` unless ``--hssd-root`` says otherwise.
@@ -20,6 +31,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from reverberate.scenes import clips as clip_library
 from reverberate.scenes.describe import describe
 from reverberate.scenes.generate import (
     GenerationError,
@@ -30,6 +42,9 @@ from reverberate.scenes.generate import (
 from reverberate.scenes.layout import load_hssd_floor, load_hssd_layout
 from reverberate.scenes.recipe import Assets, RecipeError, load_recipe, save_recipe
 from reverberate.scenes.validate import FLOOR_RULES, validate
+
+#: The library the first scene plays.
+DEFAULT_MANIFEST = Path(__file__).parent / "library" / "clarify_v1.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,7 +82,64 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("describe", help="a recipe in words")
     p.add_argument("recipe", type=Path)
+
+    p = sub.add_parser("clips", help="the library of dry clips: fetch, check, curate")
+    action = p.add_subparsers(dest="action", required=True)
+    for name, text in (
+        ("fetch", "build the library's files from the bucket, digests checked"),
+        ("check", "measure the library's files against the limits"),
+        ("curate", "a selection to a manifest, and the files"),
+    ):
+        q = action.add_parser(name, help=text)
+        q.add_argument("--root", type=Path, default=None, help="<data root>/clips unless said")
+        if name == "curate":
+            q.add_argument("--selection", type=Path, required=True)
+            q.add_argument("--out", type=Path, required=True)
+        else:
+            q.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+        if name != "check":
+            q.add_argument("--jobs", type=int, default=4)
     return parser
+
+
+def _clips(args: argparse.Namespace) -> int:
+    root = args.root
+    if root is None:
+        from reverberate.settings import data_root
+
+        root = data_root() / "clips"
+    if args.action == "check":
+        manifest = json.loads(args.manifest.read_text())
+        reports = clip_library.check(manifest, root)
+        print(clip_library.format_table(reports))
+        failed = [report.name for report in reports if report.failures]
+        seconds = sum(float(clip["duration_s"]) for clip in manifest["clips"])
+        megabytes = sum(int(clip["bytes"]) for clip in manifest["clips"]) / 1e6
+        print(
+            f"{len(reports)} clips, {seconds / 60:.1f} min, {megabytes:.0f} MB; {len(failed)} fail"
+        )
+        return 1 if failed else 0
+    from reverberate.store import shared_store
+
+    store = shared_store()
+    if store is None:
+        print("the bucket cannot be reached from this machine")
+        return 1
+    if args.action == "curate":
+        selection = json.loads(args.selection.read_text())
+        manifest = clip_library.curate(selection, store, root, jobs=args.jobs)
+        args.out.write_text(clip_library.dumps(manifest))
+        print(f"{args.out}  {len(manifest['clips'])} clips under {root / manifest['library']}")
+        return 0
+    manifest = json.loads(args.manifest.read_text())
+    try:
+        done = clip_library.fetch(manifest, root, store, jobs=args.jobs)
+    except ValueError as error:
+        print(error)
+        return 1
+    fetched = sum(state == "fetched" for state in done.values())
+    print(f"{root / manifest['library']}  {fetched} fetched, {len(done) - fetched} kept")
+    return 0
 
 
 def _hssd_root(given: Path | None) -> Path:
@@ -80,6 +152,8 @@ def _hssd_root(given: Path | None) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "clips":
+        return _clips(args)
     if args.command == "describe":
         print(describe(load_recipe(args.recipe)))
         return 0

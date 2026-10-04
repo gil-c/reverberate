@@ -145,10 +145,13 @@ class FreeFieldPairs:
     """A monopole in free air at every pair, in the cache form: no room, no card, no solve.
 
     The response is the interior expansion of a point source about the cell
-    (:func:`reverberate.spatial.field.monopole_coefficients`), on the scale
-    of ``low/ir``, band limited as a low only solve is and delayed by
-    ``lead_s``, the wave field's clock. ``centres`` moves the arrays off the
-    cells asked for, as a grid does.
+    (:func:`reverberate.spatial.field.monopole_coefficients`), times
+    ``gain`` and band limited as a low only solve is. The cache form is on
+    the geometric clock and on the field's scale: ``lead_s`` zero and
+    ``gain`` :data:`reverberate.spatial.lowband.FIELD_UNIT_AT_1M`. A
+    ``lead_s`` delays the response, which is how a field's low band comes
+    and what a trace refuses. ``centres`` moves the arrays off the cells
+    asked for, as a grid does.
     """
 
     def __init__(
@@ -204,11 +207,15 @@ class FreeFieldPairs:
         scale = self.gain * LOW_RATE_HZ / 48000.0
         response = np.fft.irfft(spectrum.T, LOW_SAMPLES, axis=-1) * scale
         # A solve starts in silence and does not wrap; a band limited expansion rings
-        # both ways. It is faded in over the lead and out over the last 50 ms.
+        # both ways. It is faded in over the lead, or without one over the time the sound
+        # takes to arrive, and out over the last 50 ms.
         time_s = np.arange(LOW_SAMPLES) / LOW_RATE_HZ
-        rise = (
-            np.clip(time_s / self.lead_s, 0.0, 1.0) if self.lead_s > 0.0 else np.ones_like(time_s)
+        before = (
+            self.lead_s
+            if self.lead_s > 0.0
+            else float(np.linalg.norm(seen)) / (self.sound_speed_m_s)
         )
+        rise = np.clip(time_s / before, 0.0, 1.0) if before > 0.0 else np.ones_like(time_s)
         fall = np.clip((time_s[-1] - time_s) / 0.05, 0.0, 1.0)
         window = (0.5 - 0.5 * np.cos(np.pi * rise)) * (0.5 - 0.5 * np.cos(np.pi * fall))
         return np.asarray(response * window[None, :], dtype=np.float32)

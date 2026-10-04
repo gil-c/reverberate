@@ -407,8 +407,10 @@ M="--mirror-from data/runs/w42_gpu_hssd_0076/mirror \
 X="--models-from data/runs/w44_clarify_interpolation/bundle_line_0076/models/storey"
 
 python -m reverberate.trace assets $M $X > assets.json
+python -m reverberate.scenes clips fetch        # the dry clips, once, on the laptop
 python -m reverberate.scenes generate --dwelling hssd_0076 --seed 20261004 \
-    --assets assets.json --clips clips.json --out recipe.json
+    --assets assets.json --clips src/reverberate/scenes/library/clarify_v1.json \
+    --out recipe.json
 
 # The plan and its cost; nothing built, nothing rented, no key read.
 python -m reverberate.trace rent --recipe recipe.json --home H $M --dry-run [--rate 0.30]

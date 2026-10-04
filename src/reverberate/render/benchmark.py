@@ -14,14 +14,23 @@ walking at 1 m/s between cells, so every step reads new pairs, a new
 operator and a histogram with new weights.
 
 ``python -m reverberate.render benchmark`` prints seconds of compute per
-second of scene, for one source, per part.
+second of scene, for one source, per part. With ``--processes 1,4,8`` it
+also renders stems as the audit does, a run at a time in that many
+processes of one thread each, and prints what they render together, what a
+process holds, and how long a scene of twenty minutes and fourteen sources
+that each sound half the time would take. ``--save`` keeps the report and
+``--against`` prints it beside an earlier one. Nothing here asserts.
 """
 
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
+import resource
+import sys
 import time
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -49,7 +58,11 @@ from reverberate.render.pack import (
     validate,
 )
 
-__all__ = ["Repeated", "density_pack", "measure"]
+__all__ = ["SCENE_SOURCE_S", "Repeated", "density_pack", "measure", "scaling", "table"]
+
+#: Seconds of stem in the scene the format sizes: twenty minutes, fourteen sources,
+#: each sounding half the time.
+SCENE_SOURCE_S = 20 * 60 * 14 / 2
 
 
 class Repeated:
@@ -311,3 +324,106 @@ def measure(
         scene["total"] = round(total, 4)
         report[label] = scene
     return report
+
+
+def _stems(moving: bool, duration_s: float, seed: int, ready: Any, go: Any, done: Any) -> None:
+    """One process of :func:`scaling`: a stem a run at a time, as the audit's worker renders."""
+    pack = density_pack(duration_s=duration_s, moving=moving, seed=seed)
+    h = pack.header
+    dry = np.random.default_rng(seed).standard_normal(int(round(duration_s * h.sample_rate_hz)))
+    settings = RenderSettings(workers=1, chunks_held=1)
+    engine = Engine(pack, {"s1": dry}, settings=settings)
+    run = settings.chunk_steps * h.step_samples
+    engine.stem("s1", 0, run)
+    ready.put(None)
+    go.wait()
+    started = time.perf_counter()
+    for first in range(run, h.samples, run):
+        engine.stem("s1", first, min(first + run, h.samples)).astype(np.float32)
+    spent = time.perf_counter() - started
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    resident = peak if sys.platform == "darwin" else peak * 1024
+    done.put((spent / ((h.samples - run) / h.sample_rate_hz), resident))
+
+
+def scaling(
+    *,
+    duration_s: float = 5.0,
+    processes: Iterable[int] = (1, 4, 8),
+    scenes: Iterable[str] = ("rest", "moving"),
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Whole stems rendered by several processes at once, one thread each.
+
+    Every process builds the pack and renders its one source, the first run
+    apart, then all start together. Per scene and per number of processes:
+    the seconds of compute a second of scene costs one process, the seconds
+    of stem all render in a second of wall clock, the largest resident size
+    of a process (which holds the benchmark's pack, 0.28 GB, besides the
+    engine), and the minutes the scene of :data:`SCENE_SOURCE_S` would take.
+    """
+    context = multiprocessing.get_context("spawn")
+    report: dict[str, Any] = {}
+    counts = list(processes)
+    for label in scenes:
+        moving = label == "moving"
+        rows = []
+        for count in counts:
+            ready, done = context.Queue(), context.Queue()
+            go = context.Event()
+            workers = [
+                context.Process(target=_stems, args=(moving, duration_s, seed, ready, go, done))
+                for _ in range(count)
+            ]
+            for worker in workers:
+                worker.start()
+            for _ in workers:
+                ready.get()
+            go.set()
+            results = [done.get() for _ in workers]
+            for worker in workers:
+                worker.join()
+            cost = [seconds for seconds, _ in results]
+            together = float(sum(1.0 / seconds for seconds in cost))
+            rows.append(
+                {
+                    "processes": count,
+                    "compute_s_per_scene_s": round(float(np.mean(cost)), 4),
+                    "stem_s_per_wall_s": round(together, 2),
+                    "resident_mb": round(max(size for _, size in results) / 1e6),
+                    "scene_minutes": round(SCENE_SOURCE_S / together / 60.0, 1),
+                }
+            )
+        report[label] = rows
+    return report
+
+
+def table(after: dict[str, Any], before: dict[str, Any] | None = None) -> str:
+    """The report as lines of text, beside an earlier one when given."""
+    lines = []
+    reports = [("before", before), ("after", after)] if before else [("", after)]
+    lines.append("seconds of compute per second of scene, one source, one process")
+    lines.append(f"{'':16s}" + "".join(f"{part:>9s}" for part in (*PARTS, "total")))
+    for label in ("rest", "moving"):
+        for name, report in reports:
+            assert report is not None
+            scene = report[label]
+            cells = "".join(f"{scene[part]:9.3f}" for part in (*PARTS, "total"))
+            lines.append(f"{label + ' ' + name:16s}" + cells)
+    if "scaling" in after:
+        lines.append("")
+        lines.append("stems a run at a time, processes of one thread each")
+        lines.append(
+            f"{'':16s}{'processes':>10s}{'s/s each':>10s}{'stem s/s':>10s}{'MB each':>9s}"
+            f"{'scene min':>11s}"
+        )
+        for label in ("rest", "moving"):
+            for name, report in reports:
+                assert report is not None
+                for row in report.get("scaling", {}).get(label, []):
+                    lines.append(
+                        f"{label + ' ' + name:16s}{row['processes']:10d}"
+                        f"{row['compute_s_per_scene_s']:10.3f}{row['stem_s_per_wall_s']:10.2f}"
+                        f"{row['resident_mb']:9d}{row['scene_minutes']:11.1f}"
+                    )
+    return "\n".join(lines)

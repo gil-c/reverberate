@@ -10,6 +10,7 @@ devices, stems against the mix.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import subprocess
@@ -28,17 +29,19 @@ from reverberate.mirror.render import RenderSettings as MirrorSettings
 from reverberate.mirror.render import early_signals
 from reverberate.render import delay
 from reverberate.render.__main__ import main
-from reverberate.render.benchmark import density_pack
+from reverberate.render.benchmark import density_pack, scaling, table
 from reverberate.render.dry import DryTrack
 from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.output import open_signal, write_signal
 from reverberate.render.pack import (
     ScenePack,
+    Tail,
     monopole_low_response,
     read_pack,
     synthetic_free_field,
     write_pack,
 )
+from reverberate.render.tail import PLACES, Held, TailPart
 from reverberate.render.translate import OperatorTranslation, SpatialTranslation
 from reverberate.spatial.lowband import from_stored, to_stored
 from reverberate.spatial.sh import degrees_of, real_sh, scene_to_ambisonic
@@ -402,6 +405,220 @@ def test_the_tail_reads_through_the_bank_at_the_energy_the_histogram_holds() -> 
     assert not np.allclose(again.stem("s1", parts=("tail",)), tail)
 
 
+def flat_tail(
+    energies: tuple[float, ...],
+    weight: float,
+    *,
+    seconds: float = 0.7,
+    late_from: int | None = None,
+    later_s: float = 0.0,
+) -> ScenePack:
+    """A source at rest whose steps read flat histograms: bins 50 to 250 at ``energies``.
+
+    Two histograms are the two slots of the source's position, weighed by
+    ``weight``. From the step ``late_from`` on, every arrival is ``later_s``
+    later, so that the tail starts as many bins later.
+    """
+    pack = density_pack(duration_s=seconds, moving=False, bins=300)
+    source = pack.sources["s1"]
+    assert source.tail is not None
+    steps = pack.header.steps
+    energy = np.zeros((len(energies), 300, 7), dtype=np.float32)
+    for row, level in enumerate(energies):
+        energy[row, 50:250] = level
+    moments = np.zeros((len(energies), 300, 7, 16), dtype=np.float32)
+    moments[..., 0] = energy
+    hist = np.full((steps, 2, 2), -1, dtype=np.int32)
+    hist[:, 0, 0] = 0
+    if len(energies) == 2:
+        hist[:, 1, 0] = 1
+    tail = Tail(
+        energy=energy,
+        moments=moments,
+        scale=np.ones((len(energies), len(pack.header.bank))),
+        hist_position=np.zeros((len(energies), 3)),
+        hist_cell=np.zeros(len(energies), dtype=np.int32),
+        hist=hist,
+        position_weight=np.full(steps, weight if len(energies) == 2 else 0.0, dtype=np.float32),
+        cell_weight=np.zeros(steps, dtype=np.float32),
+    )
+    early = source.early
+    if late_from is not None:
+        delay_s = np.array(early.delay_s, dtype=float)
+        delay_s[int(early.offsets[late_from]) :] += later_s
+        early = dataclasses.replace(early, delay_s=delay_s)
+    return dataclasses.replace(
+        pack,
+        header=dataclasses.replace(pack.header, has_low=False),
+        sources={"s1": dataclasses.replace(source, tail=tail, low=None, early=early)},
+        air=dataclasses.replace(pack.air, enabled=False),
+        mirror=dataclasses.replace(pack.mirror, signature=np.ones(1), lowcut_hz=0.0, lead_s=0.0),
+    )
+
+
+def through_the_bank(signal: np.ndarray) -> np.ndarray:
+    """The energy each band of the bank reads of a signal."""
+    bands = octave_bank(FS).filters.shape[1]
+    read = octave_filter_rows(np.repeat(signal[None], bands, 0), FS, np.arange(bands))
+    return np.asarray(np.sum(read**2, axis=1))
+
+
+def test_between_two_histograms_the_tail_holds_the_weighted_sum_of_their_energies() -> None:
+    """The format's rule, an interpolation in energy, on two histograms 10 dB apart."""
+    click = np.zeros(int(0.1 * FS))
+    click[1200] = 1.0
+    weight = 0.25
+    pack = flat_tail((1e-4, 1e-3), weight)
+    tail = Engine(pack, {"s1": click}).stem("s1", parts=("tail",))
+    asked = 200 * ((1.0 - weight) * 1e-4 + weight * 1e-3)
+    # The first channel, from 1 kHz up, and the first sixteen together from 500 Hz:
+    # the two noises are independent, and what they share by chance is the tolerance.
+    np.testing.assert_allclose(10 * np.log10(through_the_bank(tail[0])[3:7] / asked), 0, atol=0.5)
+    every = np.sum([through_the_bank(tail[channel]) for channel in range(16)], axis=0) / 16.0
+    np.testing.assert_allclose(10 * np.log10(every[2:7] / asked), 0.0, atol=0.5)
+    # A weight of zero is the first histogram alone, to the bit.
+    alone = Engine(flat_tail((1e-4,), 0.0), {"s1": click}).stem("s1", parts=("tail",))
+    np.testing.assert_array_equal(
+        Engine(flat_tail((1e-4, 1e-3), 0.0), {"s1": click}).stem("s1", parts=("tail",)), alone
+    )
+    # Two histograms that hold the same are still two noises: the energy, not the samples.
+    same = Engine(flat_tail((1e-4, 1e-4), 0.5), {"s1": click}).stem("s1", parts=("tail",))
+    assert not np.allclose(same, alone)
+    level = 10 * np.log10(np.sum(same[:16] ** 2) / np.sum(alone[:16] ** 2))
+    assert abs(level) < 0.5
+
+
+def test_the_bank_reads_on_the_rendered_first_channel_what_the_histogram_holds() -> None:
+    """With a low band the dry signal comes through the crossover mask: that is what is read."""
+    pack = density_pack(duration_s=1.6, moving=False)
+    plain = dataclasses.replace(pack.mirror, signature=np.ones(1), lowcut_hz=0.0, lead_s=0.0)
+    click = np.zeros(int(0.2 * FS))
+    click[4800] = 1.0
+    engine = Engine(dataclasses.replace(pack, mirror=plain), {"s1": click})
+    tail = engine.stem("s1", parts=("tail",))
+    part = engine.source("s1").parts["tail"]
+    assert part.mask is not None
+    asked = part._energy(0)[int(part.earliest[0]) :].sum(axis=(0, 2))
+    # What the reference renderer's tail reads in expectation, through the same mask.
+    wanted = part.nominal @ asked
+    got = through_the_bank(tail[0])
+    # From 500 Hz up, where the mask leaves something to hear: to the rounding of the
+    # carrier's single precision. One draw of the noise left alone is 1 dB off at 1 kHz.
+    np.testing.assert_allclose(got[2:], wanted[2:], rtol=2e-6)
+    np.testing.assert_allclose(part.rendered[4:], 1.0, atol=1e-3)
+    assert part.rendered[1] < 1e-3 < part.rendered[2] < 0.01 < part.rendered[3] < 0.7
+    # Under the crossover nothing is heard, and the bands keep the gain of their expectation.
+    np.testing.assert_array_equal(part._norm(0)[:2], 1.0)
+    assert np.all(np.abs(20 * np.log10(part._norm(0)[3:])) < 3.0)
+
+
+def tail_part(pack: ScenePack, dry: np.ndarray) -> TailPart:
+    return TailPart(pack, pack.sources["s1"], DryTrack.from_array(dry), np, workers=1)
+
+
+def test_a_step_that_starts_later_is_its_histogram_from_that_bin() -> None:
+    """A run whose steps start at two bins is each step's own response, and so is a run of one."""
+    click = np.zeros(int(0.2 * FS))
+    at = 3000
+    click[at] = 1.0
+    pack = flat_tail((1e-4,), 0.0, seconds=1.2, late_from=12, later_s=0.1)
+    part = tail_part(pack, click)
+    first, later = int(part.start[0]), int(part.start[12])
+    # 100 ms later is 50 bins: the second start is inside the histogram's energy.
+    assert later == first + 50 and first < 50 < later < 250
+    assert int(part.earliest[0]) == first
+    step = pack.header.step_samples
+    run = np.concatenate([part.render(0, 10), part.render(10, 20)], axis=1)
+
+    def response(start: int) -> np.ndarray:
+        waves = np.einsum("bdj,bdjs->djs", part._amplitude(0, start), part._noise(0))
+        made = part.encode @ waves.reshape(part.directions, -1).astype(float)
+        laid = np.zeros((64, run.shape[1]))
+        length = min(made.shape[1], laid.shape[1] - at)
+        laid[:, at : at + length] = made[:, :length]
+        return laid
+
+    whole, cut = response(first), response(later)
+    peak = np.abs(whole).max()
+    assert np.abs(whole - cut).max() > 0.1 * peak
+    # The steps to 11 start at the first bin: the run of one response, and the next run's start.
+    np.testing.assert_allclose(run[:, : 11 * step], whole[:, : 11 * step], atol=1e-9 * peak)
+    # From step 12 on they start at the later one; between 11 and 12 the two are cross-faded.
+    np.testing.assert_allclose(run[:, 12 * step :], cut[:, 12 * step :], atol=1e-9 * peak)
+    u = np.arange(step) / step
+    between = slice(11 * step, 12 * step)
+    np.testing.assert_allclose(
+        run[:, between], whole[:, between] * (1 - u) + cut[:, between] * u, atol=1e-9 * peak
+    )
+    # Nothing of the later tail before its bin, less what the bank spreads back.
+    reach = part.spread.shape[1] // 2 * part.bin_samples
+    assert np.abs(cut[:, : at + later * part.bin_samples - reach]).max() == 0.0
+
+
+def test_the_histograms_of_a_step_read_the_carrier_at_places_of_their_own() -> None:
+    pack = density_pack(duration_s=1.0, moving=True, bins=60)
+    part = tail_part(pack, noise(1.0))
+    keys = [part._key(k) for k in range(pack.header.steps)]
+    assert max(len(key.rows) for key in keys if key is not None) == 4
+    for key in keys:
+        assert key is not None
+        places = [int(part.place[row]) for row in key.rows]
+        assert len(set(places)) == len(places) and max(places) < PLACES
+        assert part._gain(key) == 1.0
+        assert sum(key.weights) == pytest.approx(1.0, abs=1e-6)
+    # Two places are further apart than the bank's filter is long: independent noises.
+    assert part.apart * part.bin_samples >= part.taps - 1
+    carrier = part._carrier().astype(float)
+    here = carrier[:, :, : part.bins].ravel()
+    there = carrier[:, :, part.apart : part.apart + part.bins].ravel()
+    assert abs(here @ there) < 0.01 * (here @ here)
+    np.testing.assert_allclose(np.mean(here**2), 1.0, atol=0.01)
+    # Were two histograms of a step at one place, their responses would add in amplitude:
+    # the step's gain brings the energy expected back to the weighted sum.
+    mixed = next(key for key in keys if key is not None and len(key.rows) == 4)
+    part.place[:] = 0
+    gain = part._gain(mixed)
+    gains = [part._amplitude(row, mixed.start).astype(float) for row in mixed.rows]
+    summed = sum(np.sqrt(w) * g for w, g in zip(mixed.weights, gains, strict=True))
+    wanted = sum(w * np.sum(g**2) for w, g in zip(mixed.weights, gains, strict=True))
+    assert gain < 1.0
+    assert gain**2 * np.sum(summed**2) == pytest.approx(wanted, rel=1e-9)
+
+
+def test_the_tail_keeps_its_single_precision_under_a_millionth_of_the_peak() -> None:
+    """The carrier and the gains are float32; what that rounds is what a card may differ by."""
+    pack = density_pack(duration_s=0.5, moving=True, bins=60)
+    part = tail_part(pack, noise(0.5))
+    key = part._key(3)
+    assert key is not None
+    row = key.rows[0]
+    gains, carrier = part._amplitude(row, int(part.earliest[row])), part._noise(row)
+    assert gains.dtype == np.float32 and carrier.dtype == np.float32
+    single = np.einsum("bdj,bdjs->djs", gains, carrier).astype(float)
+    double = np.einsum("bdj,bdjs->djs", gains.astype(float), carrier.astype(float))
+    assert np.abs(single - double).max() < 1e-6 * np.abs(double).max()
+
+
+def test_what_the_tails_hold_is_bounded_in_bytes() -> None:
+    held = Held(3000)
+    made = []
+
+    def make(name: str) -> np.ndarray:
+        made.append(name)
+        return np.zeros(125)  # 1000 bytes
+
+    owner = object()
+    for name in ("a", "b", "c", "a", "d", "b"):
+        held.get((owner, name), functools.partial(make, name))
+    # "a" was read again before "d" came, so "b" went first and is made again; "c" then goes.
+    assert made == ["a", "b", "c", "d", "b"]
+    assert held.held_bytes == 3000
+    held.get((owner, "big"), lambda: np.zeros(1000))
+    assert held.held_bytes == 8000  # what is made is kept, alone
+    held.forget(owner)
+    assert held.held_bytes == 0
+
+
 # --------------------------------------------------------------------------
 # the engine against itself
 # --------------------------------------------------------------------------
@@ -531,6 +748,10 @@ def test_clips_are_placed_at_their_times_with_their_gains() -> None:
     out = Engine(pack, clips=load).render()
     placed = np.zeros(int(0.6 * FS))
     placed[4800:14400] = clip[2400:12000] * 10.0 ** (-6.0 / 20.0)  # the engine adds the source's
+    # The interval comes on and goes off over 5 ms, from zero and to zero.
+    ramp = np.sin(0.5 * np.pi * np.arange(240) / 240) ** 2
+    placed[4800:5040] *= ramp
+    placed[14160:14400] *= ramp[::-1]
     np.testing.assert_allclose(out, Engine(pack, {"s1": placed}).render(), atol=1e-12)
     assert asked == ["a"] and np.abs(out).max() > 0.0
     assert np.abs(out[:, :4000]).max() < 1e-6 * np.abs(out).max()
@@ -595,3 +816,14 @@ def test_the_command_line_states_the_interpolators_error(
     assert main(["interpolator"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["1 kHz to 20 kHz"]["error_db"] < -93.0
+
+
+def test_the_benchmark_times_processes_side_by_side() -> None:
+    report: dict[str, Any] = {
+        label: {"early": 0.1, "low": 0.1, "tail": 0.2, "total": 0.4} for label in ("rest", "moving")
+    }
+    report["scaling"] = scaling(duration_s=1.0, processes=(1,), scenes=("moving",))
+    row = report["scaling"]["moving"][0]
+    assert row["processes"] == 1 and row["stem_s_per_wall_s"] > 0.0
+    printed = table(report, report)
+    assert "moving before" in printed and "scene min" in printed

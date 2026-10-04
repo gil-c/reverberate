@@ -37,6 +37,8 @@ RING_S = 1.0
 MASK_TAPS = 4097
 #: The grid the masks are designed on: the 1.2 s response ``mirror.hybrid.blend`` joins.
 MASK_GRID = 57600
+#: What an interval of a recipe is faded in and out over, seconds: a raised cosine.
+EDGE_FADE_S = 0.005
 #: Stop band of the filter between the two rates, in dB; its pass band ripples by 1e-6.
 RATE_FILTER_DB = 120.0
 
@@ -78,12 +80,29 @@ class DryTrack:
 
         The source's own ``gain_db`` is not applied here; the engine applies
         the pack's.
+
+        **An interval is faded in and out** over :data:`EDGE_FADE_S`, inside
+        its own length: a source that comes on or goes off away from zero is
+        a step on 64 channels, which is a click (measured: a noise cut where
+        it stands starts at its own rms). An end that another interval of
+        the source starts on, to the sample, is not faded, nor is that
+        start: they are one interval cut in pieces, as the audit cuts a long
+        one, and their join stays exact.
         """
-        segments = []
+        spans = []
         for interval in source.get("activity", []):
             start = int(round(float(interval["start_s"]) * rate))
             length = int(round((float(interval["end_s"]) - float(interval["start_s"])) * rate))
-            segments.append(_Segment(start, length, _clip_maker(interval, load, rate, length)))
+            spans.append((start, length, interval))
+        starts = {start for start, _, _ in spans}
+        ends = {start + length for start, length, _ in spans}
+        fade = int(round(EDGE_FADE_S * rate))
+        segments = []
+        for start, length, interval in spans:
+            edges = (0 if start in ends else fade, 0 if start + length in starts else fade)
+            segments.append(
+                _Segment(start, length, _clip_maker(interval, load, rate, length, edges))
+            )
         return cls(segments, rate)
 
     def _samples(self, index: int) -> np.ndarray:
@@ -180,7 +199,11 @@ class DryTrack:
 
 
 def _clip_maker(
-    interval: Mapping[str, Any], load: ClipLoader, rate: float, length: int
+    interval: Mapping[str, Any],
+    load: ClipLoader,
+    rate: float,
+    length: int,
+    edges: tuple[int, int] = (0, 0),
 ) -> Callable[[], np.ndarray]:
     def make() -> np.ndarray:
         samples, clip_rate = load(interval["clip"])
@@ -195,7 +218,13 @@ def _clip_maker(
                 f"the clip {interval['clip'].get('name')!r} is shorter than its interval"
             )
         gain = 10.0 ** (float(interval.get("gain_db", 0.0)) / 20.0)
-        return np.asarray(samples[first : first + length] * gain)
+        cut = np.asarray(samples[first : first + length] * gain)
+        for count, side in zip(edges, (slice(None), slice(None, None, -1)), strict=True):
+            count = min(count, length // 2)
+            if count:
+                # Zero on the first sample and on the last, one a fade's length in.
+                cut[side][:count] *= np.sin(0.5 * np.pi * np.arange(count) / count) ** 2
+        return cut
 
     return make
 

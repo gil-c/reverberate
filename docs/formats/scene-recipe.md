@@ -242,19 +242,30 @@ yaw holds through it; a `dwell` cannot face `"travel"`, having no rail.
 | key | type | meaning |
 | --- | --- | --- |
 | `start_s`, `end_s` | float | when the source emits |
-| `clip` | object | `{"library": "ears", "name": "<clip_id>", "sha256": "<digest of the clip's bytes>"}` |
+| `clip` | object | `{"library": "clarify_v1", "name": "<clip's name>", "sha256": "<digest of the clip's file>"}` |
 | `clip_offset_s` | float | where in the clip the interval starts |
 | `gain_db` | float | on top of the source's own |
 
-**Audio is never embedded.** A clip is named and pinned by the digest of its
-bytes as fetched (`clarify_library.fetch_clip`); a reader that finds other
-bytes under the name refuses the recipe. A clip is mono; one at another rate
-is resampled to the output rate by the engine's loader. The clip must be at
-least `clip_offset_s + end_s - start_s` long.
+**Audio is never embedded.** A clip is a file of a clip library
+([`clip-library.md`](clip-library.md)), `<data root>/clips/<library>/<name>.wav`,
+named and pinned by the digest of that file's bytes; a reader that finds
+other bytes under the name refuses the recipe. A clip is mono; one at
+another rate is resampled to the output rate by the engine's loader. The
+clip must be at least `clip_offset_s + end_s - start_s` long. An interval is
+cut out of its clip as it is, with no fade.
+
+**Levels.** The engine normalises nothing: a clip's samples are multiplied by
+the source's `gain_db` and the interval's. What level a clip is stored at is
+the library's convention, stated in `clip-library.md`: a voice at an active
+speech level of -26 dB re full scale, which stands for a normal vocal effort
+of 60 dB SPL at 1 m, and a noise at the level its source has at 1 m on the
+same scale, full scale standing for 86 dB SPL at 1 m. A `gain_db` is
+therefore a departure from that: a voice at `-6` speaks quietly, a noise at
+`-12` is 12 dB under what its library entry says.
 
 The library `"placeholder"` names no audio: its digests are those of the
-clips' names. The generator writes it only when asked to by name, while no
-library of pinned clips exists, and a trace refuses it.
+clips' names. The generator writes it only when asked to by name, and a
+trace refuses it.
 
 ### `listener`
 
@@ -292,6 +303,15 @@ apart on the plan: the reach a rail has towards a seat.
 | `name` | string | `"reverberate.scenes"` |
 | `version` | string | the generator's own version; a change of output for one seed changes it |
 | `parameters` | object | every range a draw was taken from |
+
+The first generator's version is `0.2.0`. It was `0.1.0` while a talk spurt
+was a length of time laid on a clip wherever it fell and each noise drew its
+subtype on its own; since `0.2.0` a spurt is whole utterances of the clip
+library, a noise loops or walks through its clips, and the subtypes are
+dealt (`clip-library.md`, "What the generator does with it"). A talk spurt
+then lasts what its utterances last, so `sources.speech_s` is the range the
+length aimed at is drawn from, and an interval may be longer than its
+maximum by part of an utterance.
 
 `parameters` is a tree whose leaves are scalars or two element `[min, max]`
 ranges, with the unit as the key's suffix. It is recorded so the audit can
