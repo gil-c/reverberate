@@ -131,7 +131,7 @@ One group per source of the recipe, named by its `id`. Attributes: `kind`,
 | --- | --- | --- | --- |
 | `position` | float64 | `[step, 3]` | the mouth |
 | `yaw_deg` | float32 | `[step]` | the facing, not wrapped |
-| `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one |
+| `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one (`scenes.audible_steps`) |
 
 A step that is not `audible` has no arrivals and `-1` in every index below;
 the trace does not compute it.
@@ -165,8 +165,8 @@ is the grid's and not an edge's has no stable name: in place of the edges it
 takes `-1, -1` and its rank by delay among the step's such paths of its
 kind, and the jump rule below catches a rank that changed hands. A
 diffracted then reflected path (kind 3) names the edge its reflection is
-taken from, the one nearest the listener. `mirror.moving.path_id` is the
-function.
+taken from, the one nearest the listener. `render.pack.path_id` is the
+function, and the trace (`mirror.moving`) names its rows with it.
 
 **`departure`**, for an image path, points from the source at its first
 reflection point; for the direct path, at the listener; for a diffracted
@@ -337,13 +337,15 @@ under `1.05 * 1414` Hz are given to the operator.
 
 **The translation is behind one interface**
 (`reverberate.render.translate.Translation`): the cells' fields and the
-head's offsets in, the head's field out. The estimator above is its default
-(`PlaneWaveFusion`), applied without forming `G`: the fields are solved
-against `(A W A^H + mu I)`, which depends only on the vector between the
-two cells and is inverted once per vector, spread on the quadrature's 378
-plane waves, each turned by its own phase, and gathered. A function of
-`spatial.translate` that returns `G` is swapped in through
-`OperatorTranslation`.
+head's offsets in, the head's field out. Its default (`SpatialTranslation`)
+is `reverberate.spatial.translate`, the one implementation of the
+mathematics above, applied without forming `T` or `G`
+(`apply_translation`, `apply_fusion`): the fields are solved against
+`(A W A^H + mu I)`, which depends only on the vector between the two cells
+and is inverted once per vector (`fusion_inverse`), spread on the
+quadrature's 378 plane waves, each turned by its own phase, and gathered.
+Forming `G` first gives the same field at twenty times the cost. A function
+that returns `G` is swapped in through `OperatorTranslation`.
 
 The trace chooses the cells **by clearance**
 (`spatial.translate.choose_cells`): a cell may serve a head at distance `d`
@@ -381,7 +383,8 @@ and per step:
 is the weighted sum of the four, energies and moments alike: an
 interpolation in energy, never of waveforms. Rays are traced from every
 station and from rail positions every 0.80 m; the receiver spheres stand on
-every second lattice cell in `x` and `z`, 0.80 m apart, and on every seat.
+cells of `/cells` no nearer one another than 0.80 m, and on every seat:
+the trace chooses them among `/cells` and `hist_cell` is their row there.
 The weights are linear in arc length on the source side and in distance on
 the listener's: slot 1 of the cells has `d0 / (d0 + d1)`. The two cells are
 the nearest two the head sees, among the six nearest (a cell behind a wall
@@ -503,7 +506,8 @@ Per source, at every output sample, in this order:
    The tail starts after the window and takes the power mask.
 4. **Low side.** The dry signal at `low_sample_rate_hz` convolved with the
    step's responses, crossfaded by `position_weight`, moved to the head by
-   `mode`, brought to 48 kHz.
+   `mode`, brought to 48 kHz, times the ratio of the two rates (see the
+   scale of `ir`).
 5. **Sum**, times the source's `gain_db` and the interval's.
 
 and the sources are summed, in the order the pack holds them. At rest, with
@@ -622,7 +626,11 @@ trace of L5 and what it is expected to cost are in
 ## The synthetic profile
 
 `profile = "synthetic-free-field"`: a pack a test builds in memory, with no
-trace, whose render is known in closed form. Lot L7 is developed against it.
+trace, whose render is known in closed form. Lot L7 is developed against
+it. Its two cells are where the builder is told to put them and its `mode`
+is what the builder is asked for: it does not follow the rule a trace
+chooses cells by, so that one cell can be measured further than a trace
+would read it.
 
 - No room: one source, omnidirectional, at a fixed position; a listener at
   rest or on a straight line at constant speed.
@@ -641,7 +649,8 @@ trace, whose render is known in closed form. Lot L7 is developed against it.
 - **Level B**, `has_low = true`: `/cells` holds two cells 0.40 m apart on
   the listener's line; `low/ir` is the monopole's interior expansion at each
   (`spatial.field.monopole_coefficients`, divided by `i^n` per degree to make
-  it the ambisonic signal, scaled by `4 pi` so its far field is `1 / d`)
+  it the ambisonic signal, scaled by `4 pi` so its far field is `1 / d`,
+  on the scale of `ir`)
   through the low **pressure** mask (one arrival lies wholly in the onset
   window, and `level/onset_s` is its delay, so the early part takes the high
   pressure mask and the two add to one) and through a raised cosine high
@@ -661,8 +670,8 @@ in dB (`tests/test_render_engine.py`):
 | the head | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | on a cell, mode 1 | -120 | -120 | -120 | -120 | -120 | -120 | -120 | -120 |
-| 0.10 m from one cell, mode 2 | -56 | -54 | -53 | -51 | -43 | -31 | -19 | -8 |
-| 0.20 m from one cell, mode 2 | -50 | -47 | -41 | -32 | -23 | -16 | -9 | -4 |
+| 0.10 m from one cell, mode 2 | -59 | -56 | -54 | -53 | -44 | -31 | -19 | -9 |
+| 0.20 m from one cell, mode 2 | -51 | -49 | -41 | -32 | -23 | -16 | -9 | -4 |
 | 0.20 m from each of two, mode 3 | -52 | -54 | -58 | -51 | -45 | -44 | -35 | -23 |
 
 Mode 1 is the filter between the two rates (1e-6 of ripple). **An order 7

@@ -89,9 +89,12 @@ source positions**, each reciprocal solve giving every source position at
 once, as point receivers that cost nothing.
 
 On the first recipe of lot L2 (hssd_0076, seed 20261004, 20 minutes, 14
-sources; `reverberate.scenes.low_band_positions` counts 2151 positions on
-its 60 stations and 144.6 m of rail, of which the sources pass through
-1919 and are audible at 1636): the listener walks 140 m and rests at 13
+sources, drawn with the generator's first defaults; lot L2 counted 2151
+positions on its 60 stations and 144.6 m of rail, of which the sources pass
+through 1919 distinct ones and are audible at 1636; since then
+`reverberate.scenes.low_band_positions` counts the distinct ones, all and
+audible, and the generator's defaults are calmer: 752 and 375 for the same
+seed): the listener walks 140 m and rests at 13
 places for four fifths of the time. Cells every 0.15 m along that path are
 895.
 
