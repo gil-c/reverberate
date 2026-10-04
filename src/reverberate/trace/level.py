@@ -42,6 +42,7 @@ from reverberate.spatial.lowband import (
     LOW_DURATION_S,
     LOW_RATE_HZ,
     decimate,
+    delayed,
     low_side,
     onset_s,
     with_air,
@@ -64,19 +65,31 @@ def pair_low(
     atmosphere: Atmosphere,
     *,
     sound_speed_m_s: float,
+    lead_s: float = 0.0,
+    unit_at_1m: float = 1.0,
     xp: Any = None,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     """A pair's response in the cache form as the pack keeps it.
 
-    Returns ``low/ir`` (``[channel, 4800]`` float32), ``low/onset_s``, and
-    channel 0 of the response with its air and before its masks, at 4 kHz:
-    what the seam is read on.
+    The cache is on the geometric clock and on the field's scale. The pack
+    is on the mirror's clock, ``lead_s`` later, so that the crossover's
+    masks, which ring both ways, have that much silence before the first
+    arrival and do not come back at the response's end; and it is physical,
+    the response over ``unit_at_1m``
+    (:data:`reverberate.spatial.lowband.FIELD_UNIT_AT_1M`). The air is taken
+    on the geometric clock, where a sample's time is its path.
+
+    Returns ``low/ir`` (``[channel, 4800]`` float32), ``low/onset_s`` on the
+    pack's clock, and channel 0 of the response with its air and before its
+    masks, at 4 kHz, on the pack's clock and the field's scale: what the
+    seam is read on.
     """
     from reverberate.compute import to_numpy
 
     aired = with_air(cached, LOW_RATE_HZ, atmosphere, sound_speed_m_s=sound_speed_m_s, xp=xp)
+    aired = delayed(aired, LOW_RATE_HZ, lead_s, xp=xp)
     onset = onset_s(aired[0], LOW_RATE_HZ, xp=xp)
-    stored = low_side(aired, LOW_RATE_HZ, crossover, xp=xp)
+    stored = low_side(aired, LOW_RATE_HZ, crossover, xp=xp) / unit_at_1m
     return (
         np.asarray(to_numpy(stored), dtype=np.float32),
         float(onset),
