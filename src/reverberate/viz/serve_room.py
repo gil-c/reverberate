@@ -13,6 +13,11 @@ It also serves the solver runs the app can open: those carrying a ``walk.json``,
 see :mod:`reverberate.viz.app_payload`. A run names the scene it was simulated
 in, so it is offered with that apartment rather than as a separate page.
 
+And it answers the page's scene view under ``/api/scene/``
+(:mod:`reverberate.viz.scene_api`): layouts, the generator, recipes and where
+everything is over time. Saving a recipe is the one request that writes, to
+``<data root>/recipes`` unless ``--recipes`` says otherwise.
+
 Run it: ``python src/reverberate/viz/serve_room.py``, or the run button on
 this file. Everything it needs is in ``walk.toml``
 (:mod:`reverberate.viz.walk_config`); any command line argument overrides the
@@ -40,10 +45,12 @@ import webbrowser
 from collections.abc import Mapping, Sequence
 
 from reverberate.geometry.scene_ids import scene_of
+from reverberate.settings import data_root
 from reverberate.store import ObjectStore, shared_store
 from reverberate.viz.app_payload import WalkRun, build_run, discover_walk_runs
 from reverberate.viz.assemble_dataset import every_storey
 from reverberate.viz.decoders import export_decoders
+from reverberate.viz.scene_api import MAX_BODY_BYTES, PREFIX, SceneError, SceneService
 from reverberate.viz.scene_cache import (
     SceneEntry,
     cache_root,
@@ -137,9 +144,13 @@ class SiteBuilder:
         lead: str | None = None,
         voices: Path | None = None,
         measured_head: Path | None = None,
+        recipes: Path | None = None,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
+        # Nothing is created here: the folder appears with the first recipe saved.
+        self.scenes = SceneService(hssd_root, recipes or data_root() / "recipes")
+        print(f"recipes: {self.scenes.recipes_root}")
         self.rebuild = rebuild
         self.lead = lead
         self._lock = threading.Lock()
@@ -247,6 +258,8 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
             super().__init__(*args, directory=str(builder.target), **kwargs)  # type: ignore[arg-type]
 
         def do_GET(self) -> None:  # noqa: N802
+            if self._scene_api("GET"):
+                return
             parts = self.path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "scenes" and parts[2] == "manifest.json":
                 try:
@@ -258,6 +271,40 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
             if wanted and self._send_range(wanted):
                 return
             super().do_GET()
+
+        def do_POST(self) -> None:  # noqa: N802
+            if not self._scene_api("POST"):
+                self.send_error(404, "nothing takes a POST here")
+
+        def _scene_api(self, method: str) -> bool:
+            """Answer a request of the scene view in JSON; false when it is not one."""
+            parts = self.path.split("?")[0].strip("/").split("/")
+            if parts[:2] != PREFIX.split("/"):
+                return False
+            scenes: SceneService | None = getattr(builder, "scenes", None)
+            status, answer = 200, None
+            try:
+                if scenes is None:
+                    raise SceneError(404, "this server has no scene view")
+                body = None
+                if method == "POST":
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if length > MAX_BODY_BYTES:
+                        raise SceneError(413, "the body is larger than a recipe")
+                    try:
+                        body = json.loads(self.rfile.read(length))
+                    except ValueError as error:
+                        raise SceneError(400, f"the body is not JSON: {error}") from error
+                answer = scenes.handle(method, parts[2:], body)
+            except SceneError as error:
+                status, answer = error.status, {"error": error.message}
+            payload = json.dumps(answer).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return True
 
         def _send_range(self, wanted: str) -> bool:
             """Serve ``bytes=a-b`` of a file, which is how the page reads a field.
@@ -371,6 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--voices", type=Path, default=None, help="default: <data root>/voices")
     parser.add_argument("--measured-head", type=Path, default=None, help="a SOFA head to add")
+    parser.add_argument(
+        "--recipes", type=Path, default=None, help="where recipes are saved; <data root>/recipes"
+    )
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
@@ -405,7 +455,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config: {found}")
 
     def build(target: Path) -> SiteBuilder:
-        builder = SiteBuilder(hssd_root, target, scene, runs, rebuild, run, voices, head)
+        builder = SiteBuilder(
+            hssd_root, target, scene, runs, rebuild, run, voices, head, arguments.recipes
+        )
         if scene:
             builder.ensure(scene)
         return builder

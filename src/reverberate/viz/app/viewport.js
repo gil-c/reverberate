@@ -108,6 +108,9 @@ export function createViewport(canvas, pane) {
   let manifest = null;
   let yaw = 0;
   let pitch = 0;
+  // The head's roll, radians, positive lowering the right ear. Only a scene
+  // replayed through the listener's own eyes sets it; the walk has none.
+  let roll = 0;
   // One view in the scene at a time: the furnished model, the wave solver's
   // grid, the mirror solver's derived scene.
   const groups = { colour: null, acoustic: null, mirror: null };
@@ -364,7 +367,7 @@ export function createViewport(canvas, pane) {
         camera.position.z = z + stepZ;
       }
     }
-    camera.rotation.set(pitch, yaw, 0);
+    camera.rotation.set(pitch, yaw, -roll);
     headLamp.position.copy(camera.position);
 
     const now = pose();
@@ -402,18 +405,24 @@ export function createViewport(canvas, pane) {
     isGliding: () => glide !== null,
 
     /** Place the listener. Any field may be omitted; x and z are refused
-     *  together when the point is not walkable. */
-    moveTo({ x, y, z, yaw: newYaw, pitch: newPitch, fov } = {}) {
+     *  together when the point is not walkable. `placed` says the position
+     *  was validated elsewhere, as a recipe's listener is: it is taken as it
+     *  is, a seat by a wall included. */
+    moveTo({ x, y, z, yaw: newYaw, pitch: newPitch, roll: newRoll, fov, placed = false } = {}) {
       if (x !== undefined || y !== undefined || z !== undefined) glide = null;
       if (x !== undefined || z !== undefined) {
         // One coordinate alone keeps the other; the walls still apply.
         const nx = x !== undefined ? x : camera.position.x;
         const nz = z !== undefined ? z : camera.position.z;
-        if (canStandAt(nx, nz)) camera.position.set(nx, camera.position.y, nz);
+        if (placed || canStandAt(nx, nz)) camera.position.set(nx, camera.position.y, nz);
       }
       if (y !== undefined) {
         const [low, high] = heightRange();
-        camera.position.y = Math.min(high, Math.max(low, y));
+        camera.position.y = placed ? y : Math.min(high, Math.max(low, y));
+      }
+      if (newRoll !== undefined && newRoll !== roll) {
+        roll = newRoll;
+        dirty = true;
       }
       if (newYaw !== undefined) yaw = newYaw;
       if (newPitch !== undefined) pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, newPitch));

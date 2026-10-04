@@ -15,6 +15,7 @@ import { setupFolds } from "./folds.js";
 import { createEngine } from "./audio/engine.js";
 import { loadField } from "./audio/field.js";
 import { createSpatial } from "./audio/spatial.js";
+import { createSceneMode } from "./scene/scene.js";
 import { state } from "./state.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -35,6 +36,21 @@ const points = createPoints(viewport);
 const minimap = createMinimap($("#map"), {
   onMove: (x, z) => viewport.moveTo({ x, z }),
   onSelectSource: (id) => selectSource(id),
+  onSelectActor: (id) => sceneMode.select(id),
+});
+// A moving scene, drawn and replayed over whichever view is shown (scene/scene.js).
+const sceneMode = createSceneMode({
+  THREE,
+  viewport,
+  minimap,
+  busy,
+  elements: {
+    toggle: $("#scene-on"),
+    panel: $("#scene-panel"),
+    timeline: $("#timeline"),
+    summary: $("#scene-summary"),
+    audio: $("#audio-body"),
+  },
 });
 const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => viewport.moveTo(pose) });
 
@@ -544,6 +560,7 @@ async function openApartment(id, runName) {
     floorHeight: manifest.floorHeight,
   });
   renderFacts(manifest, extent.area);
+  sceneMode.setDwelling(id);
   busy("loading furniture");
   const furnished = viewport.setApartment(manifest, base);
   await openRun(run);
@@ -597,6 +614,9 @@ async function boot() {
   if (apartments.length) await openApartment(select.value, lead ? lead.name : undefined);
 }
 
+// The view in force is named to the viewport before any apartment arrives:
+// it draws a view's group only once told that view is the one on show.
+viewport.show(state.view);
 renderViewButtons();
 boot().catch((error) => busy(`failed to start: ${error.message}`));
 
@@ -615,4 +635,6 @@ window.reverberate = {
   setFmax,
   lastRender: () => lastRender,
   grid: () => grid,
+  // Scene mode, with its clock (`scene.transport`) and its solo and mute (`scene.mix`).
+  scene: sceneMode,
 };

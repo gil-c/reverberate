@@ -71,6 +71,16 @@
             </div>
           </section>
 
+          <section class="fold" data-fold="scene">
+            <button type="button" class="fold-head"><span class="label">Scene</span><i></i></button>
+            <div class="fold-body stack">
+              <div class="fields">
+                <label class="field switch"><span>scene</span><input type="checkbox" id="scene-on" /><em></em></label>
+              </div>
+              <div class="stack generator" id="scene-panel" hidden></div>
+            </div>
+          </section>
+
           <section class="fold" data-fold="listener">
             <button type="button" class="fold-head"><span class="label">Listener</span><i></i></button>
             <div class="fold-body">
@@ -104,20 +114,24 @@
         </div>
       </aside>
 
-      <main id="view-pane">
-        <canvas id="scene"></canvas>
-        <div class="crumb"><b id="room"></b></div>
-        <div class="hud">
-          <span id="hud-pos"></span>
-          <span id="hud-tier"></span>
-          <span id="hud-busy"></span>
-        </div>
-      </main>
+      <div id="centre">
+        <main id="view-pane">
+          <canvas id="scene"></canvas>
+          <div class="crumb"><b id="room"></b></div>
+          <div class="hud">
+            <span id="hud-pos"></span>
+            <span id="hud-tier"></span>
+            <span id="hud-busy"></span>
+          </div>
+        </main>
+        <section id="timeline" hidden></section>
+      </div>
 
       <aside class="panel right" id="right">
         <div class="rail"><button type="button" title="Collapse" data-collapse="right">›</button></div>
         <div class="grip" data-grip="right"></div>
-        <div class="body">
+        <div class="body" id="scene-summary" hidden></div>
+        <div class="body" id="audio-body">
           <div class="stack">
             <p class="label">Audio</p>
             <div class="note" id="simulation"></div>
