@@ -2,9 +2,13 @@
 
 Status: proposed with [ADR 0016](../adr/0016-a-scene-moves-and-one-engine-renders-it.md).
 Written and validated by `reverberate.scenes` (lot L2), drawn by the
-application (L3), read by the trace stage (L6). Nothing reads it yet.
+application (L3), read by the trace stage (L6). Where a source and the
+listener are at a time `t` is computed by `reverberate.scenes.kinematics` and
+by nothing else.
 
-A recipe is one JSON document of a few kilobytes that says everything a moving
+A recipe is one JSON document (about 320 kB in canonical form for twenty
+minutes and fourteen sources, most of it activity intervals and keyframes)
+that says everything a moving
 scene is: the dwelling, where sources may stand and travel, what each source
 does over time, what the listener does, the air, and the seed and versions
 that make it reproducible. It holds no audio and no acoustics. It is the only
@@ -57,16 +61,30 @@ representation gives the same characters on every machine:
 | angles | 0.01 degree |
 | levels | 0.01 dB |
 | speeds | 0.001 m/s |
+| turn rates | 0.01 degree a second |
+| temperature, humidity, pressure | 0.001 of their unit |
+
+The step is read from the key's suffix (`_m`, `_s`, `_deg`, `_db`, `_m_s`,
+`_deg_s`, `_c`, `_percent`, `_kpa`; `position` and `points` are lengths). The
+`generator` block is not quantised: its leaves are what the draws were taken
+from.
 
 A value that is a whole number of its step is written as the float it is
 (`12.5`, `1.0`), never as an integer; counts, seeds and versions are integers.
+A reader refuses the integer under rule 1, because `12` and `12.0` would give
+one scene two identities.
 
 **Determinism.** The same seed, the same generator parameters, the same asset
 keys and the same generator version give the same canonical bytes, in two
 processes under different `PYTHONHASHSEED`. Every random draw comes from a
 generator seeded with the first eight bytes of
-`sha256("<seed>:<label>")`, the label naming what is drawn (`"source:v1"`,
-`"listener"`), so adding a source does not move the others.
+`sha256("<seed>:<label>")`, the label naming what is drawn
+(`"source:near_1"`, `"listener"`), so adding a source does not move the draws
+of the others. It may still move the others themselves: a source yields to
+those placed before it. A draw that is taken again, because a source found no
+clear way or the recipe failed a rule, is taken under the same label with a
+suffix (`":retry2"` for a source, `"#1"` for a whole attempt), and the attempt
+that passed is recorded under `generator.parameters.attempt`.
 
 ## Top level
 
@@ -162,11 +180,13 @@ A rail is walked standing: every point of it is at
 `y = floor_y_m + heights.standing_m`, and it ends above a seat, not on it.
 **The rail's sampled positions** are at arc lengths `j * pitch_m` from `a`,
 `j = 0 .. floor(L / pitch_m)`, and at `b` itself; they are a function of the
-recipe and nothing else, so the low band cache can be keyed on them.
+recipe and nothing else, so the low band cache can be keyed on them
+(`kinematics.rail_samples`). When the last multiple of the pitch falls on `b`
+to a micrometre, `b` is not repeated.
 
 Every seat has an implicit vertical rail between its seated and its standing
 position, sampled at the same pitch from the seated end, on which a source
-rises and sits.
+rises and sits (`kinematics.seat_rail_heights`: 1.20, 1.28, ... 1.68, 1.70 m).
 
 ### `sources`
 
@@ -211,6 +231,12 @@ scene's start, and from there moves towards the facing's current value by
 the shorter way round at no more than `turn_rate_deg_s`. A source has no
 pitch and no roll.
 
+That is a recurrence, and it is the same number for every reader only on a
+stated step: the yaw is advanced every 50 ms from the scene's start, the
+pack's step, and is linear between two such instants
+(`kinematics.YAW_STEP_S`). It is not wrapped. A `rise` has no facing and the
+yaw holds through it; a `dwell` cannot face `"travel"`, having no rail.
+
 **`activity`** is a list of intervals in time order that do not overlap:
 
 | key | type | meaning |
@@ -225,6 +251,10 @@ bytes as fetched (`clarify_library.fetch_clip`); a reader that finds other
 bytes under the name refuses the recipe. A clip is mono; one at another rate
 is resampled to the output rate by the engine's loader. The clip must be at
 least `clip_offset_s + end_s - start_s` long.
+
+The library `"placeholder"` names no audio: its digests are those of the
+clips' names. The generator writes it only when asked to by name, while no
+library of pinned clips exists, and a trace refuses it.
 
 ### `listener`
 
@@ -249,7 +279,9 @@ keyframes alone. A smooth walk is a dense one: a curve is written as the
 keyframes it needs.
 
 Two consecutive keyframes naming the same `station` are a rest there. A
-listener is seated only at a seat.
+listener is seated only at a seat. It sits down and gets up between two
+keyframes, one on the free floor and one naming the seat, no more than 0.60 m
+apart on the plan: the reach a rail has towards a seat.
 
 ### `generator`
 
@@ -268,13 +300,21 @@ give the recipe back. The trace and the signal engine do not read it. The
 keys the first generator writes, nested at each dot:
 
 ```
+duration_s                                                                 scalar
 sources.near_voice.count, sources.far_voice.count, sources.noise.count     [min, max]
-sources.near_voice.distance_m, sources.far_voice.distance_m                [min, max], to the listener, at rest
+sources.near_voice.distance_m, sources.far_voice.distance_m                [min, max], on the plan, from a station to where the listener rests
 sources.speed_m_s, sources.dwell_s, sources.gain_db                        [min, max]
 sources.seated_share, sources.speech_s, sources.pause_s                    [min, max]
+sources.turn_rate_deg_s, sources.rise_s                                    [min, max]
+sources.overlap_share                                                      scalar
+sources.noise.gain_db, sources.noise.on_s, sources.noise.off_s             [min, max]
+sources.noise.steady_share                                                 scalar
 listener.speed_m_s, listener.rest_s, listener.turn_rate_deg_s              [min, max]
-listener.seated_share                                                      [min, max]
+listener.seated_share, listener.pitch_deg                                  [min, max]
+listener.gaze_jitter_deg, listener.attend_share                            scalar
 rails.pitch_m, rails.max_length_m                                          scalar
+clips.placeholder                                                          true or false
+attempt                                                                    the attempt that passed, 0 the first
 ```
 
 ## Validation
@@ -284,38 +324,55 @@ A recipe that breaks one of these is refused with the rule's number.
 of `experiments.w40_volume_field.plan`, whose `free_floor` is the floor
 meant here.
 
-1. **Shape.** Every key above is present with its type, and no other.
+1. **Shape.** Every key above is present with its type, and no other. A
+   source's id is unique.
 2. **Time.** `duration_s > 0`. Every source's segments cover the scene
    without gap or overlap. Activity intervals lie inside the scene and do not
    overlap. Keyframes start at `0`, end at `duration_s` and increase.
-3. **Stations.** Unique ids. A `stand` or a `waypoint` lies on the free floor
-   and in the room it names. A `seat` lies within 0.60 m of the footprint of
-   its `object` and at least 0.30 m from any wall.
-4. **Rails.** Both ends are stations, and the first and last points are their
-   `x, z`. Every segment of the polyline lies on the free floor, except its
-   last 0.60 m towards a seat. `pitch_m` is `0.08`.
+3. **Stations.** Unique ids. A station's `height` is `seated` for a `seat`
+   and `standing` otherwise, and its `y` is the floor plus that height. A
+   `stand` or a `waypoint` lies on the free floor and in the room it names. A
+   `seat` lies within 0.60 m of the footprint of its `object` and at least
+   0.30 m from any wall, the walls being the boundary of the storey's
+   walkable outline.
+4. **Rails.** Unique ids. Both ends are stations, and the first and last
+   points are their `x, z`. Every segment of the polyline lies on the free
+   floor, except its last 0.60 m towards a seat, at whichever end the seat
+   is. `pitch_m` is `0.08`.
 5. **Sources on the graph.** A `dwell` is the first segment or follows one
-   that ends at its station. A `travel` goes from one end of its rail to the other. A `rise`
-   is at a seat; a `dwell` there is `seated` after a rise to `seated` and
-   `standing` otherwise.
+   that ends at its station, and is never at a `waypoint`. A `travel` goes
+   from one end of its rail to the other, leaves from where the source is,
+   and is walked standing. A `rise` is at a seat, where the source is, and
+   changes its posture; a `dwell` there is `seated` after a rise to `seated`
+   and `standing` otherwise. A source whose first segment is a `dwell` at a
+   seat starts in the posture that dwell states.
 6. **Listener on the floor.** Every keyframe, and so every point between two,
-   is on the free floor, unless both keyframes name the same seat. The head's
-   height above the floor is between `heights.seated_m` and
-   `heights.standing_m`, and equals `heights.seated_m` only at a seat.
+   is on the free floor, unless both keyframes name the same seat, or one
+   names a seat and the other is on the free floor within 0.60 m of it on the
+   plan. A keyframe that names a station is at it. The head's height above
+   the floor is between `heights.seated_m` and `heights.standing_m`, and
+   equals `heights.seated_m` only at a seat.
 7. **Speeds.** A source's peak speed on a rail is at most 1.5 m/s, a rise
    takes at least 1.0 s, the listener's speed between two keyframes is at
-   most 1.5 m/s and the head turns at most 360 degrees a second.
+   most 1.5 m/s and each of the head's three angles turns at most 360
+   degrees a second. A turn rate is not negative.
 8. **Clearances.** At every instant a source's mouth and the listener's head
    are at least 0.50 m apart, and two sources at least 0.40 m.
-9. **Collisions.** No two sources travel the same rail segment in opposite
+9. **Collisions.** No two sources travel the same rail in opposite
    directions at the same time.
 10. **Assets.** Every clip's digest is 64 hexadecimal characters; every
-    directivity model named has a digest under `assets.directivity`; the
-    atmosphere's temperature is the low band's.
+    directivity model named has a digest under `assets.directivity`, except
+    `omni`, which has no table; the atmosphere's temperature is the low
+    band's.
 11. **Canonical numbers.** Every number is a multiple of its step.
 
 Rules 6 to 9 are checked on the trajectories sampled every 50 ms, the pack's
 step, and at every keyframe and segment boundary.
+
+The free floor, the rooms, the walls and the footprints are the dwelling's
+and not the recipe's: rules 3, 4 and 6 are checked in full only by a reader
+that has the dwelling (`reverberate.scenes.validate(recipe, floor)`), and one
+that has not says so.
 
 ## Example
 
