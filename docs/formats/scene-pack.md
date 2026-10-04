@@ -71,7 +71,7 @@ Attributes:
 | `has_low`, `has_tail` | bool | whether the two groups exist in every source |
 | `low_sample_rate_hz` | float | `4000` |
 | `low_samples` | int | `4800`, 1.2 s |
-| `fusion_json` | str | how two cells are fused: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001}` |
+| `fusion_json` | str | how two cells are fused and which may serve: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001, "translate_within_m": 0.2, "fuse_within_m": 0.3, "source_share": 0.15, "surface_share": 0.5}` |
 | `provenance_json` | str | see Provenance |
 
 Dataset `/recipe`, `uint8 [byte]`: the recipe's canonical bytes, whose
@@ -97,14 +97,20 @@ order 7 array stood at each. Shared by every source.
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `position` | float64 | `[cell, 3]` | the array's centre |
-| `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added where the lattice is too coarse for the clearance |
+| `position` | float64 | `[cell, 3]` | the array's centre: the node of the low grid the array stood on, not the point asked for |
+| `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added: on the listener's path, or where the lattice is too coarse |
 | `lattice_index` | int32 | `[cell, 3]` | `(i, layer, k)` on the lattice; `-1, -1, -1` off it |
 | `clearance_m` | float32 | `[cell]` | distance from the centre to the nearest surface of `mirror/scene.npz` |
 | `room` | str | `[cell]` | by ADR 0010 |
 
 Attributes `grid_origin_m`, `grid_step_m` (0.40 in `x` and `z`) and
-`layers_y_m` (the two heights). A seat's cell is at the seat exactly.
+`layers_y_m` (the two heights). A seat's cell is asked for at the seat
+exactly; its `position` is the node the array got, half a grid step's
+diagonal away at most (19 mm on the grid to 1500 Hz), or up to 0.10 m aside
+where the seat leaves the array's ball no free air. The engine translates
+from `position`, so the difference costs nothing; a field that recorded the
+point asked for instead carried a floor of -25 dB
+(`docs/open-questions/low-band-translation.md`).
 
 ## `/sources/<id>`
 
@@ -203,8 +209,10 @@ and per step:
 | `cell` | int32 | `[step, 2]` | rows of `/cells`, slot 0 the nearer |
 | `mode` | uint8 | `[step]` | `0` inaudible, `1` exact, `2` translated from one cell, `3` fused from two |
 
-**What `ir` is.** The wave response with the crossover's low side already
-taken, as `mirror.hybrid.blend` takes it: the part within the onset window
+**What `ir` is.** `spatial.lowband.to_stored` of the pair's response in the
+dwelling's cache, which holds it at 4 kHz before its masks and its air. It
+is the wave response with the crossover's low side already taken, as
+`mirror.hybrid.blend` takes it: the part within the onset window
 through the pressure mask, the rest through the power mask
 (`Crossover.masks`), and the air absorption of `/atmosphere` applied
 (`audio.apply_air_absorption`). Its spectrum is therefore zero above
@@ -255,12 +263,17 @@ factored once per vector and frequency, and a step costs one product. So
 the offsets cost the engine little and the weights would cost the pack
 everything.
 
-The trace chooses the cells **by clearance**: a cell may serve a head at
-distance `d` only if `d` is under the cell's free radius, the smaller of
-`clearance_m` and its distance to the source. Slot 0 is the nearest cell
-that may serve; slot 1 the next that may, on the other side of the head
-where there is one. With one, `mode` is 2; with none, the trace fails and
-names the step: the lattice needs a cell there (`kind` 2).
+The trace chooses the cells **by clearance**
+(`spatial.translate.choose_cells`): a cell may serve a head at distance `d`
+only if `d` is under its serving radius, the smaller of `surface_share` of
+`clearance_m` and `source_share` of its distance to the source, and under
+`fuse_within_m`. Slot 0 is the nearest cell that may serve; slot 1 the
+nearest that may on the other side of the head. With both, `mode` is 3;
+with slot 0 alone and within `translate_within_m`, 2; otherwise the trace
+fails and names the step: a cell is needed there (`kind` 2). The shares
+are measured: inside the free ball itself, past 0.15 of the source's
+distance, the 64 channels are no prediction
+(`docs/open-questions/low-band-translation.md`).
 
 ### `tail`: what the late part is made from
 
@@ -396,8 +409,11 @@ not written (roadmap constraint 10).
 
 **A pair's key** is the first 64 hexadecimal characters of the SHA-256 of
 the canonical JSON of: `voxel_low_key`, the source position and the cell's
-position in millimetres as integers, the encoder's settings, the solver's
-version, the window in seconds. It is the same for every recipe that uses
+position (the one asked for) in millimetres as integers, the encoder's
+settings, the solver's version, the window in seconds
+(`spatial.lowband.pair_key`). `voxel_low_key` is the key of a grid to
+1500 Hz, not of a field's low grid to 1 kHz, which stops under the
+crossover's ramp. It is the same for every recipe that uses
 the pair, which is what makes the dwelling's cache fill once.
 
 ## Size
