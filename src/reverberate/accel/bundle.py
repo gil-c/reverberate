@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["DEFAULT_BANDS", "STOREY_SCENE", "prepare_bundle", "take_home"]
+__all__ = ["DEFAULT_BANDS", "STOREY_SCENE", "export_models", "prepare_bundle", "take_home"]
 
 #: The storey's export, the scene name ``scene_export`` gives it.
 STOREY_SCENE = "apartment_full"
@@ -48,7 +48,51 @@ HOME_ITEMS = (
     "campaign.log",
     "report.json",
     "status.json",
+    # A campaign of low band pairs (:mod:`reverberate.accel.pairs`): its cache and its arrays.
+    "pairs",
+    "pairs_plan.json",
 )
+
+
+def export_models(
+    bundle: Path,
+    *,
+    scene_id: str,
+    hssd_root: Path | None = None,
+    models_from: Path | None = None,
+) -> Path:
+    """The storey's export under ``bundle/models/storey``, made or reused; returns that path.
+
+    ``models_from`` reuses an earlier export (the directory holding
+    ``manifest.json`` and the storey's model, with ``materials`` beside it)
+    instead of exporting again from the download at ``hssd_root``.
+    """
+    from reverberate.experiments.w40_volume_field.storey import export_scene
+
+    models = Path(bundle) / "models" / "storey"
+    if models_from is not None:
+        source_models = Path(models_from)
+        if not (source_models / "manifest.json").is_file():
+            raise FileNotFoundError(f"{source_models} holds no export manifest")
+        if models.exists():
+            shutil.rmtree(models)
+        models.mkdir(parents=True)
+        for item in (source_models / "manifest.json", source_models / f"{STOREY_SCENE}.json"):
+            shutil.copy2(item, models / item.name)
+        materials_dir = Path(bundle) / "models" / "materials"
+        if materials_dir.exists():
+            shutil.rmtree(materials_dir)
+        shutil.copytree(source_models.parent / "materials", materials_dir)
+    elif hssd_root is not None:
+        export_scene(Path(hssd_root), scene_id, models)
+    else:
+        raise ValueError("an export needs the HSSD download or an earlier export to reuse")
+    # The export also writes the room alone and two truncations, which the
+    # campaign never reads and would only lengthen the upload.
+    for extra in models.glob("*.json"):
+        if extra.name not in (f"{STOREY_SCENE}.json", "manifest.json"):
+            extra.unlink()
+    return models
 
 
 def prepare_bundle(
@@ -76,34 +120,15 @@ def prepare_bundle(
     """
     from reverberate.experiments.run import scene_spec
     from reverberate.experiments.w40_volume_field.plan import dwelling_of, free_floor, plan_points
-    from reverberate.experiments.w40_volume_field.storey import export_scene
     from reverberate.geometry.rooms import rooms_record
 
     bands = bands or DEFAULT_BANDS
     bundle = Path(bundle)
     bundle.mkdir(parents=True, exist_ok=True)
-    models = bundle / "models" / "storey"
     started = time.time()
-    if models_from is not None:
-        source_models = Path(models_from)
-        if not (source_models / "manifest.json").is_file():
-            raise FileNotFoundError(f"{source_models} holds no export manifest")
-        if models.exists():
-            shutil.rmtree(models)
-        models.mkdir(parents=True)
-        for item in (source_models / "manifest.json", source_models / f"{STOREY_SCENE}.json"):
-            shutil.copy2(item, models / item.name)
-        materials_dir = bundle / "models" / "materials"
-        if materials_dir.exists():
-            shutil.rmtree(materials_dir)
-        shutil.copytree(source_models.parent / "materials", materials_dir)
-    else:
-        export_scene(Path(hssd_root), scene_id, models)
-    # The export also writes the room alone and two truncations, which the
-    # campaign never reads and would only lengthen the upload.
-    for extra in models.glob("*.json"):
-        if extra.name not in (f"{STOREY_SCENE}.json", "manifest.json"):
-            extra.unlink()
+    models = export_models(
+        bundle, scene_id=scene_id, hssd_root=Path(hssd_root), models_from=models_from
+    )
     keys: dict[str, str] = {}
     nh: dict[str, int] = {}
     manifest = json.loads((models / "manifest.json").read_text())

@@ -103,9 +103,11 @@ recipe  ->  TRACE (rented card)  ->  scene pack  ->  SIGNAL (numpy or cupy)  -> 
      an order 7 expansion; the field at the head is one cell's expansion
      translated, or two cells' fused by a minimum norm plane wave fit. The
      cells are chosen **by clearance**: a cell serves a head only inside
-     its own free ball, bounded by the nearest surface and by the source.
-     Where the 0.40 m lattice leaves a head with no such cell, a cell is
-     added.
+     a share of its own free ball, half its clearance to the nearest
+     surface and 0.15 of its distance to the source (measured by L4,
+     `docs/open-questions/low-band-translation.md`). Where the 0.40 m
+     lattice leaves a head with no such cell, a cell is added; along the
+     listener's path they are 0.15 m apart.
    - *The source is continuous by sampling.* A source rests at **stations**
      and travels on **rails**. A station is solved once. A rail is solved
      every 8 cm and the source between two positions is their weighted
@@ -242,21 +244,27 @@ project any longer.
    trajectory are not validated.
 4. **Directivity departs from the validated render.** The switch gives the
    comparison. Under 1 kHz and in the tail the voice stays omnidirectional.
-5. **The floor of -20 to -30 dB** of the translation is not explained.
-6. **The fusion was measured on channel 0 only.** The engine needs all 64
-   channels at the head; that the higher orders translate as well is
-   expected and not measured.
+5. **The floor of -20 to -30 dB** of the translation was the arrays'
+   positions, not the solver: an array stands on a node of its grid, up
+   to 17 mm from the point the field records, and on the lattice a
+   quarter of the low band's arrays were moved 3 to 41 cm to find free
+   air. Between true centres the median is -45 dB (L4).
+6. **The fusion was measured on channel 0 only.** Measured since on all 64
+   (L4): one cell holds -21 dB to 0.20 m and two cells -24 dB to 0.29 m
+   each, read on the head's sphere, with the source 1.2 m away or more.
 7. **Near a source the low band has no free ball.** Every measured
    translation within 0.8 m of the source failed; a near voice is 0.5 to
    1.5 m from the head. The recipe keeps 0.50 m between mouth and head, and
-   L4 must show the dense cells this needs or say that it cannot.
+   L4 measured it: a cell serves within 0.15 of its distance to the source,
+   7.5 cm for a voice at 0.5 m, so cells stand 0.15 m apart along the
+   listener's path.
 8. **The late reverberation follows a moving source at once**, the
    rendering being quasi-static. Unheard so far.
 9. **Off the lattice's lines the head is further from a cell** than
    anything measured: 0.28 m at the centre of a square of the 0.40 m
    lattice, `k d = 5.2` at 1 kHz, where the line measured 0.20 m. L4
-   measures it, and the remedy is the same as for the clearance: a cell
-   added.
+   measured it on the line: the two diagonal cells fused hold -24 dB
+   there. A head off both the lines and the diagonals was not measured.
 
 ## Rejected
 
