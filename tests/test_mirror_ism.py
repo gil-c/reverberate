@@ -24,7 +24,7 @@ from reverberate.mirror.geometry import (
     MaterialTable,
     derive,
 )
-from reverberate.mirror.ism import IsmSettings, grow_tree, paths_for, ray_triangles
+from reverberate.mirror.ism import IsmSettings, grow_tree, paths_for, ray_triangles, sheet_layers
 from test_accel_scene import write_scene
 
 SIZE = np.array([4.0, 3.0, 2.5])
@@ -265,3 +265,90 @@ def test_an_apex_inside_a_facet_s_sphere_is_not_pruned_by_its_cone() -> None:
     children = tree.sequence[(tree.order == 2) & (tree.sequence[:, 0] == 5), 1]
     assert ceiling_images.size == 1
     assert set(children.tolist()) == {0, 1, 2, 3, 4}
+
+
+def sheet_scene(sides: int = 3) -> DerivedScene:
+    """The box with a panel across it at x = 2, held as two layers of the same triangles.
+
+    An unoriented sheet as the model exports it: one layer facing each way,
+    both marked as reflecting on both sides, and the panel an occluder.
+    """
+    scene = box_scene()
+    a, b = np.array([2.0, 0.5, 0.5]), np.array([2.0, 2.5, 0.5])
+    c, d = np.array([2.0, 2.5, 2.0]), np.array([2.0, 0.5, 2.0])
+    layers = [np.array([[a, b, c], [a, c, d]]), np.array([[a, c, b], [a, d, c]])]
+    start = scene.reflector_vertices.shape[0]
+    facets = [
+        Facet(
+            label=0,
+            normal=normal,
+            offset=float(normal @ a),
+            area=3.0,
+            triangles=np.arange(start + 2 * i, start + 2 * i + 2, dtype=np.int32),
+            kind="furniture",
+            sides=sides,
+        )
+        for i, normal in enumerate((np.array([-1.0, 0, 0]), np.array([1.0, 0, 0])))
+    ]
+    return DerivedScene(
+        **{
+            **scene.__dict__,
+            "facets": (*scene.facets, *facets),
+            "reflector_vertices": np.concatenate([scene.reflector_vertices, *layers]),
+            "reflector_facet": np.concatenate([scene.reflector_facet, [6, 6, 7, 7]]).astype(
+                np.int32
+            ),
+            "occluder_vertices": np.concatenate([scene.occluder_vertices, layers[0]]),
+            "occluder_label": np.zeros(scene.occluder_vertices.shape[0] + 2, dtype=np.int16),
+            "occluder_sides": np.full(scene.occluder_vertices.shape[0] + 2, 2, dtype=np.int8),
+        }
+    )
+
+
+def test_a_sheet_of_two_coincident_layers_reflects_once_on_either_side() -> None:
+    """The panes of hssd_0076: 11 sheets, 502 of the 6092 paths of its validated field twice."""
+    from reverberate.mirror.moving import prepare, trace_early
+    from reverberate.mirror.pipeline import MirrorSettings
+
+    scene = sheet_scene()
+    assert sheet_layers(scene).tolist() == [False] * 6 + [True, True]
+    # Layers that reflect on the side they face are a sheet already, and a lone layer is none.
+    assert not sheet_layers(sheet_scene(sides=2)).any()
+    lone = DerivedScene(**{**scene.__dict__, "facets": scene.facets[:7]})
+    assert not sheet_layers(lone).any()
+    near = np.array([1.4, 1.8, 1.3])  # on the source's side of the panel
+    once, twice = IsmSettings(max_order=2), IsmSettings(max_order=2, coincident_facets="twice")
+    found = {}
+    for name, settings in (("once", once), ("twice", twice)):
+        paths = paths_for(scene, grow_tree(scene, SOURCE, settings), near, settings)
+        found[name] = paths
+        on_the_sheet = np.isin(paths.sequence, (6, 7)).any(axis=1)
+        lengths = np.round(paths.length_m[on_the_sheet], 9)
+        # The seeded fault: both layers mirror the source, every such path under two names.
+        doubled = lengths.size - np.unique(lengths).size
+        assert (doubled > 0) == (name == "twice")
+    # Read once, the paths are those of twice with each doubled one kept under one name.
+    assert np.array_equal(
+        np.unique(np.round(found["once"].length_m, 9)),
+        np.unique(np.round(found["twice"].length_m, 9)),
+    )
+    first = found["once"]
+    sheet = first.sequence[(first.order == 1) & np.isin(first.sequence[:, 0], (6, 7)), 0]
+    assert sheet.tolist() == [6]  # the layer that faces the source
+    image = np.array([4.0 - SOURCE[0], SOURCE[1], SOURCE[2]])
+    assert float(first.length_m[first.sequence[:, 0] == 6][0]) == pytest.approx(
+        float(np.linalg.norm(image - near))
+    )
+    # From the other side it is the other layer, once.
+    far_source, far = np.array([3.0, 1.2, 1.1]), np.array([2.6, 1.8, 1.3])
+    behind = paths_for(scene, grow_tree(scene, far_source, once), far, once)
+    assert behind.sequence[(behind.order == 1) & (behind.sequence[:, 0] >= 6), 0].tolist() == [7]
+    # The batched trace reads the same setting: a step holds the reflection once.
+    for settings, rows in ((once, 1), (twice, 2)):
+        table = trace_early(
+            prepare(scene, MirrorSettings(ism=settings)), SOURCE[None, :], near[None, :]
+        )
+        on_the_sheet = (table.order == 1) & np.isin(table.sequence[:, 0], (6, 7))
+        assert int(on_the_sheet.sum()) == rows
+    with pytest.raises(ValueError, match="coincident_facets"):
+        IsmSettings(coincident_facets="thrice")

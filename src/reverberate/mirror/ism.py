@@ -42,10 +42,15 @@ __all__ = [
     "occluder_grid",
     "paths_for",
     "ray_triangles",
+    "sheet_layers",
 ]
 
 #: A facet that reflects on both sides, PFFDTD's ``3``.
 BOTH_SIDES = 3
+#: What :attr:`IsmSettings.coincident_facets` may be.
+COINCIDENT_FACETS = ("once", "twice")
+#: Two layers are one sheet when their planes and their extents agree to this, m.
+SHEET_TOLERANCE_M = 1e-3
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,19 @@ class IsmSettings:
     #: fifth bounces the reference still holds above -15 dB while the
     #: general tree at that order would be millions of images.
     flutter_order: int = 6
+    #: A sheet the model holds as two layers on one plane, each reflecting on
+    #: both sides (:func:`sheet_layers`): ``"once"`` reads each layer on the
+    #: side it faces, so a reflection on the sheet is one path; ``"twice"``
+    #: lets both layers mirror a source on either side, and every path that
+    #: reflects there is found under two names, 6 dB too loud. ``"twice"`` is
+    #: what every field before 2026-10-05 was traced with.
+    coincident_facets: str = "once"
+
+    def __post_init__(self) -> None:
+        if self.coincident_facets not in COINCIDENT_FACETS:
+            raise ValueError(
+                f"coincident_facets is one of {COINCIDENT_FACETS}, not {self.coincident_facets!r}"
+            )
 
     def record(self) -> dict[str, Any]:
         return {
@@ -81,6 +99,7 @@ class IsmSettings:
             "max_images": self.max_images,
             "window_s": self.window_s,
             "flutter_order": self.flutter_order,
+            "coincident_facets": self.coincident_facets,
         }
 
 
@@ -154,11 +173,53 @@ def norm3(a: Any) -> Any:
 # --------------------------------------------------------------------------
 
 
-def _facet_arrays(scene: DerivedScene) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def sheet_layers(scene: DerivedScene) -> np.ndarray:
+    """Per facet: it reflects both ways and a second such facet lies on it, facing the other way.
+
+    An unoriented sheet (a pane, a panel, a door leaf) comes from the model
+    as two layers of the same triangles, one facing each way, both marked as
+    reflecting on both sides. Each layer then mirrors a source on either
+    side to the same image, the two paths cross the same point of the same
+    triangles, and one reflection is rendered twice. Two facets are the two
+    layers of one sheet when their normals are opposite, their planes one,
+    and their boxes and areas the same to :data:`SHEET_TOLERANCE_M`. Read on
+    the side it faces, each layer gives the sheet's reflection to its own
+    side and to no other, which is the sheet.
+    """
+    count = len(scene.facets)
+    layer = np.zeros(count, dtype=bool)
+    both = np.flatnonzero([f.sides == BOTH_SIDES for f in scene.facets])
+    if both.size < 2:
+        return layer
+    normals = np.asarray([scene.facets[i].normal for i in both], dtype=float)
+    offsets = np.asarray([scene.facets[i].offset for i in both], dtype=float)
+    areas = np.asarray([scene.facets[i].area for i in both], dtype=float)
+    boxes = np.zeros((both.size, 6))
+    for row, i in enumerate(both):
+        vertices = scene.reflector_vertices[scene.facets[i].triangles].reshape(-1, 3)
+        boxes[row] = np.concatenate([vertices.min(axis=0), vertices.max(axis=0)])
+    opposite = normals @ normals.T < -1.0 + 1e-6
+    one_plane = np.abs(offsets[:, None] + offsets[None, :]) < SHEET_TOLERANCE_M
+    one_box = np.abs(boxes[:, None, :] - boxes[None, :, :]).max(axis=2) < SHEET_TOLERANCE_M
+    one_area = np.abs(areas[:, None] - areas[None, :]) <= 1e-3 * np.maximum(areas[:, None], 1e-12)
+    layer[both] = np.any(opposite & one_plane & one_box & one_area, axis=1)
+    return layer
+
+
+def _facet_arrays(
+    scene: DerivedScene, coincident_facets: str = "once"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per facet: its normal, its offset, whether it is furniture, whether it reflects both ways.
+
+    With ``coincident_facets`` ``"once"`` a layer of a two layer sheet
+    (:func:`sheet_layers`) reflects on the side it faces alone.
+    """
     normals = np.asarray([f.normal for f in scene.facets], dtype=float).reshape(-1, 3)
     offsets = np.asarray([f.offset for f in scene.facets], dtype=float)
     furniture = np.asarray([f.kind == "furniture" for f in scene.facets], dtype=bool)
     both = np.asarray([f.sides == BOTH_SIDES for f in scene.facets], dtype=bool)
+    if coincident_facets == "once":
+        both &= ~sheet_layers(scene)
     return normals, offsets, furniture, both
 
 
@@ -173,7 +234,12 @@ def _facet_spheres(scene: DerivedScene) -> tuple[np.ndarray, np.ndarray]:
     return centres, radii
 
 
-def _in_front(scene: DerivedScene, normals: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+def _in_front(
+    scene: DerivedScene,
+    normals: np.ndarray,
+    offsets: np.ndarray,
+    coincident_facets: str = "once",
+) -> np.ndarray:
     """``[i, j]``: some vertex of facet ``j`` lies strictly on the air side of facet ``i``'s plane.
 
     A path that has just reflected on facet ``i`` runs on its air side, so it
@@ -188,7 +254,7 @@ def _in_front(scene: DerivedScene, normals: np.ndarray, offsets: np.ndarray) -> 
         front[:, j] = np.any(heights > 1e-9, axis=0)
         behind[:, j] = np.any(heights < -1e-9, axis=0)
     # A facet that reflects on both sides sends sound to either of them.
-    both = np.asarray([f.sides == BOTH_SIDES for f in scene.facets], dtype=bool)
+    both = _facet_arrays(scene, coincident_facets)[3]
     return front | (both[:, None] & behind)
 
 
@@ -245,10 +311,14 @@ def grow_tree(
     settings = settings or IsmSettings()
     source = np.asarray(source, dtype=float).reshape(3)
     reach = settings.sound_speed_m_s * settings.window_s
-    normals, offsets, furniture, both = _facet_arrays(scene)
+    normals, offsets, furniture, both = _facet_arrays(scene, settings.coincident_facets)
     count = normals.shape[0]
     centres, radii = _facet_spheres(scene)
-    front = _in_front(scene, normals, offsets) if count else np.zeros((0, 0), dtype=bool)
+    front = (
+        _in_front(scene, normals, offsets, settings.coincident_facets)
+        if count
+        else np.zeros((0, 0), dtype=bool)
+    )
     positions = [source[None, :]]
     orders = [np.zeros(1, dtype=np.int32)]
     parents = [np.full(1, -1, dtype=np.int32)]
