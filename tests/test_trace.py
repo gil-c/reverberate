@@ -1010,8 +1010,11 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)
-    # Home: the pack is read, and its cost is the rental's bill at the rental's rate.
-    assert result["home"]["pack"]["steps"] == 11 and result["home"]["usd"] == pytest.approx(0.1)
+    # Home: the pack is read, and its cost is the rental's bill at the rental's rate, to the
+    # rounding of its records: each is written to 0.0001 USD, and how the bill splits between
+    # them is how long each stage took on the machine that ran this test.
+    assert result["home"]["pack"]["steps"] == 11
+    assert result["home"]["usd"] == pytest.approx(0.1, abs=5e-4)
     with read_pack(home / "pulled" / "pack.h5") as pack:
         assert {r["billed_rate_usd_per_hour"] for r in pack.header.provenance["cost"]} == {0.4}
     assert any("cost at 1.74 USD/h" in line for line in said)
