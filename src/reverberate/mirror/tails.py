@@ -313,7 +313,11 @@ def tail_scale(
     direct sound: the energy a sphere of the receivers' radius catches at
     that distance against the direct pulse's. The others take the median of
     those, as :func:`reverberate.mirror.pipeline.render` gives the points
-    without a direct path; zero when no cell sees the source.
+    without a direct path. Where no cell sees the source, a voice in another
+    room than every cell, they take what a cell beyond the sphere would
+    have: the spreading and the sphere's share both go as the distance
+    squared, so that scale is the pulse's energy times four over the
+    radius squared, wherever the cell stands.
     """
     position = np.asarray(position, dtype=float).reshape(3)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
@@ -335,7 +339,8 @@ def tail_scale(
     # The direct path's gain is its spreading alone, the same in every band.
     amplitude = 1.0 / np.maximum(distance, 1e-12)
     scale = (amplitude**2 / expected)[:, None] * band_pulse_energy(rate)[None, : len(picks)]
-    fallback = np.median(scale[own], axis=0) if bool(own.any()) else np.zeros(scale.shape[1])
+    beyond = 4.0 / receiver_radius_m**2 * band_pulse_energy(rate)[: len(picks)]
+    fallback = np.median(scale[own], axis=0) if bool(own.any()) else beyond
     scale[~own] = fallback
     return np.asarray(scale, dtype=float)
 
