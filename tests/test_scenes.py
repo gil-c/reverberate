@@ -26,12 +26,14 @@ from reverberate.scenes import (
     Parameters,
     Recipe,
     RecipeError,
+    audible_steps,
     canonical_bytes,
     check,
     describe,
     generate,
     listener_state,
     low_band_positions,
+    low_band_source_positions,
     parse_recipe,
     placeholder_assets,
     quantise,
@@ -39,6 +41,7 @@ from reverberate.scenes import (
     rail_length,
     rail_samples,
     recipe_sha256,
+    sample_times,
     save_recipe,
     seat_rail_heights,
     source_state,
@@ -766,6 +769,36 @@ def test_the_summary_names_every_source_and_counts_the_low_band_positions() -> N
     assert all(source.id in text for source in recipe.sources)
     assert "metres" in text and "active" in text and "visits:" in text
     assert positions["rail_samples"] > 0 and positions["stations"] > 0
+    # Both counts are printed: every position passed through, and those a source is heard at.
+    parts = ("stations", "rail_samples", "seat_rail_samples")
+    assert positions["all"] == sum(positions[name] for name in parts)
+    assert 0 < positions["audible"] <= positions["all"]
+    assert f"low band source positions: {positions['all']} (" in text
+    assert f"{positions['audible']} where a source is audible" in text
+    assert "speech on the move:" in text
+
+
+def test_a_position_is_solved_only_where_its_source_is_heard() -> None:
+    recipe = Recipe.from_dict(hand_tree())
+    every = low_band_source_positions(recipe, audible_only=False)
+    heard = low_band_source_positions(recipe)
+    walker = next(s for s in recipe.sources if s.id == "walker")
+    rail = recipe.rail(next(s.rail for s in walker.segments if isinstance(s, Travel)))
+    # A rail's two ends are its stations: counted once, with the rail.
+    assert every.by_source["walker"] == tuple(range(len(rail_samples(rail))))
+    assert set(every.kind[row] for row in every.by_source["walker"]) == {"rail"}
+    assert "seat_rail" in every.kind
+    # The sitter never speaks: nothing is solved for it. The walker speaks at its
+    # first station and again from the middle of its walk.
+    assert heard.by_source["sitter"] == ()
+    assert 0 < heard.count < len(rail_samples(rail))
+    held = {tuple(p) for p in every.positions.tolist()}
+    assert {tuple(p) for p in heard.positions.tolist()} <= held
+    # The steps the pack calls audible: in an interval, or 1.2 s after one.
+    steps = audible_steps(recipe, "walker")
+    times = sample_times(recipe)
+    assert steps[times == 1.0].all() and steps[times == 9.2].all()
+    assert not steps[times == 9.25].any() and not steps[times == 0.95].any()
 
 
 def test_the_command_line_describes_and_validates_a_file(

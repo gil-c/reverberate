@@ -53,6 +53,22 @@ def describe(recipe: Recipe) -> str:
         f"{positions['seat_rail_samples']} on seats' vertical rails), "
         f"{positions['audible']} where a source is audible"
     )
+    spoken = moving = 0.0
+    for source in recipe.sources:
+        if source.kind == "noise":
+            continue
+        for interval in source.activity:
+            spoken += interval.end_s - interval.start_s
+            for segment in source.segments:
+                if not isinstance(segment, Dwell):
+                    moving += max(
+                        0.0,
+                        min(interval.end_s, segment.end_s) - max(interval.start_s, segment.start_s),
+                    )
+    lines.append(
+        f"  speech on the move: {moving:.1f} s of {spoken:.1f} s spoken "
+        f"({100 * moving / max(spoken, 1e-9):.1f} %)"
+    )
     if recipe.generator is not None:
         lines.append(f"  generator {recipe.generator.name} {recipe.generator.version}")
 
