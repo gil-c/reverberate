@@ -1,0 +1,481 @@
+# The scene pack
+
+Status: proposed with [ADR 0016](../adr/0016-a-scene-moves-and-one-engine-renders-it.md).
+Written by the trace stage on a rented card (lot L6, from L4 and L5), read by
+the signal engine (`reverberate.render`, L7). Nothing writes it yet.
+
+A pack is everything the acoustics of one recipe
+([`scene-recipe.md`](scene-recipe.md)) come to, sampled along the
+trajectories: for every source and every step, the arrivals above the
+crossover, what the tail is made from, which solved responses carry the band
+under it, and the scalar that levels the two. The signal engine applies it to
+dry audio and needs nothing else: no geometry, no solver, no card. It is a
+cache. Its identity is the recipe's digest, the asset keys and the code
+version; it is regenerated, not archived.
+
+One file, `pack.h5`, HDF5 as the fields are. The reasons: the tables are
+ragged and large and are read a source and a block at a time, which HDF5
+does by slice and `.npz` does not; `h5py` is already what every field is read
+with; and one file is one thing to copy from a rented machine. Uncompressed
+and little endian, for the reason of `impulse-response.md`.
+
+## Conventions
+
+Everything of `ambisonic-response.md` and `scene-recipe.md` holds. In
+addition:
+
+| quantity | choice |
+| --- | --- |
+| positions and directions | scene frame, `(x, y up, z)`; a direction is a unit vector |
+| ambisonic frame | reached by `spatial.sh.scene_to_ambisonic` in the engine, nowhere in the pack |
+| step | `step_s = 0.05`; step `k` is the scene at `t_k = k step_s`; `steps = round(duration_s / step_s) + 1` |
+| bands | `bands_hz = (125, 250, 500, 1000, 2000, 4000, 8000)`, `acoustics.OCTAVE_BANDS`: what a path's gain and a histogram are written on |
+| bank bands | `bank_bands_hz = metrics.band_centres(48000)`, eight, the last at 16 kHz; bank band `i` reads the band nearest its centre, as `mirror.render._band_map` |
+| gains | pressure, linear, unless the name ends in `_db` |
+| clock | the wave field's: a response of `low/ir` starts `lead_s` before its geometric time zero |
+| missing index | `-1` |
+
+**The step is 50 ms** because that is the time the fastest source the
+recipe allows, 1.5 m/s, takes to cross one 8 cm rail sample (53 ms): a
+moving source is on a new solved position at about every step and never
+skips one. It is 2400 samples at 48 kHz and 200 at the low band's rate, both
+whole. A listener at 1.5 m/s moves 7.5 cm in a step, under a fifth of the
+0.40 m lattice.
+
+**Rendering is quasi-static.** At time `t` the engine plays what the scene
+frozen as it is at `t` would give for the signal emitted so far: a delay is
+the path's length now, a response is the response between the positions
+now. That is what makes a moving delay a Doppler shift, and it is the rule
+of ADR 0013's page. Its error is of the order of speed over sound speed,
+0.4 per cent, except for the late reverberation, which follows the source at
+once instead of over its own decay.
+
+## Root
+
+Attributes:
+
+| attribute | type | value |
+| --- | --- | --- |
+| `schema` | str | `"reverberate.scene-pack"` |
+| `schema_version` | int | `1` |
+| `profile` | str | `"trace"` or `"synthetic-free-field"` |
+| `recipe_sha256` | str | the recipe's identity |
+| `dwelling`, `scene_id` | str | as the recipe |
+| `duration_s`, `step_s` | float | |
+| `steps` | int | |
+| `sample_rate_hz` | float | `48000`, the rate of the output |
+| `order` | int | `7`: 64 channels |
+| `ordering`, `normalisation` | str | `"ACN"`, `"N3D"` |
+| `sound_speed_m_s` | float | `343.2`, the solver's at the recipe's temperature |
+| `bands_hz`, `bank_bands_hz` | int array | as above |
+| `has_low`, `has_tail` | bool | whether the two groups exist in every source |
+| `low_sample_rate_hz` | float | `4000` |
+| `low_samples` | int | `4800`, 1.2 s |
+| `fusion_json` | str | how two cells are fused: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001}` |
+| `provenance_json` | str | see Provenance |
+
+Dataset `/recipe`, `uint8 [byte]`: the recipe's canonical bytes, whose
+SHA-256 is `recipe_sha256`. The engine reads the sources' activity, clips
+and gains from it, so a pack is rendered without its recipe file.
+
+## `/listener`
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `position` | float64 | `[step, 3]` | the centre of the head |
+| `orientation` | float32 | `[step, 3]` | yaw, pitch, roll in degrees, the recipe's convention, yaw not wrapped |
+
+The orientation is carried for the decoder and is **not applied**: the
+engine's output is the order 7 field at the head's centre in the scene's
+fixed ambisonic frame. The head turns at decode, where it costs nothing and
+where the page already does it.
+
+## `/cells`
+
+The listening positions the low band was solved at and the scene uses: an
+order 7 array stood at each. Shared by every source.
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `position` | float64 | `[cell, 3]` | the array's centre |
+| `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added where the lattice is too coarse for the clearance |
+| `lattice_index` | int32 | `[cell, 3]` | `(i, layer, k)` on the lattice; `-1, -1, -1` off it |
+| `clearance_m` | float32 | `[cell]` | distance from the centre to the nearest surface of `mirror/scene.npz` |
+| `room` | str | `[cell]` | by ADR 0010 |
+
+Attributes `grid_origin_m`, `grid_step_m` (0.40 in `x` and `z`) and
+`layers_y_m` (the two heights). A seat's cell is at the seat exactly.
+
+## `/sources/<id>`
+
+One group per source of the recipe, named by its `id`. Attributes: `kind`,
+`subtype` (empty for a voice), `directivity_model`, `directivity_enabled`,
+`gain_db`, `tail_seed` (uint64, the first eight bytes of
+`sha256("<seed>:tail:<id>")`).
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `position` | float64 | `[step, 3]` | the mouth |
+| `yaw_deg` | float32 | `[step]` | the facing, not wrapped |
+| `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one |
+
+A step that is not `audible` has no arrivals and `-1` in every index below;
+the trace does not compute it.
+
+### `early`: the arrivals above the crossover
+
+One table, every audible step's arrivals one after the other.
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `offsets` | int64 | `[step + 1]` | step `k` owns rows `offsets[k]` to `offsets[k + 1]` |
+| `path_id` | uint64 | `[row]` | the path's identity, the same at every step it exists |
+| `delay_s` | float64 | `[row]` | `length_m / sound_speed_m_s`, geometric: `lead_s` is not in it |
+| `arrival` | float32 | `[row, 3]` | unit vector from the listener towards where the sound comes from (`Paths.direction`) |
+| `departure` | float32 | `[row, 3]` | unit vector from the source along the path's first leg |
+| `gain` | float32 | `[row, band]` | spreading times the reflection factors, `Paths.gain` after `regain` with the calibration's image materials; omnidirectional, without air |
+| `order` | uint8 | `[row]` | reflections on the path |
+| `kind` | uint8 | `[row]` | `0` direct, `1` specular, `2` diffracted round edges, `3` diffracted then reflected |
+
+Within a step the rows are sorted by `path_id`, and no `path_id` repeats.
+
+**`path_id`** is the first eight bytes, little endian, of the SHA-256 of:
+the `kind` as one byte, then the facets of the path in bounce order as
+little endian `int32` (`Paths.sequence` without its padding), then for kinds
+2 and 3 the indices of the edges it bends round in order from the source
+(`mirror.edges`), as `int32`. An image is its facet sequence wherever the
+source stands, so the identity survives the tree being grown again at every
+position. A diffracted path whose corners are the grid's and not an edge's
+has no stable name: it takes the digest of its kind and its rank by delay
+among the step's such paths, and the jump rule below catches a rank that
+changed hands.
+
+**Between two steps** the engine moves each path as follows, with
+`u = (t - t_k) / step_s`, `l(t)` the listener's position and `c` the sound
+speed.
+
+- The path's **apparent source** at a step is
+  `q_k = l_k + c delay_s arrival`: the image itself for kinds 0 and 1.
+  `q(t)` is linear from `q_k` to `q_{k+1}` and `l(t)` linear from `l_k` to
+  `l_{k+1}`.
+- **Delay**: `|q(t) - l(t)| / c`, plus `lead_s`. Continuous, equal to the
+  stored delay at each step, and exact for an image when source and listener
+  move in straight lines within the step, an image being an affine function
+  of its source.
+- **Arrival direction**: `(q(t) - l(t))` normalised, then
+  `scene_to_ambisonic`, then `real_sh` at order 7. On the sphere by
+  construction.
+- **Departure direction**: the two stored vectors interpolated linearly and
+  normalised.
+- **Gain**: linear in `u`, band by band.
+- **Birth and death**: a `path_id` present at one of the two steps only has
+  gain zero at the other and keeps the apparent source of the step where it
+  exists, so it fades over one step and its delay still follows the
+  listener.
+- **Jump**: a `path_id` present at both steps whose apparent source moved
+  more than 0.30 m is two paths, one dying and one born. A real image moves
+  at the source's speed, 7.5 cm a step at most.
+
+A path's delay line therefore belongs to its `path_id`: it is created at
+birth, read at the moving delay with an interpolator of the engine's choice
+(the mirror's own is a 33 tap windowed sinc, `mirror.render.DELAY_HALF_TAPS`),
+and released after death.
+
+### `low`: the band under the crossover
+
+The responses, deduplicated:
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `ir` | float32 | `[pair, channel, sample]` | the wave response between one source position and one cell, order 7, at `low_sample_rate_hz` |
+| `pair_position` | float64 | `[pair, 3]` | the source position it was solved from |
+| `pair_cell` | int32 | `[pair]` | row of `/cells` |
+| `pair_key` | bytes, 64 | `[pair]` | the pair's key in the dwelling's cache |
+| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between this response and the mirror rendered at the same pair, omnidirectional, before any levelling |
+| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 at 48 kHz, on the pack's clock |
+
+and per step:
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `pair` | int32 | `[step, 2, 2]` | rows of `ir`: source slot by cell slot |
+| `position_weight` | float32 | `[step]` | weight of source slot 1; slot 0 has one minus it |
+| `cell` | int32 | `[step, 2]` | rows of `/cells`, slot 0 the nearer |
+| `mode` | uint8 | `[step]` | `0` inaudible, `1` exact, `2` translated from one cell, `3` fused from two |
+
+**What `ir` is.** The wave response with the crossover's low side already
+taken, as `mirror.hybrid.blend` takes it: the part within the onset window
+through the pressure mask, the rest through the power mask
+(`Crossover.masks`), and the air absorption of `/atmosphere` applied
+(`audio.apply_air_absorption`). Its spectrum is therefore zero above
+`cutoff_hz * 2^(width_octaves / 2)`, 1414 Hz, which is what lets it be kept
+at 4 kHz: the decimation is exact (the bins of the 48 kHz transform under
+2 kHz, transformed back at 4800 samples), and the engine's interpolation
+back to 48 kHz has the whole of 1414 to 2586 Hz for its transition. At
+3 kHz the first image would start at 1586 Hz and that transition would be
+seven times narrower. One response is 1.23 MB against 14.7 MB at 48 kHz.
+
+**Source side.** At rest at a station, slot 0 is the station's position and
+`position_weight` is 0. On a rail, slots 0 and 1 are the two solved
+positions either side of the source and the weight is linear in arc length
+between them. The engine crossfades the two responses' outputs with those
+weights. That is averaging two waveforms, which this project measured to
+hold 1 kHz only when the two are 8 cm apart; it is why rails are solved
+every 8 cm.
+
+**Listener side.** `mode` says how the field at the cell becomes the field
+at the head:
+
+- `1`, exact: the head is within `exact_under_m` of cell slot 0. The
+  response is used unchanged. A seat, or a listener at rest on a lattice
+  point.
+- `2`, translated: cell slot 0 alone. The cell's 64 channels are translated
+  by `d0 = l(t) - position[cell 0]`.
+- `3`, fused: both cells, by the minimum norm plane wave estimator.
+
+**The pack stores the cells, not the weights**, and the engine derives the
+operator from the offsets `d_j = l(t) - position[cell j]`. With the
+directions `s` and weights `w` of `spatial.sh.quadrature(quadrature_degree)`
+normalised to sum to one, `Y = real_sh(7, s)`, `k = 2 pi f / c`, and
+`A_j = Y^T diag(exp(-i k s . r_j))` the expansion at cell `j` of unit plane
+waves, where `r_j = scene_to_ambisonic(d_j)`:
+
+```
+G(f) = Y^T W A^H (A W A^H + lambda tr(A W A^H) / n I)^-1        A = [A_0; A_1], n its rows
+b_listener(f) = G(f) [b_0(f); b_1(f)]
+```
+
+For one cell the same expression with `A = A_0`. This is the estimator of
+`w44_clarify_interpolation/leave_one_out/loo_planewave.py`, there evaluated
+for channel 0 only, here for all 64. Stored, `G` is a 64 by 128 complex
+matrix per frequency and per step: 8.5 MB a step on 129 frequencies, 200 GB
+a scene. Derived, the matrix to invert depends only on `r_0 - r_1`, the
+vector between the two cells, which takes a few values on a lattice; it is
+factored once per vector and frequency, and a step costs one product. So
+the offsets cost the engine little and the weights would cost the pack
+everything.
+
+The trace chooses the cells **by clearance**: a cell may serve a head at
+distance `d` only if `d` is under the cell's free radius, the smaller of
+`clearance_m` and its distance to the source. Slot 0 is the nearest cell
+that may serve; slot 1 the next that may, on the other side of the head
+where there is one. With one, `mode` is 2; with none, the trace fails and
+names the step: the lattice needs a cell there (`kind` 2).
+
+### `tail`: what the late part is made from
+
+The histograms of the mirror's rays, deduplicated:
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `energy` | float32 | `[hist, bin, band]` | `Histogram.energy`: energy per 2 ms bin, in units of the source's |
+| `moments` | float32 | `[hist, bin, band, 16]` | `Histogram.moments`: its order 3 directional moments, ACN and N3D, ambisonic frame |
+| `scale` | float64 | `[hist, bank band]` | `scale_per_band` of `mirror.render.render_point`: what turns the histogram's energy into the response's |
+| `hist_position` | float64 | `[hist, 3]` | the source position the rays left from |
+| `hist_cell` | int32 | `[hist]` | row of `/cells`: where the receiver sphere stood |
+
+and per step:
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `hist` | int32 | `[step, 2, 2]` | rows of `energy`: source slot by cell slot |
+| `position_weight` | float32 | `[step]` | weight of source slot 1, in energy |
+| `cell_weight` | float32 | `[step]` | weight of cell slot 1, in energy |
+
+600 bins of `histogram_bin_s`, on the geometric clock. The step's histogram
+is the weighted sum of the four, energies and moments alike: an
+interpolation in energy, never of waveforms. Rays are traced from every
+station and from rail positions every 0.80 m; the receiver spheres stand on
+every second lattice cell in `x` and `z`, 0.80 m apart, and on every seat.
+The weights are linear in arc length on the source side and in distance on
+the listener's. The late level measured between neighbours 0.40 m apart
+differs by 0.3 to 0.7 dB in the median, so the tail is sampled more coarsely
+than anything else in the pack.
+
+The engine makes the tail as `mirror.render.tail_from_histogram` does: per
+bin and band, `tail_bursts` noise bursts from directions drawn from the
+moments' density, starting `tail_from_s` after the smallest `delay_s` of the
+step's rows (the histogram's first bin holding energy when the step has
+none), the calibration's `tail_gain_db` on top of `scale`. **The noise is one carrier
+per source**, drawn from `tail_seed` by a generator that gives the same
+numbers on the host and on a card, and shaped by the step's envelope; it is
+not drawn again at each step, or the tail would be a different room twenty
+times a second.
+
+### `level`
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `high_gain_db` | float32 | `[step]` | what multiplies everything of `early` and `tail` at this step |
+| `onset_s` | float64 | `[step]` | where the crossover's coherent window is anchored, on the pack's clock |
+
+`high_gain_db` is `20 log10(alignment_gain)` plus the step's seam: the
+`low/seam_db` of the step's pairs, weighted by `low/position_weight` across
+source slots and by inverse distance across cells, in decibels. It is the
+scalar of `mirror.hybrid.blend`, one per point there, one per step here.
+`onset_s` is the step's smallest `delay_s` plus what the wave response's
+loudest sample trails its own direct arrival by: each pair's `low/onset_s`
+less its geometric direct delay, under the same weighting. Between steps
+both are linear in time.
+
+## `/mirror`, `/crossover`, `/atmosphere`
+
+`/mirror`: dataset `signature`, `float64 [tap]`, the source's minimum phase
+signature (`mirror.direct.measure_signature`, 128 taps). Attributes
+`lead_s` and `alignment_gain` (`mirror.files.Alignment`: the clock and scale
+of the wave field), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
+`tail_bursts`, `tail_gain_db` (seven), `histogram_bin_s`, `histogram_order`
+(3), `receiver_radius_m`, and `settings_json`, the whole
+`MirrorSettings.record()`.
+
+`/crossover`: attributes `cutoff_hz` (1000), `width_octaves` (1),
+`coherent_s` (0.005), `coherent_fade_s` (0.005): `mirror.hybrid.Crossover`.
+
+`/atmosphere`: attributes `temperature_c`, `humidity_percent`,
+`pressure_kpa`, and `enabled`. `low/ir` already carries the air; nothing
+else in the pack does.
+
+## `/directivity/<model>`
+
+One group per model a source names.
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `gain_db` | float32 | `[band, angle]` | the pattern, on `bands_hz` |
+
+Attribute `angles_deg`, 0 to 180 in steps of 5: the angle between the
+departure direction and the source's facing, `(cos yaw, 0, -sin yaw)` in the
+scene frame. A model is a figure of revolution about the facing. **It is
+normalised to unit mean power over the sphere in every band**, so a
+directional source radiates what the omnidirectional one does, and the tail
+and the low band, which are omnidirectional, keep their level. `omni` is
+zeros. A model's digest, in the recipe's `assets.directivity`, is the
+SHA-256 of `gain_db`'s bytes.
+
+## What the engine does with it
+
+Per source, at every output sample, in this order:
+
+1. **Early.** Each living path: the dry signal read at the path's delay,
+   through the octave bank with the path's band gains times the
+   directivity's (interpolated in angle, when `directivity_enabled`), times
+   the air's `exp(-m(f) c delay)`, encoded on the arrival direction.
+2. **Tail.** As above, with the air's loss at each bin's time.
+3. **High side.** The sum of 1 and 2, through the signature and the low cut,
+   times `high_gain_db`, through the crossover's high masks: an arrival at
+   pack time `tau` takes `w hi_press + (1 - w) hi_power`, `w` being the
+   value at `tau` of `Crossover.onset_window` anchored on `level/onset_s`.
+   The tail starts after the window and takes the power mask.
+4. **Low side.** The dry signal at `low_sample_rate_hz` convolved with the
+   step's responses, crossfaded by `position_weight`, moved to the head by
+   `mode`, brought to 48 kHz.
+5. **Sum**, times the source's `gain_db` and the interval's.
+
+and the sources are summed. At rest, with one source and directivity off,
+steps 1 to 4 are `mirror.render.render_point` followed by
+`mirror.hybrid.blend`.
+
+## Provenance
+
+`provenance_json`, sorted keys:
+
+| field | meaning |
+| --- | --- |
+| `recipe_sha256` | again, so the JSON stands alone |
+| `assets` | the recipe's `assets`, as found: a trace refuses a mismatch |
+| `code_version` | the commit of `reverberate` that traced |
+| `solver` | the low band engine and its commit or version |
+| `low_pairs` | how many pairs were read from the cache and how many were solved |
+| `created_utc` | |
+| `cost` | a list, one record per stage |
+
+A cost record: `stage` (`low`, `paths`, `rays`, `diffraction`, `level`,
+`write`, `transfer`), `seconds`, `card` (the model's name), `cards`,
+`billed_rate_usd_per_hour`, `usd`, `instance`. A cost without its rate is
+not written (roadmap constraint 10).
+
+**A pair's key** is the first 64 hexadecimal characters of the SHA-256 of
+the canonical JSON of: `voxel_low_key`, the source position and the cell's
+position in millimetres as integers, the encoder's settings, the solver's
+version, the window in seconds. It is the same for every recipe that uses
+the pair, which is what makes the dwelling's cache fill once.
+
+## Size
+
+For 20 minutes, `steps = 24 001`, and 14 sources. The per step tables are
+fixed; the rest depends on the scene, and the figures below are for a scene
+assumed as follows until the first one is measured: each source audible
+half the time; 16 arrivals a step (the validated field has a median of 10
+and at most 49, `mirror/report_S1_c9.json`); 400 low band pairs and 240
+histograms a source.
+
+| part | per unit | per source | 14 sources |
+| --- | --- | --- | --- |
+| per step tables | 102 B a step | 2.4 MB | 34 MB |
+| `early` | 70 B a row | 13 MB | 190 MB |
+| `low/ir` | 1.23 MB a pair | 490 MB | 6.9 GB |
+| `tail` | 286 kB a histogram | 69 MB | 0.96 GB |
+| **the pack** | | | **about 8 GB** |
+
+The rendered order 7 signal of the same scene is 14.7 GB. The pack is
+`low/ir`: pairs times 1.23 MB, and the number of pairs is the number of
+(source position, cell) couples the scene passes through while the source is
+audible. A source at one station heard from 150 cells is 150 pairs; a walk
+down a 6 m rail is 75 positions, each heard from one or two cells.
+
+What the trace computes, counted and not priced: 14 sources by 12 000
+audible steps is 168 000 path validations, 67 minutes of one RTX 3090 at the
+24 ms a pair measured on 2026-09-17, before L5 batches them.
+
+## What a reader may assume
+
+1. Every per step dataset has `steps` rows; `offsets` has `steps + 1`,
+   starts at 0, never decreases, and ends at the row count.
+2. Step `k` is the scene at `k step_s` exactly, source and listener at the
+   same instant.
+3. Where `audible` is false: no rows, `mode` 0, every index `-1`.
+4. Where `audible` is true and `has_low`: `mode` is 1, 2 or 3; `pair[k, 0, 0]`
+   is valid; `pair[k, 1, :]` is valid exactly when `position_weight > 0`;
+   `pair[k, :, 1]` is valid exactly when `mode` is 3. The same for `hist`
+   with its two weights.
+5. `ir[pair[k, a, b]]` was solved from `pair_position` at `cell[k, b]`.
+6. Directions are unit vectors to 1e-6. Gains are finite and not negative.
+   `delay_s` is positive and under `low_samples / low_sample_rate_hz`.
+7. Rows of a step are sorted by `path_id`, without repeats.
+8. Every weight is in `[0, 1]`.
+9. `ir` is zero above 1414 Hz to rounding, and every channel of it is on one
+   scale: no per channel or per pair normalisation was applied.
+10. Nothing in the pack depends on the head's orientation or on any clip.
+11. Two traces of one identity agree in every dataset the mirror writes
+    (`early`, `tail`): the paths and the histograms are the same on any
+    device (ADR 0014). `low/ir` agrees to the solver's own repeatability and
+    is not promised to the bit.
+
+## The synthetic profile
+
+`profile = "synthetic-free-field"`: a pack a test builds in memory, with no
+trace, whose render is known in closed form. Lot L7 is developed against it.
+
+- No room: one source, omnidirectional, at a fixed position; a listener at
+  rest or on a straight line at constant speed.
+- `has_tail = false`. `/mirror/signature` is `[1.0]`, `lead_s = 0`,
+  `alignment_gain = 1`, `lowcut_hz = 0` (no low cut).
+  `/atmosphere.enabled = false`. `level/high_gain_db` is 0 everywhere.
+- `early`: one row a step, `kind` 0, `order` 0, `path_id` that of the
+  direct path (the digest of the single byte `0`), `delay_s = d / c`,
+  `gain = 1 / d` in every band, `arrival` the unit vector from listener to
+  source, `departure` its opposite, `d` the distance at the step.
+- **Level A**, `has_low = false`: the crossover is not applied and the early
+  part is the whole band. The output is the dry signal delayed by `d(t) / c`,
+  divided by `d(t)`, through the octave bank with equal gains, on the
+  harmonics of the source's direction. At rest that is
+  `mirror.render.early_signals` of one path convolved with the dry signal.
+- **Level B**, `has_low = true`: `/cells` holds two cells 0.40 m apart on
+  the listener's line; `low/ir` is the monopole's interior expansion at each
+  (`spatial.field.monopole_coefficients`, divided by `i^n` per degree to make
+  it the ambisonic signal, scaled by `4 pi` so its far field is `1 / d`)
+  through the low masks; `seam_db` is 0. The translated and fused fields at
+  the head are then known from the same function at the head itself.
+
+A synthetic pack carries `provenance_json` with `"cost": []` and
+`code_version` of the test.
