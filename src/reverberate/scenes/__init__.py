@@ -12,10 +12,15 @@ trace reads them, both through the functions below.
 - :mod:`.layout`: a storey's stations and rails.
 - :mod:`.generate`: a recipe from ranges and a seed, deterministic.
 - :mod:`.describe`: a recipe in words.
+- :mod:`.clips`: the library of dry clips the generator names: its manifest,
+  and the files built from the bucket, digests checked
+  (``docs/formats/clip-library.md``).
 
 The package is pure: no network, and no file is touched outside
 ``load_recipe``, ``save_recipe``, ``load_clip_library`` and the HSSD loaders of
-:mod:`.layout`.
+:mod:`.layout`. :mod:`.clips` is the exception, and only when it is handed a
+store: ``python -m reverberate.scenes clips fetch`` reads the bucket and
+writes the clips.
 """
 
 from reverberate.scenes.describe import describe, low_band_positions

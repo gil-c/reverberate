@@ -104,7 +104,9 @@ def fetch_clip(store: ObjectStore, clip: Clip) -> bytes:
     verifies the decompression too.
     """
     raw = store.get_range(clip.shard_key, clip.payload_offset, clip.payload_length, shared=True)
-    if _looks_stored(raw):
+    if _looks_stored(raw) or zlib.crc32(raw) & 0xFFFFFFFF == clip.crc32 & 0xFFFFFFFF:
+        # The library's shards are ``ZIP_STORED``: a member that is not a
+        # WAV (FLAC, MP3) is told from a deflated one by its CRC.
         payload = raw
     else:
         try:
