@@ -156,9 +156,13 @@ faded: a programme's segment, a piece of music.
 A recipe's interval is therefore never longer than its clip, and a noise
 that runs twenty minutes is as many intervals as it takes clips.
 
-The engine cuts an interval out of its clip without a fade. For a voice the
-cut is in silence. For a noise that comes on or goes off, the cut is the
-switch.
+The engine fades an interval in and out over 5 ms, a raised cosine inside
+the interval's own length (`reverberate.render.dry.EDGE_FADE_S`). For a
+voice the cut is in silence and the fade changes nothing. A noise that comes
+on or goes off was cut where it stood, at its own level on the first sample:
+a step on 64 channels, heard as a click; the fade is the switch. Two
+intervals of one source that meet on a sample are one interval in pieces (the
+audit cuts a long one every 20 s) and are not faded where they meet.
 
 ## Commands
 

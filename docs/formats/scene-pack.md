@@ -651,6 +651,12 @@ Per source, at every output sample, in this order:
    scale of `ir`).
 5. **Sum**, times the source's `gain_db` and the interval's.
 
+The dry signal of an activity interval is the clip from its offset, faded in
+and out over 5 ms inside the interval (a raised cosine), so that a source
+never comes on or goes off away from zero; an end on which another interval
+of the source starts, to the sample, is not faded, nor is that start
+(`render.dry.DryTrack.from_recipe`, and `clip-library.md`).
+
 and the sources are summed, in the order the pack holds them. At rest, with
 one source and directivity off, steps 1 to 4 are
 `mirror.render.render_point` followed by `mirror.hybrid.blend`.
