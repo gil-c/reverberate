@@ -387,3 +387,74 @@ with the 651 edges and the corners' own image trees. One source of 0076 on
 one RTX 3090 is then about **83 s with 1e5 rays** and 105 s with 3e5,
 against 68 and 90 before: 0.37 and 0.47 US cents at 0.16 USD/h, still
 1/290 and 1/225 of the wave campaign's 1.06 USD.
+
+## 7. The scene trace (ADR 0016)
+
+A recipe becomes a scene pack on one rented machine, by one command from the
+laptop (`reverberate.trace`). **None of it has run on a card.** Everything
+below was run on `numpy` on a small room with a monopole in free air in
+place of the solves, and planned, not run, on hssd_0076.
+
+The mirror of the dwelling comes from a run's `mirror` directory: its scene,
+a calibration, the signature and the alignment's lead and gain. A recipe is
+refused unless its `assets` are the trace's; `python -m reverberate.trace
+assets` prints them for `python -m reverberate.scenes generate --assets`.
+
+```
+M="--mirror-from data/runs/w42_gpu_hssd_0076/mirror \
+   --calibration data/runs/w42_gpu_hssd_0076/mirror/calibration/c3cec6aab28bb582.json \
+   --lead-s 0.0106744 --gain 0.014396307939042263"
+X="--models-from data/runs/w44_clarify_interpolation/bundle_line_0076/models/storey"
+
+python -m reverberate.trace assets $M $X > assets.json
+python -m reverberate.scenes generate --dwelling hssd_0076 --seed 20261004 \
+    --assets assets.json --clips clips.json --out recipe.json
+
+# The plan and its cost; nothing built, nothing rented, no key read.
+python -m reverberate.trace rent --recipe recipe.json --home H $M --dry-run [--rate 0.30]
+
+# The first paid run: sixty seconds, three sources, every stage, the engine on both modules.
+python -m reverberate.trace rent --recipe recipe.json --home H_smoke $M $X \
+    --smoke 60 --smoke-sources 3 [--smoke-start auto] [--patch] \
+    --hours 2 --max-dph 0.6 --avoid ID ... --yes
+
+# The scene.
+python -m reverberate.trace rent --recipe recipe.json --home H_full $M $X \
+    --hours 8 --max-dph 2.0 --avoid ID ... [--publish-pairs] --yes
+```
+
+The lead and the gain are those the field `field_mirror_c10` was written
+with (its `provenance_json`); `report_S1.json` holds another calibration's.
+`--smoke-start auto` puts the window where most moves; at the scene's start
+everything of the first recipe is at rest, which exercises every stage and
+no translation. `--patch` adds the 882 cells of the off-line translation
+validation, from one source: their responses come home in the pair cache and
+are not in the pack.
+
+What the driver does is `gpu.onebox`'s: the offers and machines of `--avoid`
+are not rented, a host whose cards hold someone's memory is destroyed and
+the next taken, the machine runs `python -m reverberate.accel campaign`,
+which reads that the bundle is a trace, the watcher looks every five minutes
+and relaunches a stalled run once (a trace resumes: pairs in their cache,
+paths in `early/`, histograms in `tails/`, seams in `level.jsonl`), the pack
+and the pair cache are fetched, and the instance is destroyed and verified
+when the run is done. **An outcome other than `done` keeps the instance**,
+and says so. At home the pack's provenance receives its cost records with
+the billed rate, and the pairs go into `data/cache/low-pairs/`, and into the
+store with `--publish-pairs`. `python -m reverberate.trace finish --home H`
+does that part again.
+
+Planned for the first recipe (seed 20261004, 20 minutes, 14 sources), the
+low band priced by `accel.pairs.estimate` (measured on 2 x A100 at
+1.74 USD/h) and the mirror by the projection of ADR 0016's cost appendix:
+
+| | cells | source positions | pairs | tail sites x cells | distinct step-pairs | machine | USD at 1.74 /h |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| the scene | 185 | 375 | 1964 | 72 x 23 | 7422 of 179 562 audible | 3.1 h | 5.41 |
+| `--smoke 60`, 3 sources, from 0 s | 1 | 3 | 3 | 3 x 1 | 3 of 749 | 19 min | 0.56 |
+| `--smoke 60`, 3 sources, `auto` (605 s), `--patch` | 103 | 128 | 1088 | 22 x 18 | 557 of 557 | 78 min | 2.26 |
+
+Fifteen of those minutes are assumed, not measured: the provisioning, the
+push and the grid. The scene's 3.1 h are 2.2 h of solves, 19 min of rays, 10
+of levelling and 11 of transfer. No step of the first recipe needs the
+0.10 m rule: its nearest mouth passes 0.66 m from the head.

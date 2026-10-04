@@ -5,11 +5,14 @@ Written by the trace stage on a rented card (lot L6, from L4 and L5), read by
 the signal engine (`reverberate.render`, L7). `reverberate.render.pack` is
 the one implementation of this document: its types, its writer
 (`PackWriter`, `write_pack`), its reader (`read_pack`) and its invariants
-(`validate`, which both the writer and the reader run). No trace writes one
-yet; the tables of `early`, `tail` and `/directivity` are made, in memory,
-by `reverberate.mirror.moving`, `mirror.tails` and `mirror.directivity`,
-whose `pack()` methods give the datasets below in the types below, and
-`low/ir` by `reverberate.spatial.lowband.to_stored`.
+(`validate`, which both the writer and the reader run). The trace is
+`reverberate.trace`: the tables of `early`, `tail` and `/directivity` are
+made by `reverberate.mirror.moving`, `mirror.tails` and
+`mirror.directivity`, whose `pack()` methods give the datasets below in the
+types below, `low/ir` by `reverberate.spatial.lowband`, and the three
+scalars that level the two sides by `reverberate.trace.level`. No card has
+run it yet: what it writes was made on `numpy`, with a monopole in free air
+where a card would solve.
 
 A pack is everything the acoustics of one recipe
 ([`scene-recipe.md`](scene-recipe.md)) come to, sampled along the
@@ -109,7 +112,7 @@ order 7 array stood at each. Shared by every source.
 | `kind` | uint8 | `[cell]` | `0` lattice, `1` seat, `2` added: on the listener's path, or where the lattice is too coarse |
 | `lattice_index` | int32 | `[cell, 3]` | `(i, layer, k)` on the lattice; `-1, -1, -1` off it |
 | `clearance_m` | float32 | `[cell]` | distance from the centre to the nearest surface of `mirror/scene.npz` |
-| `room` | str | `[cell]` | by ADR 0010 |
+| `room` | str | `[cell]` | by ADR 0010: the room of the recipe's station nearest the cell, the trace having the recipe's rooms and not the dwelling's polygons |
 
 Attributes `grid_origin_m`, `grid_step_m` (0.40 in `x` and `z`) and
 `layers_y_m` (the two heights). A seat's cell is asked for at the seat
@@ -244,8 +247,20 @@ The responses, deduplicated:
 | `pair_position` | float64 | `[pair, 3]` | the source position it was solved from |
 | `pair_cell` | int32 | `[pair]` | row of `/cells` |
 | `pair_key` | bytes, 64 | `[pair]` | the pair's key in the dwelling's cache |
-| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between this response and the mirror rendered at the same pair, omnidirectional, before any levelling |
-| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 at 48 kHz, on the pack's clock |
+| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair, omnidirectional, before any levelling |
+| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 of the wave response at 48 kHz, on the pack's clock |
+
+Both are read as `mirror.hybrid.blend` reads them, on the wave response
+**with its air and before its masks** (`spatial.lowband.with_air` of the
+cache form), not on `ir`, whose masks have taken most of the seam's octave.
+The mirror of the seam is `mirror.render.render_point` at the pair: the
+source on `pair_position`, the head on the cell's centre, the pair's own
+image paths and diffracted onset, the tail the pack gives that pair (its
+histograms, each on its own `scale`, summed with the weights a step at rest
+there would have), then the air, the low cut and the signature, on the wave
+field's clock and scale (`/mirror`'s `lead_s` and `alignment_gain`). Its
+noise is drawn with the mirror's seed plus the cell's row, as a field draws
+a point's (`reverberate.trace.level`).
 
 and per step:
 
@@ -353,11 +368,21 @@ only if `d` is under its serving radius, the smaller of `surface_share` of
 `clearance_m` and `source_share` of its distance to the source, and under
 `fuse_within_m`. Slot 0 is the nearest cell that may serve; slot 1 the
 nearest that may on the other side of the head. With both, `mode` is 3;
-with slot 0 alone and within `translate_within_m`, 2; otherwise the trace
-fails and names the step: a cell is needed there (`kind` 2). The shares
-are measured: inside the free ball itself, past 0.15 of the source's
-distance, the 64 channels are no prediction
-(`docs/open-questions/low-band-translation.md`).
+with slot 0 alone and within `translate_within_m`, 2; otherwise a cell is
+needed there (`kind` 2). The shares are measured: inside the free ball
+itself, past 0.15 of the source's distance, the 64 channels are no
+prediction (`docs/open-questions/low-band-translation.md`).
+
+**Where the cells are** (`reverberate.trace.plan`): one at every place the
+listener rests, at the height it has there; one every 0.15 m of its path;
+where a source is so near that the rule refuses those, the path every
+0.10 m; and where that is refused too, one on the head itself, if an array
+can stand there (0.26 m free of surfaces and of mouths). The plan makes the
+rule hold at every audible step before anything is rented. The machine
+applies it again on the centres the arrays really got. **A step no cell may
+serve does not fail the scene**: it reads the nearest cell alone, mode 2,
+and is counted in the provenance (`fallback_steps`); a mouth nearer the head
+than an array's radius is the case.
 
 ### `tail`: what the late part is made from
 
@@ -440,17 +465,43 @@ bin the tail starts at do not change.
 source slots and by inverse distance across cells, in decibels. It is the
 scalar of `mirror.hybrid.blend`, one per point there, one per step here.
 `onset_s` is the step's smallest `delay_s` plus what the wave response's
-loudest sample trails its own direct arrival by: each pair's `low/onset_s`
-less its geometric direct delay, under the same weighting. Neither is
-interpolated between steps on its own: each is read at the step and enters
-the path's gain there (see `early`), and the tail's.
+loudest sample trails the mirror's first arrival by: each pair's
+`low/onset_s` less the smallest delay of the mirror's paths at that pair
+(the direct path's where there is one, the diffracted onset's where the
+pair is shadowed, the straight line's where the mirror finds nothing),
+under the same weighting. Neither is interpolated between steps on its own:
+each is read at the step and enters the path's gain there (see `early`),
+and the tail's.
+
+**At rest**, the source on a solved position and the head on a cell, a step
+reads one pair with weight one: `high_gain_db` is
+`20 log10(alignment_gain) + seam_db` of that pair and `onset_s` its
+`low/onset_s`, which are `blend`'s own gain and the anchor of its window.
+Measured on a small room (`tests/test_trace.py`), the pack rendered by the
+engine against `render_point` then `blend` of the present pipeline at the
+same point, with the same wave response:
+
+| part | what is equal | measured |
+| --- | --- | --- |
+| the three scalars | `seam_db` to float32, `onset_s` to the sample | 1e-4 dB, exact |
+| `low` | sample for sample, 64 channels | 3.2e-5 of the response's peak |
+| `early`, under 20 kHz | sample for sample to the engine's approximations | 1.2 per cent of the early part's peak inside the onset window, 0.17 per cent after it; the error's energy -39.5 dB |
+| `early`, whole band | as above, plus the engine's taper from 22 kHz | 2.2 per cent, -24 dB |
+| `tail` | energy per bank band: it is noise, two draws | 0.7 dB at worst |
+
+The early part's residue is the engine's: its masks are filters of 85 ms
+where `blend` multiplies a spectrum of 1.2 s, and a path takes the window's
+value at its arrival where `blend` windows the samples.
 
 ## `/mirror`, `/crossover`, `/atmosphere`
 
 `/mirror`: dataset `signature`, `float64 [tap]`, the source's minimum phase
 signature (`mirror.direct.measure_signature`, 128 taps). Attributes
 `lead_s` and `alignment_gain` (`mirror.files.Alignment`: the clock and scale
-of the wave field), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
+of the wave field; `lead_s` is the alignment's lead **rounded to a whole
+sample at 48 kHz**, 512 samples for 10.6744 ms on hssd_0076, because that is
+the shift the mirror's field was written with and the hybrid was validated
+at), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
 `tail_bursts`, `tail_gain_db` (seven), `histogram_bin_s`, `histogram_order`
 (3), `receiver_radius_m`, and `settings_json`, the whole
 `MirrorSettings.record()`.
@@ -552,14 +603,32 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `assets` | the recipe's `assets`, as found: a trace refuses a mismatch |
 | `code_version` | the commit of `reverberate` that traced |
 | `solver` | the low band engine and its commit or version |
-| `low_pairs` | how many pairs were read from the cache and how many were solved |
+| `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
+| `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |
 | `created_utc` | |
+| `profile` | what of the recipe was traced: `{"seconds", "sources", "patch", "start_s"}`, all `null`, `false` and `0` for the whole scene |
+| `fallback_steps` | how many audible steps no cell could serve by the rule and read the nearest alone |
+| `device`, `timings_s` | the card and the seconds of each stage, as the machine saw them |
 | `cost` | a list, one record per stage |
 
-A cost record: `stage` (`low`, `paths`, `rays`, `diffraction`, `level`,
-`write`, `transfer`), `seconds`, `card` (the model's name), `cards`,
-`billed_rate_usd_per_hour`, `usd`, `instance`. A cost without its rate is
-not written (roadmap constraint 10).
+A cost record: `stage` (`low`, `paths`, `rays`, `level`, `write`, `check`,
+`transfer`, `rental`), `seconds`, `card` (the model's name), `cards`,
+`billed_rate_usd_per_hour`, `usd`, `instance`. `paths` holds the diffracted
+onsets, which the batched trace computes with the image paths; `check` is
+the pack read back and rendered on the host and on the card; `rental` is
+what the machine was billed for outside the stages: provisioning, the
+bundle's push, the watcher's polls. A cost without its rate is not written
+(roadmap constraint 10): the machine does not know its rate, so it writes
+`"cost": []` and the laptop that rented it adds the records when the pack is
+home (`reverberate.trace.driver.stamp_cost`), which rewrites this attribute
+and nothing else.
+
+**A smoke pack** (`profile.seconds` not `null`) holds the first seconds of
+the scene and some of its sources, under the whole recipe's digest and
+bytes. With `profile.start_s` not zero its step `k` is the scene at
+`start_s + k step_s`: it exercises the stages on a stretch where something
+moves and is rendered with dry signals given to the engine, not with the
+recipe's clips, whose times are the scene's.
 
 **A pair's key** is the first 64 hexadecimal characters of the SHA-256 of
 the canonical JSON of: `voxel_low_key`, the source position and the cell's
