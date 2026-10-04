@@ -62,6 +62,8 @@ from reverberate.mirror.ism import (
     _facet_spheres,
     _gains,
     _in_front,
+    dot3,
+    norm3,
     occluder_grid,
 )
 from reverberate.mirror.parameters import apply_parameters, image_scene
@@ -289,15 +291,15 @@ def _beam_with_slack(
     this one must hold every sequence that one can.
     """
     axis = centres[last] - parents
-    distance = np.linalg.norm(axis, axis=1)
+    distance = norm3(axis)
     axis = axis / np.maximum(distance, 1e-12)[:, None]
     inside = distance <= radii[last]
     half_angle = np.where(
         inside, np.pi, np.arcsin(np.clip(radii[last] / np.maximum(distance, 1e-12), 0.0, 1.0))
     )
     to_facet = centres[None, :, :] - parents[:, None, :]
-    reach = np.linalg.norm(to_facet, axis=2)
-    cosine = np.einsum("pfk,pk->pf", to_facet, axis) / np.maximum(reach, 1e-12)
+    reach = norm3(to_facet)
+    cosine = dot3(to_facet, axis[:, None, :]) / np.maximum(reach, 1e-12)
     angle = np.arccos(np.clip(cosine, -1.0, 1.0))
     subtended = np.where(
         reach <= radii[None, :],
@@ -370,7 +372,7 @@ def grow_candidates(
         parent_furn = furniture_used[-1]
         if count == 0 or parent_pos.shape[0] == 0:
             break
-        height = parent_pos @ normals.T - offsets[None, :]
+        height = dot3(parent_pos[:, None, :], normals[None, :, :]) - offsets[None, :]
         allowed = (height > -slack) | both[None, :]
         last = parent_seq[:, level - 2] if level >= 2 else np.full(parent_pos.shape[0], -1)
         allowed &= np.arange(count)[None, :] != last[:, None]
@@ -409,15 +411,12 @@ def grow_candidates(
         before = parent_seq[:, level_done - 2]
         facing = (last >= 0) & (before >= 0)
         facing &= ~furniture[np.maximum(last, 0)] & ~furniture[np.maximum(before, 0)]
-        facing &= (
-            np.einsum("ij,ij->i", normals[np.maximum(last, 0)], normals[np.maximum(before, 0)])
-            < -0.99
-        )
+        facing &= dot3(normals[np.maximum(last, 0)], normals[np.maximum(before, 0)]) < -0.99
         rows = np.flatnonzero(facing)
         if rows.size == 0:
             break
         cols = np.asarray(before[rows], dtype=np.int64)
-        height = np.einsum("ij,ij->i", parent_pos[rows], normals[cols]) - offsets[cols]
+        height = dot3(parent_pos[rows], normals[cols]) - offsets[cols]
         keep = (height > -slack) | both[cols]
         rows, cols, height = rows[keep], cols[keep], height[keep]
         if rows.size == 0:
@@ -568,8 +567,8 @@ def _walk(
 # --------------------------------------------------------------------------
 
 
-def _dot(a: Any, b: Any) -> Any:
-    return a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1] + a[:, 2] * b[:, 2]
+#: The pipeline's own scalar product, written out: the same bits on any array library.
+_dot = dot3
 
 
 def _norm(xp: Any, a: Any) -> Any:
@@ -1295,7 +1294,7 @@ def _image_rows(
         job = pair_job[index]
         receiver = job_listener[job]
         # The twin's own expressions, on the host: its lengths, directions and gains.
-        lengths = np.linalg.norm(image_at - receiver, axis=1)
+        lengths = norm3(image_at - receiver)
         arrival = (image_at - receiver) / np.maximum(lengths, 1e-12)[:, None]
         order = to_numpy(order_x)[index]
         sequence = to_numpy(sequence_x)[index].astype(np.int32)

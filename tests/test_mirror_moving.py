@@ -133,8 +133,14 @@ def test_at_rest_a_shadowed_point_has_the_pipeline_s_diffracted_onset_too() -> N
         np.testing.assert_allclose(np.linalg.norm(table.departure, axis=1), 1.0, atol=1e-12)
 
 
-def test_off_the_axes_the_render_agrees_to_rounding() -> None:
-    """Planes that are not axis aligned: the images differ by a few units in the last place."""
+def test_off_the_axes_the_render_is_the_pipeline_s_sample_for_sample() -> None:
+    """Planes that are not axis aligned: no product is exact, and the two still agree to the bit.
+
+    The tilted box keeps the box's degenerate legs, which graze a facet's
+    edge to a unit in the last place. Both codes take every scalar product
+    through :func:`reverberate.mirror.ism.dot3`, so such a leg is a path for
+    both or for neither, whatever the machine's linear algebra library.
+    """
     catalogue, turn = tilted(walled_box())
     ms = prepare(catalogue, SETTINGS)
     source = turn @ SOURCE
@@ -152,8 +158,8 @@ def test_off_the_axes_the_render_agrees_to_rounding() -> None:
         table = trace_early(ms, source[None, :], receiver[None, :], region=region, onsets=held)
         mine, _ = table.paths(0)
         np.testing.assert_array_equal(mine.sequence, want.sequence)
-        got = render_early(table, 0, RENDER)
-        assert float(np.abs(got - signals).max()) <= 1e-11 * float(np.abs(signals).max())
+        np.testing.assert_array_equal(mine.length_m, want.length_m)
+        np.testing.assert_array_equal(render_early(table, 0, RENDER), signals)
 
 
 def a_walk(steps: int) -> tuple[np.ndarray, np.ndarray]:
