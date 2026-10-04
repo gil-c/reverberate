@@ -1,4 +1,4 @@
-/** Scene mode: a recipe drawn and replayed, without sound.
+/** Scene mode: a recipe drawn and replayed; `sound.js` makes it heard.
  *
  * A recipe says where every source and the listener are over twenty minutes.
  * This mode generates one from the generator's ranges and a seed, or loads a
@@ -13,7 +13,10 @@
  * which sources are heard; both are exported on the mode and neither knows
  * the page (`transport.js`). An audio stage listens to `play`, `pause`, `seek`
  * and `speed`, may hand in its own clock with `transport.setClock`, and reads
- * `mix.audible(id)`; `onScene` tells it when another recipe is on show.
+ * `mix.audible(id)`; `onScene` tells it when another recipe is on show and
+ * `onSelect` which source is picked. `sound.js` is that stage. It may also put
+ * a scene on show without its recipe (`showTracks`), from a pack's own
+ * tables, and draws its state on the timeline (`timelineSound`).
  */
 import { createGeneratorPanel, createSummary } from "./generator.js";
 import { createSceneMarkers } from "./markers.js";
@@ -64,6 +67,7 @@ export function createSceneMode({ THREE, viewport, minimap, elements, busy }) {
   // comes back late is dropped and not drawn over its successor.
   let generation = 0;
   const sceneHandlers = [];
+  const selectHandlers = [];
 
   const panel = createGeneratorPanel(elements.panel, {
     onGenerate: () => generate(),
@@ -205,6 +209,12 @@ export function createSceneMode({ THREE, viewport, minimap, elements, busy }) {
     const mine = ++generation;
     const sampled = await api("tracks", { canonical: next.canonical, step_s: STEP_S });
     if (mine !== generation) return;
+    put(sampled, next);
+  }
+
+  /** Tracks on show, with the recipe's report when there is one: a pack's own
+   *  tracks have none, and nothing of them can be saved. */
+  function put(sampled, next) {
     report = next;
     tracks = sampled;
     selected = null;
@@ -215,8 +225,8 @@ export function createSceneMode({ THREE, viewport, minimap, elements, busy }) {
     drawGround();
     timeline.setTracks(tracks);
     timeline.setSelected(null);
-    summary.show(report);
-    panel.canSave(true);
+    if (report) summary.show(report);
+    panel.canSave(Boolean(report));
     transport.load(tracks.duration_s);
     for (const handler of sceneHandlers) handler({ report, tracks });
     frame();
@@ -307,6 +317,7 @@ export function createSceneMode({ THREE, viewport, minimap, elements, busy }) {
     selected = selected === id ? null : id;
     timeline.setSelected(selected);
     frame();
+    for (const handler of selectHandlers) handler(selected);
   }
 
   function setFollow(on) {
@@ -370,6 +381,16 @@ export function createSceneMode({ THREE, viewport, minimap, elements, busy }) {
     setFollow,
     /** `handler({ report, tracks })` when a recipe is put on show, `handler(null)` when it goes. */
     onScene: (handler) => sceneHandlers.push(handler),
+    /** `handler(id)` when a source or the listener is picked, `handler(null)` when none is. */
+    onSelect: (handler) => selectHandlers.push(handler),
+    /** Put on show tracks that came from elsewhere than a recipe: a pack's own. */
+    showTracks(sampled) {
+      generation += 1;
+      put(sampled, null);
+    },
+    /** What the sound's stage draws on the timeline (`timeline.setSound`), or null. */
+    timelineSound: (provider) => timeline.setSound(provider),
+    refreshTimeline: () => timeline.refresh(),
     enabled: () => enabled,
     selected: () => selected,
     report: () => report,

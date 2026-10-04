@@ -7,6 +7,11 @@
  *
  * It draws what the transport and the mix say and tells them what the user
  * did; it keeps no time of its own. The arithmetic is in `timemap.js`.
+ *
+ * With sound (`setSound`) a lane also says what is rendered: a line under its
+ * bands wherever the source's stem is in the cache, as a player shows its
+ * buffer; the ruler carries the same line for the mix being heard; and each
+ * lane's head has a meter of the source's level at the cursor.
  */
 import { SPEEDS } from "./transport.js";
 import { createTimeMap, formatTime, laneLayout, panned, posture, resized, ticks, visible, zoomed } from "./timemap.js";
@@ -79,6 +84,9 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
   let layout = laneLayout([]);
   let map = createTimeMap({ duration: 1, width: 1 });
   let selected = null;
+  // What the sound's stage knows: `{ ready(id), mixReady(), level(id, t), label(id) }`.
+  let sound = null;
+  let meters = new Map();
   // The lanes without the playhead, kept so a frame is one copy and one line.
   const still = document.createElement("canvas");
   let stale = true;
@@ -136,6 +144,16 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
     context.globalAlpha = 1;
     context.fillStyle = "#262e38";
     context.fillRect(0, row.y + row.height - 1, map.width, 1);
+    if (sound && actor.id !== "listener") drawReady(context, sound.ready(actor.id), row.y + row.height - 3, colour);
+  }
+
+  /** Spans of seconds as a line two pixels thick: what is rendered. */
+  function drawReady(context, spans, y, colour) {
+    context.fillStyle = colour;
+    for (const [start, end] of visible(spans, map.start, map.end, (s) => s[0], (s) => s[1])) {
+      const x = map.toX(start);
+      context.fillRect(x, y, Math.max(1, map.toX(end) - x), 2);
+    }
   }
 
   function drawStill() {
@@ -157,6 +175,7 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
       scale.stroke();
       scale.fillText(tick.label, tick.x + 3, RULER - 8);
     }
+    if (sound) drawReady(scale, sound.mixReady(), 0, "#e6ebf1");
     stale = false;
   }
 
@@ -182,9 +201,13 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
     mark.hidden = x < 0 || x > width;
     readout.textContent = `${formatTime(t, true)} / ${formatTime(duration)}`;
     play.textContent = playing ? "❚❚" : "▶";
+    for (const [id, meter] of meters) {
+      meter.style.transform = `scaleX(${sound ? sound.level(id, t) : 0})`;
+    }
   }
 
   function renderHeads() {
+    meters = new Map();
     heads.replaceChildren(
       ...actors.map((actor) => {
         const head = make("div", `tl-head${actor.id === selected ? " sel" : ""}`);
@@ -195,6 +218,14 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
         head.append(make("i"), name);
         if (actor.id !== "listener") {
           head.classList.toggle("silent", !mix.audible(actor.id));
+          if (sound) {
+            const meter = make("b", "tl-meter");
+            const fill = make("u");
+            meter.append(fill);
+            meter.title = sound.label(actor.id);
+            head.append(meter);
+            meters.set(actor.id, fill);
+          }
           for (const [letter, on, flip, title] of [
             ["S", mix.isSolo(actor.id), mix.toggleSolo, "solo"],
             ["M", mix.isMuted(actor.id), mix.toggleMute, "mute"],
@@ -326,6 +357,19 @@ export function createTimeline(root, { transport, mix, onSelect, onFollow, onTra
     },
     setFollow(on) {
       followBox.checked = on;
+    },
+    /** What the sound's stage knows of each lane, or null when the scene is silent. */
+    setSound(provider) {
+      sound = provider;
+      stale = true;
+      renderHeads();
+      draw();
+    },
+    /** What is rendered changed: the lanes are drawn again. */
+    refresh() {
+      stale = true;
+      for (const [id, fill] of meters) fill.parentNode.title = sound ? sound.label(id) : "";
+      draw();
     },
     trailSeconds: () => Number(trailInput.value) || 0,
     /** The window on show, for a check that cannot look. */

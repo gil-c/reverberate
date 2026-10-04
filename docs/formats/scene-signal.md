@@ -61,6 +61,47 @@ its end and read by time range, and for that:
 
 Uncompressed, for the reason of `impulse-response.md`.
 
+## The audit's stems
+
+The audit's server (`reverberate.viz.audit_stems`) keeps one signal per
+source of a pack, so that the page mixes any of them at once. Each is this
+format with three things added, because it is rendered a chunk at a time and
+out of order, the chunk under the play cursor first:
+
+```
+<cache>/<pack sha256, 16 hex>/<source id>/<key, 16 hex>/
+    key.json      what the key is the digest of
+    stem.f32      the frames, at their place from the start
+    chunks.jsonl  one line per chunk rendered
+    stem.json     the header above, written once every chunk is there
+```
+
+- **A chunk is one run of the engine**, `chunk_steps` steps: half a second,
+  24 000 frames, 6.1 MB. The engine renders a run from the pack and the dry
+  signal alone, so a stem's chunks put end to end are a one-shot
+  `Engine.stem` of the source, byte for byte, in whatever order they were
+  rendered.
+- **`stem.f32` has its full length from the first chunk and is sparse.** A
+  chunk in which the engine returned only zeros is recorded and not written:
+  it stays a hole and reads as the zeros it is. A stem takes the disk of the
+  time its source sounds, 12.3 MB a second.
+- **`chunks.jsonl`** has one JSON object per chunk: `chunk`, `sha256` (of the
+  engine's samples as float32 frames, taken before they are written),
+  `frames`, `peak`, `silent`, `levels_db` (the omnidirectional channel's level
+  per step) and `seconds` (what the render took). A chunk is in the cache
+  when its line is; a last line cut short is a chunk to render again.
+- **The key** is the SHA-256 of `key.json`: the digest of the pack's bytes,
+  the source, a digest of the engine's code, the settings that change a
+  sample (`chunk_steps`, `direction_nodes`, and `workers`, which the cache
+  fixes at 1 because the transforms' thread count moves the last bits),
+  whether the source's directivity is applied, and the digest of what the
+  source was fed. The owner's directivity switch therefore moves the stems
+  of the sources it concerns and no other. A header's `stem_key` repeats it.
+
+A mix served to the page is the chosen stems summed in float64 in the pack's
+order and brought back to float32: the engine's mix to within the rounding
+of each stem to float32 (rule 4 below), and a single stem untouched.
+
 ## What a reader may assume
 
 1. The frames' file is exactly `frames * channels * 4` bytes.
