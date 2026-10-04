@@ -29,8 +29,8 @@ from reverberate.experiments.w44_interpolation.scoring import (
     onset_of,
     write_summary,
 )
-from reverberate.experiments.w44_interpolation.translate import translation_weights
 from reverberate.spatial.sh import degrees_of
+from reverberate.spatial.translate import translation_weights
 
 __all__ = ["BAD_DB", "THIRDS", "translation_failures"]
 

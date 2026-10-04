@@ -39,10 +39,7 @@ from reverberate.experiments.w44_interpolation.scoring import (
     percentiles,
     write_summary,
 )
-from reverberate.experiments.w44_interpolation.translate import (
-    SOUND_SPEED_M_S,
-    translation_weights,
-)
+from reverberate.spatial.translate import SOUND_SPEED_M_S, translation_weights
 
 __all__ = ["leave_one_out"]
 
