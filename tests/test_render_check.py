@@ -17,13 +17,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
 import pytest
 import soundfile
 from scipy.signal import fftconvolve
 
 from reverberate.render.__main__ import main
-from reverberate.render.check import measure
+from reverberate.render.check import measure, reference
 from reverberate.render.check.binaural import PageDecoder, head_matrix, page_decoder, rotation
 from reverberate.render.check.clips import ClipSource, feed_of
 from reverberate.render.check.report import check_pack
@@ -38,8 +39,10 @@ from reverberate.render.check.run import (
     probe_source,
 )
 from reverberate.render.dry import EDGE_FADE_S, DryTrack
+from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.pack import ScenePack, synthetic_free_field, write_pack
 from reverberate.spatial.binaural import BinauralDecoder
+from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
 from reverberate.spatial.sh import real_sh, rotate_yaw
 
 FS = 48000.0
@@ -498,6 +501,53 @@ def test_the_validated_field_is_read_at_the_nearest_point_of_the_same_scene() ->
     other = CheckSettings(workers=1, reference={**reference, "scene_id": "another dwelling"})
     results = probe_source(pack, pack.sources["s1"], 2, other, None)[0]
     assert not [r for r in results if r.test.endswith("_reference")]
+
+
+def test_a_pack_on_the_field_s_own_source_is_held_to_it_sample_for_sample(tmp_path: Path) -> None:
+    """``--reference-point``: the field is the pack's own render, then the same late and halved."""
+    pack = resting()
+    h = pack.header
+    count = int(1.2 * FS)
+    dry = DryTrack.from_array(np.array([1.0]), start_s=0.0, rate=FS)
+    engine = Engine(pack, {"s1": dry}, settings=RenderSettings(directivity=False, workers=1))
+    own = np.asarray(engine.stem("s1", 0, count)[0]) * FIELD_UNIT_AT_1M
+
+    def field(name: str, response: np.ndarray, **attrs: Any) -> Path:
+        path = tmp_path / name
+        with h5py.File(path, "w") as handle:
+            handle.attrs["scene_id"] = h.scene_id
+            handle.attrs["sample_rate_hz"] = FS
+            handle.attrs["source_position"] = np.asarray(pack.sources["s1"].position[0])
+            handle.attrs["gain"] = 1.0
+            for key, value in attrs.items():
+                handle.attrs[key] = value
+            handle["positions"] = np.array([[5.0, 1.5, 0.0], pack.listener.position[0]])
+            handle["ir"] = np.stack([np.zeros_like(response), response])[:, None, :]
+        return path
+
+    same = reference.compare(pack, field("same.h5", own), workers=1)
+    (found,) = same["points"]
+    assert found["point"] == 1 and found["direct"] and found["head_off_the_point_m"] == 0.0
+    heard = np.isfinite(found["images_level_db"])
+    assert heard.sum() >= 15
+    assert np.abs(found["images_level_db"][heard]).max() < 1e-3
+    assert found["images_error_db"][heard].max() < -60.0
+    assert np.abs(found["low_level_db"]).max() < 1e-3 and found["low_error_db"].max() < -60.0
+    assert "s1 to lattice point 1" in reference.markdown(same)
+    # The seeded fault: the field half a millisecond later and half as loud.
+    late = np.zeros_like(own)
+    late[24:] = 0.5 * own[:-24]
+    fault = reference.compare(pack, field("late.h5", late), workers=1)["points"][0]
+    np.testing.assert_allclose(fault["images_level_db"][heard], 6.02, atol=0.1)
+    at_1k = int(np.argmin(np.abs(fault["third_octaves_hz"] - 1000.0)))
+    assert fault["images_error_db"][at_1k] > 0.0
+    assert fault["pack_arrival_ms"] == pytest.approx(fault["arrival_ms"] - 0.5, abs=0.05)
+    # A field of another dwelling, or whose source is not the pack's, is refused.
+    with pytest.raises(ValueError, match="scene"):
+        reference.compare(pack, field("other.h5", own, scene_id="another"), workers=1)
+    with pytest.raises(ValueError, match="stands on the field's source"):
+        elsewhere = np.asarray(pack.sources["s1"].position[0]) + [1.0, 0.0, 0.0]
+        reference.compare(pack, field("moved.h5", own, source_position=elsewhere), workers=1)
 
 
 def test_a_placeholder_is_played_from_the_manifest_s_speaker_and_says_so(tmp_path: Path) -> None:

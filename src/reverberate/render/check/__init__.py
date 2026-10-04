@@ -18,6 +18,8 @@ scene pass.
   the mix.
 - :mod:`.report`: the whole from end to end, ``check.json``, ``check.md``,
   the files to hear and the plots.
+- :mod:`.reference`: ``--reference-point``, a pack whose source stands on
+  the validated field's own against that field, sample for sample.
 
 **What it cannot tell.** Whether the voices sound like people in that room:
 timbre, naturalness, the tail's grain. Faults under its limits that add up.

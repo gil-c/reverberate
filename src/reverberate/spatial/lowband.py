@@ -29,17 +29,20 @@ import json
 from typing import Any
 
 import numpy as np
+from scipy.fft import next_fast_len
 
 from reverberate.audio import Atmosphere, frame_for
 from reverberate.mirror.hybrid import Crossover
 from reverberate.spatial.translate import SOUND_SPEED_M_S, namespace_of
 
 __all__ = [
+    "FIELD_UNIT_AT_1M",
     "HEADROOM",
     "LOW_DURATION_S",
     "LOW_RATE_HZ",
     "LOW_SAMPLES",
     "decimate",
+    "delayed",
     "from_stored",
     "low_side",
     "onset_s",
@@ -59,6 +62,18 @@ HEADROOM = 1.5 / 2.0**0.5
 
 #: The rate an onset is located at, whatever rate the response is kept at.
 _ONSET_RATE_HZ = 48000.0
+
+#: The scale of a field and of the pair cache: what the direct sound of a
+#: source of unit gain reads at 1 m in free air, as the amplitude of an
+#: impulse at 48 kHz. The solver's impulse is one step of its grid, heard as
+#: the free space ``1 / (4 pi d)``, and a field is on the scale of its solve
+#: to 8 kHz at 10.5 points per wavelength, whose grid runs at
+#: ``sqrt(3) * 10.5 * 8000`` Hz: 0.02625. Measured on the validated field of
+#: hssd_0076 (S1, eight lattice points 0.34 to 0.72 m away, under 1.5 kHz):
+#: 0.0258 to 0.0264, and on the first three pairs solved to 1500 Hz, before
+#: their first reflection: 0.0235 to 0.0255. Dividing by it is what makes a
+#: pack physical (``docs/formats/scene-pack.md``).
+FIELD_UNIT_AT_1M: float = 48000.0 / (4.0 * float(np.pi) * float(np.sqrt(3.0)) * 10.5 * 8000.0)
 
 
 def solve_fmax_hz(crossover: Crossover | None = None, *, headroom: float = HEADROOM) -> float:
@@ -136,6 +151,37 @@ def from_stored(low: Any, rate_hz: float = 48000.0, *, xp: Any = None) -> Any:
     full = xp.zeros((*spectrum.shape[:-1], samples // 2 + 1), dtype=xp.complex128)
     full[..., : spectrum.shape[-1]] = spectrum
     out: Any = xp.fft.irfft(full, n=samples, axis=-1) * (samples / have)
+    return out
+
+
+def delayed(ir: Any, rate_hz: float, delay_s: float, *, xp: Any = None) -> Any:
+    """``ir`` later by ``delay_s``, at its length: what leaves its end is dropped, nothing wraps.
+
+    The pair cache is on the geometric clock, a pack on that clock plus the
+    mirror's lead, which is seldom a whole number of samples at 4 kHz (512
+    at 48 kHz are 42.67). The delay is a phase, taken on a transform long
+    enough that what it pushes past the end does not come back at the start.
+    Returns float64.
+    """
+    xp = namespace_of(ir, xp=xp)
+    block = xp.asarray(ir, dtype=xp.float64)
+    if delay_s == 0.0:
+        return block
+    if delay_s < 0.0:
+        raise ValueError("a response is delayed, never advanced: its start would be lost")
+    samples = int(block.shape[-1])
+    moved = int(np.ceil(delay_s * rate_hz))
+    padded = int(next_fast_len(samples + moved + 64, real=True))
+    freqs = xp.fft.rfftfreq(padded, 1.0 / rate_hz)
+    spectrum = xp.fft.rfft(block, n=padded, axis=-1) * xp.exp(-2j * np.pi * freqs * delay_s)
+    out: Any = xp.fft.irfft(spectrum, n=padded, axis=-1)[..., :samples]
+    # The response now ends where it was not cut to end. Its last ``delay_s`` fall to
+    # zero, as long as what it lost: a response cut on a sample rings in every transform
+    # that reads it afterwards, the crossover's masks first.
+    fall = min(moved, samples)
+    out[..., samples - fall :] *= xp.asarray(
+        0.5 + 0.5 * np.cos(np.pi * (np.arange(fall) + 1.0) / fall)
+    )
     return out
 
 

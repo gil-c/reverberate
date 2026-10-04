@@ -30,6 +30,7 @@ from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.rays import RaySettings
 from reverberate.mirror.render import RenderSettings
 from reverberate.scenes import Recipe
+from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
 
 __all__ = ["ROOMS_RULE", "MirrorAssets", "directivity_models", "found_assets", "mismatched"]
 
@@ -67,6 +68,11 @@ class MirrorAssets:
     def pack_lead_s(self) -> float:
         """The lead a pack carries: the one the mirror's field was shifted by, not the measured."""
         return self.lead_samples / FIELD_RATE_HZ
+
+    @property
+    def pack_gain(self) -> float:
+        """The mirror's gain in a pack, which is physical: the alignment's over the field's unit."""
+        return self.gain / FIELD_UNIT_AT_1M
 
     @property
     def triangles(self) -> np.ndarray:

@@ -106,7 +106,8 @@ of each stem to float32 (rule 4 below), and a single stem untouched.
 
 `python -m reverberate.render check <pack.h5> [--recipe R.json] [--clips DIR]
 [--manifest M.json] [--out DIR] [--window START STOP] [--sources ...]
-[--measured-head H.sofa] [--reference FIELD.h5] [--probe-seconds S]`
+[--measured-head H.sofa] [--reference FIELD.h5] [--reference-point]
+[--probe-seconds S]`
 (`reverberate.render.check`) renders what it needs through the engine and
 holds it to what a listener would reject. It writes, in `--out`:
 
@@ -122,6 +123,19 @@ holds it to what a listener would reject. It writes, in `--out`:
   `viz/app/scene/sound-decode.js`), at the page's default level, a gain of
   one. When the mix peaks under -26 dB re full scale a second set is
   written, `*_plusNNdB.wav`, every file by the same whole tens of decibels;
+- with `--reference-point`, these alone: `reference_point.md` and
+  `reference_point.json` (`reverberate.render.check.reference`). For a pack
+  whose source stands within 5 cm of the validated field's own, with its
+  directivity off, and whose listener rests within 5 cm of a lattice point
+  of that field for 1.2 s while it sounds: the pack rendered there against
+  the field's response, both on the field's clock and scale. Per third
+  octave, the image paths (from 5 ms before the first arrival to 1 ms
+  before the tail starts): the pack's level over the field's and the
+  energy of their difference over the field's; the level of the first
+  50 ms; the same two for the whole response under the crossover; and per
+  octave the level after 50 ms and T20. It refuses a pack whose source is
+  elsewhere: that comparison is the check's own `late_spectrum_reference`,
+  which cannot tell the source's place from the pack;
 - `impulse.png`, `continuity.png`, `levels.png` where `matplotlib` is
   installed.
 

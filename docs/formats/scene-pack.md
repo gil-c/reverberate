@@ -43,7 +43,8 @@ addition:
 | bands | `bands_hz = (125, 250, 500, 1000, 2000, 4000, 8000)`, `acoustics.OCTAVE_BANDS`: what a path's gain and a histogram are written on |
 | bank bands | `bank_bands_hz = metrics.band_centres(48000)`, eight, the last at 16 kHz; bank band `i` reads the band nearest its centre, as `mirror.render._band_map` |
 | gains | pressure, linear, unless the name ends in `_db` |
-| clock | the wave field's: a response of `low/ir` starts `lead_s` before its geometric time zero |
+| clock | one, for everything the engine plays: the geometric clock, on which a sound leaves at zero and arrives at its path over the sound speed, plus `lead_s` |
+| scale | physical: a source of unit gain in free air is `1 / d` at a listener `d` metres away, under the crossover and over it |
 | missing index | `-1` |
 
 **The step is 50 ms** because that is the time the fastest source the
@@ -52,6 +53,48 @@ moving source is on a new solved position at about every step and never
 skips one. It is 2400 samples at 48 kHz and 200 at the low band's rate, both
 whole. A listener at 1.5 m/s moves 7.5 cm in a step, under a fifth of the
 0.40 m lattice.
+
+**One clock.** A path's `delay_s` and a histogram's bins are geometric and
+the engine lays them `lead_s` later; a response of `low/ir` is stored
+already `lead_s` late, its first sample `lead_s` before the source sounds.
+The lead is the mirror's (`/mirror`), 512 samples on hssd_0076, and is
+there for the filters that ring both ways: the crossover's masks and the
+octave bank are zero phase, and a response whose direct sound came 2 ms
+after its first sample would have its ring cut at the start and brought
+round to its end by the transform that takes the masks. The pair cache is
+on the geometric clock, so the trace delays each pair by `lead_s` before it
+takes its masks (`spatial.lowband.delayed`: what leaves the end is dropped,
+the last `lead_s` fall to zero, nothing wraps). **A trace whose pairs do
+not trail their direct sound by `lead_s`, to half a millisecond in the
+median over the pairs with a direct path, stops with an error**
+(`trace.run.CLOCK_S`). The first pack a card made (2026-10-04) had its
+pairs on the geometric clock and its mirror `lead_s` later: the band under
+1 kHz came 10.5 ms before the band over it, and the direct sound, 10.7 ms
+after the window anchored on the pair, took the power mask.
+
+**One scale.** The wave solver's response to its unit source is the free
+space's `1 / (4 pi d)` of an impulse one grid step long, and a field is on
+the scale of its solve to 8 kHz: its direct sound reads
+`spatial.lowband.FIELD_UNIT_AT_1M / d`, 0.02625 at 1 m (-31.6 dB), as the
+amplitude of an impulse at 48 kHz. The pair cache is on that scale (a
+solve to `fmax` times `fmax / 8000`), and so are the mirror's alignment
+(`mirror.files.Alignment.gain`) and the seam. The trace divides once:
+`low/ir` is the pair over the field's unit, and `/mirror`'s
+`alignment_gain` is the alignment's gain over it, so that the ratio the
+seam levels is untouched. The engine applies what the pack holds and no
+scale of its own; the level convention of
+[`clip-library.md`](clip-library.md) (full scale is 86 dB SPL at 1 m)
+then holds at the listener with a gain of one. Measured on the validated
+field of hssd_0076, eight lattice points 0.34 to 0.72 m from S1: the
+direct sound is 0.0258 to 0.0264 over `d` under 1.5 kHz, and within
+0.8 dB of that per third octave from 500 Hz to 4 kHz; on
+the first three pairs solved to 1500 Hz, read before their first
+reflection: 0.0235 to 0.0255 (-0.2 to -0.9 dB, the lowest where a
+reflection follows the direct sound by 0.7 ms); and by reciprocity, twelve
+pairs solved to 1500 Hz from one place to cells within 1 m of S1 against
+the validated field from S1 to the five lattice points round that place:
++0.2 dB over the whole response in the mean of the third octaves from
+100 Hz to 1.25 kHz, each within 3.2 dB.
 
 **Rendering is quasi-static.** At time `t` the engine plays what the scene
 frozen as it is at `t` would give for the signal emitted so far: a delay is
@@ -155,6 +198,14 @@ One table, every audible step's arrivals one after the other.
 | `kind` | uint8 | `[row]` | `0` direct, `1` specular, `2` diffracted round edges, `3` diffracted then reflected |
 
 Within a step the rows are sorted by `path_id`, and no `path_id` repeats.
+**A geometric path is one row.** A sheet the model holds as two layers on
+one plane, each marked as reflecting on both sides (the panes of hssd_0076:
+11 sheets, 22 of its 164 facets), gave every reflection on it under two
+names, 6 dB too loud: `mirror.ism.sheet_layers` finds the layers and each
+is read on the side it faces (`IsmSettings.coincident_facets = "once"`).
+`"twice"` is the earlier behaviour, which every field before 2026-10-05
+was traced with: the validated field of hssd_0076 (c10, S1) holds 502 such
+rows among its 6092, at 177 of its 437 points.
 
 **`path_id`** is the first eight bytes, little endian, of the SHA-256 of:
 the `kind` as one byte, then the facets of the path in bounce order as
@@ -247,12 +298,13 @@ The responses, deduplicated:
 | `pair_position` | float64 | `[pair, 3]` | the source position it was solved from |
 | `pair_cell` | int32 | `[pair]` | row of `/cells` |
 | `pair_key` | bytes, 64 | `[pair]` | the pair's key in the dwelling's cache |
-| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair, omnidirectional, before any levelling |
-| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 of the wave response at 48 kHz, on the pack's clock |
+| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair, omnidirectional, before any levelling, both on the field's scale |
+| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 of the wave response at 48 kHz, on the pack's clock: for a pair with a direct path, its `d / c` plus `lead_s` |
 
 Both are read as `mirror.hybrid.blend` reads them, on the wave response
 **with its air and before its masks** (`spatial.lowband.with_air` of the
-cache form), not on `ir`, whose masks have taken most of the seam's octave.
+cache form, `lead_s` later), not on `ir`, whose masks have taken most of
+the seam's octave.
 The mirror of the seam is `mirror.render.render_point` at the pair: the
 source on `pair_position`, the head on the cell's centre, the pair's own
 image paths and diffracted onset, the tail the pack gives that pair (its
@@ -271,12 +323,21 @@ and per step:
 | `cell` | int32 | `[step, 2]` | rows of `/cells`, slot 0 the nearer |
 | `mode` | uint8 | `[step]` | `0` inaudible, `1` exact, `2` translated from one cell, `3` fused from two |
 
-**What `ir` is, and its scale.** `spatial.lowband.to_stored` of the pair's
-response in the dwelling's cache, which holds it at 4 kHz before its masks
-and its air. **Its samples are the 48 kHz response's own**, read every
-twelfth: the kept bins transformed back at 4800 samples and divided by 12
-(`spatial.lowband.decimate`), so the cache, the pack and a field are on one
-scale and `spatial.lowband.from_stored` gives the 48 kHz response back. The
+**What `ir` is, and its scale.** The pair's response in the dwelling's
+cache, which holds it at 4 kHz before its masks and its air, on the
+geometric clock and on the field's scale: given its air on that clock,
+where a sample's time is its path, delayed by `lead_s`, its masks taken
+(`spatial.lowband.low_side`), and divided by the field's unit
+(`reverberate.trace.level.pair_low`). **Its samples are the 48 kHz
+response's own**, read every twelfth: the kept bins transformed back at
+4800 samples and divided by 12 (`spatial.lowband.decimate`), so
+`spatial.lowband.from_stored` gives the 48 kHz response back, and that
+response is physical: its direct sound is the low masks' impulse over `d`.
+With the lead the masks' ring before the first arrival has 10.7 ms and
+more. On the three pairs of the first pack the last 100 ms of `ir` hold
+-72 to -75 dB of the response, its own decay; without the lead they held
+-44 dB for the nearest source (0.8 m, a rise of 31 dB) and -60 and -65 dB
+for the two others. The
 engine therefore multiplies by `sample_rate_hz / low_sample_rate_hz`, 12,
 when it convolves at 4 kHz: the dry signal decimated at unit gain and
 convolved with `12 ir` at 4 kHz is at the response's level. It
@@ -417,7 +478,11 @@ the nearest two the head sees, among the six nearest (a cell behind a wall
 is near and is another room's tail); where it sees none, the nearest alone.
 `scale` is the cell's own where it sees the source position and rays reached
 it; elsewhere the median of the position's cells that do, as the lattice
-field gives its points without a direct path. The late level measured between neighbours 0.40 m apart
+field gives its points without a direct path; and where no cell sees the
+position, a voice in another room than every cell, what any cell beyond the
+receiver's sphere has, the band's pulse energy times `4 / receiver_radius_m^2`
+(the spreading and the sphere's share both go as the distance squared).
+Before 2026-10-05 that last case was zero and such a source had no tail. The late level measured between neighbours 0.40 m apart
 differs by 0.3 to 0.7 dB in the median, so the tail is sampled more coarsely
 than anything else in the pack.
 
@@ -553,10 +618,18 @@ moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
 `high_gain_db` is `20 log10(alignment_gain)` plus the step's seam: the
 `low/seam_db` of the step's pairs, weighted by `low/position_weight` across
 source slots and by inverse distance across cells, in decibels. It is the
-scalar of `mirror.hybrid.blend`, one per point there, one per step here.
+scalar of `mirror.hybrid.blend`, one per point there, one per step here,
+with the pack's `alignment_gain`, which is physical: on hssd_0076
+`0.0144 / 0.02625`, -5.2 dB, where a field's is -36.8 dB. The mirror's
+direct sound is then the signature's gain (+2.1 to +2.8 dB from 700 Hz to
+8 kHz, the filter having unit energy), less 5.2 dB, plus the seam, which
+the validated field of hssd_0076 holds at 2.3 dB in the median (0.9 to
+4.1 from its first to its last decile): within 1 dB of `1 / d` in the
+median and as far from it as the pair's seam is from the median.
 `onset_s` is the step's smallest `delay_s` plus what the wave response's
-loudest sample trails the mirror's first arrival by: each pair's
-`low/onset_s` less the smallest delay of the mirror's paths at that pair
+loudest sample trails the mirror's first arrival by, `lead_s` included:
+each pair's `low/onset_s` less the smallest delay of the mirror's paths at
+that pair
 (the direct path's where there is one, the diffracted onset's where the
 pair is shadowed, the straight line's where the mirror finds nothing),
 under the same weighting. Neither is interpolated between steps on its own:
@@ -587,11 +660,12 @@ value at its arrival where `blend` windows the samples.
 
 `/mirror`: dataset `signature`, `float64 [tap]`, the source's minimum phase
 signature (`mirror.direct.measure_signature`, 128 taps). Attributes
-`lead_s` and `alignment_gain` (`mirror.files.Alignment`: the clock and scale
-of the wave field; `lead_s` is the alignment's lead **rounded to a whole
-sample at 48 kHz**, 512 samples for 10.6744 ms on hssd_0076, because that is
-the shift the mirror's field was written with and the hybrid was validated
-at), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
+`lead_s` and `alignment_gain` (from `mirror.files.Alignment`, the clock and
+scale of the wave field: `lead_s` is the alignment's lead **rounded to a
+whole sample at 48 kHz**, 512 samples for 10.6744 ms on hssd_0076, because
+that is the shift the mirror's field was written with and the hybrid was
+validated at; `alignment_gain` is the alignment's gain **over the field's
+unit**, `MirrorAssets.pack_gain`, the pack being physical), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
 `tail_bursts`, `tail_gain_db` (seven), `histogram_bin_s`, `histogram_order`
 (3), `receiver_radius_m`, and `settings_json`, the whole
 `MirrorSettings.record()`.
@@ -649,7 +723,8 @@ Per source, at every output sample, in this order:
    step's responses, crossfaded by `position_weight`, moved to the head by
    `mode`, brought to 48 kHz, times the ratio of the two rates (see the
    scale of `ir`).
-5. **Sum**, times the source's `gain_db` and the interval's.
+5. **Sum**, times the source's `gain_db` and the interval's. Nothing else
+   scales it: the pack is physical and the engine has no gain of its own.
 
 The dry signal of an activity interval is the clip from its offset, faded in
 and out over 5 ms inside the interval (a raised cosine), so that a source
@@ -756,6 +831,13 @@ settings, the solver's version, the window in seconds
 crossover's ramp. It is the same for every recipe that uses
 the pair, which is what makes the dwelling's cache fill once.
 
+**The cache form** is the response as the solve gives it, order 7 at 4 kHz
+over 1.2 s: **on the geometric clock**, its first sample the instant the
+source sounds, and **on the field's scale**, `FIELD_UNIT_AT_1M / d` for
+the direct sound; before its masks, its air, the lead and the division
+that make it `low/ir`. Every engine that fills the cache gives that form,
+the monopole of `trace.engines.FreeFieldPairs` included.
+
 ## Size
 
 For 20 minutes, `steps = 24 001`, and 14 sources. The per step tables are
@@ -804,7 +886,11 @@ trace of L5 and what it is expected to cost are in
 9. `ir` is zero above 1414 Hz to rounding, and every channel of it is on one
    scale: no per channel or per pair normalisation was applied.
 10. Nothing in the pack depends on the head's orientation or on any clip.
-11. Two traces of one identity agree in every dataset the mirror writes
+11. `low/ir` and everything the engine lays from `early` and `tail` are on
+    one clock: a pair with a direct path has its `low/onset_s` at
+    `d / c + lead_s` to half a millisecond. And on one scale: a unit source
+    in free air is `1 / d` in `low/ir` and in `early/gain`.
+12. Two traces of one identity agree in every dataset the mirror writes
     (`early`, `tail`): the paths and the histograms are the same on any
     device (ADR 0014). `low/ir` agrees to the solver's own repeatability and
     is not promised to the bit.

@@ -42,6 +42,12 @@ def main(argv: list[str] | None = None) -> int:
     sound.add_argument("--sources", nargs="+", help="the sources checked; all of them unless said")
     sound.add_argument("--measured-head", type=Path, help="the SOFA head the page decodes with")
     sound.add_argument("--reference", type=Path, help="the validated hybrid field of the dwelling")
+    sound.add_argument(
+        "--reference-point",
+        action="store_true",
+        help="only this: a source that stands on the field's own, the head on a lattice point, "
+        "against the field there, a third octave at a time",
+    )
     sound.add_argument("--probe-seconds", type=float, default=5.0, help="of each steady probe")
     sound.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     args = parser.parse_args(argv)
@@ -62,6 +68,16 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.render.check.run import CheckSettings
 
         found = defaults(args.clips, args.manifest, args.measured_head, args.reference)
+        if args.reference_point:
+            from reverberate.render.check import reference
+            from reverberate.render.pack import read_pack
+
+            assert found["reference"] is not None
+            with read_pack(args.pack) as pack:
+                reference.run(
+                    pack, found["reference"], args.out, sources=args.sources, workers=args.workers
+                )
+            return 0
         document = run(
             args.pack,
             args.out,
