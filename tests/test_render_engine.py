@@ -748,6 +748,10 @@ def test_clips_are_placed_at_their_times_with_their_gains() -> None:
     out = Engine(pack, clips=load).render()
     placed = np.zeros(int(0.6 * FS))
     placed[4800:14400] = clip[2400:12000] * 10.0 ** (-6.0 / 20.0)  # the engine adds the source's
+    # The interval comes on and goes off over 5 ms, from zero and to zero.
+    ramp = np.sin(0.5 * np.pi * np.arange(240) / 240) ** 2
+    placed[4800:5040] *= ramp
+    placed[14160:14400] *= ramp[::-1]
     np.testing.assert_allclose(out, Engine(pack, {"s1": placed}).render(), atol=1e-12)
     assert asked == ["a"] and np.abs(out).max() > 0.0
     assert np.abs(out[:, :4000]).max() < 1e-6 * np.abs(out).max()

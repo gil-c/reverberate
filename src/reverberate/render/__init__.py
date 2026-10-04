@@ -25,10 +25,11 @@ one generator whose bits are the same on both.
 - :mod:`.dry`: a source's clips on the scene's clock, and what is filtered once.
 - :mod:`.output`: the signal on disk (``docs/formats/scene-signal.md``).
 - :mod:`.benchmark`: what a second of scene costs, part by part.
+- :mod:`.check`: a rendered scene's sound held to what a listener would reject.
 
 ``python -m reverberate.render benchmark`` measures the cost on this
 machine; ``interpolator`` prints the delay line's error; ``validate`` checks
-a pack.
+a pack; ``check`` measures a pack's sound and writes files to hear.
 """
 
 from __future__ import annotations

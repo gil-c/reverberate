@@ -280,8 +280,10 @@ def test_dry_audio_is_the_recipes_clip_or_a_placeholder_that_says_so(
         assert mixed.digest not in (bare.digest, voiced.digest)
         # The other source's clip is not in the library: it keeps its placeholder.
         assert dry_plan(pack, "s2", DrySources(clips, voices)).placeholder
+        # The clip's own samples, the interval faded in over its first 5 ms.
         first = dry_track(mixed).read(0, 1000)
-        assert np.array_equal(first, samples[:1000])
+        assert np.array_equal(first[240:], samples[240:1000]) and first[0] == 0.0
+        assert np.all(np.abs(first[:240]) <= np.abs(samples[:240]))
         # A clip that is not the bytes the recipe pins is refused.
         for source in recipe["sources"]:
             for interval in source["activity"]:
