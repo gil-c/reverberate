@@ -236,6 +236,108 @@ class TestFetch:
         assert missing_grids(["k1", "k2", "k3"], tmp_path) == ["k2", "k3"]
 
 
+class RentableOffer:
+    """An offer :func:`onebox.choose_offers` keeps and :func:`vast.rent_one` can try."""
+
+    num_gpus = 2
+    gpu_ram_gb = 80.0
+    gpu_name = "A100"
+    ram_gb = 250.0
+    cpu_cores = 32.0
+    disk_gb = 500.0
+    cuda_max = 12.8
+    reliability = 0.99
+
+    def __init__(self, id: int, dph_total: float, machine_id: int = 0) -> None:
+        self.id = id
+        self.dph_total = dph_total
+        self.machine_id = machine_id or 100 + id
+
+    def describe(self) -> str:
+        return f"offer {self.id}"
+
+
+class RentingClient:
+    """Answers the search and the credit; what was destroyed is kept."""
+
+    def __init__(self, offers: list[RentableOffer]) -> None:
+        self.offers = offers
+        self.destroyed: list[int] = []
+
+    def search(self, query: str, limit: int = 20) -> list[RentableOffer]:
+        # The driver searches once per card count; one answer holds them all.
+        return list(self.offers) if "num_gpus=1" in query else []
+
+    def request(self, method: str, path: str, payload: object = None) -> dict[str, float]:
+        return {"credit": 10.0}
+
+
+@dataclass
+class Rented:
+    instance_id: int
+
+
+class TestRent:
+    need = MachineNeed(
+        vram_gb=83.0, ram_gb=237.0, disk_gb=300, largest_output_gb=104.0, nodes_by_band={}
+    )
+
+    @pytest.fixture
+    def hosts(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Scripted hosts: which offers refuse to rent, and what each machine's cards hold."""
+        script: dict[str, Any] = {"refused": set(), "rented": []}
+
+        def rent(client: Any, offer: RentableOffer, **_: object) -> Rented:
+            if offer.id in script["refused"]:
+                raise vast.VastError("PUT /asks failed: HTTP 400")
+            script["rented"].append(offer.id)
+            return Rented(1000 + offer.id)
+
+        def wait_for_ssh(client: Any, instance: int, identity: Any, timeout: float = 0.0) -> str:
+            return f"machine-{instance}"
+
+        def teardown(client: RentingClient, instance: int) -> bool:
+            client.destroyed.append(instance)
+            return True
+
+        monkeypatch.setattr(vast, "rent", rent)
+        monkeypatch.setattr(vast, "wait_for_ssh", wait_for_ssh)
+        monkeypatch.setattr(vast, "teardown", teardown)
+        return script
+
+    def rent(self, client: RentingClient, **kwargs: Any) -> tuple[Any, int, Any]:
+        from reverberate.gpu import onebox
+
+        return onebox.rent(
+            client,
+            None,
+            self.need,
+            hours=1.0,
+            max_dph=3.0,
+            min_ram_gb=60.0,
+            gpu="",
+            say=lambda m: None,
+            **kwargs,
+        )
+
+    def test_the_offer_reported_is_the_one_kept_when_it_was_the_last(
+        self, hosts: dict[str, Any]
+    ) -> None:
+        # ``rent_one`` empties the list it is given as it goes: the first offer
+        # refuses, the second and last rents, and nothing is left to index.
+        hosts["refused"] = {1}
+        client = RentingClient([RentableOffer(1, 1.0), RentableOffer(2, 1.5)])
+        machine, instance, offer = self.rent(client)
+        assert (machine, instance, offer.id) == ("machine-1002", 1002, 2)
+
+    def test_the_offer_reported_is_the_one_kept_when_others_remain(
+        self, hosts: dict[str, Any]
+    ) -> None:
+        hosts["refused"] = {1}
+        offers = [RentableOffer(1, 1.0), RentableOffer(2, 1.5), RentableOffer(3, 2.0)]
+        assert self.rent(RentingClient(offers))[2].id == 2
+
+
 class TestRunEndToEnd:
     """The renter's loop against fakes: rent, provision, launch, watch, relaunch, fetch, destroy."""
 

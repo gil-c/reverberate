@@ -359,10 +359,13 @@ def rent(
     for offer in good[:6]:
         say("  " + offer.describe())
     say(f"  cap {hours:g} h -> at most {vast.estimate_cost_usd(good[0].dph_total, hours):.2f} USD")
+    # ``rent_one`` removes every offer it tries from the list, so the one it
+    # kept is the last it removed, and the list is empty when that was the last.
+    ranked = list(good)
     machine, instance = vast.rent_one(
         client, identity, good, hours=hours, disk_gb=need.disk_gb, image=IMAGE, say=say
     )
-    return machine, instance, good[0]
+    return machine, instance, ranked[len(ranked) - len(good) - 1]
 
 
 def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[str, float]:
