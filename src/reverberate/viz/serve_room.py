@@ -18,6 +18,12 @@ And it answers the page's scene view under ``/api/scene/``
 everything is over time. Saving a recipe is the one request that writes, to
 ``<data root>/recipes`` unless ``--recipes`` says otherwise.
 
+And it makes a scene heard, under ``/api/audit/``
+(:mod:`reverberate.viz.audit_api`): a scene pack found beside its recipe, or
+named with ``--pack``, is rendered by the signal engine in worker processes,
+its stems kept under ``<data root>/cache/audit_stems`` unless
+``--audit-cache`` says otherwise, and streamed to the page at order 7.
+
 Run it: ``python src/reverberate/viz/serve_room.py``, or the run button on
 this file. Everything it needs is in ``walk.toml``
 (:mod:`reverberate.viz.walk_config`); any command line argument overrides the
@@ -43,12 +49,17 @@ import tempfile
 import threading
 import webbrowser
 from collections.abc import Mapping, Sequence
+from urllib.parse import parse_qsl, urlsplit
 
 from reverberate.geometry.scene_ids import scene_of
 from reverberate.settings import data_root
 from reverberate.store import ObjectStore, shared_store
 from reverberate.viz.app_payload import WalkRun, build_run, discover_walk_runs
 from reverberate.viz.assemble_dataset import every_storey
+from reverberate.viz.audit_api import PREFIX as AUDIT_PREFIX
+from reverberate.viz.audit_api import AuditService, Binary
+from reverberate.viz.audit_dry import DrySources
+from reverberate.viz.audit_stems import StemService
 from reverberate.viz.decoders import export_decoders
 from reverberate.viz.scene_api import MAX_BODY_BYTES, PREFIX, SceneError, SceneService
 from reverberate.viz.scene_cache import (
@@ -145,12 +156,32 @@ class SiteBuilder:
         voices: Path | None = None,
         measured_head: Path | None = None,
         recipes: Path | None = None,
+        packs: Sequence[Path] = (),
+        audit_cache: Path | None = None,
+        audit_workers: int | None = None,
+        clips: Path | None = None,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
         # Nothing is created here: the folder appears with the first recipe saved.
         self.scenes = SceneService(hssd_root, recipes or data_root() / "recipes")
         print(f"recipes: {self.scenes.recipes_root}")
+        # Sound for a scene: the engine's stems, rendered when a pack is opened.
+        # Nothing is created or started here either.
+        stems = StemService(
+            audit_cache or data_root() / "cache" / "audit_stems",
+            workers=audit_workers,
+            dry=DrySources(
+                clips if clips is not None else data_root() / "clips",
+                voices if voices is not None else voices_dir(),
+            ),
+        )
+        self.audit = AuditService(
+            stems,
+            folders=[self.scenes.recipes_root, *(p for p in packs if p.is_dir())],
+            packs=[p for p in packs if p.is_file()],
+        )
+        print(f"packs: {len(self.audit.packs())} found; stems in {stems.cache_root}")
         self.rebuild = rebuild
         self.lead = lead
         self._lock = threading.Lock()
@@ -258,7 +289,7 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
             super().__init__(*args, directory=str(builder.target), **kwargs)  # type: ignore[arg-type]
 
         def do_GET(self) -> None:  # noqa: N802
-            if self._scene_api("GET"):
+            if self._api("GET"):
                 return
             parts = self.path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "scenes" and parts[2] == "manifest.json":
@@ -273,18 +304,24 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
             super().do_GET()
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self._scene_api("POST"):
+            if not self._api("POST"):
                 self.send_error(404, "nothing takes a POST here")
 
-        def _scene_api(self, method: str) -> bool:
-            """Answer a request of the scene view in JSON; false when it is not one."""
-            parts = self.path.split("?")[0].strip("/").split("/")
-            if parts[:2] != PREFIX.split("/"):
+        def _api(self, method: str) -> bool:
+            """Answer a request of the scene view or of its sound; false when it is neither.
+
+            In JSON, but for the audio itself, which is the engine's bytes.
+            """
+            url = urlsplit(self.path)
+            parts = url.path.strip("/").split("/")
+            scene, audit = parts[:2] == PREFIX.split("/"), parts[:2] == AUDIT_PREFIX.split("/")
+            if not scene and not audit:
                 return False
             scenes: SceneService | None = getattr(builder, "scenes", None)
+            sound: AuditService | None = getattr(builder, "audit", None)
             status, answer = 200, None
             try:
-                if scenes is None:
+                if (scenes if scene else sound) is None:
                     raise SceneError(404, "this server has no scene view")
                 body = None
                 if method == "POST":
@@ -295,13 +332,24 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
                         body = json.loads(self.rfile.read(length))
                     except ValueError as error:
                         raise SceneError(400, f"the body is not JSON: {error}") from error
-                answer = scenes.handle(method, parts[2:], body)
+                if scene:
+                    assert scenes is not None
+                    answer = scenes.handle(method, parts[2:], body)
+                else:
+                    assert sound is not None
+                    answer = sound.handle(method, parts[2:], dict(parse_qsl(url.query)), body)
             except SceneError as error:
                 status, answer = error.status, {"error": error.message}
-            payload = json.dumps(answer).encode()
+            extra: Mapping[str, str] = {}
+            if isinstance(answer, Binary):
+                payload, kind, extra = answer.payload, "application/octet-stream", answer.headers
+            else:
+                payload, kind = json.dumps(answer).encode(), "application/json"
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(payload)))
+            for name, value in extra.items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(payload)
             return True
@@ -404,6 +452,10 @@ def serve(builder: SiteBuilder, port: int, open_browser: bool) -> None:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\nstopped")
+        finally:
+            audit: AuditService | None = getattr(builder, "audit", None)
+            if audit is not None:
+                audit.stems.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -421,6 +473,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--recipes", type=Path, default=None, help="where recipes are saved; <data root>/recipes"
     )
+    parser.add_argument(
+        "--pack",
+        type=Path,
+        action="append",
+        default=[],
+        help="a scene pack to offer, or a folder of them; may be repeated",
+    )
+    parser.add_argument(
+        "--audit-cache", type=Path, default=None, help="default: <data root>/cache/audit_stems"
+    )
+    parser.add_argument(
+        "--audit-workers", type=int, default=None, help="processes that render stems"
+    )
+    parser.add_argument("--clips", type=Path, default=None, help="default: <data root>/clips")
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
@@ -456,7 +522,19 @@ def main(argv: list[str] | None = None) -> int:
 
     def build(target: Path) -> SiteBuilder:
         builder = SiteBuilder(
-            hssd_root, target, scene, runs, rebuild, run, voices, head, arguments.recipes
+            hssd_root,
+            target,
+            scene,
+            runs,
+            rebuild,
+            run,
+            voices,
+            head,
+            arguments.recipes,
+            packs=arguments.pack,
+            audit_cache=arguments.audit_cache,
+            audit_workers=arguments.audit_workers,
+            clips=arguments.clips,
         )
         if scene:
             builder.ensure(scene)
