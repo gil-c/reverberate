@@ -16,6 +16,7 @@ import { createEngine } from "./audio/engine.js";
 import { loadField } from "./audio/field.js";
 import { createSpatial } from "./audio/spatial.js";
 import { createSceneMode } from "./scene/scene.js";
+import { createSceneSound } from "./scene/sound.js";
 import { state } from "./state.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -52,6 +53,8 @@ const sceneMode = createSceneMode({
     audio: $("#audio-body"),
   },
 });
+// The scene heard: the signal engine's stems, streamed at order 7 and decoded here.
+const sceneSound = createSceneSound({ THREE, viewport, scene: sceneMode, root: $("#timeline") });
 const listenerTab = createListenerTab($("#pose-fields"), { onEdit: (pose) => viewport.moveTo(pose) });
 
 // The mirror solver's view: the derived scene it read, its paths at the listener's cell.
@@ -637,4 +640,6 @@ window.reverberate = {
   grid: () => grid,
   // Scene mode, with its clock (`scene.transport`) and its solo and mute (`scene.mix`).
   scene: sceneMode,
+  // The scene heard: the engine's stems streamed and decoded (scene/sound.js).
+  sound: sceneSound,
 };

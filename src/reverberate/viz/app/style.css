@@ -341,6 +341,29 @@ input[type=range].slide::-moz-range-thumb {
 }
 .tl-head button.on.solo { background: var(--ok); border-color: var(--ok); color: #08130b; }
 .tl-head button.on.mute { background: var(--src); border-color: var(--src); color: #1a1104; }
+/* A source's level at the cursor, along the foot of its head. */
+.tl-head { position: relative; }
+.tl-meter { position: absolute; left: 10px; right: 6px; bottom: 1px; height: 3px; background: #1a2028; border-radius: 1px; }
+.tl-meter u { display: block; height: 100%; background: var(--kind); transform-origin: left; transform: scaleX(0); }
+/* The sound's bar, under the transport's. */
+.tl-sound { gap: 12px; }
+.tl-tag { font: 12px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.tl-pack {
+  height: 26px; max-width: 320px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; font: 12px var(--mono); padding: 0 6px;
+}
+.tl-sound .seg { width: auto; flex: none; display: flex; }
+.tl-sound .seg button { flex: none; padding: 0 8px; white-space: nowrap; }
+.tl-verify {
+  height: 26px; padding: 0 10px; border-radius: 4px; border: 1px solid var(--line-2); background: transparent;
+  color: var(--text); font: 12px var(--mono); cursor: pointer;
+}
+.tl-verify:disabled { color: var(--dim); cursor: default; }
+.tl-badge:not(:empty) {
+  font: 11px var(--mono); text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 6px;
+  border-radius: 3px; background: var(--src); color: #1a1104;
+}
+.tl-note.bad { color: var(--bad, #f07a6a); }
 
 .generator select { margin: 0; }
 .gen-seed { grid-template-columns: 52px minmax(0, 1fr) 30px; }
