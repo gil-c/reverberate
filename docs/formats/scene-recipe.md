@@ -336,9 +336,9 @@ against the dwelling.
   },
   "assets": {
     "export_sha256": "3b5d0c1e9a7f42a68d1c0e5b7f9a2c4e6d8b0a1c3e5f7092b4d6f8a0c2e4f601",
-    "voxel_low_key": "90222a626eb68ed0008f3005f63b4d44",
-    "mirror_scene_key": "455c538ec2a6a74db2f0f2381f285f6e",
-    "calibration_key": "c3cec6aab28bb582",
+    "voxel_low_key": "00000000000000000000000000000001",
+    "mirror_scene_key": "00000000000000000000000000000002",
+    "calibration_key": "0000000000000003",
     "directivity": {
       "voice_v1": "7a1f3c5e9b2d4f60817a3c5e9b2d4f60817a3c5e9b2d4f60817a3c5e9b2d4f60"
     },
