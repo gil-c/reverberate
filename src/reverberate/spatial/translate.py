@@ -284,7 +284,12 @@ def translation_matrices(
         # Degree ``n`` is the channels ``n^2`` to ``(n + 1)^2`` of the ACN order.
         per_degree = np.stack(
             [
-                towards[index, d * d : (d + 1) * (d + 1)] @ products[d * d : (d + 1) * (d + 1)]
+                # A sum of rows, taken a row at a time: a vector by a matrix is the
+                # library's level 2, whose rounding moves with where its arrays lie.
+                (
+                    towards[index, d * d : (d + 1) * (d + 1), None]
+                    * products[d * d : (d + 1) * (d + 1)]
+                ).sum(axis=0)
                 for d in range(top + 1)
             ]
         ).astype(np.float32)

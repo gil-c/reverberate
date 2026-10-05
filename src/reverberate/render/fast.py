@@ -71,6 +71,33 @@ PAIRS_HELD = 12
 TAIL_LADDER_STEPS = 10
 
 
+def _mixed_rows(weights: np.ndarray, table: np.ndarray) -> np.ndarray:
+    """``weights @ table``, a row of the table at a time: ``[row, k]`` by ``[k, f]``.
+
+    The same sum in a fixed order whatever the count of rows. The library's
+    product takes a single row through another kernel, whose rounding moves
+    with where its arrays lie in memory: two processes would not give one
+    output.
+    """
+    made = weights[:, 0, None] * table[0][None, :]
+    for k in range(1, table.shape[0]):
+        made += weights[:, k, None] * table[k][None, :]
+    return np.asarray(made)
+
+
+def _products(operators: np.ndarray, columns: np.ndarray) -> np.ndarray:
+    """``operators @ columns`` for ``[f, a, b]`` by ``[f, b, m]``, never by a single column.
+
+    One column is given a second, of zeros, and the product's first is
+    kept: a matrix by a vector is the library's level 2, and its rounding
+    is not the level 3's (see :func:`_mixed_rows`).
+    """
+    if columns.shape[-1] != 1:
+        return np.asarray(np.matmul(operators, columns))
+    doubled = np.concatenate([columns, np.zeros_like(columns)], axis=-1)
+    return np.asarray(np.matmul(operators, doubled)[..., :1])
+
+
 class FastEarly(EarlyPart):
     """One source's arrivals: a filter a row, a loop in C a path."""
 
@@ -153,8 +180,8 @@ class FastEarly(EarlyPart):
             if spectrum is None:
                 continue
             bank, loss = self._table(n)
-            spectrum *= self._gain[rows] @ bank
-            spectrum *= self._air[rows] @ loss
+            spectrum *= _mixed_rows(self._gain[rows], bank)
+            spectrum *= _mixed_rows(self._air[rows], loss)
             # Twice the rate: the same spectrum in a transform twice as long, its own
             # Nyquist bin shared between the two it becomes.
             padded = np.zeros((rows.size, n + 1), dtype=np.complex64)
@@ -373,13 +400,13 @@ class HeadOperators:
             columns = fields.reshape(frames, cells * channels, count).transpose(2, 1, 0)
         else:
             stacked = fields.reshape(frames, cells * channels, count).transpose(2, 1, 0)
-            solved = np.matmul(
+            solved = _products(
                 self.inverse(offsets[0] - offsets[1], freqs_hz), stacked.astype(np.complex128)
             )
-            moved = np.matmul(self.matrices(offsets[0], freqs_hz), solved[:, :channels])
-            moved += np.matmul(self.matrices(offsets[1], freqs_hz), solved[:, channels:])
+            moved = _products(self.matrices(offsets[0], freqs_hz), solved[:, :channels])
+            moved += _products(self.matrices(offsets[1], freqs_hz), solved[:, channels:])
             return np.asarray(moved.transpose(2, 1, 0).astype(np.complex64))
-        return np.asarray(np.matmul(operator, np.ascontiguousarray(columns)).transpose(2, 1, 0))
+        return np.asarray(_products(operator, np.ascontiguousarray(columns)).transpose(2, 1, 0))
 
 
 class FastLow(LowPart):

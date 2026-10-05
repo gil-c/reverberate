@@ -231,8 +231,11 @@ def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> N
     here = write_mix(tmp_path / "here", partial(_engine, 2), processes=1, scratch=tmp_path)
     assert here["sha256"] == one["sha256"] and here["peak"] == pytest.approx(one["peak"])
     assert here["frames"] == h.samples and here["render"]["processes"] == 1
-    two = write_mix(tmp_path / "two", partial(_engine, 2), processes=2, scratch=tmp_path)
-    assert two["sha256"] == one["sha256"]
+    # Three times: a process started afresh lays its arrays elsewhere each time, and a
+    # product whose rounding moved with that gave another file one run in two.
+    for _ in range(3):
+        two = write_mix(tmp_path / "two", partial(_engine, 2), processes=2, scratch=tmp_path)
+        assert two["sha256"] == one["sha256"]
     signal = open_signal(tmp_path / "two")
     assert hashlib.sha256(signal.frames.tobytes()).hexdigest() == one["sha256"]
     # A window of the scene is the scene's samples there.
