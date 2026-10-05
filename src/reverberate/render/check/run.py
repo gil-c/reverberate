@@ -215,9 +215,11 @@ LIMITS: dict[str, Limit] = {
         -3.0,
         0.0,
         "dB re full scale",
-        "The largest sample of the two ears at the page's default level (0 dB, a gain of "
-        "one). Past full scale the page's output clips; 3 dB are kept for the sources "
-        "the window does not hold.",
+        "The largest sample of the two ears at the page's default level "
+        f"({measure.PAGE_DEFAULT_LEVEL_DB:g} dB, at which the output's full scale stands for "
+        f"{measure.FULL_SCALE_SPL_DB - measure.PAGE_DEFAULT_LEVEL_DB:g} dB SPL). Past full "
+        "scale the page's output clips; 3 dB are kept for the sources the window does not "
+        "hold.",
         "max",
     ),
     "dc": Limit(
@@ -322,8 +324,9 @@ class CheckSettings:
     probes_moving: int = 3
     #: The validated field's W channel, its positions and scene, or ``None``.
     reference: Mapping[str, Any] | None = None
-    #: The page's level control at its default, as a gain.
-    page_gain: float = 1.0
+    #: The page's level control at its default, as a gain
+    #: (:data:`reverberate.render.check.measure.PAGE_DEFAULT_LEVEL_DB`).
+    page_gain: float = measure.PAGE_DEFAULT_GAIN
     #: Threads of the engine's transforms.
     workers: int = -1
     #: Told what is being rendered.

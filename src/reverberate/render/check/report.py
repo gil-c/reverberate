@@ -259,10 +259,35 @@ def write_report(target: Path, outcome: dict[str, Any], header: dict[str, Any]) 
     return dict(document)
 
 
-def _write_wavs(target: Path, mix: dict[str, Any], rate: float, gain: float) -> dict[str, str]:
-    """The two ears of each source and of the mix, 24 bit, at ``gain``; and louder if faint."""
+def write_ears(path: Path, ears: np.ndarray, rate: float, scale: float) -> int:
+    """Two ears (``[ear, sample]``) at ``scale`` as a 24 bit WAV; the samples past full scale.
+
+    A file cannot hold more than full scale: what passes it is clipped, as
+    the page's output is, and counted, so that a file that is not the
+    scene's sound says so where it is listed.
+    """
     import soundfile
 
+    data = np.asarray(ears, dtype=float).T * float(scale)
+    over = int(np.count_nonzero(np.abs(data) > 1.0))
+    soundfile.write(
+        str(path), np.clip(data, -1.0, 1.0), int(round(rate)), subtype="PCM_24", format="WAV"
+    )
+    return over
+
+
+def _write_wavs(
+    target: Path,
+    mix: dict[str, Any],
+    rate: float,
+    gain: float,
+    clipped: dict[str, int] | None = None,
+) -> dict[str, str]:
+    """The two ears of each source and of the mix, 24 bit, at ``gain``; and louder if faint.
+
+    ``clipped`` receives, by file, the samples that passed full scale and
+    were clipped; a file not named there holds the scene's sound as it is.
+    """
     folder = target / "listen"
     folder.mkdir(parents=True, exist_ok=True)
     files: dict[str, str] = {}
@@ -278,8 +303,9 @@ def _write_wavs(target: Path, mix: dict[str, Any], rate: float, gain: float) -> 
             if not np.any(ears):
                 continue
             path = folder / f"{name}{suffix}.wav"
-            data = np.clip(np.asarray(ears, dtype=float).T * scale, -1.0, 1.0)
-            soundfile.write(str(path), data, int(round(rate)), subtype="PCM_24", format="WAV")
+            over = write_ears(path, ears, rate, scale)
+            if over and clipped is not None:
+                clipped[f"{name}{suffix}"] = over
             files[f"{name}{suffix}"] = str(path)
     return files
 
@@ -417,10 +443,18 @@ def run(
             settings=settings,
         )
         files: dict[str, str] = {}
+        clipped: dict[str, int] = {}
         if outcome["mix"]:
             files.update(
-                _write_wavs(out, outcome["mix"], pack.header.sample_rate_hz, settings.page_gain)
+                _write_wavs(
+                    out, outcome["mix"], pack.header.sample_rate_hz, settings.page_gain, clipped
+                )
             )
+            if clipped:
+                notes.append(
+                    "files whose samples passed full scale and were clipped, with how many: "
+                    + ", ".join(f"{name} ({count})" for name, count in clipped.items())
+                )
         out.mkdir(parents=True, exist_ok=True)
         files.update({f"plot: {k}": v for k, v in _write_plots(out, outcome).items()})
         header = {
@@ -430,6 +464,9 @@ def run(
             "recipe": None if recipe_path is None else str(recipe_path),
             "clips_root": None if clips_root is None else str(clips_root),
             "page_gain_db": float(measure.db(settings.page_gain)),
+            # What the output's full scale stands for at that level, at 1 m.
+            "full_scale_spl_db": float(measure.FULL_SCALE_SPL_DB - measure.db(settings.page_gain)),
+            "clipped_samples": clipped,
             "notes": notes,
             "files": files,
         }
@@ -438,7 +475,7 @@ def run(
     say(f"verdict {document['verdict']}: {document['counts']}")
     say(f"report: {out / 'check.md'}")
     for name, path in files.items():
-        say(f"{name}: {path}")
+        say(f"{name}: {path}" + (f"  CLIPPED, {clipped[name]} samples" if name in clipped else ""))
     return document
 
 

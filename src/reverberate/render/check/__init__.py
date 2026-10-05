@@ -20,6 +20,9 @@ scene pass.
   the files to hear and the plots.
 - :mod:`.reference`: ``--reference-point``, a pack whose source stands on
   the validated field's own against that field, sample for sample.
+- :mod:`.against`: ``--against``, two packs of one recipe side by side: the
+  two ears of each at one gain, and their difference a third octave at a
+  time. It judges nothing: the files are for someone to hear.
 
 **What it cannot tell.** Whether the voices sound like people in that room:
 timbre, naturalness, the tail's grain. Faults under its limits that add up.

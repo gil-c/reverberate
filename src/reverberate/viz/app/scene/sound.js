@@ -22,7 +22,18 @@
  * scene's.
  */
 import { headMatrix3, filterSpectra, rotateSpectra } from "./sound-decode.js";
-import { chunkSpans, commonRanges, createFetchPlan, createSoundClock, meterFill } from "./sound-plan.js";
+import {
+  DEFAULT_LEVEL_DB,
+  LEVEL_RANGE_DB,
+  FULL_SCALE_SPL_DB,
+  chunkSpans,
+  commonRanges,
+  createClipMeter,
+  createFetchPlan,
+  createSoundClock,
+  levelGain,
+  meterFill,
+} from "./sound-plan.js";
 import { createArrivals } from "./arrivals.js";
 import { listenerAt, viewYaw } from "./tracks.js";
 
@@ -82,8 +93,14 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
   const voices = seg("voices", [["pack", "as traced"], ["on", "directive"], ["off", "omni"]], "voice directivity; changing it renders the stems it concerns again");
   const level = make("label", "tl-trail");
   const levelInput = make("input");
-  Object.assign(levelInput, { type: "number", min: -60, max: 20, step: 1, value: 0 });
+  Object.assign(levelInput, { type: "number", min: LEVEL_RANGE_DB[0], max: LEVEL_RANGE_DB[1], step: 1, value: DEFAULT_LEVEL_DB });
+  level.title =
+    `the page's level. At 0 dB a sample of 1 in the pack, ${FULL_SCALE_SPL_DB} dB SPL, is the output's full scale; ` +
+    `at the default, ${DEFAULT_LEVEL_DB} dB, full scale stands for ${FULL_SCALE_SPL_DB - DEFAULT_LEVEL_DB} dB SPL, which keeps a whole scene under it`;
   level.append(make("span", "", "level"), levelInput, make("em", "", "dB"));
+  // Lit while the output passes full scale. The browser clips there; nothing here limits
+  // the sound, which would change what is heard without saying so.
+  const clipBadge = make("span", "tl-clip");
   const ahead = make("label", "check");
   const aheadBox = make("input");
   aheadBox.type = "checkbox";
@@ -95,7 +112,7 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
   verify.title = "hash the bytes the page receives for the chunk under the cursor and compare with the engine's";
   const badge = make("span", "tl-badge");
   const note = make("span", "note tl-note");
-  bar.append(make("span", "tl-tag", "sound"), pick, heads, voices, level, ahead, verify, badge, note);
+  bar.append(make("span", "tl-tag", "sound"), pick, heads, voices, level, clipBadge, ahead, verify, badge, note);
   root.querySelector(".tl-bar").after(bar);
 
   // --- state ------------------------------------------------------------------
@@ -128,6 +145,7 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
   let turnMs = 0;
   let thread = null; // what the audio thread last said of itself
   let verdict = "";
+  const clip = createClipMeter({ hold: 3 });
 
   const levels = new Map(); // chunk index -> { source id: [dB per step] }
   let top = -200;
@@ -179,7 +197,19 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
   }
 
   function setLevel() {
-    if (gain) gain.gain.value = 10 ** ((Number(levelInput.value) || 0) / 20);
+    if (gain) gain.gain.value = levelGain(levelInput.value);
+    // A new level is a new question: what clipped at the old one is forgotten.
+    clip.reset();
+    showClip();
+  }
+
+  /** The badge: lit for three seconds after the output passed full scale, with by how much. */
+  function showClip() {
+    const state = clip.state(context ? context.currentTime : 0);
+    clipBadge.textContent = state.clipping ? `clip +${state.overDb.toFixed(1)} dB` : "";
+    clipBadge.title = state.events
+      ? `the output passed full scale ${state.events} time(s) at this level, by ${state.overDb.toFixed(1)} dB at most: lower the level by that much`
+      : "";
   }
 
   /** What the audio thread says: its count for the clock, and when it ran dry. */
@@ -188,6 +218,10 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
       if (plan && message.gen === plan.gen()) clock.begin(message.played);
     } else if (message.type === "state") {
       thread = message;
+      if (Number.isFinite(message.peak)) {
+        clip.report(message.peak, levelGain(levelInput.value), message.at);
+        showClip();
+      }
       const sounding = message.running && !message.waiting;
       clock.report(message.played, message.at, sounding);
       if (streaming) {

@@ -7,6 +7,9 @@ const app = process.argv[2];
 const { createTransport } = await import(`${app}/scene/transport.js`);
 const { createSoundClock, createFetchPlan, chunkSpans, commonRanges, meterFill, arrivalGlyphs, shellPoints } =
   await import(`${app}/scene/sound-plan.js`);
+const { DEFAULT_LEVEL_DB, LEVEL_RANGE_DB, FULL_SCALE_SPL_DB, levelGain, peakOf, createClipMeter } = await import(
+  `${app}/scene/sound-plan.js`
+);
 const { BLOCK, QUANTUM, BINS, headMatrix3, filterSpectra, rotateSpectra, createStreamDecoder } = await import(
   `${app}/scene/sound-decode.js`
 );
@@ -330,6 +333,50 @@ const x = signal();
     radii: glyphs.map((glyph) => glyph.radius),
     orders: glyphs.map((glyph) => glyph.order),
     shell: Array.from(shellPoints([1, 1.5, 2], [1, 0, 0, 0, 1, 0], [0, 1])),
+  };
+}
+
+// --- the level: its default, and the output held against full scale ---------------
+{
+  const meter = createClipMeter({ hold: 3 });
+  const seen = {};
+  const at = (db) => levelGain(db);
+  // Three of fourteen sources peaked at -3.8 dB re full scale at a level of 0 dB.
+  const three = 10 ** (-3.8 / 20);
+  // Fourteen of them, their powers added: what a whole scene is expected to reach.
+  const fourteen = three * Math.sqrt(14 / 3);
+  meter.report(three, at(DEFAULT_LEVEL_DB), 0);
+  meter.report(fourteen, at(DEFAULT_LEVEL_DB), 1);
+  seen.wholeSceneAtDefault = meter.state(1);
+  seen.headroomDb = -20 * Math.log10(fourteen * at(DEFAULT_LEVEL_DB));
+  meter.reset();
+  // The same scene at the old default: past full scale, said, and for three seconds.
+  meter.report(fourteen, at(0), 10);
+  seen.atZero = meter.state(10);
+  meter.report(0.1, at(0), 10.5);
+  seen.heldAfter = meter.state(12.9).clipping;
+  seen.released = meter.state(13.1);
+  // One excursion is one event however many reports it lasts; the next is another.
+  meter.report(2, at(0), 20);
+  meter.report(2, at(0), 20.01);
+  meter.report(0.1, at(0), 20.02);
+  meter.report(1.5, at(0), 21);
+  seen.events = meter.state(21).events;
+  seen.worstDb = meter.state(21).overDb;
+  meter.reset();
+  seen.afterReset = meter.state(21);
+  // Exactly full scale is not past it; what is not a number is not a report.
+  meter.report(1, 1, 30);
+  meter.report(NaN, 1, 30);
+  seen.atFullScale = meter.state(30).clipping;
+  out.level = {
+    default: DEFAULT_LEVEL_DB,
+    range: LEVEL_RANGE_DB,
+    fullScaleSpl: FULL_SCALE_SPL_DB,
+    gains: [levelGain(DEFAULT_LEVEL_DB), levelGain("0"), levelGain(""), levelGain("abc"), levelGain(99), levelGain(-99)],
+    peak: peakOf(new Float32Array([0.1, -0.5, 0.2]), new Float32Array([0.3, 0.4, -0.75]), 0.25),
+    peakHeld: peakOf(new Float32Array([0.1]), new Float32Array([0.2]), 0.9),
+    ...seen,
   };
 }
 
