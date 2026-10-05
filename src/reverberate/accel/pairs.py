@@ -234,12 +234,23 @@ def install_pairs(pulled: Path, *, publish: bool = False) -> dict[str, Any]:
     """
     installed: list[str] = []
     published: list[str] = []
+    damaged: list[str] = []
     for source in sorted(p for p in Path(pulled).iterdir() if p.is_dir()):
         arrived = PairCache(Path(pulled), source.name)
         cache = PairCache.local(source.name)
         for key, record in arrived.records().items():
             if arrived.has(key) and not cache.has(key):
-                cache.write(key, arrived.read(key), {k: v for k, v in record.items() if k != "key"})
+                # A transfer that was cut leaves part of its last file under the file's
+                # name: a response that does not read whole is not a pair.
+                try:
+                    response = arrived.read(key)
+                except (ValueError, OSError, EOFError):
+                    damaged.append(key)
+                    continue
+                if response.ndim != 2 or not np.all(np.isfinite(response)):
+                    damaged.append(key)
+                    continue
+                cache.write(key, response, {k: v for k, v in record.items() if k != "key"})
                 installed.append(key)
         if publish:
             from reverberate.store import shared_store
@@ -247,7 +258,7 @@ def install_pairs(pulled: Path, *, publish: bool = False) -> dict[str, Any]:
             store = shared_store()
             if store is not None:
                 published.extend(cache.publish(store))
-    return {"installed": installed, "published": published}
+    return {"installed": installed, "published": published, "damaged": damaged}
 
 
 # --------------------------------------------------------------------------

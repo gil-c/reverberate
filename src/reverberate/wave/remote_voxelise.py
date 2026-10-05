@@ -40,7 +40,14 @@ from pathlib import Path
 from typing import Any
 
 from reverberate.wave import vendored
-from reverberate.wave.remote import Machine, _run
+from reverberate.wave.remote import (
+    ConnectionLost,
+    Machine,
+    RemoteError,
+    _run,
+    backoff_s,
+    one_at_a_time,
+)
 from reverberate.wave.voxelise import CACHE_FILES, CacheEntry, SceneSpec
 
 __all__ = [
@@ -78,18 +85,28 @@ def rsync(
     destination: str,
     *,
     download: bool,
-    attempts: int = 4,
+    attempts: int = 6,
     compress: bool = True,
+    exclude: Sequence[str] = (),
+    timeout: float | None = None,
 ) -> None:
     """Transfer with resume and retries, because one connection is one thing to lose.
 
     ``compress=False`` leaves ``-z`` out: responses in single precision do
     not compress (5 per cent, measured on solved pairs), and the machine
-    that deflates them is the one billed by the hour.
+    that deflates them is the one billed by the hour. ``exclude`` names
+    patterns left where they are; ``timeout`` ends one attempt, which
+    ``--partial`` makes a pause and not a loss.
 
     Not hypothetical: the first whole-flat run voxelised correctly on a rented
     machine and then died on ``Connection closed by remote host`` while fetching
     25 GB, having already spent the compute.
+
+    **A broken stream is resumed, a refused transfer is not.** What is
+    tried again, ``attempts`` times with a growing pause, is the failure
+    of the connection (:func:`reverberate.wave.remote.connection_level`)
+    and an attempt that passed its ``timeout``. A source that does not
+    exist or a full disk is raised at once: trying again does not make it.
 
     **Only flags openrsync accepts.** macOS ships openrsync, not GNU rsync, and
     it rejects ``--append-verify`` outright -- which cost a rental to discover,
@@ -104,23 +121,32 @@ def rsync(
     )
     remote = f"{machine.user}@{machine.host}"
     argv = ["rsync", "-az" if compress else "-a", "--partial", "--timeout=120", "-e", shell]
+    for pattern in exclude:
+        argv += ["--exclude", pattern]
     if download:
         argv += [f"{remote}:{source}" for source in sources]
         argv.append(destination)
     else:
         argv += [*sources, f"{remote}:{destination}"]
 
+    what = f"rsync {'down' if download else 'up'}"
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            _run(argv, what=f"rsync {'down' if download else 'up'}")
+            if timeout is None:
+                _run(argv, what=what)
+            else:
+                _run(argv, what=what, timeout=timeout)
             return
-        except Exception as error:  # noqa: BLE001 - a dropped transfer is the common case
+        except RemoteError as error:
+            # The connection's failure, or an attempt out of time; anything else is said.
+            if not isinstance(error, ConnectionLost) and error.returncode is not None:
+                raise
             last = error
             if attempt < attempts:
                 print(f"  transfer attempt {attempt} failed, resuming: {error}", flush=True)
-                time.sleep(10 * attempt)
-    raise RuntimeError(f"transfer failed after {attempts} attempts: {last}")
+                time.sleep(backoff_s(attempt))
+    raise ConnectionLost(f"transfer failed after {attempts} attempts: {last}")
 
 
 @dataclass(frozen=True)
@@ -445,7 +471,8 @@ def provision(
             what=f"send {Path(extra).name}",
         )
     _run(
-        machine.ssh_command("bash /root/build_pffdtd.sh 2>&1 | tail -40"),
+        # Idempotent, and behind a lock: a dropped connection tries it again.
+        machine.ssh_command(one_at_a_time("bash /root/build_pffdtd.sh") + " 2>&1 | tail -40"),
         what="build pffdtd",
         timeout=timeout,
     )

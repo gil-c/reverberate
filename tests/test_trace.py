@@ -960,15 +960,24 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     recipe = Recipe.from_dict(tree)
     held = assets()
     plan = make_plan(recipe, held.triangles)
-    # One of the plan's pairs is in this machine's cache already: the bundle carries it.
-    known = pair_key(
-        "key1500",
-        plan.tracks.positions[0],
-        plan.all_cells[plan.heard_at[0][0]],
-        encoder=pairs_module.encoder_record(7, 10, 1500.0),
-        solver=pairs_module.SOLVER,
-    )
-    PairCache.local("key1500").write(known, np.zeros((64, 4800), dtype=np.float32), {})
+    # One of the plan's pairs is in this machine's cache already, as the batched solver
+    # keys it on the bundle's grid: the bundle carries it. The same pair as the present
+    # engine keys it is another engine's and is not carried: a machine would not ask for it.
+    from reverberate.wave.lowband.pairs import solver_name
+    from reverberate.wave.lowband.scheme import CARTESIAN
+
+    def keyed(solver: str) -> str:
+        return pair_key(
+            "key1500",
+            plan.tracks.positions[0],
+            plan.all_cells[plan.heard_at[0][0]],
+            encoder=pairs_module.encoder_record(7, 10, 1500.0),
+            solver=solver,
+        )
+
+    known, other = keyed(solver_name(CARTESIAN, 10.5)), keyed(pairs_module.SOLVER)
+    for key in (known, other):
+        PairCache.local("key1500").write(key, np.zeros((64, 4800), dtype=np.float32), {})
     home = tmp_path / "home"
     seen: dict[str, Any] = {}
 
@@ -1011,6 +1020,38 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     assert (home / "bundle" / campaign["model_json"]).is_file()
     assert campaign["pairs_carried"] == 1 and campaign["trace"]["allow_asset_mismatch"] is True
     assert PairCache(home / "bundle" / "pairs_cache", "key1500").has(known)
+    assert not PairCache(home / "bundle" / "pairs_cache", "key1500").has(other)
+    assert campaign["trace"]["low"] == {
+        "engine": "lowband",
+        "scheme": "cartesian",
+        "ppw": None,
+        "voxel_low_key": "key1500",
+        "solver": solver_name(CARTESIAN, 10.5),
+        "bundle_grid": True,
+    }
+    assert campaign["trace"]["allowed_mismatch"] == []
+    # The machine is told its engine, the pairs come home as the run lasts, the early
+    # tables stay, and the offers are priced for this plan.
+    assert seen["campaign_args"] == "--low-engine lowband" and seen["sync"] == ("pairs",)
+    assert (
+        seen["leave"] == ()
+        and seen["also"] == ()
+        and callable(seen["predict"])
+        and seen["hours"] is None
+    )
+    # With the present engine the bundle carries that engine's pair, and no offer is priced.
+    launch(
+        recipe,
+        held,
+        tmp_path / "home_pffdtd",
+        models_from=export,
+        allow_asset_mismatch=True,
+        yes=True,
+        low_engine="pffdtd",
+        say=said.append,
+    )
+    carried = PairCache(tmp_path / "home_pffdtd" / "bundle" / "pairs_cache", "key1500")
+    assert carried.has(other) and not carried.has(known) and seen["predict"] is None
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)

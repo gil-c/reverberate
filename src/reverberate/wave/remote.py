@@ -33,12 +33,16 @@ from typing import Any
 from reverberate.wave.comms import ENGINE_FILES
 
 __all__ = [
+    "ConnectionLost",
     "EngineProgress",
     "Machine",
+    "RemoteError",
     "SolveResult",
+    "connection_level",
     "engine_log",
     "engine_progress",
     "fetch",
+    "one_at_a_time",
     "solve",
     "start_engine",
     "run_on",
@@ -114,40 +118,136 @@ class SolveResult:
         return self.upload_s + self.engine_s + self.fetch_s
 
 
-#: What a transient ssh failure looks like. Vast's proxy refused a connection
-#: for a few seconds in the middle of a twenty minute solve and the whole
-#: orchestration died on it; the engine kept running, unwatched.
+#: What a failure of the connection looks like in ``ssh``'s, ``scp``'s and ``rsync``'s own
+#: words. Vast's proxy refused a connection for a few seconds in the middle of a twenty
+#: minute solve and the whole orchestration died on it; the engine kept running, unwatched.
+#: On 2026-10-05 three rentals were lost the same way while provisioning ("Connection to
+#: ssh6.vast.ai closed by remote host"), which the list did not name.
 _TRANSIENT = (
     "Connection refused",
     "Connection closed",
+    "closed by remote host",
     "Connection reset",
-    "kex_exchange",
     "Connection timed out",
+    "Operation timed out",
+    "Broken pipe",
+    "kex_exchange",
+    "ssh_exchange_identification",
+    "client_loop: send disconnect",
+    "Timeout, server",
+    "No route to host",
+    "Network is unreachable",
+    "Could not resolve hostname",
 )
+#: What a host prints on every login, which is no word of the command's: a failure that
+#: says nothing else is the connection's.
+_BANNER = ("Welcome to vast.ai", "Have fun!", "Warning: Permanently added")
+#: ``ssh`` exits with this when it, and not the remote command, failed.
+SSH_FAILED = 255
+#: ``rsync``'s exit codes for a stream that broke: socket, protocol, the two timeouts, ssh.
+RSYNC_CONNECTION_CODES = (10, 12, 30, 35, SSH_FAILED)
+#: A command is tried this many times when the connection fails, this long apart at most.
+ATTEMPTS = 6
+BACKOFF_S = 15.0
+BACKOFF_CAP_S = 120.0
 
 
-def _run(argv: list[str], *, what: str, timeout: float | None = None, attempts: int = 4) -> str:
-    for attempt in range(1, attempts + 1):
-        completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False
-        )
+class RemoteError(RuntimeError):
+    """A command on a machine failed; ``returncode`` is its own, or ``None`` for a timeout."""
+
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+
+
+class ConnectionLost(RemoteError):
+    """The connection failed, every attempt: the command itself may never have run."""
+
+
+def connection_level(argv: list[str], returncode: int, stderr: str) -> bool:
+    """Whether a failure is the connection's and not the command's own.
+
+    ``ssh`` returns 255 for its own failures and the remote command's code
+    otherwise, so a remote command that exits non-zero is never taken for
+    a lost connection, whatever it printed. A 255 that names a connection
+    failure, or says nothing but the host's banner, is one. ``scp`` and
+    ``rsync`` are judged by their words and, for ``rsync``, its codes.
+    """
+    tool = Path(argv[0]).name if argv else ""
+    named = any(text in stderr for text in _TRANSIENT)
+    if tool == "ssh":
+        said = [
+            line
+            for line in stderr.splitlines()
+            if line.strip() and not any(text in line for text in _BANNER)
+        ]
+        return returncode == SSH_FAILED and (named or not said)
+    if tool == "scp":
+        return named or returncode == SSH_FAILED
+    if tool == "rsync":
+        return named or returncode in RSYNC_CONNECTION_CODES
+    return False
+
+
+def backoff_s(attempt: int) -> float:
+    """Seconds before the attempt after ``attempt``: doubling, capped."""
+    return float(min(BACKOFF_S * 2.0 ** (attempt - 1), BACKOFF_CAP_S))
+
+
+def _run(
+    argv: list[str], *, what: str, timeout: float | None = None, attempts: int = ATTEMPTS
+) -> str:
+    """Run ``argv`` and return its stdout; a lost connection is retried, a failed command is not.
+
+    ``ssh`` and ``scp`` are tried again, with a growing pause and at most
+    ``attempts`` times, when :func:`connection_level` says the connection
+    failed: then :class:`ConnectionLost`. Any other failure is the
+    command's and is raised at once as :class:`RemoteError`. A command
+    that passes ``timeout`` is not tried again: it may still be running.
+    """
+    retried = bool(argv) and Path(argv[0]).name in ("ssh", "scp")
+    stderr = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            raise RemoteError(f"{what} did not end in {timeout:g} s") from None
         if completed.returncode == 0:
             return completed.stdout
         stderr = completed.stderr.strip()
-        transient = any(t in stderr for t in _TRANSIENT)
-        if attempt < attempts and argv and argv[0] in ("ssh", "scp") and transient:
-            time.sleep(20.0 * attempt)
-            continue
-        raise RuntimeError(f"{what} failed: {stderr[-2000:]}")
-    raise RuntimeError(f"{what} failed after {attempts} attempts")
+        if not connection_level(argv, completed.returncode, stderr):
+            raise RemoteError(f"{what} failed: {stderr[-2000:]}", completed.returncode)
+        if not retried or attempt >= attempts:
+            break
+        time.sleep(backoff_s(attempt))
+    raise ConnectionLost(
+        f"{what} failed, the connection lost"
+        f"{f' {attempts} times' if retried else ''}: {stderr[-600:]}",
+        SSH_FAILED,
+    )
 
 
 def run_on(machine: Machine, command: str, *, what: str, timeout: float | None = None) -> str:
     """Run one shell command on ``machine`` over ssh and return its stdout.
 
-    Retries the transient proxy failures like every other ssh call here.
+    Retries the failures of the connection like every other ssh call here;
+    the command must therefore be one that may run twice.
     """
     return _run(machine.ssh_command(command), what=what, timeout=timeout)
+
+
+def one_at_a_time(command: str, lock: str = "/root/provision.lock") -> str:
+    """``command`` behind a lock on the machine, so that tried again it waits for itself.
+
+    A build whose connection drops goes on without it: its output is a
+    pipe to a reader that is still there. Tried again at once, a second
+    build would run in the same tree beside the first. Behind ``flock``
+    the second waits for the first, then finds everything made. A machine
+    without ``flock`` runs the command as it is.
+    """
+    return f'LOCK="$(command -v flock >/dev/null 2>&1 && echo "flock {lock}")"; $LOCK {command}'
 
 
 def upload(machine: Machine, files: list[Path], remote_dir: str = DEFAULT_REMOTE_DIR) -> int:

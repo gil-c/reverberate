@@ -885,6 +885,9 @@ def make_plan(
         "source_positions": int(tracks.positions.shape[0]),
         "source_positions_of_the_whole_recipe": whole.count,
         "pairs": sum(len(c) for c in heard_at),
+        # What a card's record memory is counted against: a position heard at more cells
+        # than a card holds records for is solved more than once.
+        "cells_a_position": [len(c) for c in heard_at],
         "pairs_of_the_patch": 0 if patch is None else int(patch.cells.shape[0]),
         "tail_sites": len(used),
         "tail_cells": int(receivers.size),
@@ -926,8 +929,17 @@ def estimate(
     fetch_pairs: bool = True,
     check: str | None = None,
     low_engine: str = "lowband",
+    low_ppw: float | None = None,
 ) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
+
+    This is the plan on the machines the constants were measured on, one
+    card; :func:`reverberate.trace.machines.predict` is the plan on an
+    offered machine. The batched solver's solves are counted as that card
+    makes them: a source position heard at more cells than its 20 GB hold
+    records for is solved more than once (``low.solves``,
+    ``extra_solves``). ``low_ppw`` prices the batched solver on another
+    Cartesian grid than the bundle's.
 
     The low band is priced by the engine that solves it: the batched solver
     (:func:`reverberate.wave.lowband.pairs.estimate`, measured on one RTX
@@ -959,9 +971,24 @@ def estimate(
     record = plan.record if isinstance(plan, Plan) else plan
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
     scene_pairs = pairs - int(record.get("pairs_of_the_patch", 0))
-    low = pairs_estimate(
-        positions, pairs, fmax_hz=solve_fmax_hz(), rate_usd_per_hour=rate_usd_per_hour
-    )
+    solves = positions
+    if low_engine == "lowband":
+        counts = [int(c) for c in record.get("cells_a_position", [])]
+        counted = batched.solves_needed(counts, batched.MEASURED_CARD_GIB, ppw=low_ppw)
+        solves = counted if counts and counted is not None else positions
+        low = batched.estimate(
+            solves,
+            pairs,
+            fmax_hz=solve_fmax_hz(),
+            rate_usd_per_hour=rate_usd_per_hour,
+            ppw=low_ppw,
+        )
+    else:
+        if low_ppw is not None:
+            raise ValueError("only the batched solver is priced on another grid")
+        low = pairs_estimate(
+            positions, pairs, fmax_hz=solve_fmax_hz(), rate_usd_per_hour=rate_usd_per_hour
+        )
     histograms = int(record["tail_sites"]) * int(record["tail_cells"])
     pack_bytes = scene_pairs * PAIR_BYTES + histograms * HISTOGRAM_BYTES
     jobs = int(record["step_pairs"]) + scene_pairs
@@ -997,6 +1024,9 @@ def estimate(
         "check": check,
         "low": low,
         "low_engine": low_engine,
+        "low_ppw": low_ppw,
+        "solves": solves,
+        "extra_solves": solves - positions,
         "measured": measured,
         "projected": [name for name in seconds if name not in MEASURED_ON],
         # The low band's card, as its engine names it; then every measured stage's.

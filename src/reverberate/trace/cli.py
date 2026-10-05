@@ -7,11 +7,17 @@ python -m reverberate.trace rent --recipe R.json --home H
      | --mirror DIR)
     [--models-from EXPORT/storey | --hssd-root DIR]
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
-    [--low-engine lowband|pffdtd] [--rate USD_PER_H] [--hours H] [--max-dph D] [--gpu NAME]
+    [--low-engine lowband|pffdtd] [--low-ppw P] [--low-scheme cartesian|fcc]
+    [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
-    [--publish-pairs] [--allow-asset-mismatch] [--yes]
+    [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
+    [--allow-asset-mismatch] [--plan-offers] [--yes]
 
-``--dry-run`` prints the plan and its cost and rents nothing. Besides:
+``--dry-run`` prints the plan and its cost and rents nothing. ``--plan-offers`` builds
+the bundle, asks for the offers and prints what the run is predicted to take on each,
+and rents nothing. The machine is the offer of the lowest predicted total within
+``--max-hours`` of wall time, not the cheapest hour; ``--hours``, the watchdog, is taken
+from that prediction unless given. Besides:
 
 python -m reverberate.trace assets --mirror-from RUN/mirror ... --models-from EXPORT/storey
     the recipe's ``assets`` block as a trace of this dwelling finds it, for ``scenes generate``
@@ -71,6 +77,26 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         help="what solves the low band: the batched solver, or PFFDTD a source position",
     )
     p.add_argument(
+        "--low-scheme",
+        choices=("cartesian", "fcc"),
+        default="cartesian",
+        help="the batched solver's grid; another than the bundle's has its own keys",
+    )
+    p.add_argument(
+        "--low-ppw",
+        type=float,
+        default=None,
+        help="the batched solver's points per wavelength; left out, the validated grid's 10.5."
+        " Another grid's pairs have their own keys, and its run its own --home",
+    )
+    p.add_argument(
+        "--reuse-from",
+        type=Path,
+        default=None,
+        metavar="HOME",
+        help="an earlier run of the recipe: its early tables (--fetch-early) are not traced again",
+    )
+    p.add_argument(
         "--rate",
         type=float,
         default=None,
@@ -98,8 +124,37 @@ def build_parser() -> argparse.ArgumentParser:
     _plan_arguments(p)
     p.add_argument("--home", type=Path, required=True, help="where the run comes home")
     p.add_argument("--dry-run", action="store_true", help="the plan and its cost; nothing rented")
-    p.add_argument("--hours", type=float, default=8.0)
+    p.add_argument(
+        "--hours",
+        type=float,
+        default=None,
+        help="the watchdog's cap, which cannot be extended; left out, the prediction for the"
+        " offer taken, times 1.5 (2 for a card not measured), and half an hour",
+    )
     p.add_argument("--max-dph", type=float, default=3.0)
+    p.add_argument("--gpus", type=int, default=1, metavar="N", help="hosts of N cards or more")
+    p.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="wall time allowed: of the offers predicted within it, the lowest USD is rented",
+    )
+    p.add_argument(
+        "--plan-offers",
+        action="store_true",
+        help="build the bundle, search the offers, say each one's predicted hours and USD;"
+        " nothing rented",
+    )
+    p.add_argument(
+        "--fetch-early",
+        action="store_true",
+        help="bring the early tables home, for a second run's --reuse-from",
+    )
+    p.add_argument(
+        "--destroy-failed",
+        action="store_true",
+        help="a run that failed twice on its machine is fetched and destroyed, not kept",
+    )
     p.add_argument("--gpu", default="", help="only cards whose name contains this")
     p.add_argument("--avoid", type=int, nargs="*", default=[], metavar="ID")
     p.add_argument("--instance", type=int, default=None, help="resume on a machine already rented")
@@ -279,7 +334,11 @@ def main(argv: list[str] | None = None) -> int:
 
         plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=centre)
         priced = estimate(
-            plan, rate_usd_per_hour=_rate(args), low_engine=args.low_engine, check=args.check
+            plan,
+            rate_usd_per_hour=_rate(args),
+            low_engine=args.low_engine,
+            check=args.check,
+            low_ppw=args.low_ppw if args.low_engine == "lowband" else None,
         )
         print(describe(plan, priced))
         build_bundle(
@@ -292,13 +351,16 @@ def main(argv: list[str] | None = None) -> int:
             allow_asset_mismatch=args.allow_asset_mismatch,
             rate_usd_per_hour=_rate(args),
             low_engine=args.low_engine,
+            low_scheme=args.low_scheme,
+            low_ppw=args.low_ppw,
+            reuse_from=args.reuse_from,
             check=args.check,
         )
         print(args.out)
         return 0
     from reverberate.trace.driver import launch
 
-    launch(
+    result = launch(
         recipe,
         assets,
         args.home,
@@ -322,5 +384,15 @@ def main(argv: list[str] | None = None) -> int:
         publish_pairs=args.publish_pairs,
         fetch_pairs=args.fetch_pairs,
         check=args.check,
+        gpus=args.gpus,
+        max_hours=args.max_hours,
+        plan_offers=args.plan_offers,
+        low_scheme=args.low_scheme,
+        low_ppw=args.low_ppw,
+        reuse_from=args.reuse_from,
+        fetch_early=args.fetch_early,
+        destroy_failed=args.destroy_failed,
     )
-    return 0
+    # A rental that did not end in a pack is a failure of the command.
+    outcome = dict(result.get("onebox", {})).get("outcome")
+    return 0 if outcome in (None, "done") else 1

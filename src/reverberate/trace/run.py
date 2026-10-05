@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -118,6 +119,8 @@ CHECK_BLOCK_S = 5.0
 #: pack's structure read. A smoke run takes the first unless its bundle says otherwise.
 CHECK_FULL = "full"
 CHECK_READ = "read"
+#: The region of the early trace is rounded outwards to this, m.
+REGION_STEP_M = 0.25
 #: Pairs levelled side by side on a card. A pair is a dozen small launches the card
 #: answers in microseconds: the host's interpreter is what a thread more buys.
 LEVEL_THREADS = 6
@@ -187,6 +190,27 @@ class Journal:
         self.timings[name] = round(self.timings.get(name, 0.0) + time.time() - t0, 1)
         self.say(f"{name}: done in {(time.time() - t0) / 60:.1f} min")
         return result
+
+
+@dataclass(frozen=True)
+class PairRows:
+    """A source's ``low/ir`` as the pack's writer reads it: a row when asked, never the table.
+
+    The writer copies a table that is not an array a row at a time
+    (:mod:`reverberate.render.pack`), so one pair, 1.2 MB, is all that is
+    held. The table held whole was 5.6 GB for 4586 pairs, and on a machine
+    whose page cache stood at its container's limit its copy took 164 ms a
+    pair with the card idle, against 5 ms for the pair's own work.
+    """
+
+    shape: tuple[int, int, int]
+    row: Any
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        found = np.asarray(self.row(int(index)))
+        if found.shape != self.shape[1:]:
+            raise ValueError(f"a row of {found.shape}, not of {self.shape[1:]}")
+        return found
 
 
 def _digest(*parts: Any) -> str:
@@ -309,10 +333,14 @@ class Trace:
         wrong = mismatched(self.recipe, found)
         self.report["assets"] = found
         self.report["assets_mismatched"] = wrong
-        if wrong and not self.told.get("allow_asset_mismatch", False):
+        # A trace on another low grid than the recipe names says so in its bundle: that
+        # key, and no other, then differs by intent. The pack's provenance keeps it.
+        meant = {str(name) for name in self.told.get("allowed_mismatch", [])}
+        refused = [name for name in wrong if name not in meant]
+        if refused and not self.told.get("allow_asset_mismatch", False):
             raise RuntimeError(
                 "the recipe was generated against other assets than this trace finds: "
-                + ", ".join(wrong)
+                + ", ".join(refused)
             )
         if wrong:
             self.journal.say(f"assets: the recipe disagrees on {', '.join(wrong)}; allowed")
@@ -383,6 +411,25 @@ class Trace:
         held = self.seconds.setdefault(stage, {})
         held[name] = round(held.get(name, 0.0) + time.time() - since, 2)
 
+    def _carried_early(self) -> None:
+        """The early tables the bundle carries, where this run has none of that name yet.
+
+        A table is read only if its digest is this run's (:func:`_load_early`),
+        so a table of other positions, another scene or another region costs
+        its copy and nothing else.
+        """
+        carried = self.bundle / "early_cache"
+        if not carried.is_dir():
+            return
+        target = self.out / "early"
+        target.mkdir(parents=True, exist_ok=True)
+        taken = 0
+        for table in sorted(carried.glob("*.npz")):
+            if not (target / table.name).exists():
+                shutil.copy2(table, target / table.name)
+                taken += 1
+        self.journal.say(f"paths: {taken} early table(s) taken from the bundle")
+
     def paths(self) -> None:
         """Every source's early table, and the table of the pairs at rest."""
         settings = self.assets.settings
@@ -397,8 +444,15 @@ class Trace:
         every = [tracks.listener, self.cells, tracks.positions]
         every += [track.position for track in tracks.sources.values()]
         heads = np.concatenate([tracks.listener, self.cells])
-        region = (heads.min(axis=0) - 0.5, heads.max(axis=0) + 0.5)
+        # Half a metre round the heads, out to the next quarter metre: the arrays' centres
+        # are a grid's nodes, and a region that followed them to the millimetre would give
+        # every low grid its own tables of the same sources (:data:`REGION_STEP_M`).
+        region = (
+            np.floor((heads.min(axis=0) - 0.5) / REGION_STEP_M) * REGION_STEP_M,
+            np.ceil((heads.max(axis=0) + 0.5) / REGION_STEP_M) * REGION_STEP_M,
+        )
         identity = [self.assets.catalogue.key, settings.record(), [list(r) for r in region]]
+        self._carried_early()
         self.early: dict[str, EarlyTable] = {}
         records: dict[str, Any] = {}
         field_of: list[Any] = []
@@ -612,8 +666,25 @@ class Trace:
                 " is on the geometric clock: a response in it starts when its source does"
             )
 
+    def _low_row(self, j: int, atmosphere: Atmosphere) -> np.ndarray:
+        """Pair ``j`` as the pack stores it, ``[channel, sample]`` float32."""
+        assert self.engine is not None
+        t0 = time.time()
+        # On the card when there is one: 64 channels of air and masks a pair.
+        row = pair_low(
+            self.engine.cache.read(self.pair_key[j]),
+            self.crossover,
+            atmosphere,
+            sound_speed_m_s=self.assets.settings.sound_speed_m_s,
+            lead_s=self.assets.pack_lead_s,
+            unit_at_1m=FIELD_UNIT_AT_1M,
+            xp=self.xp,
+        )[0]
+        self._spent("write", "low_ir", t0)
+        return np.asarray(row, dtype=np.float32)
+
     def write(self) -> Path:
-        """``pack.h5``, a source at a time."""
+        """``pack.h5``, a source at a time, and of a source's ``low/ir`` a pair at a time."""
         assert self.engine is not None
         recipe, tracks, settings = self.recipe, self.tracks, self.assets.settings
         atmosphere = Atmosphere(**recipe.atmosphere.to_dict())
@@ -712,20 +783,12 @@ class Trace:
                                 j = row_of[(position, cell)]
                                 pair[step, a, b] = local.setdefault(j, len(local))
                 mine = sorted(local, key=lambda j: local[j])
-                ir = np.zeros((len(mine), header.channels, header.low_samples), dtype=np.float32)
-                t0 = time.time()
-                for row, j in enumerate(mine):
-                    # On the card when there is one: 64 channels of air and masks a pair.
-                    ir[row] = pair_low(
-                        self.engine.cache.read(self.pair_key[j]),
-                        self.crossover,
-                        atmosphere,
-                        sound_speed_m_s=settings.sound_speed_m_s,
-                        lead_s=self.assets.pack_lead_s,
-                        unit_at_1m=FIELD_UNIT_AT_1M,
-                        xp=self.xp,
-                    )[0]
-                self._spent("write", "low_ir", t0)
+                # A pair at a time, from the cache to the file: the array of a source's
+                # rows is never held (:class:`PairRows`).
+                ir = PairRows(
+                    (len(mine), header.channels, header.low_samples),
+                    lambda row, mine=mine: self._low_row(mine[row], atmosphere),
+                )
                 high_gain_db, onset_s = step_levels(
                     audible=track.audible,
                     pair=pair,

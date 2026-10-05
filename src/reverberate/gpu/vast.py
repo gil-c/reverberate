@@ -758,6 +758,22 @@ def credit_of(client: Any) -> float:
         return float("nan")
 
 
+#: Hosts known bad, by machine id: when it was seen and what it did. Never rented, whatever
+#: ``--avoid`` says; a host is added here when its fault is the host's own and lasting.
+KNOWN_BAD_HOSTS: dict[int, tuple[str, str]] = {
+    35928: (
+        "2026-10-05",
+        "ssh3.vast.ai port 13832 refused every connection after the instance answered"
+        " once: the rental was lost in its provisioning",
+    ),
+}
+
+
+def hosts_to_avoid(avoid: Iterable[int] = ()) -> set[int]:
+    """The ids never to rent: those given and :data:`KNOWN_BAD_HOSTS`."""
+    return {int(i) for i in avoid} | set(KNOWN_BAD_HOSTS)
+
+
 def offer_ids(offer: Any) -> set[int]:
     """What names an offer in a list of hosts to avoid: its own id and its host's."""
     machine = int(getattr(offer, "machine_id", 0) or 0)
