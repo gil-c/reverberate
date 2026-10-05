@@ -77,6 +77,7 @@ from reverberate.scenes import canonical_bytes, load_recipe
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
 from reverberate.trace.assets import MirrorAssets, directivity_models, found_assets, mismatched
+from reverberate.trace.computed import write_as_computed
 from reverberate.trace.engines import CardPairs, PairsEngine
 from reverberate.trace.level import (
     first_arrival_s,
@@ -773,6 +774,7 @@ class Trace:
                 )
         partial.replace(target)
         self.report["pack"] = {"path": str(target), "bytes": target.stat().st_size}
+        self.report["as_computed"] = write_as_computed(self)
         return target
 
     def check(self) -> None:

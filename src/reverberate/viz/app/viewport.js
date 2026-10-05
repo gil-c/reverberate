@@ -115,6 +115,7 @@ export function createViewport(canvas, pane) {
   // grid, the mirror solver's derived scene.
   const groups = { colour: null, acoustic: null, mirror: null };
   let shown = null;
+  let modelVisible = true;
   const overlays = new THREE.Group();
   overlays.name = "overlays";
   scene.add(overlays);
@@ -301,7 +302,10 @@ export function createViewport(canvas, pane) {
   function show(name) {
     if (shown && groups[shown]) scene.remove(groups[shown]);
     shown = name;
-    if (groups[name]) scene.add(groups[name]);
+    if (groups[name]) {
+      groups[name].visible = modelVisible;
+      scene.add(groups[name]);
+    }
     dirty = true;
   }
 
@@ -468,6 +472,13 @@ export function createViewport(canvas, pane) {
     },
 
     show,
+    /** Hide or show the view's own model, leaving the overlays: what an engine
+     *  computed on is then seen instead of the furnished model and not over it. */
+    setModelVisible(on) {
+      modelVisible = Boolean(on);
+      if (shown && groups[shown]) groups[shown].visible = modelVisible;
+      dirty = true;
+    },
     resize,
     /** Something in the scene changed outside the camera: draw next frame. */
     invalidate: () => {
