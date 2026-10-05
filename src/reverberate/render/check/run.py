@@ -54,6 +54,22 @@ _RANK = {SKIP: 0, INFO: 0, PASS: 1, WARN: 2, FAIL: 3}
 
 #: The two tones of the continuity probe: one each side of the crossover's ramp.
 TONES_HZ = (400.0, 2500.0)
+#: The two combs a band's level is read on, each side of the ramp: multiples of 100 Hz,
+#: so that a frame of 10 ms holds whole periods of every tone and of every beat of two.
+COMBS_HZ = (
+    tuple(float(f) for f in range(200, 701, 100)),
+    tuple(float(f) for f in range(1500, 6401, 100)),
+)
+#: How far either side of the straight line's time a band's direct sound is looked for, s:
+#: the search of the trace's own reading (``reverberate.trace.clock``).
+ALIGN_SEARCH_S = 3.0e-3
+#: The validated field speaks for a source within this of its own, m: the tail's rays
+#: are traced from rail positions every 0.80 m, and a room away the decay is another.
+REFERENCE_SOURCE_M = 1.0
+#: Past this the room's field is louder than the direct sound, m (the limit of ``c50``).
+NEAR_M = 2.5
+#: A voice's active level is read on this much speech at the least, s.
+SPEECH_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +108,11 @@ LIMITS: dict[str, Limit] = {
         "ms",
         "The two sides of the crossover add over the onset. Half a period of 1 kHz is 0.5 ms: "
         "beyond it they cancel at the join, and a few milliseconds are heard as bass before "
-        "the consonant.",
+        "the consonant. Each band's direct sound is read where the pack puts it, its first "
+        "peak within 3 ms of the straight line's time: at a far place a band's loudest "
+        "arrival is a reflection 5 to 20 ms later, which a reading against the band's peak "
+        "took for the first. Where the listener does not see the source the two bands have "
+        "no arrival in common and nothing is judged.",
     ),
     "direct_level": Limit(
         3.0,
@@ -113,9 +133,12 @@ LIMITS: dict[str, Limit] = {
         -40.0,
         -30.0,
         "dB",
-        "What comes more than 1 ms before the first arrival, over the whole response. The "
-        "crossover's masks are zero phase and ring 40 dB down by design; backward masking "
-        "covers a few milliseconds only, and -30 dB before a consonant is heard as a smear.",
+        "What comes more than 1 ms before the straight line from the source could bring "
+        "anything, over the whole response. The crossover's masks are zero phase and ring "
+        "40 dB down by design; backward masking covers a few milliseconds only, and -30 dB "
+        "before a consonant is heard as a smear. The straight line and not the first path "
+        "the pack lists: behind a corner that path is the mirror's bend round an edge, and "
+        "the band under the crossover, which is a wave, is there before it.",
         "max",
     ),
     "late_echo": Limit(
@@ -141,16 +164,31 @@ LIMITS: dict[str, Limit] = {
         35.0,
         "per cent",
         "T20 per octave from 250 Hz to 4 kHz against the validated field's at the nearest "
-        "lattice point, worst band. The just noticeable difference is 5 to 10 per cent; the "
-        "reference has another source position, which moves it by 10 to 15 in a dwelling.",
+        "lattice point, worst band. The just noticeable difference is 5 to 10 per cent. "
+        "Judged where the pack's source stands within a metre of the field's own; a source "
+        "elsewhere in the dwelling decays as its own rooms do (the first whole scene read "
+        "35 to 70 per cent from a field whose source was rooms away) and is told only.",
+    ),
+    "reverberation_range": Limit(
+        20.0,
+        35.0,
+        "per cent",
+        "T20 per octave from 250 Hz to 4 kHz against what nine tenths of the validated "
+        "field's points read, from its 5th to its 95th percentile: nothing inside; outside, "
+        "how far past the nearer end, worst band. Wherever a source stands, the dwelling it "
+        "sounds in is that one; the limits are those of the reference. Not the shortest and "
+        "the longest: a field of 437 points has a few whose decay is read on its floor "
+        "(1.85 s at 2 kHz in hssd_0076, where the 95th percentile is 0.60 s), and between "
+        "those two everything passes.",
     ),
     "late_spectrum_reference": Limit(
         4.0,
         8.0,
         "dB",
         "The reverberant part's third octaves from 250 Hz to 4 kHz, each less the mean, "
-        "against the validated field's at the nearest lattice point: the room's colour, "
-        "which does not depend on the source's place. Worst band.",
+        "against the validated field's at the nearest lattice point: the room's colour. "
+        "Judged where the pack's source stands within a metre of the field's own, and told "
+        "elsewhere: the late colour moves with the source's place. Worst band.",
     ),
     "tone_click": Limit(
         -50.0,
@@ -174,9 +212,14 @@ LIMITS: dict[str, Limit] = {
         1.0,
         3.0,
         "dB",
-        "The level of a tone between one 10 ms frame and the next but one, where it is "
+        "The level of a band between one 10 ms frame and the next but one, where it is "
         "within 15 dB of its median. 1 dB is the just noticeable step of level; a step of "
-        "3 dB in 20 ms is heard as a switch.",
+        "3 dB in 20 ms is heard as a switch. The band is a comb of tones 100 Hz apart, six "
+        "under the crossover and fifty over it, whose own level is the same in every frame. "
+        "One tone was read before: where anything moves a tone crosses the nulls of its own "
+        "reflections at up to twice the speed over the wavelength, 15 Hz at 2.5 kHz and "
+        "1 m/s, and falls 20 dB and comes back within 100 ms. That is a room, not a switch, "
+        "and no voice is one tone.",
         "max",
     ),
     "zipper": Limit(
@@ -185,7 +228,9 @@ LIMITS: dict[str, Limit] = {
         "dB",
         "Lines 20 Hz apart (the step rate) or 2 Hz apart (the run rate) round a tone, re "
         "the tone. -40 dB is a modulation of 2 per cent, the smallest heard at 20 Hz; "
-        "-26 dB is 10 per cent, a flutter.",
+        "-26 dB is 10 per cent, a flutter. A line no further from the tone than a moving "
+        "source or head shifts a reflection (the tone times their two speeds over the sound "
+        "speed) is such a reflection and is not read.",
         "max",
     ),
     "doppler": Limit(
@@ -209,7 +254,10 @@ LIMITS: dict[str, Limit] = {
         "dB",
         "The source's level at the listener less the clip's own level at 1 m, the gains "
         "and the distance: the convention's free field. Facing the listener and in a "
-        "room a source gains up to 6 dB; beyond 12 dB either way the scale is wrong.",
+        "room a source gains up to 6 dB; beyond 12 dB either way the scale is wrong. Past "
+        "2.5 m the room's own field is the louder (a furnished room's critical distance is "
+        "under a metre: at 5 m the reverberant level stands 10 to 17 dB over the direct "
+        "sound's), so there only a level under the free field is judged.",
     ),
     "binaural_peak": Limit(
         -3.0,
@@ -243,7 +291,19 @@ LIMITS: dict[str, Limit] = {
         -20.0,
         "dB",
         "The dry signal's first and last sample of an interval re the interval's rms: a "
-        "source that starts or stops away from zero is a click on 64 channels.",
+        "source that starts or stops away from zero is a click on 64 channels. An end "
+        "another interval starts on is not an edge but a join.",
+        "max",
+    ),
+    "interval_join": Limit(
+        6.5,
+        8.0,
+        "sigma",
+        "Where an interval ends on the sample the next starts on (a clip that loops, a "
+        "playlist) nothing is faded: the step from the one's last sample to the other's "
+        "first, over the rms of the steps within 10 ms either side. A clip made to loop "
+        "steps there as it does anywhere, about once; the statistic and the limits are "
+        "those of the click in noise.",
         "max",
     ),
 }
@@ -303,6 +363,11 @@ def said(test: str, source: str, status: str, note: str, **detail: Any) -> Resul
     threshold = str(detail.pop("threshold", ""))
     reason = str(detail.pop("reason", ""))
     return Result(test, source, status, value, unit, threshold, reason, note, detail)
+
+
+def _capped(status: str, cap: str) -> str:
+    """``status``, or ``cap`` where it is worse than a result may be called."""
+    return cap if _RANK[status] > _RANK[cap] else status
 
 
 def worst(results: Iterable[Result]) -> str:
@@ -480,6 +545,50 @@ def _band_mean(spectrum: np.ndarray, freqs: np.ndarray, low: float, high: float)
     return float(np.sqrt(np.mean(np.abs(spectrum[inside]) ** 2)))
 
 
+def _sees(source: Source, steps: Iterable[int]) -> np.ndarray:
+    """Per step, whether the pack gives the listener a direct path to ``source``."""
+    early = source.early
+    return np.array(
+        [bool(np.any(np.asarray(early.kind[early.rows(int(k))]) == KIND_DIRECT)) for k in steps],
+        dtype=bool,
+    )
+
+
+def _reference_source_m(reference: Mapping[str, Any] | None, mouth: np.ndarray) -> float | None:
+    """How far ``mouth`` is from the validated field's own source; ``None`` where it says none."""
+    if reference is None or reference.get("source_position") is None:
+        return None
+    return float(np.linalg.norm(np.asarray(reference["source_position"], dtype=float) - mouth))
+
+
+def _field_range(reference: Mapping[str, Any], rate: float) -> tuple[np.ndarray, np.ndarray]:
+    """T20 per octave of the bank over the validated field's points: 5th and 95th percentiles.
+
+    Read as a probe's is, from 50 ms after the first arrival. Kept in the
+    reference once made: a point is a transform, and a field holds hundreds.
+    """
+    held = reference.get("t20_range")
+    if held is None:
+        times = []
+        for index in range(int(np.asarray(reference["positions"]).shape[0])):
+            response = np.asarray(reference["response"](index), dtype=float)
+            if not np.any(response):
+                continue
+            arrival = measure.envelope_arrival(response)
+            times.append(measure.decay_times_s(response, rate, arrival + int(0.05 * rate))[0])
+        table = np.array(times, dtype=float)
+        some = np.any(np.isfinite(table), axis=0) if table.size else np.zeros(0, dtype=bool)
+        low = np.full(some.size, np.nan)
+        high = np.full(some.size, np.nan)
+        if table.size:
+            low[some] = np.nanpercentile(table[:, some], 5.0, axis=0)
+            high[some] = np.nanpercentile(table[:, some], 95.0, axis=0)
+        held = (low, high)
+        if isinstance(reference, dict):
+            reference["t20_range"] = held
+    return np.asarray(held[0]), np.asarray(held[1])
+
+
 def _reference_at(
     reference: Mapping[str, Any] | None, pack: ScenePack, head: np.ndarray
 ) -> tuple[np.ndarray, float, str] | None:
@@ -550,16 +659,59 @@ def probe_source(
             lead_ms=pack.mirror.lead_s * 1e3,
         )
     )
-    if "low" in parts:
-        low_arrival = measure.envelope_arrival(parts["low"][0])
+    low_arrival = -1
+    if "low" in parts and direct:
+        # Each band's direct sound where the pack puts it; the band's own first arrival
+        # where it holds no peak there, so that a band on another clock is still read.
+        reach = int(ALIGN_SEARCH_S * rate)
+        low_arrival, low_share = measure.arrival_near(parts["low"][0], expected, reach)
+        high_arrival, _ = measure.arrival_near(parts["early"][0], expected, reach)
+        there = low_arrival >= 0
+        if not there:
+            low_arrival = measure.envelope_arrival(parts["low"][0])
+        if high_arrival < 0:
+            high_arrival = arrival
         results.append(
             judged(
                 "band_alignment",
                 name,
-                (low_arrival - arrival) / rate * 1e3,
-                note="the band under the crossover against the band over it, first arrival",
+                (low_arrival - high_arrival) / rate * 1e3,
+                note="the direct sound under the crossover against the direct sound over it, "
+                + (
+                    "each within 3 ms of the straight line's time"
+                    if there
+                    else "the band under it having no peak within 3 ms of the straight line's "
+                    "time: its first arrival against the band's largest"
+                ),
                 low_ms=(low_arrival - (sample - lo)) / rate * 1e3,
-                high_ms=(arrival - (sample - lo)) / rate * 1e3,
+                high_ms=(high_arrival - (sample - lo)) / rate * 1e3,
+                low_direct_over_its_largest=low_share,
+                first_arrival_of_the_low_band_ms=(
+                    measure.envelope_arrival(parts["low"][0]) - (sample - lo)
+                )
+                / rate
+                * 1e3,
+            )
+        )
+    elif "low" in parts:
+        results.append(
+            said(
+                "band_alignment",
+                name,
+                INFO,
+                "no direct path at this step: the mirror's first path is a bend round an edge "
+                "and the band under the crossover is a wave through the openings, so the two "
+                "have no arrival in common to align; what comes before the straight line's "
+                "time is judged (pre_arrival_energy)",
+                unit="ms",
+                threshold=LIMITS["band_alignment"].text(),
+                reason=LIMITS["band_alignment"].reason,
+                first_arrival_of_the_low_band_ms=(
+                    measure.envelope_arrival(parts["low"][0]) - (sample - lo)
+                )
+                / rate
+                * 1e3,
+                first_path_ms=(expected - (sample - lo)) / rate * 1e3,
             )
         )
 
@@ -645,9 +797,13 @@ def probe_source(
         )
     )
     if decoder is not None:
-        results.extend(_ears(name, _window(full, a, b), geometric, decoder, pack, sample))
+        results.extend(
+            _ears(name, _window(full, a, b), geometric, decoder, pack, sample, cap=cap, note=seen)
+        )
 
-    before = max(arrival - int(0.001 * rate), 0)
+    # Nothing travels faster than the straight line, whatever stands in it.
+    straight = (sample - lo) + (pack.mirror.lead_s + distance / h.sound_speed_m_s) * rate
+    before = max(int(straight - 0.001 * rate), 0)
     total = float(np.sum(w * w))
     shares: dict[str, Any] = {
         f"{part}_db": float(measure.db(np.sum(x[0][:before] ** 2) / total, power=True))
@@ -658,6 +814,8 @@ def probe_source(
             "pre_arrival_energy",
             name,
             float(measure.db(np.sum(w[:before] ** 2) / total, power=True)),
+            note="before the straight line's time less 1 ms",
+            straight_ms=(straight - (sample - lo)) / rate * 1e3,
             **shares,
         )
     )
@@ -744,6 +902,14 @@ def probe_source(
     found = _reference_at(settings.reference, pack, head)
     if found is not None:
         response, off, label = found
+        apart = _reference_source_m(settings.reference, mouth)
+        elsewhere = apart is not None and apart > REFERENCE_SOURCE_M
+        judge = INFO if elsewhere else FAIL
+        label = f"{label}, lattice point {off:.2f} m from the head" + (
+            f"; the field's source is {apart:.1f} m from this one, so this is told and not judged"
+            if elsewhere
+            else ""
+        )
         ref_arrival = measure.envelope_arrival(response)
         ref20, ref30 = measure.decay_times_s(response, rate, ref_arrival + int(0.05 * rate))
         both = middle & np.isfinite(t20) & np.isfinite(ref20)
@@ -754,7 +920,9 @@ def probe_source(
                     "reverberation_reference",
                     name,
                     float(departure[int(np.argmax(np.abs(departure)))]),
-                    note=f"{label}, lattice point {off:.2f} m from the head",
+                    note=label,
+                    cap=judge,
+                    source_from_the_reference_s_m=apart,
                     bands_hz=bank[both],
                     t20_s=t20[both],
                     reference_t20_s=ref20[both],
@@ -772,14 +940,39 @@ def probe_source(
                 "late_spectrum_reference",
                 name,
                 float(shape[int(np.argmax(np.abs(shape)))]),
-                note=f"{label}, lattice point {off:.2f} m from the head; under the crossover "
+                note=f"{label}; under the crossover "
                 f"(250 to 630 Hz) against over it (1.6 to 4 kHz) the late part is "
                 f"{balance:+.1f} dB from the reference's",
+                cap=judge,
                 third_octaves_hz=centres[band],
                 difference_db=shape,
                 low_over_high_db=balance,
             )
         )
+        assert settings.reference is not None
+        least, most = _field_range(settings.reference, rate)
+        ranged = middle & np.isfinite(t20) & np.isfinite(least) & np.isfinite(most)
+        if np.any(ranged):
+            past = np.where(
+                t20[ranged] > most[ranged],
+                100.0 * (t20[ranged] / most[ranged] - 1.0),
+                np.where(
+                    t20[ranged] < least[ranged], 100.0 * (t20[ranged] / least[ranged] - 1.0), 0.0
+                ),
+            )
+            results.append(
+                judged(
+                    "reverberation_range",
+                    name,
+                    float(past[int(np.argmax(np.abs(past)))]),
+                    note="against the 5th and the 95th percentile of T20 over the validated "
+                    f"field's {int(np.asarray(settings.reference['positions']).shape[0])} points",
+                    bands_hz=bank[ranged],
+                    t20_s=t20[ranged],
+                    field_least_s=least[ranged],
+                    field_most_s=most[ranged],
+                )
+            )
         plots["reference_late_db"] = ref_late
         plots["reference_response"] = response
         plots["reference_arrival"] = ref_arrival
@@ -847,8 +1040,17 @@ def _ears(
     decoder: BinauralDecoder,
     pack: ScenePack,
     sample: int,
+    *,
+    cap: str = FAIL,
+    note: str = "",
 ) -> list[Result]:
-    """Left and right, front and back, through the page's decoder, on the direct sound alone."""
+    """Left and right, front and back, through the page's decoder, on the direct sound alone.
+
+    ``cap`` is the worst either may be called, and ``note`` why: where the
+    listener does not see the source the window holds several bends round
+    edges and no one direction, and the two warn as ``direction`` does.
+    """
+    told = f"; {note}" if note else ""
     rate = pack.header.sample_rate_hz
     page = PageDecoder(decoder)
     azimuth = float(np.degrees(np.arctan2(geometric[1], geometric[0])))
@@ -881,9 +1083,9 @@ def _ears(
         said(
             "binaural_left_right",
             name,
-            PASS if signs and sized else WARN if signs else FAIL,
+            _capped(PASS if signs and sized else WARN if signs else FAIL, cap),
             "the head turned so that the source is 60 degrees to its left, then to its right: "
-            "the near ear leads and is the louder",
+            "the near ear leads and is the louder" + told,
             value=float(margin),
             unit="dB",
             threshold="the near ear leads by 0.25 to 0.9 ms and is louder by 3 dB at least",
@@ -916,10 +1118,18 @@ def _ears(
     if apart < 1.5:
         status, note = SKIP, "this head's front and back differ by under 1.5 dB: it cannot tell"
     else:
-        status = (
-            PASS if to_front < to_back and to_front <= 2.0 else WARN if to_front < to_back else FAIL
+        status = _capped(
+            PASS
+            if to_front < to_back and to_front <= 2.0
+            else WARN
+            if to_front < to_back
+            else FAIL,
+            cap,
         )
-        note = "the source put 30 degrees to the front left: the ears read the front, not its image"
+        note = (
+            "the source put 30 degrees to the front left: the ears read the front, not its image"
+            + told
+        )
     results.append(
         said(
             "binaural_front_back",
@@ -1057,9 +1267,17 @@ def continuity_of(
     settings.say(f"{name}: tones over {span}")
     toned = rendered(np.asarray(tones), True)
     trim = 1200
+    # How far a path may shift a tone: the source's and the head's speeds, one after the other.
+    inside = slice(start + lead, start + lead + length + 1)
+    speeds = [
+        float(np.linalg.norm(np.diff(np.asarray(track, dtype=float)[inside], axis=0), axis=1).max())
+        / h.step_s
+        for track in (source.position, pack.listener.position)
+    ]
+    spread = sum(speeds) / h.sound_speed_m_s
     labels = ["W", "X", "Y", "Z", "left ear", "right ear"][: toned.shape[0]]
     worst_click: tuple[float, str, int, float] = (float("-inf"), "", 0, 0.0)
-    steps_db: tuple[float, int, float] = (0.0, 0, 0.0)
+    one_tone: dict[str, float] = {}
     lines: dict[str, Any] = {}
     zip_worst = (float("-inf"), "")
     carriers = {}
@@ -1081,11 +1299,9 @@ def continuity_of(
             size = float(measure.db(rest[at] / amplitude))
             if size > worst_click[0]:
                 worst_click = (size, label, a0 + trim + at + 1, tone)
-        step_db, at = measure.level_step_db(halves[0], rate)
-        if step_db > steps_db[0]:
-            steps_db = (step_db, a0 + trim + at, tone)
+        one_tone[f"{tone:g} Hz"] = measure.level_step_db(halves[0], rate)[0]
         for spacing in (1.0 / h.step_s, 1.0 / (10.0 * h.step_s)):
-            bands = measure.sidebands_db(halves[0], rate, tone, spacing)
+            bands = measure.sidebands_db(halves[0], rate, tone, spacing, beyond_hz=spread * tone)
             lines[f"{tone:g} Hz, lines {spacing:g} Hz apart"] = asdict(bands)
             # A line counts when it stands 6 dB over what lies between the lines.
             if bands.prominence_db >= 6.0 and bands.level_db > zip_worst[0]:
@@ -1105,21 +1321,43 @@ def continuity_of(
             )[0],
         )
     )
+    # A band's level, on the two combs: each tone fades on its own and their sum does not.
+    settings.say(f"{name}: combs over {span}")
+    combs = fade * sum(
+        measure.comb(count, rate, tones_hz, seed=2 + index)
+        for index, tones_hz in enumerate(COMBS_HZ)
+    )
+    combed = rendered(np.asarray(combs), False)[0]
+    steps_db: tuple[float, int, str] = (0.0, 0, "")
+    for index, tones_hz in enumerate(COMBS_HZ):
+        half = measure.band_split(combed, rate, 1000.0)[index][trim:-trim]
+        step_db, at = measure.level_step_db(half, rate, envelope=False)
+        if step_db > steps_db[0] or not steps_db[2]:
+            steps_db = (step_db, a0 + trim + at, f"{tones_hz[0]:g} to {tones_hz[-1]:g} Hz")
     results.append(
         judged(
             "level_step",
             name,
             steps_db[0],
-            note=f"the {steps_db[2]:g} Hz tone, " + _where(pack, what, steps_db[1]),
+            note=f"the comb from {steps_db[2]}, " + _where(pack, what, steps_db[1]),
+            one_tone_alone_db=one_tone,
         )
+    )
+    moved = (
+        f"; lines within {spread * TONES_HZ[0]:.1f} Hz of the {TONES_HZ[0]:g} Hz tone and "
+        f"{spread * TONES_HZ[1]:.1f} Hz of the {TONES_HZ[1]:g} Hz tone are the movement's own "
+        "and are not read"
+        if spread > 0.0
+        else ""
     )
     results.append(
         judged(
             "zipper",
             name,
             zip_worst[0],
-            note=zip_worst[1] or "no line stands 6 dB over what lies between the lines",
+            note=(zip_worst[1] or "no line stands 6 dB over what lies between the lines") + moved,
             lines=lines,
+            doppler_spread_per_hz=spread,
         )
     )
     moving = _moving(pack, source, a0 + trim, s1 - trim)
@@ -1150,7 +1388,7 @@ def continuity_of(
 
 
 def _moving(pack: ScenePack, source: Source, a: int, b: int) -> dict[str, np.ndarray]:
-    """The distance and the radial speed at every 100 ms frame of ``[a, b)``."""
+    """The distance, the radial speed and whether it is seen, per 100 ms frame of ``[a, b)``."""
     h = pack.header
     frame = int(0.1 * h.sample_rate_hz)
     centres = a + frame // 2 + frame * np.arange((b - a) // frame)
@@ -1158,9 +1396,11 @@ def _moving(pack: ScenePack, source: Source, a: int, b: int) -> dict[str, np.nda
     distance = np.linalg.norm(gap, axis=1)
     at = centres / h.step_samples
     speed = np.gradient(distance, h.step_s)
+    nearest = np.clip(np.round(at).astype(int), 0, h.steps - 1)
     return {
         "distance_m": np.interp(at, np.arange(h.steps), distance),
         "speed_m_s": np.interp(at, np.arange(h.steps), speed),
+        "seen": _sees(source, nearest),
     }
 
 
@@ -1171,6 +1411,8 @@ def _doppler(
     if speed.size == 0 or float(np.max(np.abs(speed))) < 0.2:
         return [said("doppler", name, SKIP, "the distance changes by under 0.2 m/s")]
     h = pack.header
+    seen = np.asarray(moving.get("seen", np.ones(speed.size, dtype=bool)), dtype=bool)
+    hidden = not bool(np.all(seen))
     heard = measure.instantaneous_hz(tone, h.sample_rate_hz)[: speed.size] - TONES_HZ[1]
     # Quasi-static: the delay is the distance now, so the tone is at f (1 - d'/c).
     wanted = -TONES_HZ[1] * speed[: heard.size] / h.sound_speed_m_s
@@ -1182,8 +1424,11 @@ def _doppler(
             "doppler",
             name,
             middle,
-            cap=WARN if h.has_tail or h.has_low else FAIL,
-            note="the median frame; in a room the reflections carry other shifts, so this "
+            cap=INFO if hidden else WARN if h.has_tail or h.has_low else FAIL,
+            note="the median frame; the listener does not see the source throughout, so the "
+            "tone is its reflections', each with its own shift, and this is told only"
+            if hidden
+            else "the median frame; in a room the reflections carry other shifts, so this "
             "warns and does not fail"
             if h.has_tail or h.has_low
             else "the median frame",
@@ -1198,11 +1443,25 @@ def _doppler(
 def _distance_law(
     name: str, noise: np.ndarray, moving: dict[str, np.ndarray], rate: float
 ) -> list[Result]:
-    distance = moving["distance_m"]
+    levels = measure.frame_levels_db(noise, int(0.1 * rate))[: moving["distance_m"].size]
+    # Where the direct sound leads, which is where a law of distance holds: a source
+    # that goes behind a wall falls by the wall, at any distance.
+    seen = np.asarray(
+        moving.get("seen", np.ones(moving["distance_m"].size, dtype=bool)), dtype=bool
+    )[: levels.size]
+    distance = moving["distance_m"][: levels.size][seen]
+    levels = levels[seen]
     if distance.size < 6 or float(distance.max() / max(distance.min(), 1e-6)) < 1.25:
-        return [said("level_distance", name, SKIP, "the distance changes by under a quarter")]
-    levels = measure.frame_levels_db(noise, int(0.1 * rate))[: distance.size]
-    slope, _ = np.polyfit(np.log10(distance[: levels.size]), levels, 1)
+        return [
+            said(
+                "level_distance",
+                name,
+                SKIP,
+                "the distance changes by under a quarter"
+                + ("" if bool(np.all(seen)) else " where the listener sees the source"),
+            )
+        ]
+    slope, _ = np.polyfit(np.log10(distance), levels, 1)
     # A room may flatten the law (a slope between -20 and 0); it may not steepen or invert it.
     excess = float(slope) + 20.0
     value = excess if excess < 0.0 else max(float(slope), 0.0)
@@ -1212,8 +1471,10 @@ def _distance_law(
             name,
             value,
             note=f"the level falls {-float(slope):.1f} dB per decade of distance over "
-            f"{distance.min():.2f} to {distance.max():.2f} m",
+            f"{distance.min():.2f} to {distance.max():.2f} m"
+            + ("" if bool(np.all(seen)) else ", read where the listener sees the source"),
             slope_db_per_decade=float(slope),
+            frames_read=int(distance.size),
         )
     ]
 
@@ -1287,7 +1548,7 @@ def mix_of(
             continue
         results.extend(_level(pack, source, feed, w, mix - w, lo, hi, told))
         results.extend(_quiet(pack, source, feed, w, lo, hi))
-        results.extend(_edges(source, feed, rate))
+        results.extend(_edges(source, feed, rate, lo, hi))
     if page is not None:
         peak = float(np.max(np.abs(both))) * settings.page_gain
         results.append(
@@ -1338,6 +1599,9 @@ def _level(
     for a, b in feed.intervals:
         steps[int(a / h.step_s) : int(np.ceil(b / h.step_s)) + 1] = True
     steps &= np.asarray(source.audible, dtype=bool)
+    # The level is read on the window, and so is the distance it is held against.
+    steps[: lo // h.step_samples] = False
+    steps[-(-hi // h.step_samples) + 1 :] = False
     if not np.any(steps):
         return [said("level_at_listener", source.id, SKIP, "active only where the pack is silent")]
     # The distance of the mean intensity, and the delay the level is read after.
@@ -1356,8 +1620,13 @@ def _level(
     free = fed - 20.0 * np.log10(effective)
     fast = measure.frame_levels_db(weighted, int(0.125 * rate)) + measure.FULL_SCALE_SPL_DB
     rest = measure.a_weighted(others, rate)[active]
-    rows = source.early.rows(int(np.flatnonzero(steps)[0]))
-    seen = bool(np.any(np.asarray(source.early.kind[rows]) == KIND_DIRECT))
+    # Seen, when the pack gives a direct path at most of the steps the level is read on.
+    sounding = np.flatnonzero(steps)
+    sees = _sees(source, sounding)
+    seen = bool(np.mean(sees) >= 0.5)
+    spoken = float(np.count_nonzero(_active(feed, 0.0, lo, hi, rate))) / rate
+    brief = voice and spoken < SPEECH_S
+    room = seen and effective > NEAR_M and heard > free
     told[source.id] = {
         "kind": source.kind,
         "distance_m": effective,
@@ -1369,6 +1638,8 @@ def _level(
         "rest_dba": measure.spl_db(rest) if np.any(others) else None,
         "fast_dba": fast,
         "fed": feed.label,
+        "sees_it": seen,
+        "sounds_s": spoken,
     }
     measured = "the active speech level (ITU-T P.56)" if voice else "the level while it sounds"
     results = [
@@ -1376,22 +1647,42 @@ def _level(
             "level_at_listener",
             source.id,
             heard - free,
-            cap=FAIL if seen else INFO,
+            cap=FAIL if seen and not brief and not room else INFO,
             note=f"{measured}: {heard:.1f} dB SPL ({heard_a:.1f} dBA) at {effective:.2f} m; fed "
             f"{fed:.1f} dB SPL at 1 m, so {free:.1f} dB in a free field"
-            + ("" if seen else "; the listener does not see it, so this is told and not judged"),
+            + ("" if seen else "; the listener does not see it, so this is told and not judged")
+            + (
+                f"; it speaks for {spoken:.1f} s of the window, too little for an active level, "
+                "so this is told and not judged"
+                if brief
+                else ""
+            )
+            + (
+                f"; past {NEAR_M:g} m the room's field is the louder, so a level over the free "
+                "field's is told and not judged"
+                if room and not brief
+                else ""
+            ),
             **{k: v for k, v in told[source.id].items() if k != "fast_dba"},
         )
     ]
     hearable = PASS if 20.0 <= heard_a <= 85.0 else WARN if 10.0 <= heard_a <= 85.0 else FAIL
     if voice and "near" in source.kind and not 45.0 <= heard_a <= 80.0:
         hearable = FAIL
+    if brief:
+        hearable = INFO
     results.append(
         said(
             "audibility",
             source.id,
             hearable,
-            f"{heard_a:.1f} dBA while it sounds, {float(fast.max()):.1f} dBA at most (125 ms)",
+            f"{heard_a:.1f} dBA while it sounds, {float(fast.max()):.1f} dBA at most (125 ms)"
+            + (
+                f"; it speaks for {spoken:.1f} s of the window, the end or the start of an "
+                f"utterance: an active level wants {SPEECH_S:g} s, so this is told only"
+                if brief
+                else ""
+            ),
             value=heard_a,
             unit="dBA",
             threshold="20 <= x <= 85; warn from 10; a near voice 45 to 80",
@@ -1401,6 +1692,29 @@ def _level(
             "distance.",
         )
     )
+    if voice and "near" in source.kind:
+        behind = sounding[~sees]
+        nearest = float(distance[behind].min()) if behind.size else 0.0
+        results.append(
+            said(
+                "near_voice_seen",
+                source.id,
+                WARN if behind.size else PASS,
+                f"it speaks for {behind.size * h.step_s:.1f} s where the listener does not see it, "
+                f"first at {behind[0] * h.step_s:.2f} s, {nearest:.2f} m away at the nearest"
+                if behind.size
+                else "the listener sees it wherever it speaks",
+                value=float(behind.size * h.step_s),
+                unit="s",
+                threshold="0 s; warns",
+                reason="A near voice is someone the listener is talking with. Where the pack gives "
+                "it no direct path a wall stands between the two, and what is heard is the next "
+                "room's murmur: the first whole scene has one 1.3 m away at 30 dBA, 24 dB under "
+                "itself. That is the recipe's doing and no fault of the sound, so it warns.",
+                first_s=float(behind[0] * h.step_s) if behind.size else None,
+                nearest_m=nearest,
+            )
+        )
     if voice and np.any(others):
         ratio = heard_a - measure.spl_db(rest)
         alone = measure.spl_db(rest) < -20.0
@@ -1448,28 +1762,70 @@ def _quiet(
     ]
 
 
-def _edges(source: Source, feed: Feed, rate: float) -> list[Result]:
-    """How far from zero the dry signal starts and stops, interval by interval."""
-    worst_db, where = float("-inf"), ""
-    for a, b in feed.intervals:
-        first, last = int(round(a * rate)), int(round(b * rate))
+def _edges(source: Source, feed: Feed, rate: float, lo: int, hi: int) -> list[Result]:
+    """How the dry signal starts and stops, and how its pieces meet, in ``[lo, hi)``.
+
+    An interval that starts on the sample another ends on is one signal in
+    pieces: a clip that loops, a playlist. The engine fades neither side of
+    such a join (:meth:`reverberate.render.dry.DryTrack.from_recipe`), so it
+    is not held to start from zero but to go on: the step across it against
+    the steps round it. Every other start and end is an edge and is held to
+    zero.
+    """
+    spans = [(int(round(a * rate)), int(round(b * rate)), a, b) for a, b in feed.intervals]
+    starts = {first for first, _, _, _ in spans}
+    ends = {last for _, last, _, _ in spans}
+    worst_db, where, edges = float("-inf"), "", 0
+    worst_join, at_join, joins = 0.0, "", 0
+    reach = int(0.02 * rate)
+    for first, last, a, b in spans:
+        if last <= lo or first >= hi or last <= first:
+            continue
         dry = feed.track.read(first, last)
         rms = float(np.sqrt(np.mean(dry * dry)))
+        if first in ends:
+            joins += 1
+            step = measure.join_step(feed.track.read(first - reach, first + reach), reach, rate)
+            if step > worst_join or not at_join:
+                worst_join, at_join = step, f"where the interval {a:.3f} to {b:.3f} s starts"
         if rms <= 0.0:
             continue
-        for label, sample in (("start", dry[0]), ("end", dry[-1])):
+        for label, sample, joined in (
+            ("start", dry[0], first in ends),
+            ("end", dry[-1], last in starts),
+        ):
+            if joined:
+                continue
+            edges += 1
             size = float(measure.db(abs(float(sample)) / rms)) if sample != 0.0 else float("-inf")
-            if size > worst_db:
+            if size > worst_db or not where:
                 worst_db, where = size, f"the {label} of the interval {a:.3f} to {b:.3f} s"
-    return [
-        judged(
-            "interval_edge",
-            source.id,
-            worst_db,
-            note=(where or "every interval starts and ends on zero") + f"; fed: {feed.label}",
-            intervals=len(feed.intervals),
+    results = []
+    if edges:
+        results.append(
+            judged(
+                "interval_edge",
+                source.id,
+                worst_db,
+                note=where + f"; fed: {feed.label}",
+                edges=edges,
+            )
         )
-    ]
+    if joins:
+        results.append(
+            judged(
+                "interval_join",
+                source.id,
+                worst_join,
+                note=f"{joins} intervals start on the sample the one before ends on; the largest "
+                f"step is {at_join}; fed: {feed.label}",
+                joins=joins,
+            )
+        )
+    if not results:
+        note = "no interval starts or ends in the window"
+        results.append(said("interval_edge", source.id, SKIP, note))
+    return results
 
 
 def reference_field(path: Path) -> dict[str, Any] | None:
@@ -1484,5 +1840,10 @@ def reference_field(path: Path) -> dict[str, Any] | None:
         "scene_id": str(handle.attrs.get("scene_id", "")),
         "positions": np.asarray(handle["positions"]),
         "response": lambda index: np.asarray(handle["ir"][index, 0, :], dtype=float),
+        "source_position": (
+            np.asarray(handle.attrs["source_position"], dtype=float)
+            if "source_position" in handle.attrs
+            else None
+        ),
         "record": json.loads(str(handle.attrs.get("provenance_json", "{}"))).get("kind", ""),
     }

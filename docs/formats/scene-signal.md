@@ -165,39 +165,44 @@ Doppler shift).
 Three families of tests. **Impulse probes**: the dry signal is one sample,
 at one instant a source at rest and three a source that moves, so what is
 rendered is the scene's response. **Continuity**: two steady tones (400 Hz
-and 2.5 kHz, one each side of the crossover), then pink noise, over the
+and 2.5 kHz, one each side of the crossover), then two combs of tones
+100 Hz apart (200 to 700 Hz and 1.5 to 6.4 kHz), then pink noise, over the
 stretch of the source's audible time in which the most changes in the pack.
 **The mix**: the recipe's clips, over the window.
 
 | test | what is read | passes to | warns to |
 | --- | --- | --- | --- |
 | `arrival_time` | first arrival over the crossover against `lead_s` plus the distance over the sound speed | 0.1 ms | 0.5 ms |
-| `band_alignment` | first arrival under the crossover against over it | 0.5 ms | 1 ms |
+| `band_alignment` | the direct sound under the crossover against over it, each the first peak within 3 ms of the straight line's time; told where the listener does not see the source | 0.5 ms | 1 ms |
 | `direct_level` | the direct sound, 2 to 8 kHz, against the convention of `clip-library.md`: the source's gain and pattern over the distance | 3 dB | 6 dB |
 | `direct_band_balance` | the direct sound under the crossover against over it, each re the convention | 3 dB | 6 dB |
 | `direction` | the intensity vector of the direct sound against the geometry | 3 degrees | 10 degrees |
 | `binaural_left_right` | the head turned to put the source 60 degrees left, then right: which ear leads, which is louder | near ear leads by 0.25 to 0.9 ms and by 3 dB | signs right |
-| `binaural_front_back` | the ears' level difference per third octave, source 30 degrees front left, against the decoder's own front and back | nearer the front, within 2 dB | nearer the front |
-| `pre_arrival_energy` | energy more than 1 ms before the first arrival, over the whole | -40 dB | -30 dB |
+| `binaural_front_back` | the ears' level difference per third octave, source 30 degrees front left, against the decoder's own front and back; both ears' tests warn at the worst where the source is not seen | nearer the front, within 2 dB | nearer the front |
+| `pre_arrival_energy` | energy more than 1 ms before the straight line from the source could bring anything, over the whole | -40 dB | -30 dB |
 | `late_echo` | where the level per 100 ms rises by 6 dB: what it rises to, re the loudest | -60 dB | -40 dB |
 | `seam_third_octaves` | third octaves 630 Hz to 1.6 kHz against the line through 315-500 Hz and 2-3.15 kHz; `:whole` and `:early` (first 50 ms, warns only) | 3 dB | 6 dB |
-| `late_spectrum_reference` | third octaves of the part after 50 ms, 250 Hz to 4 kHz, less their mean, against the validated field's at the nearest lattice point | 4 dB | 8 dB |
-| `reverberation_reference` | T20 per octave after 50 ms, 250 Hz to 4 kHz, against the same | 20 per cent | 35 per cent |
+| `late_spectrum_reference` | third octaves of the part after 50 ms, 250 Hz to 4 kHz, less their mean, against the validated field's at the nearest lattice point; told where the pack's source is more than 1 m from the field's own | 4 dB | 8 dB |
+| `reverberation_reference` | T20 per octave after 50 ms, 250 Hz to 4 kHz, against the same; told likewise | 20 per cent | 35 per cent |
+| `reverberation_range` | T20 per octave against what nine tenths of the validated field's points read (its 5th and 95th percentiles): how far past the nearer end | 20 per cent | 35 per cent |
+| `reverberation_spread` | what the pack's own probes span in T20, the longest over the shortest | told | |
 | `reverberation_plausible` | T20 per octave | 0.15 to 1.0 s | (warns outside) |
 | `c50` | early to late per octave, 500 Hz to 4 kHz, a source seen within 2.5 m | 0 to 40 dB | (warns outside) |
 | `duplicate_arrivals` | rows of one step with one delay, direction and gain under two names | none | fails when the pair passes the direct sound |
 | `tone_click` | what `x[n] - 2 cos(w) x[n-1] + x[n-2]` leaves of each tone, on W, X, Y, Z and the two ears, re the tone | -50 dB | -40 dB |
 | `noise_click` | largest sample difference of the noise over the local rms of the differences | 6.5 | 8 |
-| `level_step` | a tone's level between a 10 ms frame and the next but one | 1 dB | 3 dB |
-| `zipper` | lines 20 Hz and 2 Hz apart round a tone, 6 dB over what lies between | -40 dB | -26 dB |
-| `doppler` | the 2.5 kHz tone's frequency per 100 ms against the radial speed (warns only in a room) | 20 per cent | 50 per cent |
-| `level_distance` | slope of the noise's level against the distance, where it changes by a quarter | -26 to 0 dB a decade | -30 to +10 |
-| `level_at_listener` | active speech level (P.56) of a voice, level while it sounds of a noise, less the clip's at 1 m over the distance | 6 dB | 12 dB |
-| `audibility` | the same, A weighted | 20 to 85 dBA, a near voice 45 to 80 | from 10 dBA |
+| `level_step` | a comb's level between a 10 ms frame and the next but one: a band's, not a tone's, which crosses the nulls of its own reflections where anything moves | 1 dB | 3 dB |
+| `zipper` | lines 20 Hz and 2 Hz apart round a tone, 6 dB over what lies between, further from the tone than the source's and the head's speeds shift a reflection | -40 dB | -26 dB |
+| `doppler` | the 2.5 kHz tone's frequency per 100 ms against the radial speed (warns only in a room; told where the source is not seen throughout) | 20 per cent | 50 per cent |
+| `level_distance` | slope of the noise's level against the distance, where it changes by a quarter and the source is seen | -26 to 0 dB a decade | -30 to +10 |
+| `level_at_listener` | active speech level (P.56) of a voice, level while it sounds of a noise, less the clip's at 1 m over the distance it has in the window; told for a voice with under 3 s of speech, and past 2.5 m for a level over the free field | 6 dB | 12 dB |
+| `audibility` | the same, A weighted; told for a voice with under 3 s of speech | 20 to 85 dBA, a near voice 45 to 80 | from 10 dBA |
+| `near_voice_seen` | how long a near voice speaks where the pack gives it no direct path | 0 s | (warns) |
 | `binaural_peak`, `playback_level` | the two ears' peak at the page's default level | -30 to -3 dB re full scale | -40 to 0 |
 | `dc` | the mean over the rms | -40 dB | -20 dB |
 | `silence` | largest sample where the recipe gives the source nothing, re its peak | -90 dB | -60 dB |
-| `interval_edge` | the dry signal's first and last sample of an interval, re its rms | -40 dB | -20 dB |
+| `interval_edge` | the dry signal's first and last sample of an interval, re its rms, where no other interval meets it | -40 dB | -20 dB |
+| `interval_join` | where an interval starts on the sample another ends on: the step across over the rms of the steps round it | 6.5 | 8 |
 | `speech_to_rest` | a voice over everything else while it speaks, A weighted | told | |
 
 The reasons are in `reverberate.render.check.run.LIMITS` and are printed in

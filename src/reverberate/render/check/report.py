@@ -48,6 +48,7 @@ SCHEMA = "reverberate.sound-check"
 ORDER = (
     "impulse",
     "audibility",
+    "near_voice_seen",
     "level_at_listener",
     "direct_level",
     "direct_band_balance",
@@ -60,6 +61,7 @@ ORDER = (
     "noise_click",
     "level_step",
     "interval_edge",
+    "interval_join",
     "zipper",
     "binaural_left_right",
     "binaural_front_back",
@@ -68,7 +70,9 @@ ORDER = (
     "seam_third_octaves",
     "late_spectrum_reference",
     "reverberation_reference",
+    "reverberation_range",
     "reverberation_plausible",
+    "reverberation_spread",
     "c50",
     "arrival_time",
     "doppler",
@@ -137,6 +141,9 @@ def check_pack(
             results.extend(made)
             if drawn:
                 plots["continuity"].append(drawn)
+    spread = _spread(plots["impulse"])
+    if spread is not None:
+        results.append(spread)
     mix: dict[str, Any] = {}
     if "mix" in families:
         made, mix = mix_of(
@@ -158,6 +165,49 @@ def check_pack(
         "sources": [s.id for s in chosen],
         "decoder": None if decoder is None else decoder.record(),
     }
+
+
+def _spread(probes: list[dict[str, Any]]) -> Result | None:
+    """The dwelling's own range: T20 per octave over every probe of the pack, told.
+
+    A source decays as the rooms between it and the head do, so the probes
+    of one pack do not agree and are not held to; what they span is what a
+    probe far from all the others is read against by whoever reads the
+    report.
+    """
+    held = [probe for probe in probes if "t20_s" in probe and "bank_hz" in probe]
+    if len(held) < 2:
+        return None
+    bank = np.asarray(held[0]["bank_hz"])
+    table = np.array([np.asarray(probe["t20_s"], dtype=float) for probe in held])
+    middle = (bank >= 250) & (bank <= 4000) & np.any(np.isfinite(table), axis=0)
+    if not np.any(middle):
+        return None
+    least = np.nanmin(table[:, middle], axis=0)
+    most = np.nanmax(table[:, middle], axis=0)
+    centre = np.nanmedian(table[:, middle], axis=0)
+    told = ", ".join(
+        f"{int(f)} Hz {a:.2f} to {b:.2f} s (median {c:.2f})"
+        for f, a, b, c in zip(bank[middle], least, most, centre, strict=True)
+    )
+    return Result(
+        "reverberation_spread",
+        "every probe",
+        INFO,
+        float(100.0 * np.max(most / least - 1.0)),
+        "per cent",
+        "told, not judged",
+        "What the sources of one dwelling span between them, the longest T20 over the "
+        "shortest in the octave where they differ the most: a source's decay is its rooms'.",
+        f"T20 over the {len(held)} probes: {told}",
+        {
+            "bands_hz": bank[middle],
+            "least_s": least,
+            "most_s": most,
+            "median_s": centre,
+            "probes": [str(probe.get("name", "")) for probe in held],
+        },
+    )
 
 
 def _key(result: Result) -> tuple[int, int, str, str]:
