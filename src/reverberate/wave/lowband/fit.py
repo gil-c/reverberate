@@ -62,7 +62,9 @@ def level_scale(scheme: Scheme, fmax_hz: float, ts: float, ppw: float) -> float:
     goes as the time step. On the Cartesian grid at 10.5 points per
     wavelength that is ``fmax / 8000``, :mod:`reverberate.accel.pairs`'s own
     figure, and is given as such; any other grid is given the ratio of the
-    steps, of which that figure is the special case.
+    steps, of which that figure is the special case. Either way the cache's
+    contract holds: on the geometric clock, a unit source in free air reads
+    :data:`reverberate.spatial.lowband.FIELD_UNIT_AT_1M` over its distance.
     """
     if not scheme.fcc and ppw == CARTESIAN.ppw:
         return float(fmax_hz / REFERENCE_FMAX_HZ)
@@ -341,8 +343,11 @@ class CellEncoder:
             return 4
         self.xp.get_default_memory_pool().free_all_blocks()
         free, _ = self.xp.cuda.Device().mem_info
-        # Two copies of the records in double precision at the widest point.
-        return int(max(1, min(32, 0.5 * float(free) // (2.0 * 8.0 * nodes * steps))))
+        # Two copies of the records in double precision at the widest point, and the
+        # fit's spectra after them: three complex arrays of a cell's transform.
+        filters = 2.0 * 8.0 * nodes * steps
+        fit = 3.0 * 16.0 * nodes * (self.samples + 1)
+        return int(max(1, min(32, 0.5 * float(free) // (filters + fit))))
 
     def cells(self, records: Any, offsets: list[np.ndarray]) -> list[np.ndarray]:
         """Consecutive cells' records, ``[node, step]``, to each cell's response in the cache form.
@@ -366,10 +371,13 @@ class CellEncoder:
             cells = last - index
             operator = self.operator_for(offsets[index])
             block = self.signals(records[row : row + cells * count])
-            encoded = operator.apply_many(block.reshape(cells, count, self.samples), xp)
+            if xp is not np:
+                xp.get_default_memory_pool().free_all_blocks()
+            for first in range(cells):
+                # Fitted a cell at a time: the product is small, and its spectra are not.
+                encoded = operator.apply(block[first * count : (first + 1) * count], xp)
+                out.append(np.asarray(to_numpy(encoded * self.scale), dtype=np.float32))
             del block
-            held = np.asarray(to_numpy(encoded * self.scale), dtype=np.float32)
-            out.extend(held[i] for i in range(cells))
             row += cells * count
             index = last
         return out

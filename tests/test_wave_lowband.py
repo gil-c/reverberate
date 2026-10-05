@@ -23,6 +23,7 @@ from reverberate.accel import dsp
 from reverberate.accel.encode import encode_point, prepare_band
 from reverberate.accel.pairs import KIND, PairsCampaign, encoder_record
 from reverberate.spatial.encode import EncoderSettings, numerical_wavenumber
+from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
 from reverberate.trace.engines import BatchedPairs
 from reverberate.wave.comms import Grid, engine_indices, interp_weights, nearest_node
 from reverberate.wave.lowband.box import TEST_BRANCHES, box_arrays, write_entry
@@ -582,6 +583,12 @@ class TestTheCampaign:
         # Off the bundle's grid the scale is the ratio of the steps, the same figure.
         assert level_scale(CARTESIAN, BAND_FMAX, ts, 10.4) == pytest.approx(BAND_FMAX / 8000.0)
         assert level_scale(FCC, BAND_FMAX, 2 * ts, 7.7) == pytest.approx(BAND_FMAX / 16000.0)
+        # The cache's contract: a unit source's impulse, one step of its grid heard as
+        # 1 / (4 pi d), reads FIELD_UNIT_AT_1M at 48 kHz on any grid. The monopole test
+        # above is what shows a step is that impulse on both grids.
+        for scheme, step in ((CARTESIAN, ts), (FCC, 2.3 * ts), (CARTESIAN, 1.4 * ts)):
+            unit = level_scale(scheme, BAND_FMAX, step, 9.0) * step * 48000.0 / (4.0 * np.pi)
+            assert unit == pytest.approx(FIELD_UNIT_AT_1M, rel=2e-3)
 
     def test_batches_are_packed_by_the_card_s_memory(self, machine: dict[str, Path]) -> None:
         campaign = a_campaign(machine)
