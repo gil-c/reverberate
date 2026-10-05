@@ -460,3 +460,26 @@ Fifteen of those minutes are assumed, not measured: the provisioning, the
 push and the grid. The scene's 3.1 h are 2.2 h of solves, 19 min of rays, 10
 of levelling and 11 of transfer. No step of the first recipe needs the
 0.10 m rule: its nearest mouth passes 0.66 m from the head.
+
+### The low band on the batched solver
+
+`reverberate.wave.lowband` solves the pairs many source positions a launch,
+with the receivers and the fit on the card
+(`docs/open-questions/low-band-solver.md`). **It has not run on a card.** The
+machine's command takes it by flags, which a rental passes with
+`--campaign-args`:
+
+```
+python -m reverberate.trace rent ... --campaign-args "--low-engine lowband"
+python -m reverberate.trace rent ... \
+    --campaign-args "--low-engine lowband --low-scheme fcc --low-ppw 7.7"
+```
+
+Without `--low-scheme` and `--low-ppw` the grid is the bundle's and the
+pairs are the present engine's to rounding, under another key: a pair's key
+names its solver. Another grid is voxelised on the machine under its own
+key; the face centred one by PFFDTD's voxeliser on the host, which needs
+`PFFDTD_DIR` and `PFFDTD_PYTHON` in the machine's environment. Before a
+scene is trusted to it, the dev box runs `verify`, `compare` and `cost` of
+`python -m reverberate.wave.lowband`, in that order; the note gives the
+lines.

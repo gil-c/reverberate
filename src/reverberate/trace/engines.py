@@ -1,9 +1,13 @@
-"""Where a trace gets its low band pairs: the campaign on a card, or a monopole in free air.
+"""Where a trace gets its low band pairs: a campaign on a card, or a monopole in free air.
 
 A trace asks three things of the low band: where the arrays really stood,
 the pairs it names solved into the dwelling's cache, and each pair's key.
 :class:`CardPairs` answers with :class:`reverberate.accel.pairs.PairsCampaign`
-on the rented machine. :class:`FreeFieldPairs` answers in closed form with
+on the rented machine, one engine process a source position.
+:class:`BatchedPairs` answers with the same campaign on the batched solver
+(:mod:`reverberate.wave.lowband`): many source positions a launch, the
+receivers and the fit on the card, on the bundle's grid or on a cheaper one
+under its own key. :class:`FreeFieldPairs` answers in closed form with
 no room at all, so that the whole chain runs on a laptop and in the tests:
 a pack made with it replays, and says in its provenance that its low band
 is not a solve.
@@ -21,7 +25,7 @@ from reverberate.spatial.field import monopole_coefficients
 from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, pair_key
 from reverberate.spatial.sh import degrees_of, scene_to_ambisonic
 
-__all__ = ["CardPairs", "FreeFieldPairs", "PairsEngine"]
+__all__ = ["BatchedPairs", "CardPairs", "FreeFieldPairs", "PairsEngine"]
 
 
 class PairsEngine(Protocol):
@@ -90,6 +94,51 @@ class CardPairs:
             "cached": wanted - solved,
             "source_positions_solved": sum(1 for r in solves if not r.get("skipped")),
         }
+
+
+class BatchedPairs(CardPairs):
+    """The pairs campaign on the batched low band solver; what a trace asks is unchanged.
+
+    ``scheme`` and ``ppw`` name the grid: left alone, the bundle's own. The
+    report carries the grid as the solver cut it, a record a launch, and
+    what a source position and a pair cost in seconds.
+    """
+
+    def __init__(
+        self,
+        bundle: Path,
+        out: Path,
+        *,
+        pffdtd_dir: Path = Path("/root/pffdtd"),
+        devices: str | None = None,
+        gpu: bool | None = None,
+        scheme: str = "cartesian",
+        ppw: float | None = None,
+        batch: int | None = None,
+    ) -> None:
+        from reverberate.wave.lowband.pairs import LowbandPairs
+
+        self.lowband = LowbandPairs(
+            bundle=bundle,
+            out=out,
+            pffdtd_dir=pffdtd_dir,
+            devices=devices,
+            gpu=gpu,
+            scheme=scheme,
+            ppw=ppw,
+            batch=batch,
+        )
+        self.campaign = self.lowband
+        self.cache = self.campaign.cache
+        self.voxel_low_key = self.campaign.keys["low"]
+        self.solver = str(self.campaign.spec["solver"])
+        self.report = {}
+
+    def solve(self, heard_at: list[list[int]]) -> dict[str, Any]:
+        found = super().solve(heard_at)
+        self.report["grid"] = getattr(self.lowband, "problem_record", {})
+        self.report["batches"] = self.lowband.batches
+        return found
 
 
 class FreeFieldPairs:

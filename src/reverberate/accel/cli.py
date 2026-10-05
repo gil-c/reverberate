@@ -13,6 +13,10 @@ python -m reverberate.accel pairs-bundle --out B --scene-id S --models-from DIR
     (--recipe R.json | --sources P.npy) --cells C.npy [--heard-at H.json] [--fmax F]
 python -m reverberate.accel pairs-estimate --sources N --pairs M [--fmax F] [--rate USD_PER_H]
 python -m reverberate.accel pairs-install --pulled DIR [--publish]
+
+For the pairs of either bundle, ``campaign --low-engine lowband`` solves them
+with the batched solver of :mod:`reverberate.wave.lowband` instead of PFFDTD,
+``--low-scheme`` and ``--low-ppw`` naming another grid than the bundle's.
 """
 
 from __future__ import annotations
@@ -39,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--solvers", type=int, default=None, help="low band pairs: source positions at once"
     )
+    p.add_argument(
+        "--low-engine",
+        choices=("pffdtd", "lowband"),
+        default="pffdtd",
+        help="low band pairs: PFFDTD a source position, or the batched solver",
+    )
+    p.add_argument("--low-scheme", choices=("cartesian", "fcc"), default="cartesian")
+    p.add_argument("--low-ppw", type=float, default=None, help="points per wavelength of the grid")
+    p.add_argument("--low-batch", type=int, default=None, help="sources a launch, at most")
 
     p = sub.add_parser("pairs-bundle", help="a bundle of low band pairs, on the laptop")
     p.add_argument("--out", type=Path, required=True)
@@ -111,6 +124,20 @@ def main(argv: list[str] | None = None) -> int:
             # A recipe's pack (:mod:`reverberate.trace`): the pairs, then the mirror, then the file.
             from reverberate.trace.run import run_trace
 
+            engine = None
+            if args.low_engine == "lowband":
+                from reverberate.trace.engines import BatchedPairs
+
+                engine = BatchedPairs(
+                    args.bundle / "pairs",
+                    args.out,
+                    pffdtd_dir=args.pffdtd,
+                    devices=args.devices,
+                    gpu=False if args.cpu else None,
+                    scheme=args.low_scheme,
+                    ppw=args.low_ppw,
+                    batch=args.low_batch,
+                )
             run_trace(
                 args.bundle,
                 args.out,
@@ -118,7 +145,22 @@ def main(argv: list[str] | None = None) -> int:
                 devices=args.devices,
                 gpu=False if args.cpu else None,
                 solvers=args.solvers,
+                engine=engine,
             )
+            return 0
+        if kind == KIND and args.low_engine == "lowband":
+            from reverberate.wave.lowband.pairs import LowbandPairs
+
+            LowbandPairs(
+                bundle=args.bundle,
+                out=args.out,
+                pffdtd_dir=args.pffdtd,
+                devices=args.devices,
+                gpu=False if args.cpu else None,
+                scheme=args.low_scheme,
+                ppw=args.low_ppw,
+                batch=args.low_batch,
+            ).run()
             return 0
         if kind == KIND:
             run_pairs(

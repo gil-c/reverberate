@@ -890,14 +890,27 @@ def make_plan(
 # --------------------------------------------------------------------------
 
 
-def estimate(plan: Plan | dict[str, Any], *, rate_usd_per_hour: float) -> dict[str, Any]:
+def estimate(
+    plan: Plan | dict[str, Any], *, rate_usd_per_hour: float, low_engine: str = "lowband"
+) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
 
-    The low band is :func:`reverberate.accel.pairs.estimate`, measured on
-    2 x A100; the mirror's stages are the projection of ADR 0016's cost
-    appendix, which no card has run. A plan's record is enough.
+    The low band is priced by the engine that solves it: the batched solver
+    (:func:`reverberate.wave.lowband.pairs.estimate`, measured on one RTX
+    3080) or, with ``low_engine`` ``pffdtd``, PFFDTD a source position
+    (:func:`reverberate.accel.pairs.estimate`, measured on 2 x A100). The
+    rate is the caller's and is right only for the card the terms were
+    measured on, which the result names. The mirror's stages are the
+    projection of ADR 0016's cost appendix, which no card has run. A plan's
+    record is enough.
     """
-    from reverberate.accel.pairs import estimate as pairs_estimate
+    from reverberate.accel import pairs as present
+    from reverberate.wave.lowband import pairs as batched
+
+    engines: dict[str, Any] = {"lowband": batched.estimate, "pffdtd": present.estimate}
+    if low_engine not in engines:
+        raise ValueError(f"unknown low band engine {low_engine!r}")
+    pairs_estimate = engines[low_engine]
 
     record = plan.record if isinstance(plan, Plan) else plan
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
@@ -929,6 +942,8 @@ def estimate(plan: Plan | dict[str, Any], *, rate_usd_per_hour: float) -> dict[s
         "pack_gb": round(pack_bytes / 1e9, 2),
         "pair_cache_gb": round(pairs * PAIR_BYTES / 1e9, 2),
         "low": low,
+        "low_engine": low_engine,
+        "measured_on": str(low.get("measured_on", "2 x A100")),
         "measured": ["low"],
         "projected": ["paths", "diffraction", "rays", "level", "write", "transfer", "fixed"],
     }

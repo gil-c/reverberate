@@ -111,8 +111,13 @@ def prepare_band(
     sample_rate_hz: float,
     xp: Any,
     chunk: int = CHUNK,
+    wavenumber_of: Any = None,
 ) -> BandEncoder:
-    """Everything of the fit that does not depend on the pressure, for one geometry."""
+    """Everything of the fit that does not depend on the pressure, for one geometry.
+
+    ``wavenumber_of`` gives the wavenumber of each bin's frequency where the
+    grid is not the Cartesian one the settings' dispersion model describes.
+    """
     started = time.time()
     offsets = np.asarray(offsets, dtype=np.float64)
     radii = np.linalg.norm(offsets, axis=1)
@@ -128,7 +133,10 @@ def prepare_band(
     )
     length = int(next_fast_len(2 * samples))
     frequency = np.fft.rfftfreq(length, 1.0 / sample_rate_hz)
-    if settings.dispersion == "numerical":
+    k: np.ndarray
+    if wavenumber_of is not None:
+        k = np.asarray(wavenumber_of(frequency), dtype=np.float64)
+    elif settings.dispersion == "numerical":
         k = numerical_wavenumber(frequency, design.grid_step_m, sound_speed_m_s)
     else:
         k = 2.0 * np.pi * frequency / sound_speed_m_s
