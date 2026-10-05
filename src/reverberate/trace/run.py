@@ -910,8 +910,10 @@ class Trace:
                     "source": name,
                     "steps": int(heard.size),
                     "same_paths": bool(same),
-                    "delay_s": float(np.abs(a["delay_s"] - b["delay_s"]).max()) if same else None,
-                    "gain": float(np.abs(a["gain"] - b["gain"]).max()) if same else None,
+                    "delay_s": float(np.abs(a["delay_s"] - b["delay_s"]).max(initial=0.0))
+                    if same
+                    else None,
+                    "gain": float(np.abs(a["gain"] - b["gain"]).max(initial=0.0)) if same else None,
                 }
         self.journal.say(f"check: render {self.report['render']}")
 
