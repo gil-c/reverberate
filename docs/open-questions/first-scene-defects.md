@@ -207,9 +207,11 @@ on it, and the voice heard 6.6 dB over its free field. A voice of which the
 window holds under 3 s is now told, not judged.
 
 **noise_2 at 17 dB SPL** is the washing machine, and it is the clip: 25 dB
-of its level lies under 80 Hz, which neither band renders (the solve's
-band starts at 80 Hz and the mirror's chain cuts there). Stored at 58 dB
-SPL at 1 m, it is 30 dBA at 1 m:
+of its level lies under 40 Hz, which neither band renders: 98 % of it
+between 10 and 20 Hz. (The solve's band is whole from 50 Hz and 3 dB down
+at 40 Hz; it is the free field stand-in that starts at 80 Hz, as this
+section first said of the solve: `chain-audit.md`, section 5.) Stored at
+58 dB SPL at 1 m, it is 30 dBA at 1 m:
 
 | clip | stored, dB SPL at 1 m | dBA at 1 m |
 | --- | --- | --- |

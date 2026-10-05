@@ -644,9 +644,10 @@ def test_a_sealed_room_keeps_the_volume_its_source_gave_it() -> None:
     from reverberate.accel import dsp
     from reverberate.wave.lowband.box import box_arrays
     from reverberate.wave.lowband.problem import build_problem
+    from reverberate.wave.lowband.scheme import CARTESIAN
     from reverberate.wave.lowband.solver import drive_for, solve
 
-    arrays, grid = box_arrays(wave.CARTESIAN, (26, 22, 18), room=((4, 4, 4), (20, 17, 13)))
+    arrays, grid = box_arrays(CARTESIAN, (26, 22, 18), room=((4, 4, 4), (20, 17, 13)))
     source = np.array([[8.0, 9.0, 8.0]]) * grid.h
     nodes = np.array([wave.node(grid, s) for s in ((12, 11, 9), (18, 6, 6), (6, 15, 11))])
     problem = build_problem(arrays, wave.seeds_of(grid, source))
