@@ -98,6 +98,7 @@ ENGINE_SOURCES = (
     "render/delay.py",
     "render/low.py",
     "render/tail.py",
+    "render/seam.py",
     "render/noise.py",
     "render/dry.py",
     "render/translate.py",

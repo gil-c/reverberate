@@ -1,4 +1,4 @@
-"""``python -m reverberate.render``: time the engine, validate, compact, relevel or check a pack."""
+"""``python -m reverberate.render``: time the engine; validate, compact, level or check a pack."""
 
 from __future__ import annotations
 
@@ -52,6 +52,47 @@ def main(argv: list[str] | None = None) -> int:
         "--seconds", type=float, default=2.0, help="averaged over this long either side"
     )
     level.add_argument("--undo", action="store_true", help="put the trace's table back")
+    join = commands.add_parser(
+        "seam",
+        help="give a pack its level a band above the crossover, the tapered join, IN PLACE: "
+        "the pair's own seam at the crossover, the scene's one number above; the trace's "
+        "scalar is kept and --undo removes the table",
+    )
+    join.add_argument("pack", type=Path)
+    join.add_argument(
+        "--taper",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="SHARE",
+        help="the share of a pair's own seam a band keeps, from the crossover's band up; the "
+        "last holds above (1 0.5 0: 1 kHz whole, 2 kHz half, 4 kHz and over none)",
+    )
+    join.add_argument(
+        "--constant-db",
+        type=float,
+        default=None,
+        metavar="DB",
+        help="the scene's one number over the alignment's gain; left out, the median of the "
+        "pack's pairs' seams",
+    )
+    join.add_argument("--undo", action="store_true", help="remove the table")
+    join.add_argument("--dry-run", action="store_true", help="write nothing: say what it does")
+    loud = commands.add_parser(
+        "gains",
+        help="set sources' gains in a traced pack, IN PLACE; the trace's are kept and --undo "
+        "puts them back; the provenance says which differ from the recipe's",
+    )
+    loud.add_argument("pack", type=Path)
+    loud.add_argument(
+        "--set", nargs="+", default=[], metavar="ID=DB", help="a source's gain, in dB"
+    )
+    loud.add_argument("--kind", help="with --add: the sources of this kind")
+    loud.add_argument(
+        "--add", type=float, metavar="DB", help="with --kind: added to the gain the trace wrote"
+    )
+    loud.add_argument("--undo", action="store_true", help="put the trace's gains back")
+    loud.add_argument("--dry-run", action="store_true", help="write nothing: say what it does")
     sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
     sound.add_argument("pack", type=Path)
     sound.add_argument(
@@ -114,6 +155,31 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.render.relevel import relevel_pack
 
         print(json.dumps(relevel_pack(args.pack, seconds=args.seconds, undo=args.undo), indent=1))
+    elif args.command == "seam":
+        from reverberate.render.seam import SEAM_CONSTANT_DB, TAPER, taper_pack
+
+        said = taper_pack(
+            args.pack,
+            taper=TAPER if args.taper is None else tuple(args.taper),
+            constant_db=SEAM_CONSTANT_DB if args.constant_db is None else args.constant_db,
+            undo=args.undo,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(said, indent=1))
+    elif args.command == "gains":
+        from reverberate.render.gains import set_gains
+
+        if (args.kind is None) != (args.add is None):
+            parser.error("--kind and --add go together")
+        named = dict(item.split("=", 1) for item in args.set)
+        said = set_gains(
+            args.pack,
+            gains_db={name: float(value) for name, value in named.items()},
+            add_db={} if args.kind is None else {args.kind: args.add},
+            undo=args.undo,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(said, indent=1))
     elif args.command == "unseal":
         from reverberate.render.check.many import unseal
 

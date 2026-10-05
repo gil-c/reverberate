@@ -505,6 +505,10 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
         assert provenance["cost"] == [] and provenance["solver"].startswith("free-field")
         assert provenance["low_pairs"]["cached"] == report["pairs"]["scene"]
         assert "calibration_key" in provenance["assets_mismatched"]
+        seams = np.concatenate([s.low.seam_db for s in pack.sources.values() if s.low is not None])
+        assert provenance["seam"]["shares"] == [1.0, 1.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0]
+        assert provenance["seam"]["constant"] == "the median of the pairs' seams"
+        assert provenance["seam"]["constant_db"] == pytest.approx(np.median(seams), abs=0.05)
         # The cells are where the arrays stood, not where they were asked for.
         cells = pack.cells.position
         asked = plan.cells.position
@@ -532,6 +536,13 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
                 atol=1e-5,
             )
             assert np.all(source.level.onset_s > pack.mirror.lead_s)
+            # The level a band, the tapered join: the scalar to the bit up to 1 kHz, the
+            # scene's one number from 4 kHz, which the provenance names.
+            table = np.asarray(source.level.band_gain_db)
+            heard = np.asarray(source.audible, dtype=bool)
+            assert table.shape == (h.steps, len(h.bank))
+            assert np.array_equal(table[:, 3], source.level.high_gain_db)
+            assert np.all(table[heard, 5:] == np.float32(provenance["seam"]["level_db"]))
             assert np.all(source.tail.hist_cell < cells.shape[0])
         # The cell without an array leaves the two beside it 0.30 m apart. The noise is far and
         # reads both; the voice is 0.7 m away and, half way, may read neither: that one step

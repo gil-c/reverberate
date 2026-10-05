@@ -133,6 +133,7 @@ class EarlyPart:
         directivity: bool,
         direction_nodes: int,
         workers: int,
+        band_gain_db: np.ndarray | None = None,
     ) -> None:
         h = pack.header
         self.pack, self.source, self.tracks, self.xp = pack, source, tracks, xp
@@ -175,9 +176,15 @@ class EarlyPart:
                     np.asarray(source.yaw_deg, dtype=float)[step_of],
                 )[:, self.picks]
             )
-        gain = (
-            gain * (10.0 ** (np.asarray(source.level.high_gain_db, float)[step_of] / 20.0))[:, None]
-        )
+        if band_gain_db is None:
+            gain = (
+                gain
+                * (10.0 ** (np.asarray(source.level.high_gain_db, float)[step_of] / 20.0))[:, None]
+            )
+        else:
+            # THE SEAM (reverberate.render.seam): a level a step and a band of the bank,
+            # ``[step, bank]`` in dB, in place of the pack's scalar.
+            gain = gain * 10.0 ** (np.asarray(band_gain_db, dtype=float)[step_of] / 20.0)
         if self.masks == 2:
             together = onset_weight(
                 delay_s + pack.mirror.lead_s,

@@ -110,6 +110,16 @@ from reverberate.render.pack import (
     read_pack,
     tail_seed,
 )
+from reverberate.render.seam import (
+    GIVEN,
+    MEDIAN,
+    SEAM_CONSTANT_DB,
+    TAPER,
+    band_levels,
+    scene_constant_db,
+    seam_record,
+    taper_of,
+)
 from reverberate.scenes import canonical_bytes, load_recipe
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
@@ -1542,6 +1552,16 @@ class Trace:
             # A cost without its rate is not written: the laptop, which rented, adds them.
             "cost": [],
         }
+        # The level above the crossover a band (``render.seam``): the pair's own seam at
+        # the join, the scene's one number above it. The scalar is written as it was.
+        seam = np.array([r["seam_db"] for r in self.levels], dtype=float)
+        constant = scene_constant_db([seam]) if SEAM_CONSTANT_DB is None else SEAM_CONSTANT_DB
+        base_db = 20.0 * float(np.log10(self.assets.pack_gain))
+        bank = band_centres(48000)
+        shares = taper_of(bank, self.crossover.cutoff_hz, TAPER)
+        provenance["seam"] = seam_record(
+            bank, shares, base_db, constant, MEDIAN if SEAM_CONSTANT_DB is None else GIVEN
+        )
         # What a variant changed, named only when it did: the reference's pack is as it was.
         low_seconds = dict(self.told.get("low") or {}).get("seconds")
         if low_seconds is not None:
@@ -1572,7 +1592,6 @@ class Trace:
         )
         target = self.out / "pack.h5"
         partial = self.out / "pack.partial.h5"
-        seam = np.array([r["seam_db"] for r in self.levels], dtype=float)
         # The anchor of each pair's join, which its row was made with, and what it trails
         # the mirror's first arrival at the pair by: the engine's window follows it.
         onset = np.array([r["anchor_s"] for r in self.levels], dtype=float)
@@ -1682,7 +1701,13 @@ class Trace:
                             slot_weight=track.rail_weight,
                             slot_knots_hz=tracks.rail_knots_hz,
                         ),
-                        level=Level(high_gain_db=high_gain_db, onset_s=onset_s),
+                        level=Level(
+                            high_gain_db=high_gain_db,
+                            onset_s=onset_s,
+                            band_gain_db=band_levels(
+                                high_gain_db, track.audible, base_db + constant, shares
+                            ),
+                        ),
                         directivity_model=source.directivity.model,
                         directivity_enabled=bool(source.directivity.enabled),
                         gain_db=float(source.gain_db),
