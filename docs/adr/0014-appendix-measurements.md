@@ -261,3 +261,76 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   of those whose median band met 5 per cent, 17 per cent had a band more
   than 10 per cent out, the worst at 27. A listener walking the storey
   hears that band. The worst band stays.
+## 2026-10-05: the alignment step is withdrawn from a pack
+
+The mirror was put on the wave field's clock and scale by a lead, a gain
+and a signature, each read on the direct sound of a field of the dwelling
+(`mirror.files.align_to_reference`, `mirror.direct.measure_signature`).
+The audit of the chain (`docs/open-questions/chain-audit.md`) found that
+the gain and the signature are not a scale:
+
+- **the gain** is the ratio of two energies inside 0.5 ms round the direct
+  sound (`mirror.direct.DIRECT_WINDOW_S`), and the two pulses are not the
+  same pulse. The wave field's is spread by its grid: 5.0 to 6.1 dB of a
+  unit pulse's energy lie outside the window on the ten nearest points of
+  hssd_0076, 1.6 to 3.5 dB outside 4 ms. The mirror's is the signature, a
+  minimum phase filter of unit energy, all of it inside (-0.3 dB). The
+  gain comes out 2.4 dB low at every frequency: -5.22 dB over the field's
+  unit, with a signature of +2.85 dB at 1 kHz, where the mirror before
+  either renders a unit source as `1 / d` within 0.06 dB and the wave
+  field's direct sound is `FIELD_UNIT_AT_1M / d` within 0.1 dB;
+- **the signature** is the reference's direct spectrum, the band limit of
+  its grid at 8 kHz with it: -1.8 dB at 8 kHz, -3.3 at 12 kHz, -5.0 at
+  16 kHz re 1 kHz, laid on a band that grid does not hold.
+
+Nothing of the kind needs fitting: both solvers are physical before
+anything is measured. So in a scene pack **the gain is one and the
+signature a unit pulse, once for all, whatever the dwelling**
+(`trace.assets.Normalisation`, `PHYSICAL`); the lead stays, it is a clock
+and was never fitted. The seam between the two bands, which had hidden
+the 2.4 dB under a levelling of 1.9 dB a pair (and read 1.07 dB of its
+own low, the band limit of a solve to 1500 Hz taken for a level), is read
+where both bands are whole, and its median on the first whole scene falls
+from +1.89 to +0.52 dB (18 219 pairs; +0.27 dB on the 255 with a direct
+path under 1 m). The constant of the tapered join is then zero, in code
+(`render.seam.SEAM_CONSTANT_DB`).
+
+Measured on the pack at rest that holds a lattice point of the validated
+wave field (S1 of hssd_0076, 1.99 m, a direct path;
+`python -m reverberate.render check --reference-point`), the pack's level
+over the wave field's, a third octave at a time:
+
+| | 1k | 1.26k | 1.6k | 2k | 2.5k | 3.2k | 4k | 5k |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| the image paths' window, as traced under its pair's seam of +1.98 dB | -0.51 | -0.78 | -0.89 | -0.62 | -0.85 | -1.27 | -0.61 | -0.50 |
+| the same, on the physical scale | -0.23 | -0.02 | +0.03 | +0.08 | +0.03 | +0.38 | +0.07 | +0.19 |
+| the first 50 ms, as traced | +1.68 | -0.83 | -0.34 | -0.35 | +0.10 | -0.94 | -0.15 | -0.73 |
+| the first 50 ms, on the physical scale | +1.87 | -0.20 | +0.57 | +0.32 | +0.96 | +0.72 | +0.54 | -0.04 |
+
+and after 50 ms, per octave at 1, 2 and 4 kHz: +0.04, -2.06 and -2.24 dB
+as traced, +0.38, -1.28 and -1.31 dB on the physical scale. The direct
+sound is on the wave field within 0.1 dB at five third octaves of eight.
+What is left is not a scale: the first 50 ms are 0.3 to 1 dB over the
+field from 1.6 to 4 kHz and 1.9 dB over it at 1 kHz (the join in power of
+reflections that are still coherent, and the images the calibration makes
+loud), and the late part is 1.3 dB under it at 2 and 4 kHz. At the point
+without a direct path (4.75 m), which its own seam of +3.98 dB had
+levelled on every band, the first 50 ms read -1.35, -2.18 and -0.52 dB
+against the field at 1, 2 and 4 kHz, from -0.61, -0.86 and +0.81 dB, and
+the late part -0.57, +0.66 and -1.62 dB from +0.30, +1.86 and -0.53 dB:
+a pack of one pair has no scene to take a median from, and stands at
+`1 / d`. Those are the tail's defects and the calibration's (D4 to D6,
+D8, D9), which one fit on fields traced with `coincident_facets = "once"`
+is to settle.
+
+**The static fields keep their alignment.** `mirror.pipeline` and
+`write_field` are unchanged, and a pack traced with the bundle's
+`normalisation = "aligned"` carries every number as before: the pack at
+rest against `render_point` then `blend` is still held sample for sample
+(`tests/test_trace.py`). A field of the mirror written today is therefore
+still 2.4 dB under the wave field before its seam; an alignment read on a
+band and not on a window would be its remedy, and is not made here.
+
+**The calibration is not moved by this.** It reads every level against
+the same response's own direct sound, band by band, so neither a gain nor
+a filter common to the whole response enters its numbers.

@@ -9,9 +9,12 @@ linear in arc length on the source's side and in distance on the listener's
 (:func:`source_weights`, :func:`cell_weights`): an interpolation in energy,
 never of waveforms (``docs/formats/scene-pack.md``, group ``tail``).
 
-A histogram depends on the source position, the scene with its calibrated
-materials, the ray settings and the cells, and on nothing else: it is kept
-under :func:`tail_key`, in the dwelling's cache, and traced once.
+A histogram at a cell depends on the source position, the cell, the scene
+with its calibrated materials and the ray settings, and on nothing else, not
+on which other cells were traced with it: it is kept under :func:`tail_key`,
+one entry a (site, cell), and traced once for every recipe of the dwelling
+that reads it. A launch still casts a site's rays once for all the cells it
+is asked.
 
 :func:`interpolation_error_db` is the measure of what the interpolation
 costs: the level, band by band, of the weighted sum against a histogram
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +33,7 @@ from typing import Any
 import numpy as np
 
 from reverberate.compute import Devices, to_numpy
+from reverberate.mirror import tracer
 from reverberate.mirror.engine import histogram_on_devices
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import occluder_grid
@@ -37,6 +42,7 @@ from reverberate.mirror.parameters import apply_parameters
 from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.rays import Histogram, RaySettings
 from reverberate.mirror.render import _band_map, band_pulse_energy
+from reverberate.mirror.shared import Store
 
 __all__ = [
     "SPACING_M",
@@ -47,6 +53,7 @@ __all__ = [
     "histograms",
     "interpolation_error_db",
     "shared_scene",
+    "site_key",
     "sites_read",
     "source_weights",
     "tail_key",
@@ -192,22 +199,31 @@ def cell_weights(
 
 
 def tail_key(
-    scene: DerivedScene | str, position: np.ndarray, cells: np.ndarray, rays: RaySettings
+    scene: DerivedScene | str, position: np.ndarray, cell: np.ndarray, rays: RaySettings
 ) -> str:
-    """The identity of one source position's histograms over ``cells``.
+    """The identity of one source position's histogram at one cell.
 
     The scene's own key, which holds its geometry and the materials the rays
-    read; the position and the cells in whole millimetres; the ray settings.
-    Sixty-four hexadecimal characters. ``scene`` may be that key itself: it
-    is a digest of every triangle, and a caller with many positions reads it
-    once.
+    read; the position and the cell in whole millimetres; the ray settings.
+    Sixty-four hexadecimal characters. Nothing of the other cells a launch
+    held: a second recipe of the dwelling, with another set of cells, finds
+    the cells it shares. ``scene`` may be that key itself: it is a digest of
+    every triangle, and a caller with many positions reads it once.
     """
     record = {
         "scene": scene if isinstance(scene, str) else scene.key,
         "position_mm": [int(v) for v in np.rint(np.asarray(position, dtype=float) * 1000.0)],
-        "cells_mm": hashlib.sha256(
-            np.rint(np.asarray(cells, dtype=float) * 1000.0).astype("<i8").tobytes()
-        ).hexdigest(),
+        "cell_mm": [int(v) for v in np.rint(np.asarray(cell, dtype=float).reshape(3) * 1000.0)],
+        "rays": rays.record(),
+    }
+    return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+
+
+def site_key(scene: DerivedScene | str, position: np.ndarray, rays: RaySettings) -> str:
+    """The name of one source position's rays, whatever cells they are counted at."""
+    record = {
+        "scene": scene if isinstance(scene, str) else scene.key,
+        "position_mm": [int(v) for v in np.rint(np.asarray(position, dtype=float) * 1000.0)],
         "rays": rays.record(),
     }
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
@@ -215,69 +231,132 @@ def tail_key(
 
 @dataclass
 class TailCache:
-    """Histograms by :func:`tail_key`: a directory of ``<key>.npz``, or memory alone."""
+    """Histograms by :func:`tail_key`, a cell an entry: ``<key>.npz`` files, or memory alone.
+
+    An entry is one cell's rows of a site's histogram. :meth:`site` gives a
+    site's histogram over a list of cells from their entries, and holds the
+    last few it gave.
+    """
 
     directory: Path | None = None
-    #: The histograms held in memory at most, the last read kept; ``None`` is every one.
-    #: A process among several that each read the whole scene's sites holds a few.
+    #: The sites' histograms held in memory at most, the last read kept; ``None`` is every
+    #: one. A process among several that each read the whole scene's sites holds a few.
     keep: int | None = None
 
     def __post_init__(self) -> None:
         self._held: dict[str, Histogram] = {}
+        self._cells: dict[str, Histogram] = {}
         self._shared: dict[str, Any] = {}
+        #: Sites found whole, and sites asked for of which a cell at least was not there.
         self.hits = 0
         self.misses = 0
+        #: The same a (site, cell) at a time: entries found, and entries not there.
+        self.cells_found = 0
+        self.cells_absent = 0
 
-    def _hold(self, key: str, histogram: Histogram) -> None:
-        self._held.pop(key, None)
-        self._held[key] = histogram
+    def _hold(self, name: str, histogram: Histogram) -> None:
+        self._held.pop(name, None)
+        self._held[name] = histogram
         if self.keep is not None and self.directory is not None:
             while len(self._held) > max(1, self.keep):
                 self._held.pop(next(iter(self._held)))
 
     def path(self, key: str) -> Path | None:
-        return None if self.directory is None else Path(self.directory) / f"{key}.npz"
+        """Where an entry is kept: two characters of its key, then the key."""
+        return None if self.directory is None else Path(self.directory) / key[:2] / f"{key}.npz"
 
-    def get(self, key: str) -> Histogram | None:
-        found = self._held.get(key)
-        if found is None and self.directory is not None:
-            path = Path(self.directory) / f"{key}.npz"
-            if path.is_file():
-                with np.load(path) as arrays:
-                    found = Histogram(
-                        energy=arrays["energy"],
-                        moments=arrays["moments"],
-                        hits=arrays["hits"],
-                        bin_s=float(arrays["bin_s"]),
-                        bands_hz=tuple(int(v) for v in arrays["bands_hz"]),
-                        order=int(arrays["order"]),
-                        rays=int(arrays["rays"]),
-                    )
-        if found is None:
-            self.misses += 1
-        else:
-            self._hold(key, found)
-            self.hits += 1
+    def has(self, key: str) -> bool:
+        path = self.path(key)
+        return key in self._cells if path is None else path.is_file()
+
+    def absent(self, keys: list[str]) -> list[int]:
+        """The places in ``keys`` of the entries that are not kept."""
+        return [k for k, key in enumerate(keys) if not self.has(key)]
+
+    def _read(self, key: str) -> Histogram | None:
+        path = self.path(key)
+        if path is None:
+            return self._cells.get(key)
+        if not path.is_file():
+            return None
+        with np.load(path) as arrays:
+            return Histogram(
+                energy=arrays["energy"],
+                moments=arrays["moments"],
+                hits=arrays["hits"],
+                bin_s=float(arrays["bin_s"]),
+                bands_hz=tuple(int(v) for v in arrays["bands_hz"]),
+                order=int(arrays["order"]),
+                rays=int(arrays["rays"]),
+            )
+
+    def site(self, keys: list[str], *, counted: bool = True) -> Histogram | None:
+        """A site's histogram over the cells of ``keys``, or ``None`` when an entry is absent.
+
+        ``counted`` is whether the call is one of those :attr:`hits` and
+        :attr:`misses` count: not the reading back of what was just traced.
+        """
+        name = hashlib.sha256("".join(keys).encode()).hexdigest()
+        found = self._held.get(name)
+        if found is not None:
+            self._hold(name, found)
+            if counted:
+                self.hits += 1
+                self.cells_found += len(keys)
+            return found
+        cells = [self._read(key) for key in keys]
+        there = [c for c in cells if c is not None]
+        whole = len(there) == len(cells) and bool(cells)
+        if counted:
+            self.hits += int(whole)
+            self.misses += int(not whole)
+            self.cells_found += len(there)
+            self.cells_absent += len(cells) - len(there)
+        if not whole:
+            return None
+        found = Histogram(
+            energy=np.stack([c.energy for c in there]),
+            moments=np.stack([c.moments for c in there]),
+            hits=np.stack([c.hits for c in there]),
+            bin_s=there[0].bin_s,
+            bands_hz=there[0].bands_hz,
+            order=there[0].order,
+            rays=there[0].rays,
+        )
+        self._hold(name, found)
         return found
 
-    def put(self, key: str, histogram: Histogram) -> None:
-        self._hold(key, histogram)
-        if self.directory is not None:
-            Path(self.directory).mkdir(parents=True, exist_ok=True)
+    def put(self, keys: list[str], histogram: Histogram) -> None:
+        """A histogram over cells, kept a cell an entry under ``keys``, in the cells' order."""
+        if len(keys) != histogram.energy.shape[0]:
+            raise ValueError(f"{len(keys)} keys for {histogram.energy.shape[0]} cells")
+        for row, key in enumerate(keys):
+            path = self.path(key)
+            if path is None:
+                self._cells[key] = Histogram(
+                    energy=histogram.energy[row],
+                    moments=histogram.moments[row],
+                    hits=histogram.hits[row],
+                    bin_s=histogram.bin_s,
+                    bands_hz=histogram.bands_hz,
+                    order=histogram.order,
+                    rays=histogram.rays,
+                )
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
             # Whole or not at all: another process may be reading the directory.
-            target = Path(self.directory) / f"{key}.npz"
-            partial = target.with_suffix(".partial.npz")
+            partial = path.with_suffix(f".{os.getpid()}.partial.npz")
             np.savez(
                 partial,
-                energy=histogram.energy,
-                moments=histogram.moments,
-                hits=histogram.hits,
+                energy=histogram.energy[row],
+                moments=histogram.moments[row],
+                hits=histogram.hits[row],
                 bin_s=histogram.bin_s,
                 bands_hz=np.asarray(histogram.bands_hz),
                 order=histogram.order,
                 rays=histogram.rays,
             )
-            partial.replace(target)
+            partial.replace(path)
 
 
 def shared_scene(
@@ -332,13 +411,17 @@ def histograms(
     devices: Devices | None = None,
     cache: TailCache | None = None,
     say: Any = None,
+    store: Store | None = None,
+    stats: dict[str, int] | None = None,
 ) -> list[Histogram]:
     """One :class:`Histogram` over ``cells`` per source position, traced or read from the cache.
 
     The rays are the present pipeline's: the scene with the calibration's
     materials, :meth:`MirrorSettings.traced_rays`, so a histogram here is the
     one :func:`reverberate.mirror.pipeline.trace` computes for that source
-    over those receivers.
+    over those receivers. A position whose cells are not all kept is traced
+    over those that are not, in one launch, and each is kept on its own.
+    ``store`` keeps the rays' tree (:func:`reverberate.mirror.tracer.prepare`).
     """
     positions = np.asarray(positions, dtype=float).reshape(-1, 3)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
@@ -347,23 +430,31 @@ def histograms(
     shared = shared_scene(cache, catalogue, settings)
     scene = shared["scene"]
     out = []
+    through_grid = tracer.structure() == "grid"
     for position in positions:
-        key = tail_key(shared["key"], position, cells, rays)
-        found = cache.get(key)
+        keys = [tail_key(shared["key"], position, cell, rays) for cell in cells]
+        found = cache.site(keys)
         if found is None:
-            if shared["grid"] is None:
+            if through_grid and shared["grid"] is None:
                 shared["grid"] = occluder_grid(scene, rays.cell_m)
-            found = histogram_on_devices(
+            absent = cache.absent(keys)
+            traced = histogram_on_devices(
                 scene,
                 position,
-                cells,
+                cells[absent],
                 rays,
                 devices=devices,
                 grid=shared["grid"],
                 say=say,
                 held=shared["uploads"],
+                store=store,
+                stats=stats,
             )
-            cache.put(key, found)
+            cache.put([keys[k] for k in absent], traced)
+            # With no cell there is nothing to keep, and the empty histogram is the answer.
+            found = cache.site(keys, counted=False) if keys else traced
+            if found is None:
+                raise RuntimeError("a histogram just traced is not in its cache")
         out.append(found)
     return out
 

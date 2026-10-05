@@ -284,6 +284,9 @@ def build_bundle(
         "export_sha256": export or assets.export_sha256,
         "recipe_sha256": plan.recipe_sha256,
         "low_levers": levers,
+        # How the pack's two bands are put on one scale: the mirror's own word, physical
+        # unless it was asked aligned (``trace.assets.Normalisation``).
+        "normalisation": assets.normalisation.record(),
     }
     if levers != "none":
         from reverberate.accel.pairs import CACHE_LEVERS

@@ -47,6 +47,7 @@ from reverberate.render.dry import ClipLoader, DryTrack, band_filter, mask_kerne
 from reverberate.render.early import EarlyPart
 from reverberate.render.fast import FastEarly, FastLow, FastTail, HeadOperators
 from reverberate.render.low import LowPart
+from reverberate.render.normalise import radiating
 from reverberate.render.pack import ScenePack, Source, sources_of
 from reverberate.render.seam import BandedTail, level_table
 from reverberate.render.tail import TailPart
@@ -172,14 +173,24 @@ class SourceRenderer:
                 workers=settings.workers,
                 **more,
             )
+        # L23 (D3, ``render.normalise.radiating``): the late part is omnidirectional. For a
+        # source whose directivity is applied and whose table is level with its axis it is
+        # rendered at what the table radiates, a band; any other pack is ``pack`` itself.
+        tail_pack = radiating(pack, source, directivity)
         longer: dict[str, Any] = {"tail_steps": settings.tail_steps} if self.fast else {}
         if h.has_tail and bands is None:
             self.parts["tail"] = tail_part(
-                pack, source, tail_track, xp, workers=settings.workers, mask=tail_mask, **longer
+                tail_pack,
+                source,
+                tail_track,
+                xp,
+                workers=settings.workers,
+                mask=tail_mask,
+                **longer,
             )
         elif h.has_tail and bands is not None:
             self.parts["tail"] = BandedTail(
-                pack,
+                tail_pack,
                 source,
                 tail_track,
                 xp,

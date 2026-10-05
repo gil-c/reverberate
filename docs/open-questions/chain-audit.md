@@ -6,11 +6,19 @@ Status: the 2 dB are located and are a normalisation error of the mirror,
 not of the wave band; eleven other defects of the same kind are listed with
 their place in the code, four of which can be heard; the split between the
 images and the rays is sound in its design and loses energy in one place;
-the chain renders from 45 Hz, not from 80. Nothing of the chain was changed:
-every defect is pinned by a test of `tests/test_chain_audit.py`, marked
-`xfail` with the error measured, and the remedies belong to the lots that
-own the files (L20 the engine, L21 the levelling) or to the owner. Written
-for lot L19 of ADR 0016.
+the chain renders from 45 Hz, not from 80. The audit itself changed nothing
+of the chain: every defect is pinned by a test of
+`tests/test_chain_audit.py`, marked `xfail` with the error measured.
+Written for lot L19 of ADR 0016.
+
+**Closed on 2026-10-05 (lot L23, section 8):** D1, D2, D3, D7 and D12, and
+D11 in the trace's stand-in. The normalisation between the two bands is
+made once for all: a pack's mirror has a gain of one and a unit pulse for
+a signature, the seam is read where both bands are whole, a voice is its
+clip on its axis, and a pack traced before is given all of it in place
+(`python -m reverberate.render normalise`). Open: D4, D5, D6, D8, D9,
+D10, the synthetic profile's half of D11, and the one fit of the
+calibration.
 
 Everything here was measured on a laptop: small exact cases, the solver's
 CPU twin on a box of 25 litres, the tracer's twin on shoeboxes, and, read
@@ -396,3 +404,65 @@ Not measured, and what would settle each:
 | the mirror against the wave field in a room that was not calibrated on | the wave field to 8 kHz from a second source of hssd_0076 | the cost of a field, about 30 USD by the last one |
 | the pressure zone of the dwelling itself | one solve of 3 s without the low cut, the raw record kept | one pair's solve, cents |
 | the engine between steps, the stems' sum, the compact form | left to L20's own tests on the rebuilt engine | none |
+
+## 8. What was closed on 2026-10-05, and what it measures now
+
+Lot L23. Sections 1 to 7 are the audit as it was written; this one says
+what became of each defect. A newly traced pack is born so
+(`trace.assets.Normalisation`, in its provenance under `normalisation`);
+a pack traced before is given the same in place by `python -m
+reverberate.render normalise PACK`, which keeps what the trace wrote
+(`/as_traced`), is undone by `--undo` to the bit, and says every number it
+changed. The old choice stays one word away (`--normalisation aligned` at
+the trace) and keeps its `xfail`.
+
+| | what was done | measured after |
+| --- | --- | --- |
+| D1 | in a pack `alignment_gain = 1`; the static fields keep their alignment (`mirror.pipeline` is unchanged) | the mirror band's direct sound re `1 / d` at the at-rest point of the validated field (1.99 m): -0.02, -0.03, -0.06 dB at 2, 2.5 and 4 kHz, from -0.75, -0.98 and -0.81 dB under its pair's seam of +1.98 dB (-2.7 to -3.0 before that seam); against the wave field itself, the image paths' window within 0.1 dB at five third octaves of eight from 1 to 5 kHz |
+| D2 | in a pack the signature is a unit pulse (`--keep-signature` keeps the old colour at 0 dB over the crossover's octave) | re `1 / d`: -0.21 dB at 8 kHz, -0.45 at 12.7 kHz, -0.65 at 16 kHz, which is the air over 2 m; from -2.72, -4.23 and -6.30 dB. Everything above 6 kHz is 2 to 5 dB brighter |
+| D3 | a directivity table is level with its axis, and the late part of a source whose directivity is applied is rendered at what the table radiates (`render.normalise.radiating`, one marked statement in `render/engine.py`); `--directivity mean` is the old table | a voice that faces the listener: -0.02 dB re `1 / d` at 2 kHz and -0.06 at 4 kHz, from +3.29 and +4.43 dB; behind, -9.8 and -13.9 dB (the table's 10 and 14); its late part -2.9, -4.1, -5.3 and -6.25 dB in the third octaves of 1, 2, 4 and 8 kHz against the omnidirectional source's. The band under the crossover is still an omnidirectional source's: on the axis nothing is left; off it the direct sound under the crossover is 1 to 2.5 dB loud at the side and 2 to 5 dB behind, and the reverberant level 1.0 to 2.3 dB loud, from 125 to 500 Hz (`scene-pack.md`, `/directivity`) |
+| D7 | `mirror.hybrid.seam_db` told what the pair was solved to reads 707 to 1061 Hz with the solve's band limit undone; the trace tells it (`PairsEngine.band_limit_hz`); in a pack already traced the seams take the constant, +1.07 dB | on the direct sound of the same 92 pairs: -0.08 dB (deciles -0.31 and +0.02), from -1.07 dB (-1.24 and -0.94). Without the filter undone, 707 to 1061 Hz reads -0.25 dB |
+| the seam's median | D1, D2 and D7 together: `seam_db + a + s + r`, -5.2188 + 2.7738 + 1.07 = -1.375 dB on hssd_0076 | the first whole scene, 18 219 pairs: **+0.53 dB** from +1.90 (deciles -0.93 and +2.07 from +0.45 and +3.45; +0.41 dB with a direct path, +0.73 without; +0.27 dB on the 255 direct pairs under 1 m, +0.36 from 1 to 2 m, +0.48 from 2 to 4 m, +0.42 from 4 to 8 m) |
+| `K` | `render.seam.SEAM_CONSTANT_DB = 0`, in code, once for all: with a gain of one the bands from 4 kHz stand at 0 dB absolute; a step's own part is counted from the scene's median and tapered | the level applied over the 179 652 audible steps of the scene: 0.00 dB from 4 kHz; at 1 kHz a median of -0.11 dB (deciles -1.51 and +1.58), at 2 kHz -0.05 dB (-0.75 and +0.79) |
+| the two bands at the crossover | the same | the whole pack's direct sound re `1 / d` from 630 Hz to 1.6 kHz: -0.35, -0.07, -0.10, -0.10, -0.03 dB, from -0.39, -0.20, -0.43, -0.73, -0.85 dB |
+| D11 | `trace.engines.FreeFieldPairs` takes the fit's own low cut, causal as a solve's (`spatial.lowband.lowcut_response`); `render.pack.synthetic_free_field` is **not** moved: the engine's tests are tuned on its edge (the ring before the arrival, the compact form's bounds), and it now says in its text and in `scene-pack.md` that it starts an octave over a solve; a strict `xfail` pins it | the stand-in at 63 Hz re 400 Hz: 0.0 dB, from nothing; -3 dB at 40 Hz, under -40 dB at 20 Hz |
+| D12 | a noise is levelled on what a render holds of it (`measure: "heard"`, `scenes.clips.heard_level_db`, the chain's own low cut); the first library keeps its files and its selection now says `rms` on each noise; its washing machine is corrected in the pack by `render gains` | a rumble at 15 Hz 20 dB over a hum at 200 Hz reads the hum's level within 0.1 dB |
+
+**The arithmetic of a pack normalised in place**, in dB, `a` the gain it
+held, `s` its signature's level over the crossover's octave, `r` the
+seam's reading, `W` the share of a step's weight that reads a pair:
+
+```
+alignment_gain  = 1                                  a = -5.2188 on hssd_0076
+signature       = [1.0]                              s = +2.7738
+seam_db[pair]   = seam_db[pair] + a + s + r          r = +1.07, the sum -1.375
+high_gain_db[k] = high_gain_db[k] - a + W[k] (a + s + r)        +3.8438 where W = 1
+K               = 20 log10(alignment_gain) + SEAM_CONSTANT_DB = 0
+M               = 20 log10(alignment_gain) + median(seam_db)  = +0.5162 on pack A
+band_gain_db    = K + share (high_gain_db - M)
+```
+
+`high_gain_db` is always the gain plus the step's seam, so the scalar and
+the table are made from one set of numbers: changing `alignment_gain`
+without `high_gain_db` would make `K` and the scalar disagree, and the
+tool writes both or neither. Under the scalar the mirror is rendered `r`
+louder than before, a pair's whole seam read right; under the table it is
+at `1 / d` from 4 kHz.
+
+**What is left, and is not a scale.** On the at-rest point the first
+50 ms are 0.3 to 1 dB over the wave field from 1.6 to 4 kHz and the late
+part 1.3 dB under it at 2 and 4 kHz; the scene's seams keep a median of
+0.5 dB that is not on the direct sound. The next lot, in the order of
+section 7:
+
+| | what it needs |
+| --- | --- |
+| D8, the 117 per cent returned on the shell | the owner's choice of one scattering for images and rays, or the rays' share cut to what the images do not render; then the fit below |
+| D5, the tail's first 10 ms | the direct rays out of the histogram and `tail_from_s` to zero, after D8 (opening the gate first makes the first 10 ms too loud); the owner's ear on whether a first bounce's scattered part may be a noise |
+| D4, the tail's comb | the engine's lot: a late part whose bands add to a flat spectrum (2.7 dB a half octave today) |
+| D6, the power join of reflections that are still coherent | a join tapered over a third of an octave, or a coherent window that follows the measured coherence (0.41 from 10 to 20 ms) |
+| D9, the tail's scale under 0.5 m | the sphere's cap in place of the small angle's value, in `mirror/render.py`, `trace/level.py` and the engine's tail |
+| D10, flutter images that are also rays | `skip_specular_order = flutter_order` in `MirrorSettings.traced_rays` |
+| D11, the synthetic profile | `render.pack.SYNTHETIC_HIGHPASS_HZ` to the fit's low cut, with the five engine tests that are tuned on its edge (`test_render_engine`, `test_render_compact` twice, `test_render_check` twice) |
+| the one fit of the calibration | fields of the mirror traced with `coincident_facets = "once"` and with the shares of D5 and D8, against the validated wave field of hssd_0076 (437 points), then the fit: a card for the tracer, not priced here (the fields of 2026-09-19 were the last rendered); and the 200 pairs of section 7 to say where the scene's 0.5 dB lie, a quarter of an hour of one card, under 1 USD by the audit's own estimate |
+| a directive wave source | not planned: the band under the crossover is omnidirectional, and `scene-pack.md` says what that leaves off the axis |

@@ -16,9 +16,17 @@ levelling is written as three numbers the engine applies:
 - ``low/onset_s`` of a pair (:func:`pair_low`): the loudest sample of that
   wave response's channel 0, read at 48 kHz;
 - ``level/high_gain_db`` and ``level/onset_s`` of a step
-  (:func:`step_levels`): the alignment's gain and the step's pairs' seams,
-  and the step's first arrival plus what its pairs' onsets trail their own
-  first arrival by, both weighted as the engine weighs the pairs.
+  (:func:`step_levels`): the mirror's gain in the pack, which is one, and
+  the step's pairs' seams, and the step's first arrival plus what its
+  pairs' onsets trail their own first arrival by, both weighted as the
+  engine weighs the pairs.
+
+The mirror a pair is read against is the pack's own
+(:class:`reverberate.trace.assets.Normalisation`): a unit pulse for a
+signature and no fitted gain, so a seam is how far the wave response
+stands over a mirror whose direct sound is ``1 / d``; and it is read where
+both bands are whole (``low_limit_hz``), not over an octave whose top the
+solve has band limited.
 
 At rest, the source on a solved position and the head on a cell, a step
 reads one pair with weight one and the three are ``blend``'s own.
@@ -288,7 +296,9 @@ def mirror_omni(
         sound_speed_m_s=c,
         seed=seed,
         fallback=None if bool(direct.any()) else (scale, straight, onset),
-        signature=assets.signature,
+        # The mirror as the pack renders it: its signature and its gain are the pack's
+        # (``trace.assets.Normalisation``), a unit pulse and the field's unit unless told.
+        signature=assets.pack_signature(),
         xp=xp,
         noise=noise,
     )
@@ -299,19 +309,32 @@ def mirror_omni(
         shifted[lead:] = signal[: signal.size - lead]
     else:
         shifted[:lead] = signal[-lead:]
-    return shifted * assets.gain
+    return shifted * assets.field_gain
 
 
-def pair_seam_db(aired_omni: np.ndarray, mirror: np.ndarray, crossover: Crossover) -> float:
+def pair_seam_db(
+    aired_omni: np.ndarray,
+    mirror: np.ndarray,
+    crossover: Crossover,
+    *,
+    low_limit_hz: float | None = None,
+) -> float:
     """``mirror.hybrid.seam_db`` of a pair: the wave side at 4 kHz, the mirror's at 48 kHz.
 
     The seam is a ratio of energies over the crossover's octave, 707 to
     1414 Hz, whose bins the cache form holds exactly
     (:func:`reverberate.spatial.lowband.decimate`): the mirror's response is
     brought to the same form and the two are read at 4 kHz.
+
+    ``low_limit_hz`` is what the pair was solved to
+    (:func:`reverberate.spatial.lowband.solve_fmax_hz`, 1500 Hz): with it
+    the seam is read where both bands are whole and the solve's band limit
+    is not taken for a level (:func:`reverberate.mirror.hybrid.seam_db`).
     """
     high = np.asarray(decimate(np.asarray(mirror, dtype=float)[None, :], FIELD_RATE_HZ)[0], float)
-    return seam_db(np.asarray(aired_omni, dtype=float), high, LOW_RATE_HZ, crossover)
+    return seam_db(
+        np.asarray(aired_omni, dtype=float), high, LOW_RATE_HZ, crossover, low_limit_hz=low_limit_hz
+    )
 
 
 def step_levels(

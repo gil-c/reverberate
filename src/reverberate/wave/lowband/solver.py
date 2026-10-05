@@ -19,11 +19,25 @@ fields exchanged. What differs is what it is run over:
 Three implementations of the same arithmetic, operation for operation:
 :class:`NumpyStepper` (vectorised, what a machine without a card and the
 tests run), :func:`reference_step` (one node at a time, a transcription of
-the kernels below, slow and obvious) and the CUDA kernels of
+the kernel below, slow and obvious) and the CUDA kernels of
 :class:`CardStepper`, compiled without fused multiply-add as every kernel of
 this project is. The first two are compared bit for bit by the tests, and
 the third with the first on the card by ``python -m reverberate.wave.lowband
-verify``.
+verify``; without a card the kernels' own text is compiled for the host
+(:mod:`reverberate.wave.lowband.hostkernel`) and the tests hold it to the
+first, to the bit.
+
+**A boundary node is updated where the stencil is.** One kernel walks every
+stored node: the air, a boundary node's rigid update from the adjacency in
+its mask, and, for a lossy node, its branches, in the same thread, which
+still holds the value the node had two steps before. The lossy nodes' rows
+in the branch arrays are found from a base a column and the column's lossy
+bits (:func:`lossy_rows`). The kernel that did the branches apart
+(``boundary="apart"``) is kept for the measurement of one against the other:
+it read a node's value back from the field (a sector of the card's memory
+for one value), kept the value of two steps before in an array of its own,
+and four index arrays beside. The arithmetic of a node is the same in both,
+operation for operation, and so are the bits.
 
 The arithmetic is the CPU engine's, not the card engine's: PFFDTD's CUDA air
 kernel sums its neighbours pairwise and fuses the last products, so the two
@@ -49,15 +63,18 @@ from reverberate.wave.comms import (
 from reverberate.wave.lowband.problem import Problem
 
 __all__ = [
+    "BOUNDARIES",
     "CardStepper",
     "Drive",
     "NumpyStepper",
     "SPOOL_STEPS",
     "State",
     "drive_for",
+    "lossy_rows",
     "node_masks",
     "reference_step",
     "solve",
+    "step_bytes",
     "steps_for",
 ]
 
@@ -86,6 +103,19 @@ class Drive:
     inject_signal: np.ndarray
     record_index: np.ndarray
     record_source: np.ndarray
+
+    @classmethod
+    def nothing(cls, batch: int = 1) -> Drive:
+        """A drive that adds no source and reads no node: a grid stepped for its own sake."""
+        return cls(
+            batch=batch,
+            steps=1,
+            inject_index=np.zeros(0, dtype=np.int64),
+            inject_source=np.zeros(0, dtype=np.int32),
+            inject_signal=np.zeros((0, 1), dtype=np.float32),
+            record_index=np.zeros(0, dtype=np.int64),
+            record_source=np.zeros(0, dtype=np.int32),
+        )
 
 
 def drive_for(
@@ -296,7 +326,7 @@ class NumpyStepper:
 
 
 def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np.ndarray) -> None:
-    """One step, every node and every source in its own scalar pass: the kernels, in Python."""
+    """One step, every node and every source in its own scalar pass: the kernel, in Python."""
     p = problem
     f32 = np.float32
     nz, batch = p.nz, drive.batch
@@ -307,59 +337,68 @@ def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np
         for pair in range(dst.size):
             for b in range(batch):
                 u1[dst[pair], b] = u1[src[pair], b]
-    kind = p.kind.reshape(-1)
+    mask = node_masks(p)
+    base, bits = lossy_rows(p)
     for column in range(p.column_count):
         for z in range(nz):
             at = column * nz + z
-            k = int(kind[at])
+            k = int(mask[column, z])
             if k == 0:
                 continue
             for b in range(batch):
                 previous = u0[at, b]
-                partial = f32(p.a1 * u1[at, b]) - previous
-                for slot, dz in p.stencil:
-                    other = column if slot < 0 else int(p.lateral[column, slot])
-                    partial = f32(partial + f32(p.a2 * u1[other * nz + z + dz, b]))
-                if k > 1:
-                    lq = f32(p.l32 * f32(k - 1))
-                    partial = f32(f32(partial + f32(lq * previous)) / f32(_ONE + lq))
+                if k & MASK_BOUNDARY:
+                    # a boundary node's rigid update: the neighbours its adjacency allows
+                    adjacency = k & 0x0FFF
+                    b1 = f32(_TWO - f32(p.sl2 * f32(bin(adjacency).count("1"))))
+                    partial = f32(f32(b1 * u1[at, b]) - previous)
+                    for j, (slot, dz) in enumerate(p.stencil):
+                        other = column if slot < 0 else int(p.lateral[column, slot])
+                        bit = f32((adjacency >> j) & 1)
+                        partial = f32(partial + f32(f32(p.a2 * bit) * u1[other * nz + z + dz, b]))
+                    if k & MASK_LOSSY:
+                        # its branches, in the same pass: the row from the column's lossy bits
+                        row = int(base[column])
+                        for word in range(z >> 5):
+                            row += bin(int(bits[column, word])).count("1")
+                        row += bin(int(bits[column, z >> 5]) & ((1 << (z & 31)) - 1)).count("1")
+                        m_k = int(p.lossy_material[row])
+                        ssaf = p.lossy_ssaf[row]
+                        lo2kbg = f32(f32(p.lo2 * ssaf) * p.beta[m_k])
+                        fac = f32(f32(f32(_TWO * p.lo2) * ssaf) / f32(_ONE + lo2kbg))
+                        x = f32(f32(partial + f32(lo2kbg * previous)) / f32(_ONE + lo2kbg))
+                        count = int(p.branches[m_k])
+                        held_v = [state.vh[b, m, row] for m in range(count)]
+                        held_g = [state.gh[b, m, row] for m in range(count)]
+                        for m in range(count):
+                            _, _, bdh, bfh = p.quads[m_k, m]
+                            x = f32(
+                                x
+                                - f32(
+                                    fac
+                                    * f32(f32(f32(_TWO * bdh) * held_v[m]) - f32(bfh * held_g[m]))
+                                )
+                            )
+                        du = f32(x - previous)
+                        for m in range(count):
+                            bb, bd, _, bfh = p.quads[m_k, m]
+                            vh0 = f32(
+                                f32(f32(bb * du) + f32(bd * held_v[m]))
+                                - f32(f32(_TWO * bfh) * held_g[m])
+                            )
+                            state.gh[b, m, row] = f32(held_g[m] + f32(f32(vh0 + held_v[m]) / _TWO))
+                            state.vh[b, m, row] = vh0
+                        partial = x
+                else:
+                    partial = f32(p.a1 * u1[at, b]) - previous
+                    for slot, dz in p.stencil:
+                        other = column if slot < 0 else int(p.lateral[column, slot])
+                        partial = f32(partial + f32(p.a2 * u1[other * nz + z + dz, b]))
+                    q = (k >> MASK_Q_SHIFT) & 3
+                    if q > 0:
+                        lq = f32(p.l32 * f32(q))
+                        partial = f32(f32(partial + f32(lq * previous)) / f32(_ONE + lq))
                 u0[at, b] = partial
-    for nb in range(p.bn_index.size):
-        column, z = int(p.bn_column[nb]), int(p.bn_z[nb])
-        at = column * nz + z
-        adjacency = int(p.bn_adjacency[nb])
-        b1 = f32(_TWO - f32(p.sl2 * f32(bin(adjacency).count("1"))))
-        row = int(p.bn_lossy[nb])
-        for b in range(batch):
-            previous = u0[at, b]
-            partial = f32(f32(b1 * u1[at, b]) - previous)
-            for j, (slot, dz) in enumerate(p.stencil):
-                other = column if slot < 0 else int(p.lateral[column, slot])
-                bit = f32((adjacency >> j) & 1)
-                partial = f32(partial + f32(f32(p.a2 * bit) * u1[other * nz + z + dz, b]))
-            if row >= 0:
-                k = int(p.lossy_material[row])
-                ssaf = p.lossy_ssaf[row]
-                lo2kbg = f32(f32(p.lo2 * ssaf) * p.beta[k])
-                fac = f32(f32(f32(_TWO * p.lo2) * ssaf) / f32(_ONE + lo2kbg))
-                x = f32(f32(partial + f32(lo2kbg * previous)) / f32(_ONE + lo2kbg))
-                held_v = [state.vh[b, m, row] for m in range(int(p.branches[k]))]
-                held_g = [state.gh[b, m, row] for m in range(int(p.branches[k]))]
-                for m in range(int(p.branches[k])):
-                    _, _, bdh, bfh = p.quads[k, m]
-                    x = f32(
-                        x - f32(fac * f32(f32(f32(_TWO * bdh) * held_v[m]) - f32(bfh * held_g[m])))
-                    )
-                du = f32(x - previous)
-                for m in range(int(p.branches[k])):
-                    bb, bd, _, bfh = p.quads[k, m]
-                    vh0 = f32(
-                        f32(f32(bb * du) + f32(bd * held_v[m])) - f32(f32(_TWO * bfh) * held_g[m])
-                    )
-                    state.gh[b, m, row] = f32(held_g[m] + f32(f32(vh0 + held_v[m]) / _TWO))
-                    state.vh[b, m, row] = vh0
-                partial = x
-            u0[at, b] = partial
     for row in range(drive.inject_index.size):
         where = (drive.inject_index[row], drive.inject_source[row])
         u0[where] = f32(u0[where] + drive.inject_signal[row, n])
@@ -371,15 +410,22 @@ def reference_step(problem: Problem, drive: Drive, state: State, n: int, out: np
 # --------------------------------------------------------------------------
 
 #: A node's mask on the card: its adjacency in the low twelve bits, the absorbing layer's
-#: ``Q`` above them, and a flag on a boundary node. Zero is a node that is never written.
+#: ``Q`` above them, a flag on a boundary node and one more on a lossy one. Zero is a node
+#: that is never written.
 MASK_Q_SHIFT = 12
 MASK_BOUNDARY = 0x4000
+MASK_LOSSY = 0x8000
 
+#: Where a lossy node's branches are updated: in the stencil's own thread, or by a kernel apart.
+BOUNDARIES = ("stencil", "apart")
+
+#: The stencil's kernel. ``%(lossy)s`` is the branches' update where the boundary is in the
+#: stencil's pass, and nothing where a kernel apart makes it.
 _AIR_KERNEL = r"""
-extern "C" __global__ void lowband_air(
+extern "C" __global__ void %(name)s(
     float* __restrict__ u0, const float* __restrict__ u1,
     const unsigned short* __restrict__ mask, const int* __restrict__ lateral,
-    int nz, int batch, int laterals, float a1, float a2, float sl2, float l)
+    int nz, int batch, int laterals, float a1, float a2, float sl2, float l%(arguments)s)
 {
     int column = blockIdx.x;
     int t = blockIdx.y * blockDim.x + threadIdx.x;
@@ -397,6 +443,7 @@ extern "C" __global__ void lowband_air(
         float b1 = 2.0f - sl2 * (float)__popc(adjacency);
         partial = b1 * u1[own + t] - previous;
 %(boundary)s
+%(lossy)s
     } else {
         partial = a1 * u1[own + t] - previous;
 %(air)s
@@ -409,6 +456,48 @@ extern "C" __global__ void lowband_air(
     u0[own + t] = partial;
 }
 """
+
+_STENCIL_ARGUMENTS = r""",
+    const int* __restrict__ lossy_base, const unsigned int* __restrict__ lossy_bits,
+    const int* __restrict__ lossy_material, const float* __restrict__ lossy_ssaf,
+    const signed char* __restrict__ branches, const float* __restrict__ quads,
+    const float* __restrict__ beta, float* __restrict__ vh, float* __restrict__ gh,
+    int words, int max_branches, int lossy, float lo2"""
+
+#: A lossy node's branches in the stencil's thread: ``partial`` is its rigid update and
+#: ``previous`` the value it held two steps before, both in the thread's registers. The
+#: arithmetic is ``lowband_lossy``'s, line for line.
+_STENCIL_LOSSY = r"""
+        if (k & 0x8000u) {
+            int z = t / batch;
+            int b = t - z * batch;
+            const unsigned int* bits = lossy_bits + (long long)column * words;
+            int row = lossy_base[column];
+            for (int w = 0; w < (z >> 5); ++w) row += __popc(bits[w]);
+            row += __popc(bits[z >> 5] & ((1u << (z & 31)) - 1u));
+            int m_k = lossy_material[row];
+            float ssaf = lossy_ssaf[row];
+            float lo2kbg = lo2 * ssaf * beta[m_k];
+            float fac = 2.0f * lo2 * ssaf / (1.0f + lo2kbg);
+            float x = (partial + lo2kbg * previous) / (1.0f + lo2kbg);
+            const float* q = quads + (long long)m_k * max_branches * 4;
+            int mb = branches[m_k];
+            long long first = (long long)b * max_branches * lossy + row;
+            float held_v[%(most)d], held_g[%(most)d];
+            for (int m = 0; m < mb; ++m) {
+                held_v[m] = vh[first + (long long)m * lossy];
+                held_g[m] = gh[first + (long long)m * lossy];
+                x -= fac * (2.0f * q[m * 4 + 2] * held_v[m] - q[m * 4 + 3] * held_g[m]);
+            }
+            float du = x - previous;
+            for (int m = 0; m < mb; ++m) {
+                float vh0 =
+                    q[m * 4] * du + q[m * 4 + 1] * held_v[m] - 2.0f * q[m * 4 + 3] * held_g[m];
+                gh[first + (long long)m * lossy] = held_g[m] + (vh0 + held_v[m]) / 2.0f;
+                vh[first + (long long)m * lossy] = vh0;
+            }
+            partial = x;
+        }"""
 
 _LOSSY_KERNEL = r"""
 extern "C" __global__ void lowband_lossy(
@@ -500,64 +589,184 @@ def node_masks(problem: Problem) -> np.ndarray:
     mask = np.where(kind > 0, full | ((kind - (kind > 0)) << MASK_Q_SHIFT), 0).astype(np.uint16)
     flat = mask.reshape(-1)
     flat[problem.bn_index] = problem.bn_adjacency | np.uint16(MASK_BOUNDARY)
+    flat[problem.bn_index[problem.bn_lossy >= 0]] |= np.uint16(MASK_LOSSY)
     return mask
+
+
+def lossy_rows(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
+    """Where a column's lossy nodes are in the branch arrays: a base a column, and its bits.
+
+    ``base[column]`` is the row of the column's first lossy node and
+    ``bits[column, z >> 5]`` holds bit ``z & 31`` for each of its lossy
+    nodes, so the row of the lossy node at ``z`` is the base and the bits set
+    under ``z``: four bytes and ``Nz / 8`` a column, which a card keeps in
+    its cache, in place of an index a node. It needs the lossy nodes in the
+    grid's order, a column after another and ``z`` rising, which is the
+    order :func:`reverberate.wave.lowband.problem.build_problem` keeps.
+    """
+    nz = problem.nz
+    rows = np.flatnonzero(problem.bn_lossy >= 0)
+    column = problem.bn_column[rows].astype(np.int64)
+    z = problem.bn_z[rows].astype(np.int64)
+    at = column * nz + z
+    in_order = np.array_equal(problem.bn_lossy[rows], np.arange(rows.size))
+    if not in_order or bool((np.diff(at) <= 0).any()):
+        raise ValueError("the lossy nodes are not in the grid's order")
+    columns = problem.column_count + 1
+    base = np.searchsorted(column, np.arange(columns)).astype(np.int32)
+    bits = np.zeros((columns, (nz + 31) // 32), dtype=np.uint32)
+    np.bitwise_or.at(bits, (column, z >> 5), np.uint32(1) << (z & 31).astype(np.uint32))
+    return base, bits
+
+
+def step_bytes(problem: Problem, boundary: str = "stencil") -> dict[str, Any]:
+    """Bytes of a card's memory one source moves a step, by what moves them.
+
+    Counted from the arrays' own sizes, as the kernels read and write them:
+
+    - a node written, of air or of the boundary: its value two steps back
+      read and its new value written, 4 bytes each, and its present value
+      read once for the seven threads that use it;
+    - every stored node: its mask, 2 bytes;
+    - a lossy node, besides: each branch's two states read and written, its
+      material and its surface factor; and where the branches are updated
+      by a kernel apart (``boundary="apart"``), its column and its ``z``,
+      the value it held two steps before read and written in an array of
+      its own, and its value in the field read back and written again,
+      which moves the 32 byte sector it lies in, twice, for one value.
+
+    The lossy bits and bases of the stencil's pass are ``Nz / 8 + 4`` bytes
+    a column and are counted with the masks.
+    """
+    if boundary not in BOUNDARIES:
+        raise ValueError(f"the boundary is updated in one of {BOUNDARIES}, not {boundary!r}")
+    lossy = float(problem.lossy)
+    air = 12.0 * problem.updated
+    masks = 2.0 * problem.column_count * problem.nz
+    states = 16.0 * problem.max_branches * lossy
+    indices = 8.0 * lossy
+    scattered = before = 0.0
+    if boundary == "apart":
+        indices += 8.0 * lossy
+        scattered = 64.0 * lossy
+        before = 8.0 * lossy
+    else:
+        masks += (4.0 + 4.0 * ((problem.nz + 31) // 32)) * problem.column_count
+    walls = states + indices + scattered + before
+    return {
+        "boundary": boundary,
+        "air": air,
+        "masks": masks,
+        "walls_states": states,
+        "walls_indices": indices,
+        "walls_scattered": scattered,
+        "walls_before": before,
+        "walls": walls,
+        "step": air + masks + walls,
+        "walls_share": walls / max(air + masks + walls, 1.0),
+        "walls_a_lossy_node": walls / max(lossy, 1.0),
+    }
 
 
 class CardStepper:
     """The step on a card: every source of the batch in each launch.
 
-    The air's kernel walks every stored node and writes a boundary node's
-    rigid update too, from the adjacency in its mask: the node's neighbours
-    are then read in the stream of its column, not gathered one node at a
-    time. What is left for the lossy nodes is their branches, and the value
-    each held two steps before, which the air's kernel has by then
-    overwritten and is therefore kept beside the branches. As a kernel of
-    its own over the boundary nodes, gathering seven values a node, the
-    boundary was 2.0 ms of a 3.2 ms step on an RTX 3080.
+    One kernel walks every stored node and writes the air, a boundary
+    node's rigid update from the adjacency in its mask, and a lossy node's
+    branches, whose states are stored in the grid's order, which is the
+    order the kernel walks. With ``boundary="apart"`` the branches are a
+    kernel of their own over the lossy nodes, as they were: it needs the
+    value each held two steps before, which the stencil's kernel has by
+    then overwritten and is therefore kept beside the branches, and it
+    reads and writes each node's value in the field, one node a sector.
+    Measured so on the reference grid, the walls were 51 % of the bytes a
+    step moves for 5.7 % of its nodes
+    (``docs/open-questions/performance-audit.md``).
+
+    ``compile`` builds a kernel from its text; the tests give the host's
+    (:func:`reverberate.wave.lowband.hostkernel.host_kernel`) with ``numpy``
+    as ``xp``, and the class then runs as it does on a card.
     """
 
     THREADS = 256
 
-    def __init__(self, problem: Problem, drive: Drive, xp: Any) -> None:
+    def __init__(
+        self,
+        problem: Problem,
+        drive: Drive,
+        xp: Any,
+        *,
+        boundary: str = "stencil",
+        compile: Any = raw_kernel,  # noqa: A002 - what it does
+        shared: CardStepper | None = None,
+    ) -> None:
         if problem.max_branches > MAX_BRANCHES:
             raise ValueError(f"a material has more than {MAX_BRANCHES} branches")
-        self.problem, self.drive, self.xp = problem, drive, xp
+        if boundary not in BOUNDARIES:
+            raise ValueError(f"the boundary is updated in one of {BOUNDARIES}, not {boundary!r}")
+        self.problem, self.drive, self.xp, self.boundary = problem, drive, xp, boundary
         p, batch = problem, drive.batch
-        self.air = raw_kernel(
+        in_stencil = boundary == "stencil"
+        threads = self.THREADS
+        self.inject_at = xp.asarray(drive.inject_index * batch + drive.inject_source)
+        self.inject_signal = xp.asarray(np.ascontiguousarray(drive.inject_signal).reshape(-1))
+        self.record_at = xp.asarray(drive.record_index * batch + drive.record_source)
+        self.air_grid = (p.column_count, (p.nz * batch + threads - 1) // threads)
+        if not in_stencil:
+            # What each lossy node held one and two steps before, ``[source, node]``.
+            self.before = [
+                xp.zeros((batch, p.lossy), dtype=xp.float32),
+                xp.zeros((batch, p.lossy), dtype=xp.float32),
+            ]
+            self.lossy_grid = ((p.lossy + threads - 1) // threads, batch)
+        if shared is not None:
+            # The grid and the kernels of a stepper of this problem, on this card: a launch
+            # then uploads its own sources and records, and the grid stays where it is.
+            if shared.problem is not problem or shared.boundary != boundary:
+                raise ValueError("a stepper shares the grid of its own problem and boundary")
+            for name in ("air", "copy", "inject_kernel", "record", "mask", "lateral"):
+                setattr(self, name, getattr(shared, name))
+            for name in ("materials", "lossy", "copies", "words", "lossy_kernel"):
+                if hasattr(shared, name):
+                    setattr(self, name, getattr(shared, name))
+            return
+        name = "lowband_step" if in_stencil else "lowband_air"
+        self.air = compile(
             _AIR_KERNEL
             % {
+                "name": name,
+                "arguments": _STENCIL_ARGUMENTS if in_stencil else "",
                 "air": _stencil_source(p, boundary=False),
                 "boundary": _stencil_source(p, boundary=True),
+                "lossy": _STENCIL_LOSSY % {"most": MAX_BRANCHES} if in_stencil else "",
             },
-            "lowband_air",
+            name,
         )
-        self.lossy_kernel = raw_kernel(_LOSSY_KERNEL % {"most": MAX_BRANCHES}, "lowband_lossy")
-        self.copy = raw_kernel(_SMALL_KERNELS, "lowband_copy")
-        self.inject_kernel = raw_kernel(_SMALL_KERNELS, "lowband_inject")
-        self.record = raw_kernel(_SMALL_KERNELS, "lowband_record")
+        self.copy = compile(_SMALL_KERNELS, "lowband_copy")
+        self.inject_kernel = compile(_SMALL_KERNELS, "lowband_inject")
+        self.record = compile(_SMALL_KERNELS, "lowband_record")
         self.mask = xp.asarray(node_masks(p).reshape(-1))
         self.lateral = xp.asarray(np.ascontiguousarray(p.lateral).reshape(-1))
-        rows = np.flatnonzero(p.bn_lossy >= 0)
-        self.lossy = tuple(
-            xp.asarray(a) for a in (p.bn_column[rows], p.bn_z[rows], p.lossy_material, p.lossy_ssaf)
-        )
         self.materials = (
             xp.asarray(p.branches),
             xp.asarray(np.ascontiguousarray(p.quads).reshape(-1)),
             xp.asarray(p.beta),
         )
-        # What each lossy node held one and two steps before, ``[source, node]``.
-        self.before = [
-            xp.zeros((batch, p.lossy), dtype=xp.float32),
-            xp.zeros((batch, p.lossy), dtype=xp.float32),
-        ]
+        self.lossy: tuple[Any, ...]
+        if in_stencil:
+            base, bits = lossy_rows(p)
+            self.words = int(bits.shape[1])
+            self.lossy = tuple(
+                xp.asarray(a) for a in (base, bits.reshape(-1), p.lossy_material, p.lossy_ssaf)
+            )
+        else:
+            self.lossy_kernel = compile(_LOSSY_KERNEL % {"most": MAX_BRANCHES}, "lowband_lossy")
+            rows = np.flatnonzero(p.bn_lossy >= 0)
+            self.lossy = tuple(
+                xp.asarray(a)
+                for a in (p.bn_column[rows], p.bn_z[rows], p.lossy_material, p.lossy_ssaf)
+            )
         self.copies = [(xp.asarray(dst), xp.asarray(src), int(dst.size)) for dst, src in p.copies]
-        self.inject_at = xp.asarray(drive.inject_index * batch + drive.inject_source)
-        self.inject_signal = xp.asarray(np.ascontiguousarray(drive.inject_signal).reshape(-1))
-        self.record_at = xp.asarray(drive.record_index * batch + drive.record_source)
-        threads = self.THREADS
-        self.air_grid = (p.column_count, (p.nz * batch + threads - 1) // threads)
-        self.lossy_grid = ((p.lossy + threads - 1) // threads, batch)
 
     def state(self) -> State:
         return State.zeros(self.problem, self.drive.batch, self.xp)
@@ -568,23 +777,31 @@ class CardStepper:
 
     def launch_air(self, state: State) -> None:
         p, i32, f32 = self.problem, np.int32, np.float32
-        self.air(
-            self.air_grid,
-            (self.THREADS,),
-            (
-                state.u0,
-                state.u1,
-                self.mask,
-                self.lateral,
-                i32(p.nz),
-                i32(self.drive.batch),
-                i32(len(p.lateral_offsets)),
-                f32(p.a1),
-                f32(p.a2),
-                f32(p.sl2),
-                f32(p.l32),
-            ),
+        arguments: tuple[Any, ...] = (
+            state.u0,
+            state.u1,
+            self.mask,
+            self.lateral,
+            i32(p.nz),
+            i32(self.drive.batch),
+            i32(len(p.lateral_offsets)),
+            f32(p.a1),
+            f32(p.a2),
+            f32(p.sl2),
+            f32(p.l32),
         )
+        if self.boundary == "stencil":
+            arguments += (
+                *self.lossy,
+                *self.materials,
+                state.vh,
+                state.gh,
+                i32(self.words),
+                i32(p.max_branches),
+                i32(p.lossy),
+                f32(p.lo2),
+            )
+        self.air(self.air_grid, (self.THREADS,), arguments)
 
     def launch_lossy(self, state: State) -> None:
         p, i32 = self.problem, np.int32
@@ -636,11 +853,11 @@ class CardStepper:
             )
 
     def update(self, state: State) -> None:
-        """Every node written a step: the air with the rigid boundary, then the branches."""
+        """Every node written a step: the air and the boundary, the branches with them or after."""
         p = self.problem
         if p.column_count:
             self.launch_air(state)
-        if p.lossy:
+        if p.lossy and self.boundary == "apart":
             self.launch_lossy(state)
 
     def inject(self, state: State, n: int) -> None:
@@ -663,7 +880,8 @@ class CardStepper:
         state.u0, state.u1 = state.u1, state.u0
 
     def finish(self) -> None:
-        self.xp.cuda.Stream.null.synchronize()
+        if self.xp is not np:
+            self.xp.cuda.Stream.null.synchronize()
 
 
 #: Steps of its records a device keeps before they are brought to the host (``records_on``).
@@ -681,6 +899,7 @@ def solve(
     records_on: str = "device",
     spool_steps: int = SPOOL_STEPS,
     stepper: Any = None,
+    boundary: str = "stencil",
 ) -> Any:
     """Every step of a batch; the records, ``[record, step]`` single precision.
 
@@ -696,11 +915,17 @@ def solve(
     the node updates it made: the reached nodes written a step, times the
     sources, times the steps. ``stepper`` is the one to step with, where
     the caller holds another than the device's own (a grid in slabs).
+    ``boundary`` is where a card updates a lossy node's branches
+    (:class:`CardStepper`): the same records either way, to the bit.
     """
     if records_on not in ("device", "host"):
         raise ValueError(f"records are kept on the device or on the host, not {records_on!r}")
     if stepper is None:
-        stepper = NumpyStepper(problem, drive) if xp is np else CardStepper(problem, drive, xp)
+        stepper = (
+            NumpyStepper(problem, drive)
+            if xp is np
+            else CardStepper(problem, drive, xp, boundary=boundary)
+        )
     state = stepper.state()
     spooled = records_on == "host"
     width = max(1, min(int(spool_steps), drive.steps)) if spooled else drive.steps

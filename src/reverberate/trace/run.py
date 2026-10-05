@@ -12,7 +12,8 @@ The stages, each leaving what the next and a rerun look for:
    steps, and of every pair at rest for the levelling, with the diffracted
    onsets (``early/<source>.npz``), a block of steps a job;
 5. ``rays``: the histograms at the tail's sites over the tail's cells, in
-   their cache (``tails/``), a site a job, and each source's table;
+   their cache (``tails/``, a (site, cell) an entry, the dwelling's own under
+   ``REVERBERATE_MIRROR_STORE``), a site a job, and each source's table;
 6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), the
    pairs of some cells a job;
 7. ``rows``: a pair as the pack stores it, a block of pairs a job;
@@ -56,7 +57,7 @@ import json
 import os
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,7 @@ from reverberate.compute import (
 )
 from reverberate.metrics import band_centres
 from reverberate.mirror import native
+from reverberate.mirror.direct import signature_level_db
 from reverberate.mirror.hybrid import Crossover
 from reverberate.mirror.moving import (
     KIND_DIRECT,
@@ -89,10 +91,12 @@ from reverberate.mirror.tails import (
     TailCache,
     TailTable,
     shared_scene,
+    site_key,
     sites_read,
     tail_key,
     tail_table,
 )
+from reverberate.mirror.tracer import structure as ray_structure
 from reverberate.render.compact import Levers
 from reverberate.render.pack import (
     Air,
@@ -111,7 +115,7 @@ from reverberate.render.pack import (
     tail_seed,
 )
 from reverberate.render.seam import (
-    GIVEN,
+    FIXED,
     MEDIAN,
     SEAM_CONSTANT_DB,
     TAPER,
@@ -123,7 +127,14 @@ from reverberate.render.seam import (
 from reverberate.scenes import canonical_bytes, load_recipe
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
-from reverberate.trace.assets import MirrorAssets, directivity_models, found_assets, mismatched
+from reverberate.trace.assets import (
+    ALIGNED,
+    MirrorAssets,
+    Normalisation,
+    directivity_models,
+    found_assets,
+    mismatched,
+)
 from reverberate.trace.clock import CLOCK_S, read_direct, verdict
 from reverberate.trace.computed import write_as_computed
 from reverberate.trace.engines import CardPairs, PairsEngine
@@ -538,7 +549,12 @@ class Trace:
         self.profile = Profile.from_record(told["profile"])
         self.crossover = Crossover(**told.get("crossover", {}))
         self.told = told
-        self.assets = MirrorAssets.load(held / "mirror")
+        # How the pack's two bands are put on one scale: physical unless the bundle says
+        # ``"normalisation": "aligned"``, every pack before 2026-10-05 (``trace.assets``).
+        self.assets = replace(
+            MirrorAssets.load(held / "mirror"),
+            normalisation=Normalisation.of(told.get("normalisation")),
+        )
         with np.load(held / "plan.npz") as plan:
             self.asked = np.asarray(plan["cells"], dtype=float)
             self.kind = np.asarray(plan["kind"], dtype=np.uint8)
@@ -1002,13 +1018,13 @@ class Trace:
         self._prepared()
         settings = self.assets.settings
         tracks = self.tracks
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         shared = shared_scene(self.tail_cache, self.assets.catalogue, settings)
         rays = settings.traced_rays()
         cells = self.cells[self.tail_rows]
         self.tail: dict[str, dict[str, np.ndarray]] = {}
         positions: dict[str, np.ndarray] = {}
+        absent: dict[str, int] = {}
         read_by: dict[str, list[str]] = {}
         at_rest: dict[str, list[int]] = {}
         for j, pair in enumerate(self.pairs):
@@ -1022,11 +1038,20 @@ class Trace:
                 rows |= {int(r) for r in sites_read(solved, sites)}
             read_by[name] = []
             for row in sorted(rows):
-                key = tail_key(shared["key"], sites.positions[row], cells, rays)
-                positions[key] = sites.positions[row]
+                # A site is a job; what is kept of it is a (site, cell) at a time, so a
+                # site is cast again only for the cells no recipe of the dwelling has read.
+                key = site_key(shared["key"], sites.positions[row], rays)
+                if key not in positions:
+                    positions[key] = sites.positions[row]
+                    absent[key] = len(
+                        self.tail_cache.absent(
+                            [tail_key(shared["key"], positions[key], cell, rays) for cell in cells]
+                        )
+                    )
                 read_by[name].append(key)
-        todo = [key for key in positions if not (self.out / "tails" / f"{key}.npz").is_file()]
+        todo = [key for key in positions if absent[key]]
         self._ray_sites = (len(positions), len(todo))
+        self._ray_cells = (len(positions) * len(cells), sum(absent.values()))
         jobs = [
             Job("rays", key, {"position": [float(v) for v in positions[key]]}, on=CARD)
             for key in todo
@@ -1052,6 +1077,12 @@ class Trace:
                 "tail_cells": int(self.tail_rows.size),
                 "histograms_traced": int(self._ray_sites[1]),
                 "histograms_read": int(self._ray_sites[0] - self._ray_sites[1]),
+                # A (site, cell) at a time: what another recipe of the dwelling left.
+                "site_cells_traced": int(self._ray_cells[1]),
+                "site_cells_read": int(self._ray_cells[0] - self._ray_cells[1]),
+                "structure": ray_structure(),
+                "precision": rays.precision,
+                "cache": str(self.tail_cache.directory),
             }
 
         merge = Job("tails", "_read", on=PARENT, after=tuple(t.key for t in tables), work=read)
@@ -1061,8 +1092,7 @@ class Trace:
         """One job of the rays: a site's histograms over the tail's cells, into the cache."""
         from reverberate.mirror.tails import histograms
 
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         t0 = time.time()
         histograms(
             self.assets.catalogue,
@@ -1071,9 +1101,30 @@ class Trace:
             self.cells[self.tail_rows],
             devices=self._ray_devices(),
             cache=self.tail_cache,
+            store=self._ray_store(),
         )
         self._spent("rays", "sites", t0)
         return {"traced": 1}
+
+    def _tails(self) -> TailCache:
+        """The histograms' cache: the dwelling's where one is named, the run's own otherwise.
+
+        Under :data:`STORE_VARIABLE` the histograms outlive the run beside
+        the mirror's shared preparation: a second recipe of the dwelling
+        reads every (site, cell) the first one cast.
+        """
+        if getattr(self, "tail_cache", None) is None:
+            shared = os.environ.get(STORE_VARIABLE)
+            root = Path(shared) / "tails" if shared else self.out / "tails"
+            self.tail_cache = TailCache(root, keep=TAILS_KEPT)
+        return self.tail_cache
+
+    def _ray_store(self) -> Store:
+        """Where the rays' tree is kept: the mirror's store, made here when it is not yet."""
+        store = getattr(self, "store", None)
+        if store is None:
+            store = Store(Path(os.environ.get(STORE_VARIABLE) or self.out / "mirror_store"))
+        return store
 
     def _ray_devices(self) -> Devices:
         """What one job's rays are cast on: this process's card, or one share on its host.
@@ -1090,8 +1141,7 @@ class Trace:
     def _tail_job(self, source: str) -> dict[str, Any]:
         """One job of the tables: a source's ``tail`` group in the pack's types, to its file."""
         self._prepared()
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         track = self.tracks.sources[source]
         t0 = time.time()
         held = tail_table(
@@ -1195,7 +1245,9 @@ class Trace:
             else {}
         )
         return {
-            "seam_db": pair_seam_db(aired, mirror, self.crossover),
+            "seam_db": pair_seam_db(
+                aired, mirror, self.crossover, low_limit_hz=self._low_limit_hz()
+            ),
             "onset_s": onset,
             # Where the pair's two bands are joined in pressure: its own direct sound,
             # and its loudest sample where it holds none (``level.pair_anchor_s``).
@@ -1214,6 +1266,37 @@ class Trace:
             "end_db": _end_db(aired if solved.shape[-1] == aired.shape[-1] else solved[0]),
         }
 
+    def _low_limit_hz(self) -> float | None:
+        """What the pairs were solved to, where the seam is read without that band limit's bias.
+
+        ``None`` under the old reading, and for an engine whose responses
+        are whole over the crossover's octave (it names no ``band_limit_hz``).
+        """
+        if self.assets.normalisation.seam != "unbiased":
+            return None
+        limit = getattr(self.engine, "band_limit_hz", None)
+        return None if limit is None else float(limit)
+
+    def _normalisation_record(self, seams_db: np.ndarray) -> dict[str, Any]:
+        """What the pack's provenance says of its scale, under ``normalisation``."""
+        chosen = self.assets.normalisation
+        measured_db = 20.0 * float(np.log10(self.assets.gain / FIELD_UNIT_AT_1M))
+        return {
+            **chosen.record(),
+            "born": True,
+            "alignment_gain_db": round(20.0 * float(np.log10(self.assets.pack_gain)), 4),
+            # What the bundle's mirror measured against a field, which a physical pack
+            # does not apply: kept so that the old pack can be told from this one.
+            "measured": {
+                "alignment_gain_db": round(measured_db, 4),
+                "signature_octave_db": round(
+                    signature_level_db(self.assets.signature, self.crossover.band_hz(), 48000.0), 4
+                ),
+            },
+            "seam_low_limit_hz": self._low_limit_hz(),
+            "seam_median_db": round(scene_constant_db([seams_db]), 4),
+        }
+
     # ---- the levelling: blocks of pairs, on the host's cores ---------------------------------
 
     def _levelled(self, read: bool = True) -> tuple[str, dict[str, dict[str, Any]]]:
@@ -1228,6 +1311,13 @@ class Trace:
             # A ledger of before the direct sound was read is levelled again, and one of
             # before the join was anchored on it.
             {"lead_s": self.assets.pack_lead_s, "clock": "direct/1", "anchor": "direct/1"},
+            # A seam read under another normalisation is another number: the mirror's
+            # gain and signature and the band it is read on. The old one keeps its ledgers.
+            *(
+                []
+                if self.assets.normalisation == ALIGNED
+                else [{"normalisation": self.assets.normalisation.record()}]
+            ),
         )
         if read and ledger.is_file():
             for line in ledger.read_text().splitlines():
@@ -1317,8 +1407,7 @@ class Trace:
     def _level_block(self, block: int, pairs: list[int]) -> dict[str, Any]:
         """One job of the levelling: the pairs of ``pairs``, a record each, to the job's file."""
         self._prepared()
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         identity, _ = self._levelled(read=False)
         atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
         table = self._pairs_early()
@@ -1533,7 +1622,7 @@ class Trace:
         else:
             room = ("",) * self.cells.shape[0]
         rays = settings.traced_rays()
-        models = directivity_models()
+        models = directivity_models(self.assets.normalisation.directivity)
         named = sorted(
             {recipe.source(name).directivity.model for name in tracks.sources} | {"omni"}
         )
@@ -1555,13 +1644,18 @@ class Trace:
         # The level above the crossover a band (``render.seam``): the pair's own seam at
         # the join, the scene's one number above it. The scalar is written as it was.
         seam = np.array([r["seam_db"] for r in self.levels], dtype=float)
-        constant = scene_constant_db([seam]) if SEAM_CONSTANT_DB is None else SEAM_CONSTANT_DB
+        # Where the bands above stand is one number once for all, 0 dB over a gain of
+        # one; a step's own part is counted from the median of the scene's seams.
+        median = scene_constant_db([seam])
+        fixed = self.assets.normalisation.constant == "fixed"
+        constant = SEAM_CONSTANT_DB if fixed else median
         base_db = 20.0 * float(np.log10(self.assets.pack_gain))
         bank = band_centres(48000)
         shares = taper_of(bank, self.crossover.cutoff_hz, TAPER)
         provenance["seam"] = seam_record(
-            bank, shares, base_db, constant, MEDIAN if SEAM_CONSTANT_DB is None else GIVEN
+            bank, shares, base_db, constant, FIXED if fixed else MEDIAN, median
         )
+        provenance["normalisation"] = self._normalisation_record(seam)
         # What a variant changed, named only when it did: the reference's pack is as it was.
         low_seconds = dict(self.told.get("low") or {}).get("seconds")
         if low_seconds is not None:
@@ -1611,7 +1705,7 @@ class Trace:
                 layers_y_m=(floor + recipe.heights.seated_m, floor + recipe.heights.standing_m),
             ),
             mirror=Mirror(
-                signature=np.asarray(self.assets.signature, dtype=float),
+                signature=np.asarray(self.assets.pack_signature(self.crossover), dtype=float),
                 lead_s=self.assets.pack_lead_s,
                 alignment_gain=self.assets.pack_gain,
                 lowcut_hz=40.0,
@@ -1705,7 +1799,11 @@ class Trace:
                             high_gain_db=high_gain_db,
                             onset_s=onset_s,
                             band_gain_db=band_levels(
-                                high_gain_db, track.audible, base_db + constant, shares
+                                high_gain_db,
+                                track.audible,
+                                base_db + constant,
+                                shares,
+                                base_db + median,
                             ),
                         ),
                         directivity_model=source.directivity.model,

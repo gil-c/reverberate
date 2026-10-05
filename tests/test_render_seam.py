@@ -96,6 +96,18 @@ def test_a_level_a_band_keeps_1_khz_to_the_bit_and_stands_still_from_4_khz() -> 
     assert np.array_equal(ones, np.repeat(scalar[:, None], 8, axis=1))
     zeros = band_levels(scalar, audible, LEVEL_DB, np.zeros(8))
     assert np.all(zeros[audible] == np.float32(LEVEL_DB)) and np.all(zeros[~audible] == 0.0)
+    # The level is one number once for all, and a step's own part is counted from the
+    # median of the scene's seams: at 1 kHz the scalar less the scene's own 0.5 dB, at
+    # 2 kHz half of the step's distance from it, from 4 kHz the one number.
+    centre = LEVEL_DB + 0.5
+    fixed = band_levels(scalar, audible, LEVEL_DB, taper_of(BANK, 1000.0), centre)
+    np.testing.assert_allclose(fixed[audible, 3], scalar[audible] - 0.5, atol=1e-6)
+    np.testing.assert_allclose(
+        fixed[audible, 4], LEVEL_DB + 0.5 * (scalar[audible] - centre), atol=1e-6
+    )
+    assert np.all(fixed[audible, 5:] == np.float32(LEVEL_DB))
+    assert np.array_equal(fixed[~audible], np.zeros((40, 8), dtype=np.float32))
+    assert motion_db(fixed[:, 3], audible, 10)["p90"] == pytest.approx(before["p90"], abs=0.01)
 
 
 def test_the_filters_of_the_late_part_add_to_the_signal_and_the_gain_is_a_slope() -> None:
@@ -200,13 +212,18 @@ def test_a_traced_pack_is_given_its_level_a_band_in_place_and_keeps_its_scalar(
     audible = np.asarray(pack.sources["s1"].audible, dtype=bool)
     wanted = band_levels(scalar, audible, base_db + constant, taper_of(BANK, 1000.0))
     assert np.array_equal(table, wanted)
+    assert said["seam"]["median_db"] == said["seam"]["constant_db"]
     # A given number, and another taper: written over, from the trace's scalar again.
+    # The number is where the bands stand; a step's own part is still how far it is
+    # from the median of the scene's seams.
     assert main(["seam", str(target), "--constant-db", "2.5", "--taper", "1", "0"]) == 0
     said = json.loads(capsys.readouterr().out)
     assert said["seam"]["constant"] == "given" and said["seam"]["constant_db"] == 2.5
+    assert said["seam"]["median_db"] == pytest.approx(constant, abs=1e-4)
     with read_pack(target, deep=True) as read:
         table = np.array(read.sources["s1"].level.band_gain_db)
-    assert np.array_equal(table[:, 3], scalar)
+    np.testing.assert_allclose(table[audible, 3], scalar[audible] + 2.5 - constant, atol=1e-5)
+    assert np.array_equal(table[~audible, 3], scalar[~audible])
     assert np.all(table[audible, 4:] == np.float32(base_db + 2.5))
     # A copy keeps it, and --undo leaves the pack as the trace wrote it.
     with read_pack(target) as read:

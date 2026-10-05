@@ -6,10 +6,17 @@ pack, and every link between a path and a sample is held to it here on a
 small exact case. Where the chain is wrong today and the remedy belongs to
 another change, the test is marked ``xfail`` and its reason carries the error
 measured, so the defect cannot hide behind a levelling scalar again.
+
+The normalisation of 2026-10-05 closed D1, D2, D3, D7 and D11 in a pack
+(``reverberate.trace.assets.Normalisation``, ``render.normalise``). Their
+tests run on what a pack carries and pass; the same test on the old choice,
+which stays selectable and is what a static field of the mirror still
+uses, keeps its ``xfail`` and its measured error.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -33,6 +40,7 @@ from reverberate.mirror.render import (
 )
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
 from reverberate.spatial.sh import real_sh
+from reverberate.trace.assets import ALIGNED, PHYSICAL, MirrorAssets, Normalisation
 from test_mirror_ism import RECEIVER, SOURCE, box_scene
 
 RATE = 48000.0
@@ -131,8 +139,22 @@ def _dispersed_pulse(spread_s: float, size: int = 512) -> np.ndarray:
     return np.asarray(np.roll(pulse, size // 4))
 
 
-def _alignment_error_db(tmp_path: Path, pulse: np.ndarray) -> float:
-    """The mirror's level at 1 kHz over the reference's, once aligned on it, in dB."""
+def _in_a_pack(gain: float, taps: np.ndarray, normalisation: Normalisation) -> MirrorAssets:
+    """What a pack carries of a measured gain and signature, under ``normalisation``."""
+    from test_trace import assets
+
+    return replace(assets(), gain=gain, signature=taps, normalisation=normalisation)
+
+
+def _alignment_error_db(
+    tmp_path: Path, pulse: np.ndarray, normalisation: Normalisation = ALIGNED
+) -> float:
+    """The mirror's level at 1 kHz over the reference's, once aligned on it, in dB.
+
+    As a pack carries the alignment under ``normalisation``: the measured
+    gain and signature (``ALIGNED``, which is also what a static field of
+    the mirror is written with), or neither (``PHYSICAL``).
+    """
     distances = np.linspace(0.8, 3.0, 6)
     reference = _reference_field(tmp_path / "S1.h5", distances, pulse, lead_s=0.01)
     with h5py.File(reference, "r") as handle:
@@ -145,8 +167,11 @@ def _alignment_error_db(tmp_path: Path, pulse: np.ndarray) -> float:
         energies[point] = direct_energy(rendered, RATE)
     alignment = align_to_reference(reference, energies, sound_speed_m_s=C)
     freqs = np.fft.rfftfreq(4096, 1.0 / RATE)
-    signature = np.abs(np.fft.rfft(taps, 4096))[at(freqs, 1000.0)]
-    return float(db(alignment.gain * signature / FIELD_UNIT_AT_1M))
+    held = _in_a_pack(alignment.gain, taps, normalisation)
+    if normalisation == ALIGNED:
+        assert held.pack_gain == alignment.gain / FIELD_UNIT_AT_1M
+    signature = np.abs(np.fft.rfft(held.pack_signature(), 4096))[at(freqs, 1000.0)]
+    return float(db(held.pack_gain * signature))
 
 
 def test_the_alignment_puts_the_mirror_on_a_reference_whose_pulse_is_a_pulse(
@@ -158,23 +183,39 @@ def test_the_alignment_puts_the_mirror_on_a_reference_whose_pulse_is_a_pulse(
     assert abs(_alignment_error_db(tmp_path, pulse)) < 0.3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "mirror.files.align_to_reference reads a level as the energy of 0.5 ms round the "
-        "direct sound, and mirror.direct.measure_signature gives the mirror a minimum phase "
-        "pulse of unit energy: a reference whose pulse is spread in time holds less of its "
-        "energy in that window than the mirror's, and the gain comes out low at every "
-        "frequency. Measured here -2.7 dB at 1 kHz; on the validated field of hssd_0076 "
-        "-2.35 dB at 1 kHz, -2.68 at 2 kHz, -2.61 at 4 kHz (126 points), which is the "
-        "seam's median of +2.3 dB"
-    ),
+@pytest.mark.parametrize(
+    "normalisation",
+    [
+        PHYSICAL,
+        pytest.param(
+            ALIGNED,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "mirror.files.align_to_reference reads a level as the energy of 0.5 ms "
+                    "round the direct sound, and mirror.direct.measure_signature gives the "
+                    "mirror a minimum phase pulse of unit energy: a reference whose pulse is "
+                    "spread in time holds less of its energy in that window than the "
+                    "mirror's, and the gain comes out low at every frequency. Measured here "
+                    "-2.7 dB at 1 kHz; on the validated field of hssd_0076 -2.35 dB at 1 kHz, "
+                    "-2.68 at 2 kHz, -2.61 at 4 kHz (126 points), which is the seam's median "
+                    "of +2.3 dB. Withdrawn from a pack on 2026-10-05; the static fields and "
+                    "a pack traced 'aligned' still carry it"
+                ),
+            ),
+        ),
+    ],
+    ids=["physical", "aligned"],
 )
 def test_the_alignment_puts_the_mirror_on_a_reference_whose_pulse_is_dispersed(
-    tmp_path: Path,
+    tmp_path: Path, normalisation: Normalisation
 ) -> None:
-    """The same level, the high frequencies up to 0.5 ms late: the mirror lands on it still."""
-    assert abs(_alignment_error_db(tmp_path, _dispersed_pulse(0.0005))) < 0.3
+    """The same level, the high frequencies up to 0.5 ms late: the mirror lands on it still.
+
+    In a pack nothing is fitted: the mirror's gain is one and its signature
+    a unit pulse, whatever pulse the reference holds.
+    """
+    assert abs(_alignment_error_db(tmp_path, _dispersed_pulse(0.0005), normalisation)) < 0.3
 
 
 # --------------------------------------------------------------------------
@@ -387,22 +428,64 @@ def test_what_a_solve_to_1500_hz_loses_under_the_low_mask_is_a_quarter_of_a_deci
     assert lost == pytest.approx(-0.21, abs=0.05)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "mirror.hybrid.seam_db (trace.level.pair_seam_db) reads the wave side before its "
-        "mask, over 707 to 1414 Hz with one weight for every frequency, and a pair is solved "
-        "to 1500 Hz and band limited there: the band limit is read as a level. Measured "
-        "here -0.9 dB for two bands on one scale; on 92 pairs of the first scene under "
-        "0.9 m, -1.07 dB (-0.45 dB at 1 kHz, -1.4 at 1189 Hz, -6.0 at 1414 Hz), where the "
-        "mask leaves 0.2 dB of it to be heard. The scene's seams are 0.9 dB low by it"
-    ),
+@pytest.mark.parametrize(
+    "told",
+    [
+        1500.0,
+        pytest.param(
+            None,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "mirror.hybrid.seam_db (trace.level.pair_seam_db), not told what the "
+                    "pair was solved to, reads the wave side before its mask, over 707 to "
+                    "1414 Hz with one weight for every frequency, and a pair is solved to "
+                    "1500 Hz and band limited there: the band limit is read as a level. "
+                    "Measured here -0.9 dB for two bands on one scale; on 92 pairs of the "
+                    "first scene under 0.9 m, -1.07 dB (-0.45 dB at 1 kHz, -1.4 at 1189 Hz, "
+                    "-6.0 at 1414 Hz), where the mask leaves 0.2 dB of it to be heard. Every "
+                    "seam traced before 2026-10-05 is low by it, and 'aligned' still reads so"
+                ),
+            ),
+        ),
+    ],
+    ids=["told the solve's limit", "not told"],
 )
-def test_the_seam_of_two_bands_on_one_scale_is_zero() -> None:
-    """A pair solved to 1500 Hz and the mirror, both a unit source's direct sound."""
+def test_the_seam_of_two_bands_on_one_scale_is_zero(told: float | None) -> None:
+    """A pair solved to 1500 Hz and the mirror, both a unit source's direct sound.
+
+    Told what the pair was solved to, the seam is read where both bands are
+    whole, 707 to 1061 Hz, with that band limit undone: what a trace does
+    (``Trace._low_limit_hz``).
+    """
     low = _pulse_at(1000, cut_hz=1500.0)
     high = _pulse_at(1000)
-    assert abs(seam_db(low, high, RATE, Crossover())) < 0.2
+    assert abs(seam_db(low, high, RATE, Crossover(), low_limit_hz=told)) < 0.2
+
+
+def test_the_seam_is_read_within_a_tenth_on_what_a_solve_really_loses() -> None:
+    """Not the filter alone: the loss measured on the first scene's pairs, which is more.
+
+    The direct sound of 92 pairs of the first scene, solved to 1500 Hz and
+    0.35 to 0.9 m long, against ``1 / d``, in the median: the band limiting
+    filter and, towards the top, the grid's own dispersion, 1.8 dB of it at
+    1414 Hz. The old reading takes 1.07 dB of that for a level, on this
+    curve as on the pairs themselves (-1.07 dB in the median, -1.24 and
+    -0.94 at the deciles); the new one, which undoes the filter alone and
+    stops at 1061 Hz, less than a tenth (-0.08 dB on the pairs).
+    """
+    samples = 24000
+    freqs = np.fft.rfftfreq(samples, 1.0 / RATE)
+    curve = {
+        0: 0.0, 500: -0.02, 600: -0.04, 707: -0.06, 750: -0.07, 800: -0.09, 850: -0.13,
+        900: -0.23, 950: -0.32, 1000: -0.45, 1061: -0.66, 1100: -0.83, 1189: -1.38,
+        1250: -2.05, 1300: -2.85, 1350: -3.95, 1414: -5.97, 1500: -10.04, 2000: -60.0,
+    }  # fmt: skip
+    measured = np.interp(freqs, [float(hz) for hz in curve], list(curve.values()))
+    high = _pulse_at(1000, samples)
+    low = np.fft.irfft(np.fft.rfft(high) * 10.0 ** (measured / 20.0), samples)
+    assert seam_db(low, high, RATE, Crossover()) == pytest.approx(-1.07, abs=0.05)
+    assert abs(seam_db(low, high, RATE, Crossover(), low_limit_hz=1500.0)) < 0.1
 
 
 # --------------------------------------------------------------------------
@@ -449,18 +532,24 @@ def test_the_decoder_gives_the_ear_the_pressure_it_is_given() -> None:
     assert power[0] > 2.0 * power[1]
 
 
-def test_a_voice_on_its_axis_is_above_the_clip_s_level_by_its_directivity() -> None:
-    """Unit mean power, so the axis is over ``1 / d``: what the audit hands the owner.
+def test_a_voice_on_its_axis_is_its_clip_and_was_above_it_by_its_directivity() -> None:
+    """A clip is its talker's axis: 0 dB ahead in every band, as the band under the crossover.
 
     ``clip-library.md`` stores a voice at 60 dB SPL at 1 m, and the engine
-    multiplies an arrival by the pattern, which is normalised to unit mean
-    power: ahead of a talker the direct sound is 3.0 dB over that at 1 kHz
-    and 6.3 dB at 8 kHz, while the band under the crossover is solved for an
-    omnidirectional source and stays at 0 dB. A change of the normalisation
-    moves these numbers and must say so.
+    multiplies an arrival by the pattern. Normalised to unit mean power, as
+    it was until 2026-10-05 (D3), the direct sound ahead of a talker was
+    3.0 dB over that at 1 kHz and 6.3 dB at 8 kHz, while the band under the
+    crossover is solved for an omnidirectional source and stays at 0 dB.
+    Level with its axis the table is 0 dB ahead, and what it radiates is
+    under the omnidirectional source's by those same figures, which the
+    late part is rendered lower by (``render.normalise.radiating``).
     """
-    axis = voice_v1().gain_db[:, 0]
-    np.testing.assert_allclose(axis, [0.96, 1.41, 2.26, 3.04, 4.08, 5.26, 6.25], atol=0.01)
+    from reverberate.mirror.directivity import radiated_db
+
+    index = [0.96, 1.41, 2.26, 3.04, 4.08, 5.26, 6.25]
+    np.testing.assert_array_equal(voice_v1().gain_db[:, 0], 0.0)
+    np.testing.assert_allclose(-radiated_db(voice_v1().gain_db), index, atol=0.01)
+    np.testing.assert_allclose(voice_v1("mean").gain_db[:, 0], index, atol=0.01)
     assert band_centres(int(RATE))[3] == 1000
 
 
@@ -476,19 +565,33 @@ def _band_limited_pulse(cut_hz: float, size: int = 256) -> np.ndarray:
     return np.asarray(np.roll(pulse, size // 4))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "mirror.direct.measure_signature gives the mirror the reference's direct spectrum, "
-        "the band limit of its grid with it, and trace.assets.MirrorAssets carries that "
-        "filter into a pack whose scale is physical and whose wave band ends at 1414 Hz: "
-        "render.engine.SourceRenderer puts every dry signal through it (DryTrack.high). In "
-        "the first scene's pack the mirror's direct sound is -2.4 dB re 1 / d at 1 kHz, "
-        "-2.6 at 2 kHz, -2.5 at 4 kHz, -4.2 at 8 kHz, -5.7 at 12 kHz and -7.4 at 16 kHz: "
-        "1.8 to 5 dB of treble that no physics took, over what the gain takes"
-    ),
+@pytest.mark.parametrize(
+    "normalisation",
+    [
+        PHYSICAL,
+        pytest.param(
+            Normalisation(signature="colour"),
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "mirror.direct.measure_signature gives the mirror the reference's direct "
+                    "spectrum, the band limit of its grid with it, and a pack that keeps it "
+                    "(the signature 'colour', or 'aligned') lays it on a scale that is "
+                    "physical and on a band the wave field does not hold: "
+                    "render.engine.SourceRenderer puts every dry signal through it "
+                    "(DryTrack.high). In the first scene's pack as traced the mirror's "
+                    "direct sound was -2.4 dB re 1 / d at 1 kHz, -2.6 at 2 kHz, -2.5 at "
+                    "4 kHz, -4.2 at 8 kHz, -5.7 at 12 kHz and -7.4 at 16 kHz: 1.8 to 5 dB of "
+                    "treble that no physics took, over what the gain took"
+                ),
+            ),
+        ),
+    ],
+    ids=["a unit pulse", "the measured colour"],
 )
-def test_the_mirror_s_direct_sound_is_as_flat_as_a_unit_source_s(tmp_path: Path) -> None:
+def test_the_mirror_s_direct_sound_is_as_flat_as_a_unit_source_s(
+    tmp_path: Path, normalisation: Normalisation
+) -> None:
     """A pack is physical: ``1 / d`` at 12 kHz as at 2 kHz, whatever grid the reference was on."""
     distances = np.linspace(0.8, 3.0, 6)
     reference = _reference_field(
@@ -498,8 +601,11 @@ def test_the_mirror_s_direct_sound_is_as_flat_as_a_unit_source_s(tmp_path: Path)
         omni = [np.asarray(handle["ir"][p, 0], dtype=float) for p in range(distances.size)]
     taps, _ = measure_signature(omni, RATE)
     freqs = np.fft.rfftfreq(4096, 1.0 / RATE)
-    colour = db(np.abs(np.fft.rfft(taps, 4096)))
+    carried = _in_a_pack(FIELD_UNIT_AT_1M, taps, normalisation).pack_signature()
+    colour = db(np.abs(np.fft.rfft(carried, 4096)))
     assert abs(float(colour[at(freqs, 12000.0)] - colour[at(freqs, 2000.0)])) < 0.5
+    # And at the crossover a pack's signature is 0 dB, kept or not: its level is not a gain.
+    assert abs(float(colour[at(freqs, 1000.0)])) < 0.5
 
 
 @pytest.mark.xfail(
@@ -600,19 +706,16 @@ def test_the_wave_band_is_whole_from_50_hz_and_gone_at_20() -> None:
     assert level[0] < -45.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "trace.engines.FreeFieldPairs.response keeps nothing under 80 Hz and raises a "
-        "cosine from 80 to 160 Hz (-6 dB at 120 Hz), and render.pack.synthetic_free_field "
-        "does the same (SYNTHETIC_HIGHPASS_HZ): the stand-in for a solve starts an octave "
-        "over the solve, whose band is whole from 50 Hz. A level read on a free field pack "
-        "is short of what a solved pack holds from 40 to 160 Hz, and 'neither band renders "
-        "under 80 Hz' (first-scene-defects.md) is true of the stand-in alone"
-    ),
-)
 def test_the_free_field_stand_in_holds_the_band_a_solve_holds(tmp_path: Path) -> None:
-    """A monopole 2 m away at 63 Hz: the level a solve's own low cut leaves it, -0.0 dB."""
+    """A monopole 2 m away at 63 Hz: the level a solve's own low cut leaves it, -0.0 dB.
+
+    Until 2026-10-05 ``trace.engines.FreeFieldPairs.response`` kept nothing
+    under 80 Hz and raised a cosine from 80 to 160 Hz (-6 dB at 120 Hz): the
+    stand-in for a solve started an octave over the solve, whose band is
+    whole from 50 Hz, and "neither band renders under 80 Hz" was true of
+    the stand-in alone (D11). It now takes the fit's own low cut, causal as
+    a solve's is (``spatial.lowband.lowcut_response``).
+    """
     from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES
     from reverberate.trace.engines import FreeFieldPairs
 
@@ -621,6 +724,45 @@ def test_the_free_field_stand_in_holds_the_band_a_solve_holds(tmp_path: Path) ->
     freqs = np.fft.rfftfreq(LOW_SAMPLES, 1.0 / LOW_RATE_HZ)
     spectrum = np.abs(np.fft.rfft(omni))
     assert float(db(spectrum[at(freqs, 63.0)] / spectrum[at(freqs, 400.0)])) > -1.0
+    # Where a solve's band starts, and no lower: -3 dB at 40 Hz, gone at 20 Hz.
+    assert float(db(spectrum[at(freqs, 40.0)] / spectrum[at(freqs, 400.0)])) == pytest.approx(
+        -3.0, abs=0.5
+    )
+    assert float(db(spectrum[at(freqs, 20.0)] / spectrum[at(freqs, 400.0)])) < -40.0
+
+
+def test_the_stand_in_s_low_cut_is_the_fit_s_own() -> None:
+    """One low cut: the constants a solve's fit is given, and the response a stand-in applies."""
+    from reverberate.accel import pairs as solved
+    from reverberate.spatial.lowband import LOWCUT_HZ, LOWCUT_ORDER, lowcut_response
+
+    assert (LOWCUT_HZ, LOWCUT_ORDER) == (solved.LOWCUT_HZ, solved.LOWCUT_ORDER)
+    level = db(lowcut_response(np.array([20.0, 31.5, 40.0, 43.7, 50.0, 63.0, 125.0])))
+    np.testing.assert_allclose(level, [-48.2, -16.6, -3.0, -1.0, -0.12, 0.0, 0.0], atol=0.1)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "render.pack.synthetic_free_field keeps nothing under 80 Hz and raises a cosine "
+        "from 80 to 160 Hz (SYNTHETIC_HIGHPASS_HZ, -6 dB at 120 Hz): the synthetic profile "
+        "starts an octave over a solve. The engine's own tests are tuned on that edge (its "
+        "ring 29 dB down before the arrival in test_render_check, the degrees' errors of "
+        "test_render_engine, the compact form's bounds of test_render_compact), so it moves "
+        "with the engine's lot; the trace's stand-in was moved on 2026-10-05"
+    ),
+)
+def test_the_synthetic_pack_s_low_band_starts_where_a_solve_s_does() -> None:
+    """``render.pack.monopole_low_response`` at 63 Hz, against 400 Hz: a solve holds it whole."""
+    from reverberate.render.pack import synthetic_free_field
+
+    pack = synthetic_free_field(level="B", duration_s=0.1)
+    low = pack.sources["s1"].low
+    assert low is not None
+    omni = np.asarray(low.ir[0][0], dtype=float)
+    freqs = np.fft.rfftfreq(omni.size, 1.0 / pack.header.low_sample_rate_hz)
+    spectrum = np.abs(np.fft.rfft(omni))
+    assert float(db(spectrum[at(freqs, 63.0)] / spectrum[at(freqs, 400.0)])) > -0.5
 
 
 def test_a_sealed_room_keeps_the_volume_its_source_gave_it() -> None:

@@ -145,8 +145,9 @@ def test_a_scene_is_keyed_once_for_all_its_sites(monkeypatch: pytest.MonkeyPatch
     assert all(a is b for a, b in zip(first, again, strict=True))
     scene = cache._shared["scene"]
     rays = held.settings.traced_rays()
-    assert tail_key(scene, sites[0], cells, rays) == tail_key(scene.key, sites[0], cells, rays)
-    assert tail_key(scene, sites[0], cells, rays) != tail_key(scene, sites[1], cells, rays)
+    one = cells[0]
+    assert tail_key(scene, sites[0], one, rays) == tail_key(scene.key, sites[0], one, rays)
+    assert tail_key(scene, sites[0], one, rays) != tail_key(scene, sites[1], one, rays)
 
 
 def test_the_levelling_reads_channel_0_and_gets_the_whole_responses_answers() -> None:

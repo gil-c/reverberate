@@ -38,6 +38,8 @@ from reverberate.spatial.translate import SOUND_SPEED_M_S, namespace_of
 __all__ = [
     "FIELD_UNIT_AT_1M",
     "HEADROOM",
+    "LOWCUT_HZ",
+    "LOWCUT_ORDER",
     "LOW_DURATION_S",
     "LOW_RATE_HZ",
     "LOW_SAMPLES",
@@ -45,6 +47,7 @@ __all__ = [
     "delayed",
     "from_stored",
     "low_side",
+    "lowcut_response",
     "onset_s",
     "pair_key",
     "solve_fmax_hz",
@@ -74,6 +77,33 @@ _ONSET_RATE_HZ = 48000.0
 #: their first reflection: 0.0235 to 0.0255. Dividing by it is what makes a
 #: pack physical (``docs/formats/scene-pack.md``).
 FIELD_UNIT_AT_1M: float = 48000.0 / (4.0 * float(np.pi) * float(np.sqrt(3.0)) * 10.5 * 8000.0)
+
+
+#: Where the band under the crossover starts: the low cut of every solve's fit
+#: (``reverberate.accel.pairs.LOWCUT_HZ`` and ``LOWCUT_ORDER``, a Butterworth high pass
+#: of order 8 at 40 Hz). -3 dB at 40 Hz, -1 dB at 43.7 Hz, -0.14 dB at 50 Hz, nothing
+#: from 63 Hz up: a pack is valid from 45 Hz (``docs/formats/scene-pack.md``).
+LOWCUT_HZ, LOWCUT_ORDER = 40.0, 8
+
+
+def lowcut_response(
+    freqs_hz: np.ndarray, cut_hz: float = LOWCUT_HZ, order: int = LOWCUT_ORDER
+) -> np.ndarray:
+    """The fit's low cut as a spectrum, complex and causal: what a stand-in for a solve applies.
+
+    The analogue Butterworth high pass the fit designs
+    (:func:`reverberate.accel.dsp.lowcut_sos`), read at ``freqs_hz``; zero
+    at 0 Hz. A stand-in that cut higher than a solve does made a synthetic
+    pack say that nothing is rendered under 80 Hz
+    (``docs/open-questions/chain-audit.md``, D11).
+    """
+    from scipy.signal import butter, freqs_zpk
+
+    zeros, poles, gain = butter(
+        order, 2.0 * np.pi * cut_hz, btype="high", analog=True, output="zpk"
+    )
+    _, response = freqs_zpk(zeros, poles, gain, worN=2.0 * np.pi * np.asarray(freqs_hz, float))
+    return np.asarray(response, dtype=complex)
 
 
 def solve_fmax_hz(crossover: Crossover | None = None, *, headroom: float = HEADROOM) -> float:

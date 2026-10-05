@@ -18,6 +18,19 @@ python -m reverberate.wave.lowband cost --bundle B --out O [--scheme S] [--ppw P
     node updates a second, seconds and USD per source position and per pair, per batch size
 python -m reverberate.wave.lowband counts --heard heard_at.json [--channels 64]
     solves needed from the source side, from the cells' side, and by the best mix
+python -m reverberate.wave.lowband walls (--entry DIR | --materials DIR) [--counts 5,6,7,8]
+    each material fitted again for the band with fewer branches: the worst third octave of
+    every count, and the fewest branches that hold every material under the bars
+python -m reverberate.wave.lowband outside --entry DIR --source X Y Z [--out O]
+    the air a source reaches between the outer walls and the shell, a face of the box at a time
+python -m reverberate.wave.lowband union --bundles B1 B2 ... --out U
+    several recipes' pairs bundles of one dwelling as one: each source position solved once
+
+``compare`` and ``cost`` also take what a campaign takes: ``--boundary stencil|apart`` (where
+a card updates the walls: the same bits), ``--walls N`` (the materials fitted again with N
+branches), ``--outside open|rigid`` (the air outside the outer walls cut off) and ``--fit
+time|spectra`` (how the records reach the fit). The last three change the responses and
+are in the pairs' keys.
 
 ``compare`` and ``cost`` take the bundle of ``python -m reverberate.accel
 pairs-bundle``; with ``--reference`` naming a directory that holds no
@@ -72,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--cpu", action="store_true")
         p.add_argument("--rate", type=float, default=None, help="USD an hour of the machine")
         p.add_argument("--pffdtd", type=Path, default=None)
+        p.add_argument("--boundary", choices=("stencil", "apart"), default="stencil")
+        p.add_argument("--walls", type=int, default=None, help="branches a material is refitted to")
+        p.add_argument("--outside", choices=("open", "rigid"), default=None)
+        p.add_argument("--fit", choices=("time", "spectra"), default="time")
         if name == "compare":
             p.add_argument("--reference", type=Path, default=None, help="a campaign's directory")
             p.add_argument("--line", type=Path, default=None, help="line.npz of the line command")
@@ -87,6 +104,24 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--batches", default="1,2,4,8,16,32,64")
             p.add_argument("--steps", type=int, default=400)
             p.add_argument("--cells", type=int, default=10)
+            p.add_argument("--probe-s", type=float, default=10.0, help="seconds of the probe")
+
+    p = sub.add_parser("walls", help="the materials fitted again for the band")
+    p.add_argument("--entry", type=Path, default=None, help="a voxelisation's cache entry")
+    p.add_argument("--materials", type=Path, default=None, help="a bundle's models/materials")
+    p.add_argument("--counts", default="5,6,7,8")
+    p.add_argument("--fmin", type=float, default=40.0)
+    p.add_argument("--fmax", type=float, default=1500.0)
+    p.add_argument("--out", type=Path, default=None)
+
+    p = sub.add_parser("outside", help="the air between the outer walls and the shell")
+    p.add_argument("--entry", type=Path, required=True)
+    p.add_argument("--source", type=float, nargs=3, required=True)
+    p.add_argument("--out", type=Path, default=None)
+
+    p = sub.add_parser("union", help="several recipes' bundles of one dwelling as one")
+    p.add_argument("--bundles", type=Path, nargs="+", required=True)
+    p.add_argument("--out", type=Path, required=True)
 
     p = sub.add_parser("between", help="two campaigns' pair caches against each other")
     p.add_argument("--reference", type=Path, required=True)
@@ -215,7 +250,90 @@ def _campaign(args: argparse.Namespace) -> Any:
         scheme=args.scheme,
         ppw=args.ppw,
         batch=getattr(args, "batch", None),
+        boundary=args.boundary,
+        walls=args.walls,
+        outside=args.outside,
+        fit=args.fit,
     )
+
+
+def _walls(args: argparse.Namespace) -> int:
+    """Every material of an entry or of a bundle, fitted again with each count of branches."""
+    import h5py
+
+    from reverberate.wave.lowband.problem import read_entry
+    from reverberate.wave.lowband.walls import (
+        ABSORPTION_BAR,
+        REFLECTION_BAR_DB,
+        WallFit,
+        refit_all,
+    )
+
+    if (args.entry is None) == (args.materials is None):
+        raise SystemExit("give the materials as --entry or as --materials, not both")
+    if args.entry is not None:
+        materials = read_entry(args.entry).materials
+        names = [f"mat_{i:02d}" for i in range(len(materials))]
+    else:
+        files = sorted(args.materials.glob("*.h5"))
+        names = [f.stem for f in files]
+        materials = []
+        for file in files:
+            with h5py.File(file, "r") as handle:
+                materials.append(np.asarray(handle["DEF"][...], dtype=np.float64))
+    table: dict[str, Any] = {
+        "bars": {"reflection_db": REFLECTION_BAR_DB, "absorption": ABSORPTION_BAR},
+        "band_hz": [args.fmin, args.fmax],
+        "counts": {},
+    }
+    chosen = None
+    for count in sorted(int(c) for c in args.counts.split(",")):
+        _, record = refit_all(materials, WallFit(count, args.fmin, args.fmax))
+        worst = record["worst"]
+        passes = bool(
+            worst["reflection_db"] <= REFLECTION_BAR_DB
+            and max(worst["normal"], worst["random"]) <= ABSORPTION_BAR
+        )
+        if passes and chosen is None:
+            chosen = count
+        table["counts"][count] = {
+            "worst": worst,
+            "worst_material": names[
+                int(np.argmax([row["reflection_db"] for row in record["materials"]]))
+            ],
+            "under_the_bars": passes,
+            "materials": dict(zip(names, record["materials"], strict=True)),
+        }
+        print(
+            f"{count} branches: admittance {100 * worst['admittance']:.2f} %, reflection"
+            f" {worst['reflection_db']:.1f} dB, absorption {worst['normal']:.4f} normal"
+            f" {worst['random']:.4f} random, worst {table['counts'][count]['worst_material']}:"
+            f" {'under' if passes else 'over'} the bars"
+        )
+    table["fewest_under_the_bars"] = chosen
+    print(f"the fewest branches under the bars: {chosen}")
+    if args.out is not None:
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / "walls.json").write_text(json.dumps(table, indent=1))
+    return 0
+
+
+def _outside(args: argparse.Namespace) -> int:
+    from reverberate.wave.comms import engine_indices, interp_weights, load_grid
+    from reverberate.wave.lowband.outside import outside_air, reach_of, without
+    from reverberate.wave.lowband.problem import read_entry
+
+    arrays = read_entry(args.entry)
+    grid = load_grid(args.entry)
+    seeds = engine_indices(interp_weights(np.asarray(args.source, dtype=float), grid)[1], grid)
+    mask, record = outside_air(reach_of(arrays, seeds), arrays.h)
+    record["cut"] = without(arrays, mask, closure="open")[1]
+    print(json.dumps(record, indent=1))
+    if args.out is not None:
+        args.out.mkdir(parents=True, exist_ok=True)
+        (args.out / "outside.json").write_text(json.dumps(record, indent=1))
+        np.save(args.out / "outside.npy", np.packbits(mask))
+    return 0
 
 
 def _numbers(args: argparse.Namespace) -> int:
@@ -353,6 +471,7 @@ def _compare(args: argparse.Namespace) -> int:
 
 def _cost(args: argparse.Namespace) -> int:
     from reverberate.wave.lowband.harness import cost_table
+    from reverberate.wave.lowband.walls import WallFit
 
     if args.rate is None:
         raise SystemExit("a cost needs the machine's hourly rate: --rate")
@@ -379,6 +498,11 @@ def _cost(args: argparse.Namespace) -> int:
         encoder=encoder,
         offsets=design.positions - design.centre,
         say=campaign.say,
+        boundary=args.boundary,
+        walls=None if args.walls is None else WallFit(args.walls),
+        outside=args.outside,
+        card=str(campaign.status["device"].get("gpu") or ""),
+        probe_s=args.probe_s,
     )
     table["solver"] = str(campaign.spec["solver"])
     table["device"] = campaign.status["device"]
@@ -414,6 +538,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "slabs":
         return _slabs(args)
+    if args.command == "walls":
+        return _walls(args)
+    if args.command == "outside":
+        return _outside(args)
+    if args.command == "union":
+        from reverberate.wave.lowband.pairs import merge_bundles
+
+        print(json.dumps(merge_bundles(args.bundles, args.out), indent=1))
+        return 0
     if args.command == "compare":
         return _compare(args)
     if args.command == "cost":

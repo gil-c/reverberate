@@ -468,3 +468,33 @@ def test_the_first_scenes_library_holds_what_the_first_scene_needs() -> None:
             assert clip["level"]["active_dbfs"] == pytest.approx(
                 clip_library.VOICE_ACTIVE_DBFS, abs=0.1
             )
+
+
+def test_a_noise_is_levelled_on_what_a_render_holds_of_it() -> None:
+    """A rumble at 15 Hz under a hum at 200 Hz: the level is the hum's (the audit's D12).
+
+    The first library's washing machine holds 98 per cent of its energy
+    between 10 and 20 Hz; levelled on its whole band it was rendered 25 dB
+    under the level its entry states, the chain being valid from 45 Hz.
+    """
+    t = np.arange(4 * RATE) / RATE
+    rumble = 0.2 * np.sin(2.0 * np.pi * 15.0 * t)
+    hum = 0.02 * np.sin(2.0 * np.pi * 200.0 * t)
+    whole = 20.0 * np.log10(np.sqrt(np.mean((rumble + hum) ** 2)))
+    heard = clip_library.heard_level_db(rumble + hum)
+    assert heard == pytest.approx(20.0 * np.log10(0.02 / np.sqrt(2.0)), abs=0.1)
+    assert whole - heard > 19.0
+    # What lies above the floor is whole: -0.14 dB at 50 Hz, nothing from 63 Hz up.
+    for hz, lost in ((50.0, -0.14), (63.0, 0.0), (1000.0, 0.0)):
+        tone = 0.1 * np.sin(2.0 * np.pi * hz * t)
+        assert clip_library.heard_level_db(tone) - 20.0 * np.log10(0.1 / np.sqrt(2.0)) == (
+            pytest.approx(lost, abs=0.05)
+        )
+    from reverberate.spatial.lowband import LOWCUT_HZ, LOWCUT_ORDER
+
+    assert (clip_library.HEARD_FROM_HZ, clip_library.HEARD_ORDER) == (LOWCUT_HZ, LOWCUT_ORDER)
+    # The first library was levelled on its whole band, and its selection says so: made
+    # again it is the same files. A noise that says nothing is levelled on what is heard.
+    selection = json.loads(DEFAULT_MANIFEST.with_name("clarify_v1.selection.json").read_text())
+    measures = {clip.get("measure") for clip in selection["clips"] if clip["kind"] != "voice"}
+    assert measures == {"rms", "active"}

@@ -39,6 +39,7 @@ from reverberate.mirror.render import render_point
 from reverberate.render.compact import CompactIr
 from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.pack import read_pack
+from reverberate.render.seam import FIXED
 from reverberate.scenes import (
     Recipe,
     low_band_source_positions,
@@ -60,7 +61,14 @@ from reverberate.spatial.translate import (
     choose_cells,
     serving_radius_m,
 )
-from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
+from reverberate.trace.assets import (
+    ALIGNED,
+    PHYSICAL,
+    MirrorAssets,
+    Normalisation,
+    found_assets,
+    mismatched,
+)
 from reverberate.trace.bundle import build_bundle
 from reverberate.trace.cli import main
 from reverberate.trace.driver import (
@@ -234,14 +242,21 @@ def resting_recipe() -> Recipe:
 
 
 def traced(
-    tmp: Path, recipe: Recipe, *, rays: int = 120, low_levers: str | None = None, **engine: Any
+    tmp: Path,
+    recipe: Recipe,
+    *,
+    rays: int = 120,
+    low_levers: str | None = None,
+    normalisation: Normalisation = PHYSICAL,
+    **engine: Any,
 ) -> tuple[Trace, FreeFieldPairs, Plan]:
     """The bundle of ``recipe`` and its trace, not yet run, on the free field engine.
 
     ``low_levers`` is the bundle's: left out, the form a trace writes by
     default, the bins in 16 bits, in the pack and in the pair cache.
+    ``normalisation`` is the mirror's, which the bundle says to the trace.
     """
-    held = assets(rays)
+    held = replace(assets(rays), normalisation=normalisation)
     plan = make_plan(recipe, held.triangles)
     build_bundle(
         tmp / "bundle", recipe, held, plan, allow_asset_mismatch=True, low_levers=low_levers
@@ -498,8 +513,12 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
         assert (h.profile, h.steps, h.has_low, h.has_tail) == ("trace", 11, True, True)
         assert h.recipe_sha256 == plan.recipe_sha256 and sorted(pack.sources) == ["tap", "voice"]
         assert pack.mirror.lead_s == pytest.approx(192 / 48000)
-        # A pack is physical: the mirror's gain is the alignment's over the field's unit.
-        assert pack.mirror.alignment_gain == pytest.approx(0.02 / FIELD_UNIT_AT_1M)
+        # A pack is physical: the mirror's gain is one and its signature a unit pulse,
+        # whatever the bundle's mirror measured against a field (0.02 and four taps).
+        assert pack.mirror.alignment_gain == 1.0
+        np.testing.assert_array_equal(pack.mirror.signature, [1.0])
+        assert pack.directivity["voice_v1"].normalised == "axis"
+        np.testing.assert_array_equal(pack.directivity["voice_v1"].gain_db[:, 0], 0.0)
         assert pack.air.enabled
         provenance = dict(h.provenance)
         assert provenance["cost"] == [] and provenance["solver"].startswith("free-field")
@@ -507,8 +526,28 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
         assert "calibration_key" in provenance["assets_mismatched"]
         seams = np.concatenate([s.low.seam_db for s in pack.sources.values() if s.low is not None])
         assert provenance["seam"]["shares"] == [1.0, 1.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0]
-        assert provenance["seam"]["constant"] == "the median of the pairs' seams"
-        assert provenance["seam"]["constant_db"] == pytest.approx(np.median(seams), abs=0.05)
+        # Where the bands above the crossover stand is the code's one number, 0 dB over a
+        # gain of one; a step's own part is counted from the median of the scene's seams.
+        assert provenance["seam"]["constant"] == FIXED and provenance["seam"]["constant_db"] == 0.0
+        assert provenance["seam"]["level_db"] == 0.0
+        assert provenance["seam"]["median_db"] == pytest.approx(np.median(seams), abs=0.05)
+        said = provenance["normalisation"]
+        assert said["born"] is True and said["alignment"] == "physical"
+        assert (said["signature"], said["seam"], said["directivity"]) == (
+            "unit",
+            "unbiased",
+            "axis",
+        )
+        assert said["alignment_gain_db"] == 0.0
+        assert said["measured"]["alignment_gain_db"] == pytest.approx(
+            20.0 * np.log10(0.02 / FIELD_UNIT_AT_1M), abs=1e-3
+        )
+        # The free field's responses are whole over the octave: nothing to undo in a seam.
+        assert said["seam_low_limit_hz"] is None
+        for source in pack.sources.values():
+            heard = np.asarray(source.audible, dtype=bool)
+            table = np.asarray(source.level.band_gain_db)
+            assert np.all(table[heard, 5:] == 0.0)
         # The cells are where the arrays stood, not where they were asked for.
         cells = pack.cells.position
         asked = plan.cells.position
@@ -527,21 +566,24 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
             assert MODE_TRANSLATED in low.mode and MODE_EXACT not in low.mode
             assert low.ir.shape[1:] == (64, 4800) and np.all(np.isfinite(low.seam_db))
             assert np.all(low.onset_s > pack.mirror.lead_s)
-            # A step that reads one pair takes that pair's seam on top of the alignment's gain.
+            # A step that reads one pair takes that pair's seam on top of the mirror's gain,
+            # which is one: the scalar is the seam.
             one = (low.position_weight == 0.0) & (low.mode == MODE_TRANSLATED)
             assert one.any()
             np.testing.assert_allclose(
-                source.level.high_gain_db[one],
-                20.0 * np.log10(0.02 / FIELD_UNIT_AT_1M) + low.seam_db[low.pair[one, 0, 0]],
-                atol=1e-5,
+                source.level.high_gain_db[one], low.seam_db[low.pair[one, 0, 0]], atol=1e-5
             )
             assert np.all(source.level.onset_s > pack.mirror.lead_s)
-            # The level a band, the tapered join: the scalar to the bit up to 1 kHz, the
-            # scene's one number from 4 kHz, which the provenance names.
+            # The level a band, the tapered join: up to 1 kHz the scalar less the median of
+            # the scene's seams, the one number from 4 kHz, which the provenance names.
             table = np.asarray(source.level.band_gain_db)
             heard = np.asarray(source.audible, dtype=bool)
             assert table.shape == (h.steps, len(h.bank))
-            assert np.array_equal(table[:, 3], source.level.high_gain_db)
+            np.testing.assert_allclose(
+                table[heard, 3],
+                source.level.high_gain_db[heard] - provenance["seam"]["median_db"],
+                atol=1e-4,
+            )
             assert np.all(table[heard, 5:] == np.float32(provenance["seam"]["level_db"]))
             assert np.all(source.tail.hist_cell < cells.shape[0])
         # The cell without an array leaves the two beside it 0.30 m apart. The noise is far and
@@ -585,11 +627,13 @@ def test_at_rest_the_pack_rendered_is_the_hybrid_of_the_present_pipeline(tmp_pat
     free field engine's; the mirror's part is real.
     """
     recipe = resting_recipe()
-    _, pairs, plan = traced(tmp_path, recipe)
+    # The hybrid of the present pipeline is a field of the mirror on its measured
+    # alignment: the pack is traced ``aligned``, the one switch that reproduces it.
+    _, pairs, plan = traced(tmp_path, recipe, normalisation=ALIGNED)
     arguments = ["run", "--bundle", str(tmp_path / "bundle"), "--out", str(tmp_path / "out")]
     assert main([*arguments, "--free-field", "--cpu"]) == 0
     assert pairs.solved == [] and (tmp_path / "out" / "campaign.done").is_file()
-    held = assets()
+    held = replace(assets(), normalisation=ALIGNED)
     settings = held.settings
     c = settings.sound_speed_m_s
     station_m, cell = plan.tracks.positions[0], plan.cells.position[0]
@@ -643,6 +687,11 @@ def test_at_rest_the_pack_rendered_is_the_hybrid_of_the_present_pipeline(tmp_pat
     click = np.zeros(int(0.5 * FS))
     click[start] = 1.0
     with read_pack(tmp_path / "out" / "pack.h5", deep=True) as pack:
+        said = dict(pack.header.provenance)["normalisation"]
+        assert said["alignment"] == "measured" and said["signature"] == "measured"
+        assert pack.mirror.alignment_gain == pytest.approx(0.02 / FIELD_UNIT_AT_1M)
+        np.testing.assert_array_equal(pack.mirror.signature, held.signature)
+        assert pack.directivity["voice_v1"].normalised == "mean"
         source = pack.sources["voice"]
         assert source.low is not None and set(source.low.mode.tolist()) == {MODE_EXACT}
         # The three scalars are the hybrid's own.
@@ -729,7 +778,9 @@ def test_a_pair_stored_without_its_lead_rings_round_to_its_end() -> None:
     stored, onset, aired = pair_low(
         cached, Crossover(), Atmosphere(), lead_s=512 / FS, unit_at_1m=FIELD_UNIT_AT_1M, **keywords
     )
-    assert onset == pytest.approx(0.8 / C + 512 / FS, abs=1 / FS)
+    # Within two samples: the stand-in's low cut is a solve's, 40 Hz at order 8 and causal,
+    # and what it turns of the band under 700 Hz brings the loudest sample 0.04 ms forward.
+    assert onset == pytest.approx(0.8 / C + 512 / FS, abs=2 / FS)
     # The seam is read on the pair on the pack's clock: silent while the lead lasts, but for
     # the ring of a delay that is not a whole sample (2e-3 of the peak, at the Nyquist
     # frequency, which the masks remove).
@@ -737,9 +788,10 @@ def test_a_pair_stored_without_its_lead_rings_round_to_its_end() -> None:
     # An impulse of one through the low pressure mask peaks at ``unit``: the pack holds it over d.
     low_mask = Crossover().masks(57600, FS, power=False)[0]
     unit = float(np.max(np.abs(np.fft.irfft(low_mask, n=57600))))
-    # Less what the engine's own high pass from 80 to 160 Hz takes of it: 12 per cent.
+    # Less what the stand-in's low cut, a solve's own, turns of it: a quarter of the peak,
+    # none of the level (``test_chain_audit``: whole from 50 Hz).
     assert float(np.abs(from_stored(stored[:1])).max()) == pytest.approx(
-        0.88 * unit / 0.8, rel=0.03
+        0.75 * unit / 0.8, rel=0.03
     )
     # The seeded fault: left on the field's scale, the same response is 31.6 dB under it.
     raw, _, _ = pair_low(cached, Crossover(), Atmosphere(), lead_s=512 / FS, **keywords)

@@ -24,9 +24,9 @@ import numpy as np
 from reverberate.accel.lattice import sim_constants
 from reverberate.wave.comms import Grid
 from reverberate.wave.lowband.problem import EngineArrays
-from reverberate.wave.lowband.scheme import BACK_OFF, Scheme
+from reverberate.wave.lowband.scheme import BACK_OFF, CARTESIAN, Scheme
 
-__all__ = ["TEST_BRANCHES", "box_arrays", "constants_of", "write_entry"]
+__all__ = ["TEST_BRANCHES", "air_arrays", "box_arrays", "constants_of", "write_entry"]
 
 #: Three branches of a fitted material of the project, ``D E F``: a wall that absorbs.
 TEST_BRANCHES = np.array(
@@ -139,6 +139,68 @@ def box_arrays(
         materials=[TEST_BRANCHES if branches is None else np.asarray(branches, dtype=float)]
         if lossy
         else [],
+    )
+    return arrays, grid
+
+
+def air_arrays(
+    air: np.ndarray,
+    *,
+    fmax_hz: float = 1500.0,
+    branches: np.ndarray | None = None,
+) -> tuple[EngineArrays, Grid]:
+    """The engine's arrays of any shape of air on the Cartesian grid, and its grid.
+
+    ``air`` is ``[nx, ny, nz]`` bool, strictly descending as
+    :func:`box_arrays` wants it, and holds no air on the box's two outer
+    layers. Every node with a neighbour on the other side of the air's skin
+    is a boundary node that reads its own side, as the voxeliser lists
+    them; a node of air on the skin carries material 0 with ``branches``.
+    What a room, a wall with an opening and a shell round both need.
+    """
+    air = np.asarray(air, dtype=bool)
+    nx, ny, nz = air.shape
+    if not nx > ny > nz:
+        raise ValueError("the box's shape must be strictly descending")
+    edge = np.ones(air.shape, dtype=bool)
+    edge[2:-2, 2:-2, 2:-2] = False
+    if bool((air & edge).any()):
+        raise ValueError("the air must lie at least two nodes inside the box")
+    held = constants_of(CARTESIAN, fmax_hz, None)
+    grid = Grid(
+        h=held["h"],
+        Ts=held["ts"],
+        l2=held["l2"],
+        fcc_flag=0,
+        xv=np.arange(nx) * held["h"],
+        yv=np.arange(ny) * held["h"],
+        zv=np.arange(nz) * held["h"],
+    )
+    same = np.ones((*air.shape, len(CARTESIAN.neighbours)), dtype=bool)
+    for j, (dx, dy, dz) in enumerate(CARTESIAN.neighbours):
+        beside = air.copy()
+        beside[
+            max(-dx, 0) : nx + min(-dx, 0),
+            max(-dy, 0) : ny + min(-dy, 0),
+            max(-dz, 0) : nz + min(-dz, 0),
+        ] = air[
+            max(dx, 0) : nx + min(dx, 0), max(dy, 0) : ny + min(dy, 0), max(dz, 0) : nz + min(dz, 0)
+        ]
+        same[..., j] = beside == air
+    index = np.flatnonzero(~same.all(axis=-1))
+    adjacency = same.reshape(-1, len(CARTESIAN.neighbours))[index]
+    arrays = EngineArrays(
+        shape=(nx, ny, nz),
+        fcc_flag=0,
+        courant=held["l"],
+        courant2=held["l2"],
+        ts=held["ts"],
+        h=held["h"],
+        bn_ixyz=index,
+        adj_bn=adjacency,
+        mat_bn=np.where(air.reshape(-1)[index], 0, -1).astype(np.int8),
+        saf_bn=(~adjacency).sum(axis=1).astype(np.float64),
+        materials=[TEST_BRANCHES if branches is None else np.asarray(branches, dtype=float)],
     )
     return arrays, grid
 

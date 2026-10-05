@@ -29,6 +29,7 @@ solver, so the two never meet in a cache.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -41,10 +42,21 @@ import numpy as np
 from reverberate.accel.pairs import PairCache, PairsCampaign
 from reverberate.spatial.lowband import LOW_RATE_HZ
 from reverberate.wave.comms import Grid, engine_indices, interp_weights, load_grid
-from reverberate.wave.lowband.fit import CellEncoder, level_scale
+from reverberate.wave.lowband.fit import FITS, CellEncoder, level_scale
+from reverberate.wave.lowband.outside import CLOSURES
 from reverberate.wave.lowband.problem import Problem, load_problem
 from reverberate.wave.lowband.scheme import CARTESIAN, SCHEMES, Scheme
-from reverberate.wave.lowband.solver import SPOOL_STEPS, drive_for, solve, steps_for
+from reverberate.wave.lowband.solver import (
+    BOUNDARIES,
+    SPOOL_STEPS,
+    CardStepper,
+    Drive,
+    drive_for,
+    solve,
+    step_bytes,
+    steps_for,
+)
+from reverberate.wave.lowband.walls import WallFit
 
 __all__ = [
     "SOLVER",
@@ -53,9 +65,14 @@ __all__ = [
     "batch_bytes",
     "batch_capacity",
     "estimate",
+    "MEMORY_GB_S",
+    "PROBE_S",
     "halves",
+    "last_short",
+    "merge_bundles",
     "node_indices",
     "pack_batches",
+    "probe",
     "solver_name",
 ]
 
@@ -210,9 +227,242 @@ def cores_lent() -> int:
     return max(1, count - 2)
 
 
-def solver_name(scheme: Scheme, ppw: float) -> str:
-    """What a pair's key and a pack's provenance say solved it."""
-    return f"{SOLVER} {scheme.name} at {ppw:g} points per wavelength"
+def solver_name(
+    scheme: Scheme,
+    ppw: float,
+    *,
+    walls: int | None = None,
+    outside: str | None = None,
+    fit: str = "time",
+) -> str:
+    """What a pair's key and a pack's provenance say solved it.
+
+    Left alone, the name every cached pair carries. Each option that
+    changes a response adds its own words, so that pairs made with it are
+    other pairs: the walls fitted again with ``walls`` branches
+    (:mod:`reverberate.wave.lowband.walls`), the air outside the outer walls
+    cut off and its openings closed as ``outside`` says
+    (:mod:`reverberate.wave.lowband.outside`), the fit made in its spectra
+    (:class:`reverberate.wave.lowband.fit.SpectralChain`). Where a card
+    updates the boundary is not in it: the bits are the same.
+    """
+    name = f"{SOLVER} {scheme.name} at {ppw:g} points per wavelength"
+    if walls is not None:
+        name += f", {WallFit(int(walls)).name()}"
+    if outside is not None:
+        if outside not in CLOSURES:
+            raise ValueError(f"an opening is closed as one of {CLOSURES}, not {outside!r}")
+        name += f", the air outside the outer walls cut off, its openings {outside} (outside/1)"
+    if fit not in FITS:
+        raise ValueError(f"a fit is one of {FITS}, not {fit!r}")
+    if fit == "spectra":
+        name += ", fitted in its spectra (spectra/1)"
+    return name
+
+
+#: What a card's memory moves a second, GB, as its maker states it: the scale a kernel's
+#: bytes are read against. A card that is not here is measured and not judged.
+MEMORY_GB_S = {
+    "RTX 3080": 760.0,
+    "RTX 3080 Ti": 912.0,
+    "RTX 3090": 936.0,
+    "RTX 3090 Ti": 1008.0,
+    "RTX 4080": 717.0,
+    "RTX 4090": 1008.0,
+    "RTX A5000": 768.0,
+    "RTX A6000": 768.0,
+    "A100": 1555.0,
+}
+#: Of a card's memory rate, what the solver's kernels moved where they were measured: 517 GB/s
+#: of the RTX 3090's 936 on the first whole scene, 453 and 394 of the RTX 3080's 760.
+MEASURED_SHARE = 0.55
+#: Under this share of what the bytes predict, a card is said to be slow.
+PROBE_FLOOR = 0.7
+#: Seconds of steps a worker times on its card before its first launch.
+PROBE_S = 10.0
+
+
+def memory_rate_of(card: str) -> float | None:
+    """The memory rate of a card by its name as the driver gives it, GB/s; ``None`` unknown."""
+    plain = " ".join(str(card).replace("NVIDIA", "").replace("GeForce", "").split())
+    for name in sorted(MEMORY_GB_S, key=len, reverse=True):
+        if name.lower() in plain.lower():
+            return MEMORY_GB_S[name]
+    return None
+
+
+def probe(
+    problem: Problem,
+    xp: Any,
+    *,
+    seconds: float = PROBE_S,
+    boundary: str = "stencil",
+    card: str = "",
+    stepper: Any = None,
+) -> dict[str, Any]:
+    """A few seconds of the campaign's own step on its own grid, one source, against its bytes.
+
+    The node updates a second, the bytes of memory they are
+    (:func:`reverberate.wave.lowband.solver.step_bytes`), and, for a card
+    whose memory rate is known, what the bytes predict at the share the
+    kernels were measured at. ``slow`` says the card made under
+    :data:`PROBE_FLOOR` of that: a card to give back, or a grid the kernel
+    is poor on, and either way a figure to read before hours are spent.
+    The fields are zero and stay zero: a step costs the same.
+    """
+    from reverberate.wave.lowband.solver import NumpyStepper
+
+    nothing = Drive.nothing()
+    if stepper is None:
+        stepper = (
+            NumpyStepper(problem, nothing)
+            if xp is np
+            else CardStepper(problem, nothing, xp, boundary=boundary)
+        )
+    state = stepper.state()
+    out = stepper.records(1)
+    for _ in range(2):  # the kernels compiled, the pages touched
+        stepper.step(state, 0, out, 0)
+    stepper.finish()
+    started = time.time()
+    steps = 0
+    while time.time() - started < seconds:
+        for _ in range(1 if xp is np else 32):
+            stepper.step(state, 0, out, 0)
+            steps += 1
+        stepper.finish()
+    elapsed = max(time.time() - started, 1e-9)
+    moved = step_bytes(problem, boundary)
+    record: dict[str, Any] = {
+        "card": card,
+        "boundary": boundary,
+        "seconds": round(elapsed, 2),
+        "steps": steps,
+        "updates_per_s": float(problem.updated) * steps / elapsed,
+        "bytes_a_step": moved["step"],
+        "walls_share_of_bytes": round(float(moved["walls_share"]), 4),
+        "gb_per_s": moved["step"] * steps / elapsed / 1e9,
+    }
+    rate = None if xp is np else memory_rate_of(card)
+    if rate is not None:
+        expected = MEASURED_SHARE * rate
+        record["card_gb_per_s"] = rate
+        record["expected_gb_per_s"] = expected
+        record["expected_updates_per_s"] = expected * 1e9 / moved["step"] * problem.updated
+        record["of_expected"] = record["gb_per_s"] / expected
+        record["slow"] = bool(record["of_expected"] < PROBE_FLOOR)
+    return record
+
+
+def last_short(launches: list[list[Item]], cards: int) -> list[list[Item]]:
+    """The launches in the order a queue should hand them out: the longest first, the last short.
+
+    A launch's time goes as its sources, each the same card seconds alone
+    or among others. When the queue is empty every card finishes what it
+    holds while the others wait, half a launch each in the mean: so the
+    launches of most sources go first, and the last two a card are parted
+    into launches of one source, which leaves each card idle half a source
+    position at the end and not half of eight. Among launches of one
+    length the order given is kept. A run of no more than two launches a
+    card has no end to speak of and is handed out as it is.
+    """
+    ordered = sorted(launches, key=lambda batch: -len(batch))
+    tail: list[list[Item]] = []
+    wanted = 2 * max(1, cards)
+    if len(ordered) <= wanted:
+        return ordered
+    while ordered and len(tail) < wanted:
+        batch = ordered.pop()
+        tail = [[item] for item in batch] + tail
+    return ordered + tail
+
+
+def merge_bundles(bundles: list[Path], out: Path) -> dict[str, Any]:
+    """Several recipes' pairs bundles of one dwelling as one: each position solved once.
+
+    Two recipes of a dwelling share most of their source positions, which
+    lie on its rails and stations, and almost none of their pairs, because
+    a listening cell is where that recipe's listener passed
+    (``docs/open-questions/performance-audit.md``, section 6). A pair's key
+    holds its two positions in whole millimetres and no recipe, so a
+    campaign over the union writes every recipe's pairs under the names
+    each recipe's trace will ask for. Positions are one when they are the
+    same to the millimetre, the key's own rule; a source position is heard
+    at the union of the cells any recipe hears it at.
+
+    The bundles must be of one grid, one window and one encoder. The models
+    are the first bundle's, linked and not copied.
+    """
+    bundles = [Path(b) for b in bundles]
+    out = Path(out)
+    if not bundles:
+        raise ValueError("no bundle to merge")
+    specs = [json.loads((b / "campaign.json").read_text()) for b in bundles]
+    same = ("kind", "dwelling", "bands", "ppw", "tc", "rh", "order", "fit_order", "encoder")
+    for bundle, spec in zip(bundles[1:], specs[1:], strict=True):
+        for name in same:
+            if spec.get(name) != specs[0].get(name):
+                raise ValueError(f"{bundle} is not of the first bundle's {name}")
+
+    def millimetres(positions: np.ndarray) -> list[tuple[int, ...]]:
+        return [tuple(round(float(v) * 1000.0) for v in row) for row in positions]
+
+    sources: dict[tuple[int, ...], int] = {}
+    cells: dict[tuple[int, ...], int] = {}
+    source_m: list[np.ndarray] = []
+    cell_m: list[np.ndarray] = []
+    heard: list[set[int]] = []
+    asked_positions = asked_pairs = 0
+    for bundle in bundles:
+        own_sources = np.load(bundle / "sources.npy").reshape(-1, 3)
+        own_cells = np.load(bundle / "cells.npy").reshape(-1, 3)
+        own_heard = json.loads((bundle / "heard_at.json").read_text())
+        cell_of = []
+        for key, position in zip(millimetres(own_cells), own_cells, strict=True):
+            if key not in cells:
+                cells[key] = len(cell_m)
+                cell_m.append(position)
+            cell_of.append(cells[key])
+        for key, position, listed in zip(
+            millimetres(own_sources), own_sources, own_heard, strict=True
+        ):
+            if key not in sources:
+                sources[key] = len(source_m)
+                source_m.append(position)
+                heard.append(set())
+            heard[sources[key]].update(cell_of[int(c)] for c in listed)
+            asked_positions += 1
+            asked_pairs += len(listed)
+    out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "sources.npy", np.asarray(source_m, dtype=float).reshape(-1, 3))
+    np.save(out / "cells.npy", np.asarray(cell_m, dtype=float).reshape(-1, 3))
+    listed_all = [sorted(found) for found in heard]
+    (out / "heard_at.json").write_text(json.dumps(listed_all))
+    models = out / "models"
+    if not models.exists():
+        models.symlink_to((bundles[0] / "models").resolve(), target_is_directory=True)
+    pairs = sum(len(found) for found in listed_all)
+    record = {
+        "recipes": len(bundles),
+        "source_positions_asked": asked_positions,
+        "source_positions": len(source_m),
+        "pairs_asked": asked_pairs,
+        "pairs": pairs,
+        "cells": len(cell_m),
+    }
+    campaign = dict(specs[0])
+    campaign.update(
+        {
+            "points": max((len(found) for found in listed_all), default=0),
+            "source_positions": len(source_m),
+            "cells": len(cell_m),
+            "pairs": pairs,
+            "merged": {**record, "bundles": [str(b) for b in bundles]},
+        }
+    )
+    campaign.pop("estimate", None)
+    (out / "campaign.json").write_text(json.dumps(campaign, indent=1))
+    return record
 
 
 def low_grid(
@@ -223,6 +473,9 @@ def low_grid(
     scheme: str = CARTESIAN.name,
     ppw: float | None = None,
     bundle_ppw: float = 10.5,
+    walls: int | None = None,
+    outside: str | None = None,
+    fit: str = "time",
 ) -> tuple[Any, str]:
     """The grid's spec and the solver's name, as a campaign of these options keys its pairs.
 
@@ -244,7 +497,7 @@ def low_grid(
     if held.fcc or points != float(bundle_ppw):
         shape = grid_shape_of(scene.model_json, float(fmax_hz), points)
         scene = replace(scene, ppw=points, fcc=held.fcc, nh=nh_for(shape))
-    return scene, solver_name(held, points)
+    return scene, solver_name(held, points, walls=walls, outside=outside, fit=fit)
 
 
 def node_indices(positions: np.ndarray, grid: Grid) -> np.ndarray:
@@ -339,15 +592,35 @@ class LowbandPairs(PairsCampaign):
     #: Where a launch's records are kept (:func:`reverberate.wave.lowband.solver.solve`):
     #: on the device, or on the host as a queue's launches keep them.
     records_on: str = "device"
+    #: Where a card updates a lossy node's branches: the same bits either way
+    #: (:class:`reverberate.wave.lowband.solver.CardStepper`).
+    boundary: str = "stencil"
+    #: Branches a material is fitted again with for the band; ``None`` is the materials as
+    #: they are, the default until a card's comparison has passed
+    #: (:mod:`reverberate.wave.lowband.walls`). In the pairs' keys.
+    walls: int | None = None
+    #: ``"open"`` or ``"rigid"``: the air between the outer walls and the shell cut off
+    #: (:mod:`reverberate.wave.lowband.outside`); ``None`` is the grid as exported. In the keys.
+    outside: str | None = None
+    #: ``"time"`` or ``"spectra"``: how the records reach the fit
+    #: (:class:`reverberate.wave.lowband.fit.SpectralChain`). In the keys.
+    fit: str = "time"
+    #: Seconds of steps each worker times on its card before its first launch; 0 is none.
+    probe_s: float = PROBE_S
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.scheme not in SCHEMES:
             raise ValueError(f"unknown scheme {self.scheme!r}, expected one of {sorted(SCHEMES)}")
+        if self.boundary not in BOUNDARIES:
+            raise ValueError(f"the boundary is updated in one of {BOUNDARIES}")
         self.grid_scheme = SCHEMES[self.scheme]
         self.grid_ppw = float(self.ppw) if self.ppw is not None else self.grid_scheme.ppw
         self.bundle_grid = not self.grid_scheme.fcc and self.grid_ppw == float(self.spec["ppw"])
-        self.spec["solver"] = solver_name(self.grid_scheme, self.grid_ppw)
+        self.spec["solver"] = solver_name(
+            self.grid_scheme, self.grid_ppw, walls=self.walls, outside=self.outside, fit=self.fit
+        )
+        self.probes: list[dict[str, Any]] = []
         if not self.bundle_grid:
             key = self.grid_key()
             self.spec["bands"]["low"]["cache_key"] = key
@@ -452,6 +725,7 @@ class LowbandPairs(PairsCampaign):
             xp=xp,
             samples=round(self.durations_s["low"] * LOW_RATE_HZ),
             scale=self.scale,
+            fit=self.fit,
         )
 
     # ---- the solve -------------------------------------------------------------------------
@@ -532,6 +806,13 @@ class LowbandPairs(PairsCampaign):
         drive = drive_for(problem, self.grid, sources, receivers, self.durations_s["low"])
         timing: dict[str, Any] = {}
         t0 = time.time()
+        stepper = None
+        if xp is not np:
+            # The grid and the kernels are on the card for the campaign: a launch brings
+            # its sources and its records, and nothing of the grid again.
+            stepper = CardStepper(
+                problem, drive, xp, boundary=self.boundary, shared=self.grid_on_card(problem, xp)
+            )
         records = solve(
             problem,
             drive,
@@ -539,7 +820,9 @@ class LowbandPairs(PairsCampaign):
             say=lambda m: self.say(f"    {m}"),
             timing=timing,
             records_on=records_on,
+            stepper=stepper,
         )
+        del stepper
         solve_s = time.time() - t0
         if records_on == "host" and xp is not np:
             # The fields are freed with the stepper: the fit's arrays take their place.
@@ -578,6 +861,52 @@ class LowbandPairs(PairsCampaign):
             "node_updates": timing["node_updates"],
         }
 
+    def grid_on_card(self, problem: Problem, xp: Any) -> Any:
+        """The grid as this thread's card holds it, uploaded once and kept for the campaign."""
+        held: dict[tuple[int, int], CardStepper] | None = getattr(self, "_grids", None)
+        if held is None:
+            held = {}
+            self._grids = held
+        key = (id(problem), threading.get_ident())
+        if key not in held:
+            held[key] = CardStepper(problem, Drive.nothing(), xp, boundary=self.boundary)
+        return held[key]
+
+    def probed(self, problem: Problem, xp: Any, card: int | None = None) -> dict[str, Any] | None:
+        """:func:`probe` of this worker's card, said and kept; ``None`` where it is not asked."""
+        if self.probe_s <= 0 or xp is np:
+            return None
+        name = str(self.status.get("device", {}).get("gpu") or "")
+        record = probe(
+            problem,
+            xp,
+            seconds=self.probe_s,
+            boundary=self.boundary,
+            card=name,
+            stepper=self.grid_on_card(problem, xp),
+        )
+        record["device"] = card
+        said = (
+            f"probe: {record['updates_per_s']:.3g} node updates/s,"
+            f" {record['gb_per_s']:.0f} GB/s of memory"
+        )
+        if "of_expected" in record:
+            said += (
+                f", {100 * record['of_expected']:.0f} % of what the bytes predict on a"
+                f" {name} ({record['expected_updates_per_s']:.3g})"
+            )
+            if record["slow"]:
+                said += ": THIS CARD IS SLOW, under 70 % of its bytes"
+        self.say(said)
+        with self._status_lock:
+            self.probes.append(record)
+        state = self.out / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / f"probe.{os.getpid()}.{card if card is not None else 0}.json").write_text(
+            json.dumps(record, indent=1)
+        )
+        return record
+
     def wanted_sources(self) -> list[int]:
         """The source positions with a pair still to make."""
         return [s for s in range(self.sources.shape[0]) if self.todo(s)]
@@ -591,7 +920,14 @@ class LowbandPairs(PairsCampaign):
             ]
         )
         t0 = time.time()
-        problem = load_problem(self.entry_path, seeds)
+        state = self.out / "state"
+        problem = load_problem(
+            self.entry_path,
+            seeds,
+            walls=None if self.walls is None else WallFit(int(self.walls)),
+            walls_file=state / "walls.json",
+            outside=self.outside,
+        )
         self.problem_record = dict(problem.record)
         self.problem_record.update(
             {
@@ -599,6 +935,10 @@ class LowbandPairs(PairsCampaign):
                 "stored_nodes": problem.nodes,
                 "bytes_per_source": problem.bytes_per_source(),
                 "bytes_shared": problem.bytes_shared(),
+                "bytes_a_step": step_bytes(problem, self.boundary)["step"],
+                "walls_share_of_bytes": round(
+                    float(step_bytes(problem, self.boundary)["walls_share"]), 4
+                ),
                 "steps": self.steps,
                 "prepare_s": round(time.time() - t0, 1),
             }
@@ -663,7 +1003,7 @@ class LowbandPairs(PairsCampaign):
         per_source = problem.bytes_per_source() + 32.0 * self.steps
         at_once = int((MEMORY_SHARE * smallest - fixed) // per_source)
         at_once = max(1, min(LAUNCH_SOURCES, at_once, self.batch or LAUNCH_SOURCES))
-        found: list[dict[str, Any]] = []
+        batches: list[list[Item]] = []
         current: list[Item] = []
         rows = 0
         # In the positions' order: the pairs of neighbouring positions come home together,
@@ -673,11 +1013,14 @@ class LowbandPairs(PairsCampaign):
         for item in [*items, None]:
             full = item is None or len(current) >= at_once or rows + item.rows > rows_limit
             if current and full:
-                found.append(self.launch_of(problem, current))
+                batches.append(current)
                 current, rows = [], 0
             if item is not None:
                 current.append(item)
                 rows += item.rows
+        # ... and then the longest launches first and the last ones short, so that the cards
+        # wait half a source position at the end, and not half a launch of eight.
+        found = [self.launch_of(problem, batch) for batch in last_short(batches, cards)]
         self.say(
             f"solve: {sum(len(f['items']) for f in found)} solve(s) in {len(found)} launch(es)"
             f" of {at_once} at most, sized for a card with {smallest / 1e9:.1f} GB free;"
@@ -713,6 +1056,7 @@ class LowbandPairs(PairsCampaign):
         design = next(d for d in self.designs if d is not None)
         encoder.operator_for(design.positions - design.centre)
         encoder.prepare_for(self.steps)
+        self.probed(problem, self.xp)
         self._ready = (problem, encoder)
 
     def run_launch(self, items: list[Any]) -> dict[str, Any]:
@@ -778,7 +1122,14 @@ class LowbandPairs(PairsCampaign):
                 held["engine_s"] = round(held["engine_s"] + record["solve_s"] * share, 3)
                 held["encode_s"] = round(held["encode_s"] + record["encode_s"] * share, 3)
         (self.out / "lowband.json").write_text(
-            json.dumps({"grid": getattr(self, "problem_record", {}), "batches": records}, indent=1)
+            json.dumps(
+                {
+                    "grid": getattr(self, "problem_record", {}),
+                    "probes": self.probes,
+                    "batches": records,
+                },
+                indent=1,
+            )
         )
         return [per_source[s] for s in sorted(per_source)]
 
@@ -845,6 +1196,7 @@ class LowbandPairs(PairsCampaign):
                 # The resampler's weights stay for the campaign: made now, on a pool that holds
                 # nothing, they are a block of their own and not a part of a launch's.
                 encoder.prepare_for(self.steps)
+                self.probed(problem, xp, card)
                 while not failures:
                     try:
                         batch = queue.get_nowait()

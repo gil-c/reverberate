@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from reverberate.compute import Devices, raw_kernel
+from reverberate.mirror import tracer
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import (
     ImageTree,
@@ -38,6 +39,8 @@ from reverberate.mirror.rays import (
     reflector_of_triangles,
     trace,
 )
+from reverberate.mirror.shared import Store
+from reverberate.mirror.tracer import STATS, TracerScene
 from reverberate.spatial.sh import channel_count
 
 __all__ = ["DeviceScene", "histogram_on_devices", "paths_on_devices", "upload"]
@@ -383,6 +386,7 @@ def histogram_on_device(
     threads: int = 128,
     rays_per_launch: int = 200_000,
     say: Any = None,
+    stats: dict[str, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The integer histogram of rays ``ray_start`` to ``ray_start + ray_count`` on one device."""
     import cupy
@@ -406,6 +410,7 @@ def histogram_on_device(
         energy = cupy.zeros((receivers.shape[0], bins, bands), dtype=cupy.int64)
         moments = cupy.zeros((receivers.shape[0], bins, bands, channels), dtype=cupy.int64)
         hits = cupy.zeros((receivers.shape[0], bins), dtype=cupy.int64)
+        counted = cupy.zeros(len(STATS), dtype=cupy.int64)
         recv = cupy.asarray(np.ascontiguousarray(receivers, dtype=np.float64))
         rec_offsets = cupy.asarray(np.asarray(rec_grid.offsets, dtype=np.int64))
         rec_members = cupy.asarray(np.asarray(rec_grid.members, dtype=np.int32))
@@ -455,14 +460,141 @@ def histogram_on_device(
                     energy,
                     moments,
                     hits,
+                    counted,
                 ),
             )
             cupy.cuda.Stream.null.synchronize()
+            _clocked(stats, t0)
             if say is not None:
                 say(
                     f"rays: {first}..{first + count} on device {held.device},"
                     f" {time.time() - t0:.1f} s"
                 )
+        _counted(stats, cupy.asnumpy(counted))
+        return cupy.asnumpy(energy), cupy.asnumpy(moments), cupy.asnumpy(hits)
+
+
+def _clocked(stats: dict[str, int] | None, started: float) -> None:
+    """A launch's own time, the card waited for, added to ``stats`` in microseconds."""
+    if stats is not None:
+        spent = int(round((time.time() - started) * 1e6))
+        stats["kernel_us"] = stats.get("kernel_us", 0) + spent
+
+
+def _counted(stats: dict[str, int] | None, counted: np.ndarray) -> None:
+    """A launch's counts (:data:`reverberate.mirror.tracer.STATS`) added to ``stats``."""
+    if stats is not None:
+        for name, value in zip(STATS, counted, strict=True):
+            stats[name] = stats.get(name, 0) + int(value)
+
+
+def tree_upload(
+    scene: DerivedScene, held: TracerScene, *, device: int, single: bool
+) -> dict[str, Any]:
+    """What the tree's text reads of a scene, on ``device``: the same for every source."""
+    import cupy
+
+    with cupy.cuda.Device(device):
+        return {
+            "nodes": cupy.asarray(held.nodes_single if single else held.nodes),
+            "tris": cupy.asarray(held.single if single else held.triangles),
+            "meta": cupy.asarray(held.meta),
+            "absorption": cupy.asarray(
+                np.ascontiguousarray(scene.materials.absorption, dtype=np.float64)
+            ),
+            "scattering": cupy.asarray(
+                np.ascontiguousarray(scene.materials.scattering, dtype=np.float64)
+            ),
+        }
+
+
+def histogram_tree_on_device(
+    scene: DerivedScene,
+    source: np.ndarray,
+    receivers: np.ndarray,
+    settings: RaySettings,
+    held: TracerScene,
+    on_card: dict[str, Any],
+    *,
+    device: int,
+    ray_start: int,
+    ray_count: int,
+    threads: int = 128,
+    rays_per_launch: int = 1_000_000,
+    say: Any = None,
+    stats: dict[str, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The integer histogram of a share of the rays through the tree, on one device.
+
+    A thread a ray, the ray's whole life in it: the rays of a site end
+    within a few bounces of one another (nearly every one by the energy
+    floor on a furnished storey), so a warp has little to wait for and
+    nothing is compacted between bounces.
+    """
+    import cupy
+
+    single = settings.precision == "single"
+    arrays = tracer.shot_arrays(scene, held, source, receivers, settings)
+    scalars = tracer.shot_scalars(scene, settings)
+    kernel = raw_kernel(tracer.device_source(single), "rays_tree")
+    cells = int(arrays["receivers"].shape[0])
+    # The card's text takes a number for "never": the grid kernel's.
+    skip_reach = scalars["skip_reach"] if np.isfinite(scalars["skip_reach"]) else 1e300
+    with cupy.cuda.Device(device):
+        energy = cupy.zeros((cells, scalars["bins"], scalars["bands"]), dtype=cupy.int64)
+        moments = cupy.zeros(
+            (cells, scalars["bins"], scalars["bands"], scalars["channels"]), dtype=cupy.int64
+        )
+        hits = cupy.zeros((cells, scalars["bins"]), dtype=cupy.int64)
+        counted = cupy.zeros(len(STATS), dtype=cupy.int64)
+        mine = {
+            name: cupy.asarray(arrays[name])
+            for name in ("rec_nodes", "rec_order", "receivers", "source")
+        }
+        for first in range(ray_start, ray_start + ray_count, rays_per_launch):
+            count = min(rays_per_launch, ray_start + ray_count - first)
+            t0 = time.time()
+            kernel(
+                ((count + threads - 1) // threads,),
+                (threads,),
+                (
+                    on_card["nodes"],
+                    on_card["tris"],
+                    on_card["meta"],
+                    mine["rec_nodes"],
+                    mine["rec_order"],
+                    mine["receivers"],
+                    on_card["absorption"],
+                    on_card["scattering"],
+                    mine["source"],
+                    np.uint64(scalars["seed"]),
+                    np.float64(scalars["reach"]),
+                    np.float64(scalars["bin_length"]),
+                    np.float64(scalars["radius"]),
+                    np.float64(scalars["floor_energy"]),
+                    np.float64(skip_reach),
+                    np.int32(scalars["total_rays"]),
+                    np.int32(scalars["bins"]),
+                    np.int32(scalars["bands"]),
+                    np.int32(scalars["channels"]),
+                    np.int32(scalars["skip_order"]),
+                    np.int32(scalars["skip_furniture"]),
+                    np.int32(first),
+                    np.int32(count),
+                    energy,
+                    moments,
+                    hits,
+                    counted,
+                ),
+            )
+            cupy.cuda.Stream.null.synchronize()
+            _clocked(stats, t0)
+            if say is not None:
+                say(
+                    f"rays: {first}..{first + count} through the tree on device {device},"
+                    f" {time.time() - t0:.2f} s"
+                )
+        _counted(stats, cupy.asnumpy(counted))
         return cupy.asnumpy(energy), cupy.asnumpy(moments), cupy.asnumpy(hits)
 
 
@@ -475,18 +607,33 @@ def histogram_on_devices(
     devices: Devices | None = None,
     grid: UniformGrid | None = None,
     say: Any = None,
-    held: dict[int, DeviceScene] | None = None,
+    held: dict[Any, Any] | None = None,
+    structure: str | None = None,
+    store: Store | None = None,
+    stats: dict[str, int] | None = None,
 ) -> Histogram:
     """The histogram of every receiver, rays split over the devices.
 
     ``held`` keeps each card's upload from one source to the next: the rays
-    read the scene and its grid, which do not depend on the source, and a
-    caller with many sources hands the same dictionary every time.
+    read the scene and its grid or its tree, which do not depend on the
+    source, and a caller with many sources hands the same dictionary every
+    time. ``structure`` is ``grid`` or ``tree``
+    (:func:`reverberate.mirror.tracer.structure`): what the triangles are
+    looked up in, which changes the time and not the histogram. ``store``
+    keeps the tree from one process to the next. ``stats`` gains the counts
+    of :data:`reverberate.mirror.tracer.STATS`, and ``kernel_us``, the
+    microseconds the launches themselves took.
     """
     settings = settings or RaySettings()
     devices = devices or Devices.detect()
     receivers = np.atleast_2d(np.asarray(receivers, dtype=float))
     source = np.asarray(source, dtype=float).reshape(3)
+    if tracer.structure(structure) == "tree":
+        return _histogram_through_tree(
+            scene, source, receivers, settings, devices, held, store, say, stats
+        )
+    if settings.precision != "double":
+        raise ValueError("single precision is the tree's: the grid is double precision")
     grid = grid or occluder_grid(scene, settings.cell_m)
     tree = ImageTree(
         source=source,
@@ -513,10 +660,27 @@ def histogram_on_devices(
             if held is not None:
                 held[card] = on_card
         return histogram_on_device(
-            scene, source, receivers, settings, on_card, ray_start=first, ray_count=count, say=say
+            scene,
+            source,
+            receivers,
+            settings,
+            on_card,
+            ray_start=first,
+            ray_count=count,
+            say=say,
+            stats=stats,
         )
 
     parts = devices.map(work, devices.split(settings.rays))
+    return _summed(parts, scene, settings)
+
+
+def _summed(
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    scene: DerivedScene,
+    settings: RaySettings,
+) -> Histogram:
+    """The shares' integer histograms as one."""
     return Histogram.from_counts(
         np.sum([p[0] for p in parts], axis=0),
         np.sum([p[1] for p in parts], axis=0),
@@ -526,3 +690,86 @@ def histogram_on_devices(
         order=settings.order,
         rays=settings.rays,
     )
+
+
+def _histogram_through_tree(
+    scene: DerivedScene,
+    source: np.ndarray,
+    receivers: np.ndarray,
+    settings: RaySettings,
+    devices: Devices,
+    held: dict[Any, Any] | None,
+    store: Store | None,
+    say: Any,
+    stats: dict[str, int] | None,
+) -> Histogram:
+    """:func:`histogram_on_devices` with the triangles under their tree.
+
+    On a card, the C text a thread a ray. On the host, the same text a
+    share of the rays a core where the machine has a compiler, and the
+    numpy twin where it has none (double precision only): the three give
+    one histogram.
+    """
+    kept = held if held is not None else {}
+    if "tree" not in kept:
+        kept["tree"] = tracer.prepare(scene, store)
+    under: TracerScene = kept["tree"]
+    single = settings.precision == "single"
+    Share = tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int]]
+
+    def work(card: int, share: np.ndarray) -> Share:
+        first, count = int(share[0]), int(share.size)
+        # A share's own counts, added once the shares are back: a forked core's are its own.
+        mine: dict[str, int] = {}
+        if card >= 0:
+            name = ("tree", card, single)
+            if name not in kept:
+                kept[name] = tree_upload(scene, under, device=card, single=single)
+            found = histogram_tree_on_device(
+                scene,
+                source,
+                receivers,
+                settings,
+                under,
+                kept[name],
+                device=card,
+                ray_start=first,
+                ray_count=count,
+                say=say,
+                stats=mine,
+            )
+        elif tracer.available():
+            found = tracer.counts_on_host(
+                scene,
+                under,
+                source,
+                receivers,
+                settings,
+                ray_start=first,
+                ray_count=count,
+                stats=mine,
+            )
+        else:
+            h = tracer.trace_tree(
+                scene,
+                source,
+                receivers,
+                settings,
+                held=under,
+                ray_start=first,
+                ray_count=count,
+                stats=mine,
+            )
+            found = (
+                np.rint(h.energy * HISTOGRAM_SCALE).astype(np.int64),
+                np.rint(h.moments * HISTOGRAM_SCALE).astype(np.int64),
+                h.hits,
+            )
+        return (*found, mine)
+
+    parts = devices.map(work, devices.split(settings.rays))
+    if stats is not None:
+        for part in parts:
+            for name, value in part[3].items():
+                stats[name] = stats.get(name, 0) + value
+    return _summed([(p[0], p[1], p[2]) for p in parts], scene, settings)

@@ -22,7 +22,7 @@ import numpy as np
 
 from reverberate.accel.pairs import PairCache
 from reverberate.spatial.field import monopole_coefficients
-from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, pair_key
+from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, lowcut_response, pair_key
 from reverberate.spatial.sh import degrees_of, scene_to_ambisonic
 
 __all__ = [
@@ -124,6 +124,11 @@ class PairsEngine(Protocol):
     cache: PairCache
     voxel_low_key: str
     solver: str
+    #: The frequency the responses are band limited at, where that lies inside the
+    #: crossover's octave: a pair's seam is read under it and with it undone
+    #: (:func:`reverberate.mirror.hybrid.seam_db`). An engine whose responses are whole
+    #: over the octave names none.
+    band_limit_hz: float | None
 
     def key_of(self, position: int, cell: int) -> str: ...
 
@@ -134,6 +139,16 @@ class PairsEngine(Protocol):
     def solve(self, heard_at: list[list[int]]) -> dict[str, Any]:
         """The pairs not yet in the cache, solved into it; how many were, and how many were not."""
         ...
+
+
+def _band_limit_hz(spec: Any) -> float:
+    """What a pairs campaign solves its low band to: the bundle's, else the crossover's own."""
+    from reverberate.spatial.lowband import solve_fmax_hz
+
+    try:
+        return float(spec["bands"]["low"]["fmax_hz"])
+    except (KeyError, TypeError, ValueError):
+        return solve_fmax_hz()
 
 
 class CardPairs:
@@ -162,6 +177,7 @@ class CardPairs:
         self.cache = self.campaign.cache
         self.voxel_low_key = self.campaign.keys["low"]
         self.solver = str(self.campaign.spec["solver"])
+        self.band_limit_hz: float | None = _band_limit_hz(self.campaign.spec)
         self.report: dict[str, Any] = {}
 
     def key_of(self, position: int, cell: int) -> str:
@@ -222,6 +238,7 @@ class BatchedPairs(CardPairs):
         self.cache = self.campaign.cache
         self.voxel_low_key = self.campaign.keys["low"]
         self.solver = str(self.campaign.spec["solver"])
+        self.band_limit_hz = _band_limit_hz(self.campaign.spec)
         self.report = {}
 
     def solve(self, heard_at: list[list[int]]) -> dict[str, Any]:
@@ -314,6 +331,8 @@ class FreeFieldPairs:
         self.cells = np.asarray(cells, dtype=float).reshape(-1, 3)
         self.voxel_low_key = "free-field"
         self.solver = "free-field monopole, no room: reverberate.trace.engines/1"
+        #: Whole to 1600 Hz, over the crossover's octave: nothing to undo.
+        self.band_limit_hz: float | None = None
         self.cache = PairCache(Path(out) / "pairs", self.voxel_low_key)
         self.sound_speed_m_s = float(sound_speed_m_s)
         self.lead_s, self.gain = float(lead_s), float(gain)
@@ -339,15 +358,17 @@ class FreeFieldPairs:
         if centre is None:
             raise ValueError(f"no array stands on cell {cell}")
         freqs = np.fft.rfftfreq(LOW_SAMPLES, 1.0 / LOW_RATE_HZ)
-        keep = freqs > 80.0
+        keep = freqs > 0.0
         k = 2.0 * np.pi * freqs[keep] / self.sound_speed_m_s
         seen = scene_to_ambisonic((self.sources[position] - np.asarray(centre))[None, :])[0]
         spectrum = np.zeros((freqs.size, 64), dtype=complex)
         spectrum[keep] = (
             4.0 * np.pi * monopole_coefficients(seen, k, 7) / (1j ** degrees_of(7))[None]
         )
-        edges = np.clip((freqs - 80.0) / 80.0, 0, 1) * np.clip((1800.0 - freqs) / 200.0, 0, 1)
-        spectrum *= (0.5 - 0.5 * np.cos(np.pi * edges))[:, None]
+        # The bottom of the band is a solve's own: the fit's low cut, 40 Hz at order 8,
+        # whole from 50 Hz. It started at 80 Hz, an octave over a solve (the audit's D11).
+        edges = np.clip((1800.0 - freqs) / 200.0, 0, 1)
+        spectrum *= ((0.5 - 0.5 * np.cos(np.pi * edges)) * lowcut_response(freqs))[:, None]
         spectrum *= np.exp(-2j * np.pi * freqs * self.lead_s)[:, None]
         scale = self.gain * LOW_RATE_HZ / 48000.0
         response = np.fft.irfft(spectrum.T, LOW_SAMPLES, axis=-1) * scale

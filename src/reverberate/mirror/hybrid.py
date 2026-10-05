@@ -28,6 +28,7 @@ import numpy as np
 
 __all__ = [
     "Crossover",
+    "band_limit_gain",
     "blend",
     "seam_db",
     "write_hybrid_field",
@@ -93,19 +94,57 @@ class Crossover:
         return self.cutoff_hz * 2.0**-half, self.cutoff_hz * 2.0**half
 
 
-def seam_db(low: np.ndarray, high: np.ndarray, rate: float, crossover: Crossover) -> float:
+def band_limit_gain(freqs_hz: np.ndarray, limit_hz: float) -> np.ndarray:
+    """What a solve to ``limit_hz`` leaves of each frequency, in amplitude: its own band limit.
+
+    The solver's records are band limited at the solve's ``fmax`` by a
+    Butterworth filter of order 4 run forward and backward
+    (:func:`reverberate.accel.dsp.lowpass_sos`): the square of its
+    magnitude, 6 dB down at ``limit_hz``. On the pairs of the first whole
+    scene, solved to 1500 Hz, the direct sound stands 0.04, 0.03 and 0.12 dB
+    under this at 707, 800 and 1000 Hz, and 1.8 dB under it at 1414 Hz,
+    where the grid's own dispersion adds to it
+    (``docs/open-questions/chain-audit.md``).
+    """
+    return np.asarray(1.0 / (1.0 + (np.asarray(freqs_hz, dtype=float) / float(limit_hz)) ** 8))
+
+
+def seam_db(
+    low: np.ndarray,
+    high: np.ndarray,
+    rate: float,
+    crossover: Crossover,
+    *,
+    low_limit_hz: float | None = None,
+) -> float:
     """How far apart the two are, in decibels, over the band they share.
 
     Positive means the low side holds more energy there: the step a listener
     would hear at the join if nothing levelled the two.
+
+    ``low_limit_hz`` is the frequency the low side was solved to, where it
+    is band limited inside the crossover's octave (a pair of a pack, solved
+    to 1500 Hz for a ramp that ends at 1414 Hz). Without it the low side's
+    band limit is read as a level: 1.07 dB on the first whole scene's
+    pairs. With it the two are compared **where both are whole**, from the
+    bottom of the ramp to ``low_limit_hz / sqrt(2)`` (707 to 1061 Hz), and
+    the low side is first given back what its band limit took there
+    (:func:`band_limit_gain`, at most 0.5 dB): what is left of the bias is
+    under 0.1 dB. A field solved to 8 kHz is whole over the octave and is
+    read over all of it, as it always was.
     """
     lo_hz, hi_hz = crossover.band_hz()
     samples = int(np.asarray(low).shape[-1])
     freqs = np.fft.rfftfreq(samples, 1.0 / rate)
+    if low_limit_hz is not None:
+        hi_hz = min(hi_hz, float(low_limit_hz) / np.sqrt(2.0))
     band = (freqs >= lo_hz) & (freqs <= hi_hz)
     if not band.any():
         return 0.0
-    a = float(np.sum(np.abs(np.fft.rfft(np.asarray(low, dtype=float), axis=-1)[..., band]) ** 2))
+    held = np.abs(np.fft.rfft(np.asarray(low, dtype=float), axis=-1)[..., band])
+    if low_limit_hz is not None:
+        held = held / band_limit_gain(freqs[band], low_limit_hz)
+    a = float(np.sum(held**2))
     b = float(np.sum(np.abs(np.fft.rfft(np.asarray(high, dtype=float), axis=-1)[..., band]) ** 2))
     if a <= 0.0 or b <= 0.0:
         return 0.0

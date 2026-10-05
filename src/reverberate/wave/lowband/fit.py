@@ -51,7 +51,11 @@ from reverberate.spatial.encode import EncoderSettings
 from reverberate.spatial.lowband import LOW_RATE_HZ
 from reverberate.wave.lowband.scheme import CARTESIAN, Scheme, wavenumber
 
-__all__ = ["CellEncoder", "FitOperator", "Resampler", "level_scale"]
+__all__ = ["FITS", "CellEncoder", "FitOperator", "Resampler", "SpectralChain", "level_scale"]
+
+#: How a cell's records reach the fit: through the filters and the resampler, a sample at a
+#: time, or as products in the fit's own spectra (:class:`SpectralChain`).
+FITS = ("time", "spectra")
 
 
 def level_scale(scheme: Scheme, fmax_hz: float, ts: float, ppw: float) -> float:
@@ -224,7 +228,13 @@ class FitOperator:
         encoder = self.encoder
         spectrum = xp.fft.rfft(xp.asarray(signals, dtype=xp.float64), n=encoder.length, axis=-1)
         fitted_bins = xp.asarray(np.flatnonzero(encoder.fitted))
-        block = spectrum[:, fitted_bins].T
+        return self.apply_bins(spectrum[:, fitted_bins], xp)
+
+    def apply_bins(self, bins: Any, xp: Any) -> Any:
+        """The fit of spectra already cut to the fitted bins, ``[receiver, bin]`` complex."""
+        encoder = self.encoder
+        fitted_bins = xp.asarray(np.flatnonzero(encoder.fitted))
+        block = bins.T
         solved_parts = []
         start = 0
         for part in self.parts:
@@ -233,7 +243,7 @@ class FitOperator:
             solved = xp.matmul(part, xp.stack([rows.real, rows.imag], axis=2))
             solved_parts.append(solved[:, :, 0] + 1j * solved[:, :, 1])
             start += count
-        coefficients = xp.zeros((spectrum.shape[1], encoder.keep), dtype=xp.complex128)
+        coefficients = xp.zeros((encoder.length // 2 + 1, encoder.keep), dtype=xp.complex128)
         coefficients[fitted_bins] = xp.concatenate(solved_parts, axis=0)
         coefficients = coefficients / xp.asarray(1j**encoder.degree_keep)[None, :]
         return xp.fft.irfft(coefficients.T, n=encoder.length, axis=-1)[..., : encoder.samples]
@@ -264,6 +274,106 @@ class FitOperator:
         ]
 
 
+#: Of the record's length, the least the transform is padded to: the spectrum is then read
+#: between its bins by a short kernel (:class:`SpectralChain`).
+SPECTRAL_PADDING = 3.0
+#: Half the taps of that kernel, and its Kaiser window's shape: an error of a millionth.
+SPECTRAL_TAPS = 8
+SPECTRAL_BETA = 13.0
+
+
+@dataclass
+class SpectralChain:
+    """The filters and the resampling as products in the fit's spectra, for one record length.
+
+    Every step between the records and the fit is linear and does not
+    depend on time: the integration with the low cut, the zero phase low
+    pass, the resampling to 4 kHz. The fit itself begins with a transform
+    and reads only the bins it fits. So the records need never be filtered
+    or resampled: their own spectrum, read at the fit's frequencies and
+    multiplied by the filters' exact responses there, is what the fit
+    wants.
+
+    The fit's frequencies (``k`` times 4 kHz over its length) are not bins
+    of a transform at the grid's rate, whose step is in no ratio to them. A
+    record is ``N`` samples and nothing else, so its spectrum between the
+    bins of a transform padded to ``M`` is given exactly by those bins; with
+    ``M`` at least three times ``N`` a Kaiser windowed sinc of sixteen taps
+    reads it to a millionth. The transform is the records' own single
+    precision; what is read is kept in double.
+
+    **Where it is not the time chain's.** That chain filters ``N`` samples
+    and stops: what the filters would still give after the record's last
+    sample, in answer to its last milliseconds, and what the backward low
+    pass would give before its first, are dropped, and the resampler has a
+    passband ripple and a stopband of its own. Here the filters' whole
+    response is kept and the band is cut exactly. The two differ by the
+    response to a record's two ends, where a room's response is silent at
+    the start and 60 dB down at the end; the tests measure it.
+    """
+
+    n_orig: int
+    padded: int
+    first: Any
+    weights: Any
+    response: Any
+
+    @classmethod
+    def prepare(
+        cls,
+        n_orig: int,
+        grid_rate_hz: float,
+        encoder: BandEncoder,
+        sections: tuple[np.ndarray, np.ndarray],
+        xp: Any,
+    ) -> SpectralChain:
+        """For records of ``n_orig`` samples; ``sections`` are the low cut's and the low pass's."""
+        from scipy.signal import sosfreqz
+
+        padded = 1 << int(np.ceil(np.log2(SPECTRAL_PADDING * n_orig)))
+        fitted = np.flatnonzero(encoder.fitted)
+        frequency = fitted * encoder.sample_rate_hz / encoder.length
+        at = frequency * padded / grid_rate_hz
+        first = np.floor(at).astype(np.int64) - SPECTRAL_TAPS + 1
+        if first.size and first.max() + 2 * SPECTRAL_TAPS > padded // 2 + 1:
+            raise ValueError("a fitted bin lies too near the grid's own limit to be read")
+        away = (first[:, None] + np.arange(2 * SPECTRAL_TAPS)[None, :]) - at[:, None]
+        window = np.i0(SPECTRAL_BETA * np.sqrt(np.clip(1.0 - (away / SPECTRAL_TAPS) ** 2, 0, 1)))
+        kernel = np.sinc(away) * window / np.i0(SPECTRAL_BETA)
+        # The record lies after time zero, not about it: read about its middle, where the
+        # spectrum is as smooth as a record of its length allows.
+        weights = kernel * np.exp(1j * np.pi * away * (n_orig - 1) / padded)
+        lowcut, lowpass = sections
+        omega = 2.0 * np.pi * frequency / grid_rate_hz
+        low_pass = sosfreqz(lowpass, worN=omega)[1]
+        response = sosfreqz(lowcut, worN=omega)[1] * np.abs(low_pass) ** 2
+        response = response * (encoder.sample_rate_hz / grid_rate_hz)
+        return cls(
+            n_orig=int(n_orig),
+            padded=int(padded),
+            first=xp.asarray(first),
+            weights=xp.asarray(weights),
+            response=xp.asarray(response),
+        )
+
+    def apply(self, records: Any, xp: Any) -> Any:
+        """Records ``[receiver, n_orig]`` as the fit's bins of their response, a row each."""
+        if int(records.shape[1]) != self.n_orig:
+            raise ValueError(
+                f"prepared for records of {self.n_orig} samples, not {records.shape[1]}"
+            )
+        spectrum = xp.fft.rfft(xp.asarray(records, dtype=xp.float32), n=self.padded, axis=-1)
+        read = xp.zeros((spectrum.shape[0], int(self.first.shape[0])), dtype=xp.complex128)
+        for tap in range(2 * SPECTRAL_TAPS):
+            index = self.first + tap
+            held = spectrum[:, abs(index)]
+            if bool((index < 0).any()):
+                # Under zero a real record's spectrum is the conjugate of the one above it.
+                held = xp.where((index < 0)[None, :], xp.conj(held), held)
+            read += held * self.weights[None, :, tap]
+        return read * self.response[None, :]
+
+
 @dataclass
 class CellEncoder:
     """A cell's node records to its order 7 response at 4 kHz, on one device."""
@@ -280,9 +390,14 @@ class CellEncoder:
     operators: dict[str, FitOperator] = field(default_factory=dict)
     prepare_s: float = 0.0
     resampler: Resampler | None = None
+    #: One of :data:`FITS`. The default is the chain every cached pair was made by.
+    fit: str = "time"
+    chains: dict[tuple[str, int], SpectralChain] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
+        if self.fit not in FITS:
+            raise ValueError(f"a fit is one of {FITS}, not {self.fit!r}")
         self.lowcut = dsp.lowcut_sos(
             self.grid_rate_hz, LOWCUT_HZ, LOWCUT_ORDER, differentiated=True
         )
@@ -341,7 +456,7 @@ class CellEncoder:
         filters it was cut from a block those filters had just freed, and
         the pool could then never give that block back.
         """
-        if self.xp is np:
+        if self.xp is np or self.fit == "spectra":
             return
         if self.resampler is None or self.resampler.n_orig != int(steps):
             self.resampler = Resampler.prepare(int(steps), self.grid_rate_hz, LOW_RATE_HZ, self.xp)
@@ -366,10 +481,28 @@ class CellEncoder:
         block[:, :kept] = signals[:, :kept]
         return block
 
+    def bins(self, u_out: Any, offsets: np.ndarray) -> Any:
+        """Node records as the fit's bins of their response at 4 kHz: :class:`SpectralChain`."""
+        operator = self.operator_for(offsets)
+        key = (geometry_key(offsets), int(u_out.shape[1]))
+        with self._lock:
+            if key not in self.chains:
+                self.chains[key] = SpectralChain.prepare(
+                    key[1],
+                    self.grid_rate_hz,
+                    operator.encoder,
+                    (self.lowcut, self.lowpass),
+                    self.xp,
+                )
+        return self.chains[key].apply(u_out, self.xp)
+
     def cell(self, u_out: Any, offsets: np.ndarray) -> np.ndarray:
         """One cell's response in the cache form, ``[channel, sample]`` float32 on the host."""
         operator = self.operator_for(offsets)
-        encoded = operator.apply(self.signals(u_out), self.xp)
+        if self.fit == "spectra":
+            encoded = operator.apply_bins(self.bins(u_out, offsets), self.xp)
+        else:
+            encoded = operator.apply(self.signals(u_out), self.xp)
         return np.asarray(to_numpy(encoded * self.scale), dtype=np.float32)
 
     def at_once(self, nodes: int, steps: int) -> int:
@@ -397,6 +530,15 @@ class CellEncoder:
         xp = self.xp
         out: list[np.ndarray] = []
         row = 0
+        if self.fit == "spectra":
+            # A cell at a time: a transform and a product, with nothing to share between cells.
+            for held in offsets:
+                count = int(held.shape[0])
+                out.append(self.cell(records[row : row + count], held))
+                row += count
+                if xp is not np:
+                    xp.get_default_memory_pool().free_all_blocks()
+            return out
         index = 0
         keys = [geometry_key(o) for o in offsets]
         while index < len(offsets):

@@ -74,6 +74,14 @@ def _mirror_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--calibration", type=Path, default=None, help="a calibration json")
     p.add_argument("--lead-s", type=float, default=None, help="the alignment's lead, s")
     p.add_argument("--gain", type=float, default=None, help="the alignment's gain")
+    p.add_argument(
+        "--normalisation",
+        choices=("physical", "aligned"),
+        default="physical",
+        help="how the pack's two bands are put on one scale: physical, the mirror's gain one,"
+        " its signature a unit pulse, the seams read without their solve's band limit and the"
+        " directivity level with its axis; aligned, every pack before 2026-10-05, for comparison",
+    )
 
 
 def _plan_arguments(p: argparse.ArgumentParser) -> None:
@@ -383,6 +391,11 @@ def _assets(args: argparse.Namespace) -> Any:
             lead_s=args.lead_s,
             gain=args.gain,
         )
+    from dataclasses import replace
+
+    from reverberate.trace.assets import Normalisation
+
+    assets = replace(assets, normalisation=Normalisation.of(getattr(args, "normalisation", None)))
     return with_rays(assets, getattr(args, "rays", None))
 
 

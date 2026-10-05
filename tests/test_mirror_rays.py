@@ -26,6 +26,7 @@ from reverberate.mirror.rays import (
     trace,
     triangle_grid,
 )
+from reverberate.mirror.tracer import trace_tree
 from test_mirror_ism import RECEIVER, SIZE, SOURCE, box_scene
 
 C = 343.2
@@ -165,7 +166,11 @@ def test_the_explicit_harmonics_are_the_library_s_to_rounding() -> None:
 def test_covered_rays_leave_the_direct_and_lose_the_specular_reflections() -> None:
     """On a box with no scattering, every bounce up to the tree's order is a specular
     reflection on a reflector facet, which the images render: with the skip, the
-    histogram keeps the direct bins and empties the bins the first reflections filled."""
+    histogram keeps the direct bins and empties the bins the first reflections filled.
+
+    Traced by the twin through the tree, which counts what the grid's twin counts with
+    and without the skip (``test_mirror_tracer.py``) and casts these rays in a
+    fiftieth of its time."""
     scene = box_scene(alpha=0.3, scattering=0.0)
     kept = RaySettings(
         rays=1500,
@@ -184,8 +189,8 @@ def test_covered_rays_leave_the_direct_and_lose_the_specular_reflections() -> No
         skip_specular_order=3,
         skip_window_s=0.0,
     )
-    full = trace(scene, SOURCE, RECEIVER[None, :], kept)
-    less = trace(scene, SOURCE, RECEIVER[None, :], skipped)
+    full = trace_tree(scene, SOURCE, RECEIVER[None, :], kept)
+    less = trace_tree(scene, SOURCE, RECEIVER[None, :], skipped)
     distance = float(np.linalg.norm(RECEIVER - SOURCE))
     last_direct = int(distance / C / kept.bin_s) + 1
     np.testing.assert_array_equal(full.hits[0, : last_direct + 1], less.hits[0, : last_direct + 1])
@@ -203,14 +208,16 @@ def test_covered_rays_count_again_after_the_tree_s_window() -> None:
         rays=1500, duration_s=0.04, bin_s=0.001, receiver_radius_m=0.4, seed=5
     )
     scene = box_scene(alpha=0.3, scattering=0.0)
-    full = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(**common, skip_specular_order=0))
-    windowed = trace(
+    full = trace_tree(
+        scene, SOURCE, RECEIVER[None, :], RaySettings(**common, skip_specular_order=0)
+    )
+    windowed = trace_tree(
         scene,
         SOURCE,
         RECEIVER[None, :],
         RaySettings(**common, skip_specular_order=3, skip_window_s=0.012),
     )
-    always = trace(
+    always = trace_tree(
         scene,
         SOURCE,
         RECEIVER[None, :],

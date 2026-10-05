@@ -81,11 +81,12 @@ space's `1 / (4 pi d)` of an impulse one grid step long, and a field is on
 the scale of its solve to 8 kHz: its direct sound reads
 `spatial.lowband.FIELD_UNIT_AT_1M / d`, 0.02625 at 1 m (-31.6 dB), as the
 amplitude of an impulse at 48 kHz. The pair cache is on that scale (a
-solve to `fmax` times `fmax / 8000`), and so are the mirror's alignment
-(`mirror.files.Alignment.gain`) and the seam. The trace divides once:
-`low/ir` is the pair over the field's unit, and `/mirror`'s
-`alignment_gain` is the alignment's gain over it, so that the ratio the
-seam levels is untouched. The engine applies what the pack holds and no
+solve to `fmax` times `fmax / 8000`). The trace divides once: `low/ir` is
+the pair over the field's unit. The mirror needs no number at all: it
+renders a unit source as `1 / d` (-0.06 dB, the windowed sinc that lays a
+pulse between two samples), so `/mirror`'s `alignment_gain` is 1 and its
+signature a unit pulse (**the normalisation, once for all**, under
+`/mirror` below). The engine applies what the pack holds and no
 scale of its own; the level convention of
 [`clip-library.md`](clip-library.md) (full scale is 86 dB SPL at 1 m)
 then holds at the listener with a gain of one. Measured on the validated
@@ -99,6 +100,28 @@ pairs solved to 1500 Hz from one place to cells within 1 m of S1 against
 the validated field from S1 to the five lattice points round that place:
 +0.2 dB over the whole response in the mean of the third octaves from
 100 Hz to 1.25 kHz, each within 3.2 dB.
+
+**Valid from 45 Hz.** The band under the crossover starts at the low cut
+of every solve's fit, a Butterworth high pass of order 8 at 40 Hz
+(`accel.pairs.LOWCUT_HZ`, `LOWCUT_ORDER`; `spatial.lowband.lowcut_response`):
+-49 dB at 20 Hz, -17 dB at 31.5 Hz, -3 dB at 40 Hz, -1 dB at 43.7 Hz,
+-0.14 dB at 50 Hz, nothing from 63 Hz up, and nothing else in the chain
+removes level under 200 Hz. A pack is therefore **valid from 45 Hz**, not
+from 80 (the free field stand-in of the synthetic profile below starts
+there, and is no pack's band). The cut is not there to hide an error. The
+solver's source is a step of volume velocity, and a room that is sealed
+keeps the volume it is given: under its first resonance the pressure
+climbs by `c^2 / V` a second until the walls' absorption balances it, the
+pressure zone of a closed room (the cabin gain of a car), with the first
+modes on top of it between 15 and 30 Hz, hardly damped since the materials
+are fitted from 125 Hz up. That is the model's true answer and not a
+dwelling's: a dwelling leaks under its doors and through its ventilation,
+and its windows and light walls give. The cut stays at 40 Hz until the
+model holds a leak and a wall compliance; a render to 20 Hz would also
+need absorption under 125 Hz and a window longer than 1.2 s
+(`docs/open-questions/chain-audit.md`, section 5). A clip's level is
+therefore read above the floor too
+([`clip-library.md`](clip-library.md)).
 
 **Rendering is quasi-static.** At time `t` the engine plays what the scene
 frozen as it is at `t` would give for the signal emitted so far: a delay is
@@ -303,19 +326,35 @@ The responses, deduplicated:
 | `pair_position` | float64 | `[pair, 3]` | the source position it was solved from |
 | `pair_cell` | int32 | `[pair]` | row of `/cells` |
 | `pair_key` | bytes, 64 | `[pair]` | the pair's key in the dwelling's cache |
-| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair, omnidirectional, before any levelling, both on the field's scale |
+| `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair as the pack renders it (its signature, its gain), omnidirectional, before any levelling, both on the field's scale; read where both bands are whole (below) |
 | `onset_s` | float64 | `[pair]` | where the pair's two bands are joined in pressure, on the pack's clock: the time of the response's own direct sound, `d / c` plus `lead_s` to what the solver's pulse trails by, and of its loudest sample where it holds no direct sound (below) |
 
 Both are read as `mirror.hybrid.blend` reads them, on the wave response
 **with its air and before its masks** (`spatial.lowband.with_air` of the
 cache form, `lead_s` later), not on `ir`, whose masks have taken most of
 the seam's octave.
+
+**A seam is read where both bands are whole.** A pair is solved to 1500 Hz
+for a ramp that ends at 1414 Hz, and band limited there: its direct sound
+stands 0.06 dB under `1 / d` at 707 Hz, 0.45 dB at 1 kHz, 1.4 dB at
+1189 Hz and 6.0 dB at 1414 Hz (92 pairs of the first whole scene). Read
+over the whole octave with one weight a frequency, that band limit is
+taken for a level: 1.07 dB, every seam traced before 2026-10-05 (the
+audit's D7). `seam_db` is therefore read from the bottom of the ramp to
+the solve's `fmax` over the square root of two, 707 to 1061 Hz, with the
+wave side given back what its band limiting filter took there
+(`mirror.hybrid.band_limit_gain`, at most 0.5 dB): on the same 92 pairs
+the reading is then 0.08 dB low. The trace tells the reader what its
+pairs were solved to (`PairsEngine.band_limit_hz`); an engine whose
+responses are whole over the octave, the free field stand-in, names none
+and is read over all of it.
 The mirror of the seam is `mirror.render.render_point` at the pair: the
 source on `pair_position`, the head on the cell's centre, the pair's own
 image paths and diffracted onset, the tail the pack gives that pair (its
 histograms, each on its own `scale`, summed with the weights a step at rest
-there would have), then the air, the low cut and the signature, on the wave
-field's clock and scale (`/mirror`'s `lead_s` and `alignment_gain`). Its
+there would have), then the air, the low cut and the pack's signature, on
+the wave field's clock (`/mirror`'s `lead_s`) and at the pack's gain
+(`alignment_gain`, one). Its
 noise is drawn with the mirror's seed plus the cell's row, as a field draws
 a point's (`reverberate.trace.level`).
 
@@ -722,7 +761,7 @@ moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `high_gain_db` | float32 | `[step]` | the step's level above the crossover as a scalar: the alignment's gain plus the step's seam |
+| `high_gain_db` | float32 | `[step]` | the step's level above the crossover as a scalar: the mirror's gain, which is one, plus the step's seam |
 | `band_gain_db` | float32 | `[step, bank]` | optional: what multiplies `early` and `tail` at this step, a band of the bank: the tapered join |
 | `onset_s` | float64 | `[step]` | where the crossover's coherent window is anchored, on the pack's clock |
 
@@ -736,13 +775,14 @@ render is the one every pack gave before 2026-10-06, to the bit.
 `low/seam_db` of the step's pairs, weighted by `low/position_weight` across
 source slots and by inverse distance across cells, in decibels. It is the
 scalar of `mirror.hybrid.blend`, one per point there, one per step here,
-with the pack's `alignment_gain`, which is physical: on hssd_0076
-`0.0144 / 0.02625`, -5.2 dB, where a field's is -36.8 dB. The mirror's
-direct sound is then the signature's gain (+2.1 to +2.8 dB from 700 Hz to
-8 kHz, the filter having unit energy), less 5.2 dB, plus the seam, which
-the validated field of hssd_0076 holds at 2.3 dB in the median (0.9 to
-4.1 from its first to its last decile): within 1 dB of `1 / d` in the
-median and as far from it as the pair's seam is from the median.
+with the pack's `alignment_gain`. In a pack on the physical scale that
+gain is one and the scalar is the step's seam: how far the wave response
+of its pairs stands over a mirror whose direct sound is `1 / d`, +0.5 dB
+in the median of the first whole scene's 18 219 pairs (-0.9 to +2.1 from
+the first to the last decile; +0.4 with a direct path, +0.7 without).
+In a pack traced before 2026-10-05 the gain was the measured alignment's
+over the field's unit, -5.2 dB on hssd_0076, the signature added +2.8 dB,
+and the seams stood at +1.9 dB in the median: see `/mirror`.
 `onset_s` is the step's smallest `delay_s` plus what the anchor of the wave
 response trails the mirror's first arrival by, `lead_s` included:
 each pair's `low/onset_s` less the smallest delay of the mirror's paths at
@@ -756,28 +796,50 @@ and the tail's.
 **The tapered join** (`reverberate.render.seam`; the owner's ruling of
 2026-10-05). A seam is two things: a constant, one error of scale between
 the two solvers, the same within 0.3 dB whatever the room and the distance
-(1.9 dB in the median of the first whole scene's 18 219 pairs); and each
-pair's own distance from it, 1.1 to 1.4 dB of scatter that is decided
-within a wavelength at 1 kHz. The second makes the two bands meet at the
-crossover and says nothing of the octaves above; laid on all of them it
-made everything over 1 kHz of a source go up and down by 2 to 5 dB within
-half a second of a walk. So the level is a band's:
+(1.9 dB in the median of the first whole scene's 18 219 pairs as they were
+traced); and each pair's own distance from it, 1.1 to 1.4 dB of scatter
+that is decided within a wavelength at 1 kHz. The second makes the two
+bands meet at the crossover and says nothing of the octaves above; laid on
+all of them it made everything over 1 kHz of a source go up and down by 2
+to 5 dB within half a second of a walk. So the level is a band's:
 
 ```
 K                 = 20 log10(alignment_gain) + constant_db
-band_gain_db[k,b] = K + share[b] (high_gain_db[k] - K)
+M                 = 20 log10(alignment_gain) + the median of the pack's low/seam_db
+band_gain_db[k,b] = K + share[b] (high_gain_db[k] - M)
 ```
 
 `share` is 1 in the crossover's band and under it, 0.5 in the band above
-(2 kHz), 0 from 4 kHz up: the pair's own seam whole at the join, half of
-it, in decibels, an octave up, and the scene's one number above. A share
-of 1 is `high_gain_db[k]` to the bit, a share of 0 is `K` in single
+(2 kHz), 0 from 4 kHz up: at the join a step keeps how far its pairs
+stand from the scene's median, half of that, in decibels, an octave up,
+and nothing above, where `K` stands alone. A share of 0 is `K` in single
 precision, and a step that is not audible holds `high_gain_db[k]` in every
-band. `constant_db` is the scene's one number: the median of its pairs'
-`low/seam_db`, each pair once, unless one is given
-(`reverberate.render.seam.SEAM_CONSTANT_DB`, `--constant-db`), which is
-where a calibration of the mirror's scale puts its result. The taper, the
-constant and where it came from are in the provenance (`seam`).
+band.
+
+**The constant is made once for all, and it is zero**
+(`reverberate.render.seam.SEAM_CONSTANT_DB`). It is not a dwelling's
+number and not a position's: the audit of 2026-10-05 found what the
+1.9 dB were made of (`/mirror` below), and with both removed nothing is
+left to fit. In a pack on the physical scale `alignment_gain` is 1, so
+`K = 0 dB` absolute: from 4 kHz up the mirror's direct sound is `1 / d`,
+in every dwelling. The median `M` is the pack's own, each pair once; it is
+what the join is counted from and enters no level above 2 kHz. What it
+still holds, 0.5 dB on the first whole scene, is not on the direct sound
+(0.3 dB on the 255 pairs under 1 m): the tail's first 10 ms and a
+calibration fitted on other fields, which are the next lot's.
+
+A pack that is **not** on the physical scale (its provenance holds no
+`normalisation`) has no constant that is right for it but its own seams':
+it is given `constant_db` = the median, `K = M`, a share of 1 is then
+`high_gain_db[k]` to the bit, and that is every table made before the
+normalisation. `--constant-db` gives another `K`; `M` stays the median.
+The taper, the constant, where it came from (`"reverberate.render.seam.
+SEAM_CONSTANT_DB, once for all"`, `"the median of the pairs' seams"` or
+`"given"`) and the median are in the provenance (`seam`).
+
+A pack of one pair has no scatter to keep: its step's own part is zero
+and every band stands at `K`. Under `RenderSettings.seam = "broadband"`
+it keeps its pair's seam on every band, as any pack does.
 
 The bank's filters are zero phase and cross in amplitude between two
 centres, so a level that differs between two bands is a slope and not a
@@ -867,17 +929,103 @@ value at its arrival where `blend` windows the samples.
 
 ## `/mirror`, `/crossover`, `/atmosphere`
 
-`/mirror`: dataset `signature`, `float64 [tap]`, the source's minimum phase
-signature (`mirror.direct.measure_signature`, 128 taps). Attributes
-`lead_s` and `alignment_gain` (from `mirror.files.Alignment`, the clock and
-scale of the wave field: `lead_s` is the alignment's lead **rounded to a
-whole sample at 48 kHz**, 512 samples for 10.6744 ms on hssd_0076, because
-that is the shift the mirror's field was written with and the hybrid was
-validated at; `alignment_gain` is the alignment's gain **over the field's
-unit**, `MirrorAssets.pack_gain`, the pack being physical), `lowcut_hz` (40) and `lowcut_order` (8), `tail_from_s`,
-`tail_bursts`, `tail_gain_db` (seven), `histogram_bin_s`, `histogram_order`
-(3), `receiver_radius_m`, and `settings_json`, the whole
+`/mirror`: dataset `signature`, `float64 [tap]`, a filter every dry signal
+above the crossover goes through: **a unit pulse**, `[1.0]`. Attributes
+`lead_s` and `alignment_gain`: `lead_s` is the wave field's clock, the
+alignment's lead (`mirror.files.Alignment`) **rounded to a whole sample at
+48 kHz**, 512 samples for 10.6744 ms on hssd_0076, because that is the
+shift the mirror's field was written with and the hybrid was validated at;
+`alignment_gain` is the mirror's gain in the pack, **1**
+(`MirrorAssets.pack_gain`). Then `lowcut_hz` (40) and `lowcut_order` (8),
+`tail_from_s`, `tail_bursts`, `tail_gain_db` (seven), `histogram_bin_s`,
+`histogram_order` (3), `receiver_radius_m`, and `settings_json`, the whole
 `MirrorSettings.record()`.
+
+**The normalisation, once for all** (2026-10-05;
+`docs/open-questions/chain-audit.md`, `trace.assets.Normalisation`). Until
+then a pack carried what a static field of the mirror is written with: the
+gain and the signature the mirror measured against a wave field of the
+dwelling. Neither is a pack's:
+
+- the gain (`mirror.files.align_to_reference`) is a ratio of energies
+  inside 0.5 ms round the two direct sounds, and they are not the same
+  pulse: the wave field's is spread by its grid (5 to 6 dB of a unit pulse
+  lie outside the window), the mirror's signature has unit energy inside
+  it. With its signature it came out 2.4 dB low at every frequency
+  (-5.22 dB and +2.85 dB at 1 kHz on hssd_0076), which was the seam's
+  median of 1.9 dB less the 1.07 dB its reading lost (`low`, above);
+- the signature (`mirror.direct.measure_signature`) is the direct spectrum
+  of a field solved to 8 kHz, the band limit of that grid with it: -1.8 dB
+  at 8 kHz, -3.3 at 12 kHz and -5.0 at 16 kHz re 1 kHz, on a band the wave
+  field does not hold.
+
+So a pack takes the clock and nothing else, in every dwelling, and
+measured on the pack at rest that holds a lattice point of the validated
+wave field (S1 of hssd_0076, 1.99 m, a direct path), the mirror band's
+direct sound against `1 / d`, a third octave at a time:
+
+| | 1.6k | 2k | 2.5k | 3.2k | 4k | 5k | 6.3k | 8k | 10k | 12.7k | 16k |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| as traced, with its pair's seam of +1.98 dB | -1.06 | -0.75 | -0.98 | -1.54 | -0.81 | -0.77 | -1.36 | -2.72 | -3.45 | -4.23 | -6.30 |
+| on the physical scale | -0.22 | -0.02 | -0.03 | -0.04 | -0.06 | -0.09 | -0.14 | -0.21 | -0.31 | -0.45 | -0.65 |
+
+(what is left under 2 kHz is the crossover's mask, and above 6 kHz the
+air's loss over 2 m), and the two bands together through the crossover,
+630 Hz to 1.6 kHz: -0.39, -0.20, -0.43, -0.73, -0.85 dB as traced, and
+-0.35, -0.07, -0.10, -0.10, -0.03 dB on the physical scale. Against the
+wave field itself at that point, 1 to 5 kHz, the window of the image
+paths is within 0.1 dB at five third octaves of eight and within 0.4 dB at
+all (-0.23 dB at 1 kHz, +0.38 at 3.2 kHz, +0.19 at 5 kHz), where it was
+0.5 to 1.3 dB low under its pair's seam, and 2.5 to 3.3 dB low before that
+seam of 1.98 dB. Above 6 kHz a pack is 2 to 5 dB brighter
+than every render before: a unit source's truth, and not what was
+listened to so far.
+
+A pack traced before is put on the physical scale **in place** by `python
+-m reverberate.render normalise PACK [--dry-run] [--undo]
+[--keep-signature] [--directivity axis|mean] [--seam-reading-db DB]`
+(`reverberate.render.normalise`), with no pair solved again. With `a` the
+gain it held and `s` its signature's level over the crossover's octave,
+both in dB (-5.2188 and +2.7738 on hssd_0076), `r` the seam's reading
+(1.07 dB for pairs solved to 1500 Hz, 0 for a free field's) and `W` the
+share of a step's weight that reads a pair (1 wherever a step has its
+pairs):
+
+```
+alignment_gain  = 1
+signature       = [1.0]                      (--keep-signature: the old one less s)
+seam_db[pair]   = seam_db[pair] + a + s + r        (-1.375 dB on hssd_0076)
+high_gain_db[k] = high_gain_db[k] - a + W[k] (a + s + r)   (+3.8438 dB where W = 1)
+gain_db[b, :]   = gain_db[b, :] - gain_db[b, 0]    (each table of /directivity)
+band_gain_db    = made again, K = 0 dB (the tapered join)
+```
+
+A seam is the wave response over the mirror's as the pack renders it, so
+it moves by what the mirror lost and by what the reading had missed;
+`high_gain_db` is the gain plus the seams and moves with both. Under the
+scalar (`broadband`) the mirror is then `r` louder than it was, a pair's
+whole seam read right; under the table it stands at `1 / d` from 4 kHz and
+keeps a step's distance from the median at the crossover. `a` is exact;
+`s` is exact for a mirror response that is flat over the octave (the
+signature moves by 0.9 dB across it); `r` is a constant measured on the
+direct sound, and a pair whose response is not flat over the octave
+differs by its own tilt. Both remainders are scatter of a pair's seam,
+which the crossover's band alone keeps.
+
+What the trace wrote is kept in the pack, the group **`/as_traced`**
+(`alignment_gain`, `signature`, every `directivity/<model>/gain_db`, every
+source's `seam_db`, `high_gain_db` and `high_gain_db_traced`), which a
+reader ignores; `--undo` puts every value back to the bit and removes the
+group, asking twice changes nothing, and a pack the tool does not
+understand is refused (another schema, a pack born on the physical scale
+asked to go back, one that says it was normalised and no longer holds
+`/as_traced`). Every number changed and why is in the provenance
+(`normalisation`). `--keep-signature` keeps the measured colour at 0 dB
+over the crossover's octave: the old treble at the right level, for
+comparison. A trace gives every number as it was with the bundle's
+`trace.normalisation = "aligned"` (`python -m reverberate.trace ...
+--normalisation aligned`), which is how the static hybrid field is still
+reproduced by a pack at rest (`tests/test_trace.py`).
 
 `/crossover`: attributes `cutoff_hz` (1000), `width_octaves` (1),
 `coherent_s` (0.005), `coherent_fade_s` (0.005): `mirror.hybrid.Crossover`.
@@ -896,23 +1044,63 @@ One group per model a source names.
 
 Attribute `angles_deg`, 0 to 180 in steps of 5: the angle between the
 departure direction and the source's facing, `(cos yaw, 0, -sin yaw)` in the
-scene frame. A model is a figure of revolution about the facing. **It is
-normalised to unit mean power over the sphere in every band**, so a
-directional source radiates what the omnidirectional one does, and the tail
-and the low band, which are omnidirectional, keep their level. The table is
-read linearly in decibels between its angles, and the mean power is that of
-the table so read. `omni` is zeros.
+scene frame, and `normalised`, what the table is level with: `"axis"` or
+`"mean"` (a pack without the word holds `"mean"`), and `pattern_sha256`,
+the model's digest. A model is a figure of revolution about the facing.
+The table is read linearly in decibels between its angles. `omni` is
+zeros.
+
+**A table is level with its axis** (`normalised = "axis"`): 0 dB at
+0 degrees in every band and an attenuation everywhere else. A clip is
+recorded in front of its talker, so its level is the axis's
+([`clip-library.md`](clip-library.md)): a voice that faces the listener is
+its clip at every frequency, as the band under the crossover holds it.
+What the source then radiates over the sphere is under the omnidirectional
+source's by the band's directivity index: -0.96, -1.41, -2.26, -3.04,
+-4.08, -5.26, -6.25 dB from 125 Hz to 8 kHz for `voice_v1`
+(`mirror.directivity.radiated_db`, the mean power of the table as it is
+read). The late part is made of rays that left alike in every direction,
+so for a source whose directivity is applied the engine renders it that
+much lower, band by band (`render.normalise.radiating`); with the
+directivity switched off the source is omnidirectional and nothing moves.
+
+Until 2026-10-05 a table was normalised to **unit mean power**
+(`"mean"`): the source radiated what the omnidirectional one does, the
+late part kept its level, and the axis stood over the clip by those same
+figures, 3.0 dB at 1 kHz, with the band under the crossover at the clip's
+level: a step of 3 dB at the crossover for a talker who faces the listener
+(the audit's D3). It stays selectable (`normalise --directivity mean`, a
+trace's `normalisation`), and the engine reads the word: a table of unit
+mean power is rendered as it always was, to the bit.
+
+**What the band under the crossover still ignores.** It is solved for an
+omnidirectional source at the clip's level, and no directive wave source
+is modelled. The table's own rows say what that leaves. On the axis,
+nothing: both bands are the clip. Off the axis the direct sound under the
+crossover is loud by what a voice loses there, at 125, 250 and 500 Hz:
+1.0, 1.5 and 2.5 dB at the side and 2, 3 and 5 dB straight behind, so that
+across the crossover (500 Hz to 1 kHz) the direct sound steps down by
+3.5 dB at the side and 7 dB behind where the voice itself steps by 1 and
+2 dB. And the reverberant level under the crossover is that of a source
+radiating alike in every direction, 1.0, 1.4 and 2.3 dB over the voice's
+at 125, 250 and 500 Hz, against a late part that is 3.0 dB down at 1 kHz:
+a step of 3.0 dB where the voice's is 0.8 dB. Under unit mean power the
+same crossover held +3.0 dB on the axis, -0.5 dB at the side and -4.0 dB
+behind in the direct sound, and no step in the reverberant level.
 
 `voice_v1` (`mirror.directivity.voice_v1`) is **a parametric fit, to be
-confirmed by the owner**: `-back_db (1 - cos angle) / 2` before
-normalisation, with `back_db = 2, 3, 5, 7, 10, 14, 18` on the seven bands,
+confirmed by the owner**: `-back_db (1 - cos angle) / 2`, with
+`back_db = 2, 3, 5, 7, 10, 14, 18` on the seven bands,
 round figures for the front to back difference of speech of the order
 reported by Chu and Warnock, *Detailed directivity of sound fields around
 human talkers*, NRC Canada, IRC-RR-104, 2002, and, at 8 kHz, by Monson,
 Hunter and Story, J. Acoust. Soc. Am. 132 (1), 2012. Their tables were not
 reproduced; replacing the figures by them changes the digest and nothing
 else. A model's digest, in the recipe's `assets.directivity`, is the
-SHA-256 of `gain_db`'s bytes.
+SHA-256 of the bytes of its **unit mean power** table in single precision,
+whichever way the pack's table is level: it names the pattern, and a
+recipe drawn before 2026-10-05 names the same one. A pack carries it as
+`pattern_sha256`.
 
 ## What the engine does with it
 
@@ -922,8 +1110,11 @@ Per source, at every output sample, in this order:
    through the octave bank with the path's band gains times the
    directivity's (interpolated in angle, when `directivity_enabled`), times
    the air's `exp(-m(f) c delay)`, encoded on the arrival direction.
-2. **Tail.** As above, with the air's loss at each bin's time.
-3. **High side.** The sum of 1 and 2, through the signature and the low cut,
+2. **Tail.** As above, with the air's loss at each bin's time; where the
+   source's directivity is applied and its table is level with its axis,
+   at what the table radiates, a band (`/directivity`).
+3. **High side.** The sum of 1 and 2, through the signature (a unit pulse:
+   nothing) and the low cut,
    times the step's level (`band_gain_db` a band of the bank where the
    pack holds it, `high_gain_db` otherwise), through the crossover's high
    masks: an arrival at
@@ -1022,7 +1213,8 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
 | `low_seconds` | present only when the low band was solved for fewer seconds than `low_samples` hold (`--low-seconds`): every `low/ir` is then faded to nothing over the 20 ms before that time and silent after it |
 | `rays` | present only when a tail site cast another number of rays than 100 000 (`--rays`) |
-| `seam` | present when the pack holds `level/band_gain_db`: `{"mode": "tapered", "bank_hz", "shares" (one a band of the bank), "constant_db", "constant" (`"the median of the pairs' seams"` or `"given"`), "level_db" (the alignment's gain plus the constant, in dB: what a band whose share is 0 is multiplied by)}` |
+| `seam` | present when the pack holds `level/band_gain_db`: `{"mode": "tapered", "bank_hz", "shares" (one a band of the bank), "constant_db", "constant" (`"reverberate.render.seam.SEAM_CONSTANT_DB, once for all"`, `"the median of the pairs' seams"` or `"given"`), "level_db" (the alignment's gain plus the constant, in dB: what a band whose share is 0 is multiplied by), "median_db" (the median of the pairs' seams, which a step's own part is counted from)}` |
+| `normalisation` | present in a pack on the physical scale, and in one traced `aligned` since 2026-10-05; absent from every pack before. The choices: `"alignment"` (`"physical"` or `"measured"`), `"signature"` (`"unit"`, `"colour"`, `"measured"`), `"seam"` (`"unbiased"`, `"octave"`), `"directivity"` (`"axis"`, `"mean"`), `"constant"` (`"fixed"`, `"median"`), and `"alignment_gain_db"`. `"born": true` in a pack traced so, with `"measured"` (the gain and the signature's level over the octave that the bundle's mirror measured and the pack does not apply), `"seam_low_limit_hz"` and `"seam_median_db"`. `"born": false` in a pack normalised in place, with `"tool"`, `"asked"`, `"kept": "/as_traced"`, `"seam_before"` (the `seam` it held, to put back) and `"changed"`: per value written (`mirror/alignment_gain`, `mirror/signature`, `directivity`, `low/seam_db`, `level/high_gain_db`) what it was, what was added in dB and of which terms, and why |
 | `gains` | present only when a source is rendered at another gain than the recipe's (`python -m reverberate.render gains`): `{"recipe": a sentence, "sources": {id: {"recipe_db", "db"}}}` |
 | `low_levers` | present only when the pack holds `low/compact`: the levers it was written with, as `low/compact`'s own `levers_json` |
 | `pair_cache` | present only when the pair cache the responses were read from was kept compact: its levers, `bins,int16` |
@@ -1166,7 +1358,11 @@ would read it.
 - No room: one source, omnidirectional, at a fixed position; a listener at
   rest or on a straight line at constant speed.
 - `has_tail = false`. `/mirror/signature` is `[1.0]`, `lead_s = 0`,
-  `alignment_gain = 1`, `lowcut_hz = 0` (no low cut).
+  `alignment_gain = 1`, `lowcut_hz = 0` (no low cut). Its low band is
+  faded out under 160 Hz and holds nothing under 80 Hz
+  (`render.pack.SYNTHETIC_HIGHPASS_HZ`): **an octave over a solve**, which
+  is whole from 50 Hz. A level read under 160 Hz on a synthetic pack is
+  this profile's and no pack's.
   `/atmosphere.enabled = false`. `level/high_gain_db` is 0 everywhere.
 - `early`: one row a step, `kind` 0, `order` 0, `path_id` that of the
   direct path (the digest of the single byte `0`), `delay_s = d / c`,
