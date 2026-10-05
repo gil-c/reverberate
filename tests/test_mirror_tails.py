@@ -3,8 +3,9 @@
 Rails are sampled no farther apart than 0.80 m; a source between two samples
 reads both with weights linear in arc length and a source on a station reads
 it alone; a head reads the two nearest cells it sees; a histogram is traced
-once per source position, scene and settings; and the table is the pack's
-``tail`` group, whose step is an interpolation in energy.
+once per source position, cell, scene and settings, whatever other cells
+were traced with it; and the table is the pack's ``tail`` group, whose step
+is an interpolation in energy.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from reverberate.mirror.tails import (
     cell_weights,
     histograms,
     interpolation_error_db,
+    site_key,
     source_weights,
     tail_key,
     tail_sites,
@@ -67,30 +69,71 @@ def test_a_head_reads_the_two_nearest_cells_it_sees() -> None:
     assert np.all((weight >= 0.0) & (weight <= 0.5))
 
 
-def test_a_histogram_is_traced_once_per_position_scene_and_settings(tmp_path: Path) -> None:
+def test_a_histogram_is_traced_once_per_position_cell_scene_and_settings(tmp_path: Path) -> None:
     catalogue = walled_box()
     cache = TailCache(tmp_path / "tails")
     first = histograms(
         catalogue, SETTINGS, STATION[None, :], CELLS, devices=Devices.host(1), cache=cache
     )
+    # A site asked for and not there: four entries, a (site, cell) each.
     assert (cache.hits, cache.misses) == (0, 1)
+    assert (cache.cells_found, cache.cells_absent) == (0, 4)
     scene = prepare(catalogue, SETTINGS).scene
     want = trace(scene, STATION, CELLS, SETTINGS.traced_rays())
     np.testing.assert_array_equal(first[0].energy, want.energy)
     # A new cache on the same directory reads it back.
-    again = histograms(
-        catalogue, SETTINGS, STATION[None, :], CELLS, cache=TailCache(tmp_path / "tails")
-    )
+    read = TailCache(tmp_path / "tails")
+    again = histograms(catalogue, SETTINGS, STATION[None, :], CELLS, cache=read)
+    assert (read.hits, read.misses) == (1, 0) and read.cells_found == 4
     np.testing.assert_array_equal(again[0].energy, first[0].energy)
     np.testing.assert_array_equal(again[0].moments, first[0].moments)
+    np.testing.assert_array_equal(again[0].hits, first[0].hits)
     rays = SETTINGS.traced_rays()
-    key = tail_key(scene, STATION, CELLS, rays)
-    assert len(key) == 64 and (tmp_path / "tails" / f"{key}.npz").is_file()
-    assert key != tail_key(scene, STATION + [0.001, 0, 0], CELLS, rays)
-    assert key != tail_key(scene, STATION, CELLS[:3], rays)
-    assert key != tail_key(scene, STATION, CELLS, replace(rays, rays=61))
+    key = tail_key(scene, STATION, CELLS[0], rays)
+    assert len(key) == 64 and (tmp_path / "tails" / key[:2] / f"{key}.npz").is_file()
+    assert len(list((tmp_path / "tails").glob("*/*.npz"))) == 4
+    assert key != tail_key(scene, STATION + [0.001, 0, 0], CELLS[0], rays)
+    assert key != tail_key(scene, STATION, CELLS[1], rays)
+    assert key != tail_key(scene, STATION, CELLS[0], replace(rays, rays=61))
+    assert key != tail_key(scene, STATION, CELLS[0], replace(rays, precision="single"))
     louder = replace(scene.materials, absorption=scene.materials.absorption * 0.5)
-    assert key != tail_key(replace(scene, materials=louder), STATION, CELLS, rays)
+    assert key != tail_key(replace(scene, materials=louder), STATION, CELLS[0], rays)
+    # A site's own name holds no cell.
+    assert site_key(scene, STATION, rays) != site_key(scene, STATION + [0.001, 0, 0], rays)
+
+
+def test_a_second_recipe_of_the_dwelling_traces_only_the_cells_the_first_did_not(
+    tmp_path: Path,
+) -> None:
+    """Another set of cells at the same site: the shared cells are read, the new one traced.
+
+    And a cell's histogram is the same whichever cells were cast with it:
+    what a launch over the new cell alone leaves is what one launch over
+    every cell gives.
+    """
+    catalogue = walled_box()
+    histograms(catalogue, SETTINGS, STATION[None, :], CELLS[:3], cache=TailCache(tmp_path / "t"))
+    second = TailCache(tmp_path / "t")
+    stats: dict[str, int] = {}
+    other = np.stack([CELLS[3], CELLS[1], CELLS[0]])
+    found = histograms(catalogue, SETTINGS, STATION[None, :], other, cache=second, stats=stats)
+    # Two of the three were kept; the third was cast, once, for itself alone.
+    assert (second.cells_found, second.cells_absent) == (2, 1)
+    assert len(list((tmp_path / "t").glob("*/*.npz"))) == 4
+    scene = prepare(catalogue, SETTINGS).scene
+    whole = trace(scene, STATION, other, SETTINGS.traced_rays())
+    np.testing.assert_array_equal(found[0].energy, whole.energy)
+    np.testing.assert_array_equal(found[0].moments, whole.moments)
+    np.testing.assert_array_equal(found[0].hits, whole.hits)
+    # A third recipe that reads only kept cells casts nothing; in memory alone the same holds.
+    third = TailCache(tmp_path / "t")
+    histograms(catalogue, SETTINGS, STATION[None, :], CELLS[[2, 3]], cache=third)
+    assert (third.hits, third.misses) == (1, 0) and third.cells_absent == 0
+    held = TailCache()
+    histograms(catalogue, SETTINGS, STATION[None, :], CELLS[:2], cache=held)
+    histograms(catalogue, SETTINGS, STATION[None, :], CELLS, cache=held)
+    assert (held.cells_found, held.cells_absent) == (2, 2 + 2)
+    assert held.absent([tail_key(scene, STATION, c, SETTINGS.traced_rays()) for c in CELLS]) == []
 
 
 def test_the_table_is_the_pack_s_and_a_step_is_a_sum_in_energy() -> None:

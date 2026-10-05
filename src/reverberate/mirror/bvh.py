@@ -52,8 +52,11 @@ __all__ = [
     "triangle_boxes",
 ]
 
-#: A segment of more items than this is cut; a leaf holds at most as many.
-LEAF = 4
+#: A segment of more items than this is cut; a leaf holds at most as many. On the storey
+#: of 1.48 million triangles a segment tests 7.0, 8.5, 12.3 and 21.0 triangles with
+#: leaves of 1, 2, 4 and 8, and visits 48, 45, 41 and 38 nodes: a triangle's test is
+#: double precision where a node's is single, so the leaves are kept small.
+LEAF = 2
 #: What a leaf's count is written on: four bits.
 LEAF_MOST = 16
 #: Bins of the surface area heuristic along each axis.
@@ -216,13 +219,13 @@ def build(
         for axis in range(3):
             key = which * bins + binned[:, axis]
             held = np.bincount(key, minlength=segments * bins).reshape(segments, bins)
-            b_lo = np.full((segments * bins, 3), np.inf)
-            b_hi = np.full((segments * bins, 3), -np.inf)
+            flat_lo = np.full((segments * bins, 3), np.inf)
+            flat_hi = np.full((segments * bins, 3), -np.inf)
             for k in range(3):
-                np.minimum.at(b_lo[:, k], key, item_lo[:, k])
-                np.maximum.at(b_hi[:, k], key, item_hi[:, k])
-            b_lo = b_lo.reshape(segments, bins, 3)
-            b_hi = b_hi.reshape(segments, bins, 3)
+                np.minimum.at(flat_lo[:, k], key, item_lo[:, k])
+                np.maximum.at(flat_hi[:, k], key, item_hi[:, k])
+            b_lo = flat_lo.reshape(segments, bins, 3)
+            b_hi = flat_hi.reshape(segments, bins, 3)
             left_n = np.cumsum(held, axis=1)[:, :-1]
             right_n = np.cumsum(held[:, ::-1], axis=1)[:, ::-1][:, 1:]
             left_area = _area(

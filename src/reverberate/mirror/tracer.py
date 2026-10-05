@@ -44,7 +44,7 @@ from typing import Any
 
 import numpy as np
 
-from reverberate.mirror.bvh import Bvh, build, nearest, triangle_boxes
+from reverberate.mirror.bvh import BINS, LEAF, Bvh, build, nearest, triangle_boxes
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.native import FLAGS, _cache_root, _compiler
 from reverberate.mirror.rays import (
@@ -67,6 +67,7 @@ __all__ = [
     "TracerScene",
     "available",
     "counts_on_host",
+    "first_hits",
     "device_source",
     "prepare",
     "receiver_tree",
@@ -184,7 +185,9 @@ def prepare(scene: DerivedScene, store: Store | None = None) -> TracerScene:
         lo, hi = triangle_boxes(triangles)
         tree = build(lo, hi)
         reflector, furniture = reflector_of_triangles(scene)
-        word = labels | (furniture.astype(np.int64) << 16) | ((reflector < 0).astype(np.int64) << 17)
+        word = (
+            labels | (furniture.astype(np.int64) << 16) | ((reflector < 0).astype(np.int64) << 17)
+        )
         order = tree.order.astype(np.int64)
         meta = np.stack([order, word[order]], axis=1).astype(np.int32)
         return {**tree.arrays(), "meta": meta}
@@ -198,7 +201,7 @@ def prepare(scene: DerivedScene, store: Store | None = None) -> TracerScene:
             [int(f.label), f.kind, float(f.offset), *[float(v) for v in f.normal]]
             for f in scene.facets
         ]
-        name = name_of("rays_tree", _KEPT, triangles, labels, facets)
+        name = name_of("rays_tree", _KEPT, LEAF, BINS, triangles, labels, facets)
         arrays, _ = store.make("rays_tree", name, made)
     tree = Bvh.from_arrays(arrays)
     centre = 0.5 * (np.asarray(scene.bmin, dtype=float) + np.asarray(scene.bmax, dtype=float))
@@ -393,11 +396,15 @@ def trace_tree(
             tally["deposits"] += int(who.size)
             mine = carried[alive[rows]][who]
             harmonics = _harmonics3(scene_to_ambisonic(-dd[who]))[:, :channels]
-            np.add.at(energy, (where, at[who, where]), np.rint(mine * HISTOGRAM_SCALE).astype(np.int64))
+            np.add.at(
+                energy, (where, at[who, where]), np.rint(mine * HISTOGRAM_SCALE).astype(np.int64)
+            )
             np.add.at(
                 moments,
                 (where, at[who, where]),
-                np.rint(mine[:, :, None] * harmonics[:, None, :] * HISTOGRAM_SCALE).astype(np.int64),
+                np.rint(mine[:, :, None] * harmonics[:, None, :] * HISTOGRAM_SCALE).astype(
+                    np.int64
+                ),
             )
             np.add.at(hits, (where, at[who, where]), 1)
         tally["escapes"] += int(np.count_nonzero(triangle < 0))
@@ -465,9 +472,11 @@ typedef float rt_real;
 #define RT_SQRT(x) sqrtf(x)
 #define RT_ABS(x) fabsf(x)
 #define RT_INF RT_INF_F
-/* What is nearer than this to the plane a ray leaves is not hit: the ray's own surface,
-   which single precision may put on either side of the origin. Metres. */
+/* A triangle parallel to the one a ray leaves, hit nearer than this to that one's plane,
+   is the ray's own surface, which single precision may put on either side of the origin:
+   it is not hit. Metres, and the cosine from which two triangles are parallel. */
 #define RT_PLANE 2e-5f
+#define RT_PARALLEL 0.999f
 #else
 typedef double rt_real;
 #define RT_R(x) (x)
@@ -594,13 +603,21 @@ RT_FN void rt_frame(const float* d, RtFrame* f) {
     f->sz = 1.0f / d[kz];
 }
 
-/* Whether the ray hits the triangle beyond ``t_min``, the distance, and the hit's weights
-   on the three corners. The three edge functions are each a difference of two products of
-   the sheared corners: the triangle on the other side of an edge takes the same two
-   products, so a ray is never outside both, and one that is on the edge to the last bit
-   is settled in double precision. */
+/* Whether the ray hits the triangle, the distance, and the hit's weights on the three
+   corners. The three edge functions are each a difference of two products of the sheared
+   corners: the triangle on the other side of an edge takes the same two products, so a
+   ray is never outside both, and one that is on the edge to the last bit is settled in
+   double precision.
+
+   ``plane`` is the unit normal of the surface the ray leaves, on the side it leaves by,
+   and ``leaving`` its cosine with the ray (both zero for a ray from the source). A hit is
+   refused when it lies within RT_PLANE of that surface on a triangle parallel to it: the
+   surface itself, met again because the origin is a rounding behind it. A wall that meets
+   the surface at an angle is hit however near, which a bound on the distance alone would
+   let the ray through at every corner of a room. */
 RT_FN int rt_hit(
-    const float* o, const RtFrame* f, const float* tri, float t_min, float* t_out, float* w)
+    const float* o, const RtFrame* f, const float* tri, const float* plane, float leaving,
+    float* t_out, float* w)
 {
     float a[3], b[3], c[3];
     for (int k = 0; k < 3; ++k) {
@@ -621,7 +638,14 @@ RT_FN int rt_hit(
     float det = u + v + s;
     if (det == 0.0f) return 0;
     float t = (u * (f->sz * a[f->kz]) + v * (f->sz * b[f->kz]) + s * (f->sz * c[f->kz])) / det;
-    if (!(t > t_min)) return 0;
+    if (!(t > 0.0f)) return 0;
+    if (t * leaving < RT_PLANE) {
+        float e1[3], e2[3], n[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = tri[3 + k] - tri[k]; e2[k] = tri[6 + k] - tri[k]; }
+        rt_cross(e1, e2, n);
+        float along = fabsf(rt_dot(n, plane));
+        if (along > RT_PARALLEL * sqrtf(rt_dot(n, n))) return 0;
+    }
     *t_out = t;
     w[0] = u / det; w[1] = v / det; w[2] = s / det;
     return 1;
@@ -655,7 +679,7 @@ RT_FN int rt_hit(
    distance, the lower index of the scene. In single precision ``w`` takes the hit's
    weights on the triangle's corners. */
 RT_FN int rt_nearest(
-    const RtShot* s, const rt_real* o, const rt_real* d, int last, rt_real t_min,
+    const RtShot* s, const rt_real* o, const rt_real* d, int last, const rt_real* plane,
     rt_real* t_out, float* w, long long* nodes, long long* tests)
 {
     float of[3], inv[3];
@@ -663,6 +687,7 @@ RT_FN int rt_nearest(
 #if RT_SINGLE
     RtFrame frame;
     rt_frame(d, &frame);
+    float leaving = rt_dot(plane, d);
 #endif
     rt_real best = RT_INF;
     int best_slot = -1, best_index = -1;
@@ -697,9 +722,11 @@ RT_FN int rt_nearest(
                 rt_real t;
 #if RT_SINGLE
                 float weights[3];
-                if (!rt_hit(o, &frame, s->tris + 9 * (long long)slot, t_min, &t, weights)) continue;
+                const float* tri = s->tris + 9 * (long long)slot;
+                if (!rt_hit(o, &frame, tri, plane, leaving, &t, weights)) continue;
 #else
-                if (!rt_hit(o, d, s->tris + 9 * (long long)slot, t_min, &t)) continue;
+                /* The twin's bound: a hit farther than a micrometre. */
+                if (!rt_hit(o, d, s->tris + 9 * (long long)slot, 1e-6, &t)) continue;
 #endif
                 if (t < best || (t == best && index < best_index)) {
                     best = t; best_slot = slot; best_index = index;
@@ -814,12 +841,13 @@ RT_FN void rt_ray(
     for (int b = 0; b < s->bands; ++b) carried[b] = RT_R(1.0 / (double)s->total_rays);
     rt_real reach = RT_R(s->reach), floor_energy = RT_R(s->floor_energy);
     rt_real travelled = RT_R(0.0);
-    rt_real t_min = RT_R(1e-6);
+    /* The unit normal of the surface the ray leaves, on its side: none yet. */
+    rt_real plane[3] = {RT_R(0.0), RT_R(0.0), RT_R(0.0)};
     int last = -1, specular_only = 1, furniture_bounces = 0;
     for (int bounce = 0; bounce < 100000; ++bounce) {
         rt_real best;
         float weights[3] = {0.0f, 0.0f, 0.0f};
-        int slot = rt_nearest(s, pos, dir, last, t_min, &best, weights, stats + 1, stats + 2);
+        int slot = rt_nearest(s, pos, dir, last, plane, &best, weights, stats + 1, stats + 2);
         stats[0] += 1;
         rt_real remaining = reach - travelled;
         rt_real segment = best < remaining ? best : remaining;
@@ -888,14 +916,11 @@ RT_FN void rt_ray(
         }
         last = s->meta[2 * (long long)slot];
 #if RT_SINGLE
-        /* A direction keeps its length to a rounding a bounce: put back to one. The ray
-           leaves on the normal's side, and what lies within RT_PLANE of that plane is its
-           own surface. */
+        /* A direction keeps its length to a rounding a bounce: put back to one. */
         rt_real length = RT_SQRT(rt_dot(dir, dir));
         for (int k = 0; k < 3; ++k) dir[k] = dir[k] / length;
-        rt_real leaving = rt_dot(n, dir);
-        t_min = RT_PLANE / (leaving > 1e-6f ? leaving : 1e-6f);
 #endif
+        for (int k = 0; k < 3; ++k) plane[k] = n[k];
     }
 }
 """
@@ -920,6 +945,22 @@ void RT_NAME(
         long long stats[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         rt_ray(s, ray_start + local, energy_out, moments_out, hits_out, stats);
         for (int k = 0; k < 8; ++k) stats_out[k] += stats[k];
+    }
+}
+
+/* The first triangle each of ``count`` rays hits, as the scene numbers it, and how far. */
+void RT_FIRST(
+    const RtShot* s, int count, const rt_real* origins, const rt_real* directions,
+    rt_real* t_out, int* index_out)
+{
+    for (int i = 0; i < count; ++i) {
+        long long nodes = 0, tests = 0;
+        float weights[3];
+        rt_real plane[3] = {RT_R(0.0), RT_R(0.0), RT_R(0.0)};
+        int slot = rt_nearest(
+            s, origins + 3 * i, directions + 3 * i, -1, plane, t_out + i, weights,
+            &nodes, &tests);
+        index_out[i] = slot < 0 ? -1 : s->meta[2 * (long long)slot];
     }
 }
 """
@@ -947,16 +988,18 @@ def _host_part(single: bool) -> str:
         "rt_ray",
     ):
         text = _renamed(text, name, name + suffix)
-    tail = _renamed(_renamed(_HOST_TAIL, "RtShot", "RtShot" + suffix), "rt_ray", "rt_ray" + suffix)
-    macros = (
-        "RT_STACK RT_EMPTY RT_SHRINK RT_GROW RT_SCALE RT_R RT_SQRT RT_ABS RT_INF RT_PLANE"
-        " RT_SINGLE RT_NAME"
-    ).split()
+    tail = _HOST_TAIL
+    for name in ("RtShot", "rt_real", "rt_ray", "rt_nearest"):
+        tail = _renamed(tail, name, name + suffix)
+    macros = ["STACK", "EMPTY", "SHRINK", "GROW", "SCALE", "R", "SQRT", "ABS", "INF", "PLANE"]
+    macros += ["PARALLEL"]
+    macros += ["SINGLE", "NAME", "FIRST"]
     return (
         f"#define RT_SINGLE {int(single)}\n#define RT_NAME rt_trace{suffix}\n"
+        f"#define RT_FIRST rt_first{suffix}\n"
         + text
         + tail
-        + "".join(f"#undef {macro}\n" for macro in macros)
+        + "".join(f"#undef RT_{macro}\n" for macro in macros)
     )
 
 
@@ -1089,6 +1132,9 @@ def _build() -> ctypes.CDLL:
             ctypes.c_int,
             *[_POINTER] * 4,
         ]
+    for entry in (held.rt_first_d, held.rt_first_s):
+        entry.restype = None
+        entry.argtypes = [ctypes.POINTER(_Shot), ctypes.c_int, *[_POINTER] * 4]
     return held
 
 
@@ -1210,3 +1256,39 @@ def counts_on_host(
         for name, value in zip(STATS, counted, strict=True):
             stats[name] = stats.get(name, 0) + int(value)
     return energy, moments, hits
+
+
+def first_hits(
+    held: TracerScene, origins: np.ndarray, directions: np.ndarray, *, precision: str = "double"
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per ray, by the C text: the distance to the first triangle it hits, and the triangle.
+
+    :func:`reverberate.mirror.bvh.nearest` as the text runs it, in either
+    precision: what the tests hold the text's walk and its triangle tests
+    against, a ray at a time.
+    """
+    built = library()
+    if built is None:
+        raise OSError(f"the rays' C text is not built here: {_state['why']}")
+    single = precision == "single"
+    real = np.float32 if single else np.float64
+    shift = held.centre if single else np.zeros(3)
+    start = np.ascontiguousarray(np.atleast_2d(np.asarray(origins, dtype=float)) - shift, real)
+    along = np.ascontiguousarray(np.atleast_2d(np.asarray(directions, dtype=float)), real)
+    nodes = held.nodes_single if single else held.nodes
+    tris = held.single if single else held.triangles
+    shot = _Shot(
+        nodes=int(nodes.ctypes.data), tris=int(tris.ctypes.data), meta=int(held.meta.ctypes.data)
+    )
+    distance = np.zeros(start.shape[0], dtype=real)
+    index = np.zeros(start.shape[0], dtype=np.int32)
+    entry = built.rt_first_s if single else built.rt_first_d
+    entry(
+        ctypes.byref(shot),
+        int(start.shape[0]),
+        int(start.ctypes.data),
+        int(along.ctypes.data),
+        int(distance.ctypes.data),
+        int(index.ctypes.data),
+    )
+    return distance.astype(np.float64), index.astype(np.int64)
