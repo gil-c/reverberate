@@ -1,7 +1,8 @@
 """The rays of the tail on a real dwelling: what a site costs, and that the tail is the same.
 
     PYTHONPATH=src python scripts/bench_rays.py --bundle RUN/bundle/trace \
-        [--sites 20] [--rays 100000,1000000] [--out rays.json] [--cpu] [--no-grid]
+        [--sites 20] [--rays 100000,1000000] [--out rays.json] [--cpu] [--no-grid] \
+        [--grid-sites 3] [--no-cost]
 
 ``--bundle`` is a trace's bundle: its ``mirror`` directory (the scene and its
 calibration), ``plan.npz`` (the cells, of which the tail's are taken as a run
@@ -28,11 +29,13 @@ before the clock starts: it pays the compilation and the upload.
    The two are the same arithmetic on the same hits and must be equal (the
    moments to a count or two).
 2. *statistics*: single precision against double at one seed, beside double
-   at another seed against double: per band, the level's difference in bins of
-   2 ms and in windows of 50 ms, as a root mean square over the bins that
-   hold crossings and as the worst cell, band and window. Single precision is
-   another draw of the same tail if it stands no farther from double than
-   another seed does.
+   at another seed against double: per band, the level's difference in a
+   cell's bins of 2 ms, in its windows of 50 ms, and in the windows of 50 ms
+   of every cell together, as a root mean square over those that hold a
+   hundred crossings, in the worst band, and as the worst cell, band and
+   window; each for the 30 dB under the cell's loudest window, for the 60 dB
+   and for the whole. Single precision is another draw of the same tail if
+   it stands no farther from double than another seed does.
 3. *escapes*: rays that met no triangle, per million, each way.
 
 A machine's line is printed as soon as it is measured; the whole is the JSON.
@@ -58,8 +61,15 @@ from reverberate.mirror.rays import Histogram, RaySettings
 from reverberate.trace.assets import MirrorAssets
 from reverberate.trace.plan import tail_cells
 
-#: A bin or a window is read where the reference holds this many crossings at least.
-CROSSINGS = 20
+#: A bin or a window is read where the reference holds this many crossings at least: under
+#: it a level is a handful of rays of unlike energies and two seeds stand decibels apart.
+CROSSINGS = 100
+#: ... and where its level is within so many decibels of the loudest the cell holds in the
+#: band; ``None`` reads every one. The tail falls 14 dB every 100 ms on the storey, and
+#: from 50 dB down a window's energy is a few rays that lost least of a hundred bounces:
+#: two seeds of 100 000 rays stand 5 to 9 dB apart there with every cell's crossings
+#: together. The figures are given for each depth so that the first does not hide the last.
+DYNAMICS_DB: tuple[float | None, ...] = (30.0, 60.0, None)
 WINDOW_BINS = 25
 
 
@@ -105,21 +115,59 @@ def levels_db(histogram: Histogram, window: int) -> tuple[np.ndarray, np.ndarray
         return 10.0 * np.log10(energy.sum(axis=2)), hits.sum(axis=2)
 
 
+def _gap(
+    a: np.ndarray, b: np.ndarray, held: np.ndarray, name: str, dynamic_db: float | None
+) -> dict[str, float]:
+    """Levels ``a`` against ``b`` (``[..., window, band]``) where ``held`` crossings suffice."""
+    read = (held >= CROSSINGS)[..., None] & np.isfinite(a) & np.isfinite(b)
+    if dynamic_db is not None:
+        loudest = np.where(np.isfinite(b), b, -np.inf).max(axis=-2, keepdims=True)
+        read &= b >= loudest - dynamic_db
+    with np.errstate(invalid="ignore"):
+        gap = np.where(read, a - b, 0.0)
+    count = max(int(read.sum()), 1)
+    bands = tuple(range(gap.ndim - 1))
+    # The worst band, every cell and window of it together: never the median.
+    per_band = np.sqrt((gap**2).sum(axis=bands) / np.maximum(read.sum(axis=bands), 1))
+    return {
+        f"{name}_rms_db": round(float(np.sqrt((gap**2).sum() / count)), 4),
+        f"{name}_worst_band_rms_db": round(float(per_band.max(initial=0.0)), 4),
+        f"{name}_worst_db": round(float(np.abs(gap).max(initial=0.0)), 3),
+        f"{name}_read": int(read.sum()),
+    }
+
+
+def _depth(dynamic_db: float | None) -> str:
+    return "whole" if dynamic_db is None else f"top{dynamic_db:.0f}db"
+
+
 def distance_db(one: Histogram, reference: Histogram) -> dict[str, float]:
-    """How far ``one`` stands from ``reference``: bins of 2 ms and windows of 50 ms, dB."""
+    """How far ``one`` stands from ``reference``, dB: a cell's bins of 2 ms, its windows of
+    50 ms, and the windows of 50 ms of every cell together.
+
+    The last is the sharp one: every cell's crossings in one level a band
+    and a window, tens of thousands of them, where a bias of a hundredth of
+    a decibel would show.
+    """
     out: dict[str, float] = {}
     for name, window in (("bins_2ms", 1), ("windows_50ms", WINDOW_BINS)):
         a, _ = levels_db(one, window)
         b, held = levels_db(reference, window)
-        read = (held >= CROSSINGS)[:, :, None] & np.isfinite(a) & np.isfinite(b)
-        gap = np.where(read, a - b, 0.0)
-        count = max(int(read.sum()), 1)
-        out[f"{name}_rms_db"] = round(float(np.sqrt((gap**2).sum() / count)), 4)
-        out[f"{name}_worst_db"] = round(float(np.abs(gap).max(initial=0.0)), 3)
-        # The worst band, every cell and window of it together: never the median.
-        per_band = np.sqrt((gap**2).sum(axis=(0, 1)) / np.maximum(read.sum(axis=(0, 1)), 1))
-        out[f"{name}_worst_band_rms_db"] = round(float(per_band.max(initial=0.0)), 4)
-        out[f"{name}_read"] = int(read.sum())
+        for depth in DYNAMICS_DB:
+            out.update(_gap(a, b, held, f"{name}_{_depth(depth)}", depth))
+
+    def together(histogram: Histogram) -> Histogram:
+        return replace(
+            histogram,
+            energy=histogram.energy.sum(axis=0, keepdims=True),
+            moments=histogram.moments[:1],
+            hits=histogram.hits.sum(axis=0, keepdims=True),
+        )
+
+    a, _ = levels_db(together(one), WINDOW_BINS)
+    b, held = levels_db(together(reference), WINDOW_BINS)
+    for depth in DYNAMICS_DB:
+        out.update(_gap(a, b, held, f"all_cells_50ms_{_depth(depth)}", depth))
     return out
 
 
@@ -132,6 +180,7 @@ def main() -> None:
     parser.add_argument("--cpu", action="store_true", help="one core of the host, the C text")
     parser.add_argument("--no-grid", action="store_true", help="leave the present kernel out")
     parser.add_argument("--grid-sites", type=int, default=3, help="sites the grid is timed on")
+    parser.add_argument("--no-cost", action="store_true", help="the proof alone")
     args = parser.parse_args()
     counts = [int(v) for v in str(args.rays).split(",") if v]
     devices = Devices.host(1) if args.cpu else Devices.detect()
@@ -178,7 +227,7 @@ def main() -> None:
         report["grid_build_s"] = round(time.time() - started, 1)
 
     # ---- cost -------------------------------------------------------------------------------
-    for rays_count in counts:
+    for rays_count in [] if args.no_cost else counts:
         rays = replace(base, rays=rays_count)
         for way in ways:
             timed = sites[: args.grid_sites] if way == "grid" else sites
