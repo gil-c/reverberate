@@ -637,7 +637,24 @@ core, and it does not grow with the sources because the server mixes.
 every run, no `conftest.py`, no parallel runner in `requirements-dev.txt`.
 CI is one job of 6.5 to 11 minutes. The suite now prints its forty slowest
 tests (`--durations=40` in the `Makefile`, this lot's only change of code),
-so that the list is read in every run and in CI. By reading, the slow ones
+so that the list is read in every run and in CI. **Read in this lot's own CI
+run: 1290 tests in 533 s, of which the forty slowest are 300 s and five are
+122 s:**
+
+| test | seconds |
+| --- | --- |
+| `test_mirror_rays.py::test_covered_rays_count_again_after_the_tree_s_window` | 35.4 |
+| `test_w38_ambisonic_bands.py::test_three_grids_assemble_into_one_drawable_run_that_points_at_the_source` | 33.6 |
+| `test_mirror_rays.py::test_covered_rays_leave_the_direct_and_lose_the_specular_reflections` | 23.6 |
+| `test_mirror_render.py::test_rendering_is_deterministic_for_a_seed` | 17.1 |
+| `test_spatial_encode.py::test_the_filter_does_not_wrap_its_own_pre_ring_onto_the_end_of_the_record` | 12.7 |
+
+The two first of `test_mirror_rays.py` are the tracer's Python twin walking
+its grid a cell at a time, 59 s for two properties that fewer rays in a
+smaller room would hold; they are the first to shorten, in the lot that
+rewrites the tracer. Then come 35 tests of 3.4 to 10 s: whole traces, whole
+reports of `tests/test_w10_render.py` (six of them, 3.4 to 8.2 s each), the
+encoder's child processes. By reading, the other slow ones
 are whole traces built in module fixtures (`tests/test_trace.py`, about 18
 plans and a full trace; `tests/test_trace_pool.py`), the sound check on
 packs of 2 to 3 s (`tests/test_render_check.py`,
