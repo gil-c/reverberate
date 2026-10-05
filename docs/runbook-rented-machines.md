@@ -391,95 +391,212 @@ against 68 and 90 before: 0.37 and 0.47 US cents at 0.16 USD/h, still
 ## 7. The scene trace (ADR 0016)
 
 A recipe becomes a scene pack on one rented machine, by one command from the
-laptop (`reverberate.trace`). **None of it has run on a card.** Everything
-below was run on `numpy` on a small room with a monopole in free air in
-place of the solves, and planned, not run, on hssd_0076.
+laptop (`reverberate.trace`). **Every stage has run on a card**: the low
+band on the batched solver on one RTX 3080 20 GB (instance 54201838,
+`docs/open-questions/low-band-solver.md`), every other stage on one RTX 3090
+(instance 54204430, `docs/adr/0016-appendix-trace-cost.md`), and smoke runs
+of the whole chain on 2 x Tesla P100 and after. **The whole scene of twenty
+minutes has not**: what follows is what the smoke runs and those two boxes
+measured, and what the rentals of 2026-10-05 broke.
 
-The mirror of the dwelling comes from a run's `mirror` directory: its scene,
-a calibration, the signature and the alignment's lead and gain. A recipe is
-refused unless its `assets` are the trace's; `python -m reverberate.trace
-assets` prints them for `python -m reverberate.scenes generate --assets`.
+### What is given
+
+The mirror of the dwelling comes from a run's `mirror` directory
+(`--mirror-from`, with its calibration, lead and gain) or from a directory a
+bundle already holds (`--mirror DIR`, what `MirrorAssets.save` wrote: a
+bundle's `trace/mirror`). The storey's export comes from an earlier one
+(`--models-from`). A recipe is refused unless its `assets` are the trace's;
+`python -m reverberate.trace assets` prints them for `python -m
+reverberate.scenes generate --assets`.
 
 ```
-M="--mirror-from data/runs/w42_gpu_hssd_0076/mirror \
-   --calibration data/runs/w42_gpu_hssd_0076/mirror/calibration/c3cec6aab28bb582.json \
-   --lead-s 0.0106744 --gain 0.014396307939042263"
+M="--mirror data/runs/w45_clarify_scene/smoke1/bundle/trace/mirror"
 X="--models-from data/runs/w44_clarify_interpolation/bundle_line_0076/models/storey"
-
-python -m reverberate.trace assets $M $X > assets.json
-python -m reverberate.scenes clips fetch        # the dry clips, once, on the laptop
-python -m reverberate.scenes generate --dwelling hssd_0076 --seed 20261004 \
-    --assets assets.json --clips src/reverberate/scenes/library/clarify_v1.json \
-    --out recipe.json
-
-# The plan and its cost; nothing built, nothing rented, no key read.
-python -m reverberate.trace rent --recipe recipe.json --home H $M --dry-run [--rate 0.30]
-
-# The first paid run: sixty seconds, three sources, every stage, the engine on both modules.
-python -m reverberate.trace rent --recipe recipe.json --home H_smoke $M $X \
-    --smoke 60 --smoke-sources 3 [--smoke-start auto] [--patch] \
-    --hours 2 --max-dph 0.6 --avoid ID ... --yes
-
-# The scene.
-python -m reverberate.trace rent --recipe recipe.json --home H_full $M $X \
-    --hours 8 --max-dph 2.0 --avoid ID ... [--publish-pairs] --yes
 ```
 
-The lead and the gain are those the field `field_mirror_c10` was written
-with (its `provenance_json`); `report_S1.json` holds another calibration's.
-`--smoke-start auto` puts the window where most moves; at the scene's start
-everything of the first recipe is at rest, which exercises every stage and
-no translation. `--patch` adds the 882 cells of the off-line translation
-validation, from one source: their responses come home in the pair cache and
-are not in the pack.
-
-What the driver does is `gpu.onebox`'s: the offers and machines of `--avoid`
-are not rented, a host whose cards hold someone's memory is destroyed and
-the next taken, the machine runs `python -m reverberate.accel campaign`,
-which reads that the bundle is a trace, the watcher looks every five minutes
-and relaunches a stalled run once (a trace resumes: pairs in their cache,
-paths in `early/`, histograms in `tails/`, seams in `level.jsonl`), the pack
-and the pair cache are fetched, and the instance is destroyed and verified
-when the run is done. **An outcome other than `done` keeps the instance**,
-and says so. At home the pack's provenance receives its cost records with
-the billed rate, and the pairs go into `data/cache/low-pairs/`, and into the
-store with `--publish-pairs`. `python -m reverberate.trace finish --home H`
-does that part again.
-
-Planned for the first recipe (seed 20261004, 20 minutes, 14 sources), the
-low band priced by `accel.pairs.estimate` (measured on 2 x A100 at
-1.74 USD/h) and the mirror by the projection of ADR 0016's cost appendix:
-
-| | cells | source positions | pairs | tail sites x cells | distinct step-pairs | machine | USD at 1.74 /h |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| the scene | 185 | 375 | 1964 | 72 x 23 | 7422 of 179 562 audible | 3.1 h | 5.41 |
-| `--smoke 60`, 3 sources, from 0 s | 1 | 3 | 3 | 3 x 1 | 3 of 749 | 19 min | 0.56 |
-| `--smoke 60`, 3 sources, `auto` (605 s), `--patch` | 103 | 128 | 1088 | 22 x 18 | 557 of 557 | 78 min | 2.26 |
-
-Fifteen of those minutes are assumed, not measured: the provisioning, the
-push and the grid. The scene's 3.1 h are 2.2 h of solves, 19 min of rays, 10
-of levelling and 11 of transfer. No step of the first recipe needs the
-0.10 m rule: its nearest mouth passes 0.66 m from the head.
-
-### The low band on the batched solver
-
-`reverberate.wave.lowband` solves the pairs many source positions a launch,
-with the receivers and the fit on the card
-(`docs/open-questions/low-band-solver.md`). **It has not run on a card.** The
-machine's command takes it by flags, which a rental passes with
-`--campaign-args`:
+### The commands
 
 ```
-python -m reverberate.trace rent ... --campaign-args "--low-engine lowband"
-python -m reverberate.trace rent ... \
-    --campaign-args "--low-engine lowband --low-scheme fcc --low-ppw 7.7"
+# 1. The plan and its cost on the measured card. Nothing built, nothing rented, no key read.
+python -m reverberate.trace rent --recipe R.json --home H $M --dry-run
+
+# 2. The offers, each with what this run is predicted to take on it. The bundle is built
+#    and the offers are asked for; nothing is rented.
+python -m reverberate.trace rent --recipe R.json --home H $M $X \
+    --gpus 4 --max-hours 16 --max-dph 2.0 --plan-offers
+
+# 3. A smoke run: a minute, three sources, every stage, the engine on both modules.
+python -m reverberate.trace rent --recipe R.json --home H_smoke $M $X \
+    --smoke 60 --smoke-sources 3 --smoke-start auto --max-dph 0.6 --yes
+
+# 4. A V1 reference run: a short recipe whose source stands on the validated field's own.
+python -m reverberate.trace rent --recipe V1_near.json --home H_v1_near $M $X \
+    --check full --fetch-pairs --max-dph 0.6 --yes
+python -m reverberate.render check H_v1_near/pulled/pack.h5 --reference-point --out H_v1_near/check
+
+# 5. The whole scene, on several cards, within a wall time.
+python -m reverberate.trace rent --recipe R.json --home H_full $M $X \
+    --gpus 4 --max-hours 16 --max-dph 2.0 --fetch-early --yes
+
+# 6. The same scene with its low band on the coarser grid, in a home of its own.
+python -m reverberate.trace rent --recipe R.json --home H_full_72 $M $X \
+    --low-ppw 7.2 --reuse-from H_full --gpus 4 --max-hours 8 --max-dph 2.0 --yes
+
+# 7. The two side by side: two files to hear at one gain, and what differs band by band.
+python -m reverberate.render check H_full/pulled/pack.h5 \
+    --against H_full_72/pulled/pack.h5 --window 600 660 --out AB
+
+# 8. After a failure: the same command again. What came home is carried and not solved twice.
+python -m reverberate.trace rent --recipe R.json --home H_full $M $X \
+    --gpus 4 --max-hours 16 --max-dph 2.0 --fetch-early --yes
+#    or, on the machine if it is still rented and the last line said so:
+python -m reverberate.trace rent --recipe R.json --home H_full $M $X --instance ID
 ```
 
-Without `--low-scheme` and `--low-ppw` the grid is the bundle's and the
-pairs are the present engine's to rounding, under another key: a pair's key
-names its solver. Another grid is voxelised on the machine under its own
-key; the face centred one by PFFDTD's voxeliser on the host, which needs
-`PFFDTD_DIR` and `PFFDTD_PYTHON` in the machine's environment. Before a
-scene is trusted to it, the dev box runs `verify`, `compare` and `cost` of
-`python -m reverberate.wave.lowband`, in that order; the note gives the
-lines.
+### The defaults, as they are now
+
+| | default | to change it |
+| --- | --- | --- |
+| low band engine | the batched solver (`wave.lowband`) | `--low-engine pffdtd` |
+| low band grid | Cartesian, 10.5 points per wavelength: the validated one | `--low-ppw 7.2`, `--low-scheme fcc` |
+| the machine | the lowest predicted total USD among the offers predicted within `--max-hours` | `--gpus N`, `--gpu NAME`, `--max-dph`, `--avoid` |
+| the watchdog, `--hours` | the prediction times 1.5 (2 for a card not measured) and half an hour, the largest of the six offers that may be tried | `--hours H` |
+| the check | a smoke run renders on both modules (`full`); the whole scene reads the pack (`read`) | `--check` |
+| the pair cache | home for the whole scene, every ten minutes while it runs; left for a smoke run | `--fetch-pairs`, `--no-fetch-pairs` |
+| the early tables | left on the machine | `--fetch-early`, for a second run's `--reuse-from` |
+| a run that failed twice | fetched, kept for inspection, named in the last line | `--destroy-failed` |
+| hosts never rented | `gpu.vast.KNOWN_BAD_HOSTS` (machine 35928, 2026-10-05) and `--avoid` | |
+
+### What the driver does, and how a rental ends
+
+It is `gpu.onebox`'s. The offers are priced for this plan
+(`trace.machines`), the table is printed, and the reason for the choice;
+nothing is rented before that. A host whose cards hold someone's memory is
+destroyed and the next taken. The machine runs `python -m reverberate.accel
+campaign`, which reads in the bundle that it is a trace, which engine solves
+its low band and on which grid (`trace.low`); a flag overrules the bundle.
+The watcher looks every five minutes, relaunches a stalled run once (a
+trace resumes: pairs in their cache, paths in `early/`, histograms in
+`tails/`, seams in `level.jsonl`), and every ten minutes brings home what is
+new of the pair cache.
+
+| what happens | what the driver does |
+| --- | --- |
+| the connection drops (`closed by remote host`, `Connection refused`, the banner alone) | the command is tried again, six times, 15 s to 2 min apart; a build tried again waits behind a lock for the one still running |
+| the remote command itself fails (a non-zero exit that is not ssh's) | raised at once, not tried again |
+| a host cannot be provisioned | destroyed, verified, avoided, the next offer taken; four hosts at most |
+| a host is destroyed and not verified gone | the run stops there; the last line names it |
+| a look fails (the API, the laptop's line) | said, and taken again |
+| the driver itself fails after the launch | the pair cache is asked for once more, the instance destroyed and verified; outcome `error`, the traceback in `onebox.json` |
+| the campaign is `done` | fetched, destroyed, verified |
+| the fetch of a finished run fails | the instance is kept, since what it made is on it; the last line says what it bills until its watchdog |
+| the campaign failed twice | fetched and kept, the last line says so; destroyed with `--destroy-failed` |
+| the rental's deadline is twenty minutes away | what exists is fetched, the instance destroyed |
+| the host vanishes | nothing to fetch: what the homecomings brought is installed |
+| a person interrupts the driver | the campaign runs on, detached; the last line names the instance |
+
+The last line of a run that leaves a machine rented is `INSTANCE n IS STILL
+RENTED: why. It bills r USD/h until its watchdog at hh:mm: x USD more at
+most. Resume with --instance n, or destroy it.` The command exits non-zero
+unless the outcome is `done`.
+
+**Whatever the outcome, what came home is installed**: the pairs go into
+`data/cache/low-pairs/<grid key>/`, a pair cut in its transfer is left out,
+and the next bundle of the recipe carries them (`pairs_cache/`), named as
+the machine's engine names them. Before this the bundle named them with the
+present engine's solver, and a machine on the batched solver found none of
+what it was sent. `python -m reverberate.trace finish --home H` installs
+again.
+
+### Choosing the machine
+
+The low band divides over a machine's cards, one batch a card, and so do
+the rays; the early trace, the levelling and the pack's write are one
+process and the host; the pack's way home is the laptop's line, 8.1 MB/s.
+`trace.machines.predict` adds that up for an offer:
+
+- **the solves**, counted as the machine will make them: a source position
+  heard at more cells than a card holds records for is solved more than
+  once. A 20 GB card holds the records of 57 cells a solve, a 24 GB card
+  83, an 80 GB card over 450; at 7.2 points per wavelength a 20 GB card
+  holds 158. A card that holds no cell's records beside the grid is not
+  offered;
+- **the card's throughput**, over the RTX 3080's:
+
+| card | throughput | from |
+| --- | --- | --- |
+| RTX 3080 20 GB | 1.0 | **measured**: the batched solver, 110 s a source position, 0.31 s a pair, 1.4e10 node updates a second |
+| A100 | 4.2 | **measured, through the present engine**: 15.9 s a position on 2 x A100 against 135 s on the RTX 3080 |
+| Tesla P100 | 0.74 | **measured, through the present engine**: 183 s a position on 2 x P100, one engine process a card, against 135 s. Half that if the 183 s were of both cards on one solve |
+| RTX 3090 | 1.2 | estimate, memory bandwidth. It is the card every stage but the solve was measured on |
+| RTX 3080 Ti, 3090 Ti, 4090, 5080, 6000 Ada | 1.2 to 1.3 | estimate, memory bandwidth |
+| RTX 5090 | 2.3 | estimate, memory bandwidth |
+| RTX 4080, A5000, A6000, A40, L40, L40S, Titan RTX, V100, 2080 Ti | 0.8 to 1.2 | estimate, memory bandwidth |
+| RTX 4070 Ti, A4000 | 0.6 to 0.65 | estimate, memory bandwidth |
+| H100, H200 | 4.2 | estimate, taken as the A100's |
+
+  The bandwidth ratio would give the A100 2.0 to 2.5 and the P100 0.96: it
+  is 70 per cent short on one and 30 per cent long on the other. An
+  estimated card is marked `ESTIMATED` in the table of offers and its
+  watchdog is given twice the prediction, not one and a half. A card with
+  no row is not offered;
+- **the coarser grid**: 36 s a source position at 7.2 points per wavelength
+  on the same RTX 3080 against 110 s, a power of 2.96 of the points;
+- **the pair cache's way home** costs no machine time while the run lasts,
+  since it is brought every ten minutes; only what the run leaves no time
+  for is waited for.
+
+The first recipe (seed 20261004, 375 source positions, 1964 pairs, 72 tail
+sites over 23 cells), `trace.machines.predict` of 2026-10-05:
+
+| machine | solves | wall, validated grid | wall, 7.2 points |
+| --- | --- | --- | --- |
+| 1 x RTX 3080 20 GB | 396, of which 21 for the records | 12.9 h | 4.6 h |
+| 4 x RTX 3080 20 GB | 396 | 3.5 h | 1.4 h |
+| 4 x RTX 3090 (estimated) | 388 | 2.9 h | 1.2 h |
+| 2 x A100 80 GB | 375 | 1.9 h | 0.9 h |
+| 2 x Tesla P100 16 GB | 419 | 9.2 h | 3.1 h |
+
+The total in USD is those hours times the offer's rate: the same work costs
+about the same on one card of a kind as on four, and four give it in a
+quarter of the time, so the wall time allowed is what chooses. The realistic
+recipe (1646 positions, 16 529 pairs) is 1763 solves and 55 h on one RTX
+3080, 14 h on four (`docs/open-questions/low-band-solver.md`).
+
+### Two grids, kept side by side
+
+The validated grid and the coarser one are both first class. `--low-ppw`
+is read by `trace rent`, `trace bundle` and the machine's command; the grid
+is voxelised on the machine under its own key, its pairs are cached under
+that key and under a solver's name that says the grid, so a pair of one is
+never found for the other, on the machine, in `data/cache/low-pairs/` or in
+the store. A home holds one grid's run: `trace rent` refuses a home whose
+bundle names another. The recipe's `voxel_low_key` then differs by intent,
+that key alone, and the pack's provenance says so (`assets_mismatched`).
+
+**What the second run does not pay again.** With `--reuse-from` the bundle
+carries the first run's early tables, and those of the sources are not
+traced again: they depend on the sources, the listener and the mirror's
+scene, and the trace's region is rounded out to a quarter of a metre so
+that it is the same on both grids. **The rays, the pairs at rest and the
+levelling are made again**: the tail's cells and the pairs' cells are the
+centres the arrays really got, which are the grid's nodes and differ from
+one grid to the other by up to half a step. On the first recipe that is
+165 s saved of 2400 s outside the solves; the rays are the larger part and
+divide over the cards.
+
+On the coarser grid an array's ball is twelve steps of 3.2 cm, 0.38 m
+against 0.26 m: more cells near a surface or a source may get no array. The
+trace says how many (`cells without an array`) and serves their steps from
+the nearest cell that has one.
+
+### The low band's own commands
+
+Before a scene is trusted to another grid or another card, the dev box runs
+`verify`, `compare` and `cost` of `python -m reverberate.wave.lowband`, in
+that order; `docs/open-questions/low-band-solver.md` gives the lines.
+`compare --line` now delays the pairs by the field's lead before it compares
+them, as the trace does (`spatial.lowband.delayed`): it read 0 dB at every
+band while the two were 10.75 ms apart. The lead is the line's own where
+`line` found it in the field, or `--lead-s`; without either the command
+refuses to print a table.

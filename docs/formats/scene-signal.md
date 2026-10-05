@@ -107,7 +107,7 @@ of each stem to float32 (rule 4 below), and a single stem untouched.
 `python -m reverberate.render check <pack.h5> [--recipe R.json] [--clips DIR]
 [--manifest M.json] [--out DIR] [--window START STOP] [--sources ...]
 [--measured-head H.sofa] [--reference FIELD.h5] [--reference-point]
-[--probe-seconds S]`
+[--against B.h5] [--probe-seconds S]`
 (`reverberate.render.check`) renders what it needs through the engine and
 holds it to what a listener would reject. It writes, in `--out`:
 
@@ -120,9 +120,28 @@ holds it to what a listener would reject. It writes, in `--out`:
   for the scene's own head, through the page's decoder
   (`spatial.binaural.design_decoder` on the measured head, turned by the
   head's matrix, in blocks of 512 with a crossfade when the head moves, as
-  `viz/app/scene/sound-decode.js`), at the page's default level, a gain of
-  one. When the mix peaks under -26 dB re full scale a second set is
-  written, `*_plusNNdB.wav`, every file by the same whole tens of decibels;
+  `viz/app/scene/sound-decode.js`), at the page's default level, -12 dB. A
+  pack is physical: a sample of 1 is 86 dB SPL and a voice at 1 m about 60.
+  At 0 dB three of a scene's fourteen sources peaked at -3.8 dB re full
+  scale in the two ears, and fourteen pass it; at -12 dB the output's full
+  scale stands for 98 dB SPL, and a whole scene is expected 9 dB under it.
+  The page keeps its level control (-60 to +20 dB) and lights `clip` with
+  the excess in dB for three seconds whenever its output passes full scale;
+  it does not limit, which would change what is heard without saying so. A
+  file whose samples pass full scale is clipped, and named with their
+  count in `check.json` (`clipped_samples`) and in the notes. When the mix
+  peaks under -26 dB re full scale a second set is written,
+  `*_plusNNdB.wav`, every file by the same whole tens of decibels;
+- with `--against B.h5`, these alone (`reverberate.render.check.against`):
+  another pack of the same recipe, the same window of both. `listen/A_*.wav`
+  and `listen/B_*.wav`, the mix and each source, the same clips and head, at
+  one gain for both packs: nothing is normalised, so a pack that is louder
+  is louder in its file. `ab.json` and `ab.md`: for each source, the level
+  of B less that of A per third octave, on the response to an impulse cut
+  50 ms after its arrival (`early`, `late`) and on the recipe's clips over
+  the window (`clips`); a band 60 dB under the response's loudest is left
+  empty. It judges nothing: the files are for someone to hear. Two packs of
+  two recipes, or of two windows, are refused;
 - with `--reference-point`, these alone: `reference_point.md` and
   `reference_point.json` (`reverberate.render.check.reference`). For a pack
   whose source stands within 5 cm of the validated field's own, with its
