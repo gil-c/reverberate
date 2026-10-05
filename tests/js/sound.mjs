@@ -380,4 +380,57 @@ const x = signal();
   };
 }
 
+// --- several packs of one scene: which, in which order, under which words -------------
+{
+  const { sameScene, scenePacks, variantLabels, variantName, variantCost, variantSaving, variantTitle, stepVariant } = await import(
+    `${app}/scene/variants.js`
+  );
+  const told = (name, flags, scene, excerpt, measured = null) => ({
+    name,
+    says: `what ${name} is`,
+    flags,
+    predicted_scene_usd: scene,
+    predicted_excerpt_usd: excerpt,
+    measured,
+  });
+  const packs = [
+    { id: "cccccc000000", name: "low-0.8s", recipe_sha256: "r1", scene_sha256: "s1", path: "/kit/low/pack.h5", variant: told("low-0.8s", { low_seconds: 0.8 }, 5.07, 0.57) },
+    { id: "aaaaaa000000", name: "reference", recipe_sha256: "r1", scene_sha256: "s1", variant: told("reference", {}, 7.54, 0.84, { usd: 0.91 }) },
+    // Rails at another pitch: another recipe, the same movements.
+    { id: "bbbbbb000000", name: "all-cheap", recipe_sha256: "r2", scene_sha256: "s1", variant: told("all-cheap", { low_ppw: 7.2, rail_pitch_m: 0.12 }, 1.81, 0.18) },
+    { id: "dddddd000000", name: "another", recipe_sha256: "r9", scene_sha256: "s9", variant: { name: null, flags: {} } },
+    // A pack brought home twice under one name, and one with no variant.json beside it.
+    { id: "eeeeee000000", name: "low-0.8s", recipe_sha256: "r1", scene_sha256: "s1", variant: told("low-0.8s", { low_seconds: 0.8 }, 5.07, 0.57) },
+    { id: "ffffff000000", name: "pulled", recipe_sha256: "r1", scene_sha256: "s1", variant: { name: null, flags: {} } },
+  ];
+  const [low, reference, cheap, another] = packs;
+  const offered = scenePacks(packs, low);
+  out.variants = {
+    sameSceneOtherRecipe: sameScene(reference, cheap),
+    otherScene: sameScene(reference, another),
+    // An older server gives no scene digest: the recipe decides, as it did.
+    withoutDigest: [
+      sameScene({ recipe_sha256: "r1" }, { recipe_sha256: "r1" }),
+      sameScene({ recipe_sha256: "r1" }, { recipe_sha256: "r2", scene_sha256: "s1" }),
+      sameScene(null, reference),
+    ],
+    order: offered.map((entry) => entry.id.slice(0, 6)),
+    labels: variantLabels(offered),
+    alone: scenePacks(packs, another),
+    none: scenePacks(packs, null),
+    names: [variantName(reference), variantName(packs[5])],
+    costs: [variantCost(reference), variantCost(low), variantCost(another)],
+    saving: [variantSaving(cheap, reference), variantSaving(reference, reference), variantSaving(packs[5], reference)],
+    title: variantTitle(cheap, reference).split("\n"),
+    referenceTitle: variantTitle(reference, reference).split("\n"),
+    bareTitle: variantTitle(packs[5], reference).split("\n"),
+    steps: [
+      stepVariant(offered, "aaaaaa000000", 1).id.slice(0, 6),
+      stepVariant(offered, "aaaaaa000000", -1).id.slice(0, 6),
+      stepVariant(offered, "missing", 1).id.slice(0, 6),
+      stepVariant([], "x", 1),
+    ],
+  };
+}
+
 console.log(JSON.stringify(out));

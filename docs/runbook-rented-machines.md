@@ -567,6 +567,25 @@ quarter of the time, so the wall time allowed is what chooses. The realistic
 recipe (1646 positions, 16 529 pairs) is 1763 solves and 55 h on one RTX
 3080, 14 h on four (`docs/open-questions/low-band-solver.md`).
 
+### What the whole scene's first run showed (2026-10-05)
+
+| symptom | cause | response | status |
+| --- | --- | --- | --- |
+| `trace FAILED: OutOfMemoryError('Out of memory allocating 10,834,217,984 bytes (allocated so far: 15,031,810,048 bytes)')` at job 94 of 304 on 8 x RTX 3090 of 24 576 MiB | The refused block is one launch's records: 84 cells of 984 nodes, 4 bytes a step, 32 769 steps. The 15.0 GB held were not that launch's: the launch before had left its own records (65 cells, 8.4 GB) in cupy's pool, the new launch's masks and fields were cut from that block, and the pool cannot give back a block of which a part is in use. The plan itself held: it was made once, on the first card, and counted one launch at a time | The pool gives its free blocks back before every launch; the resampler's weights, which stay for the campaign, are made before the first; each launch is held against what its own card has free at that moment, 80 % of it, and parted where that is less; a launch refused its memory is parted (its sources first, then one source's cells) and tried again. One source at one cell that is refused is the campaign's failure | in code, tested with an allocator that refuses; not run on a card |
+| `homecoming of pairs not complete: transfer failed after 1 attempts: rsync down did not end in 600 s`, every time, and the looks 15 minutes apart instead of 5 | A pass was given 600 s every 600 s and the watch waited for it; the line brought 0.3 to 0.5 MB/s (895 pairs of 1.2 MB in 1.6 h, of 11 481 then on the machine), so no pass could end | A pass is taken out of the pause between two looks (270 s of 300) and ends there with every whole file kept; what its last file left is removed; the log says `pairs home: N of M on the machine (+K in S s)` | in code |
+| The pair cache's way home is priced at 8.1 MB/s (43 min for 20.75 GB) and came at a twentieth of that | Not known: that host's line, the proxy, or the machine busy solving. The figure was measured on another box | **Open.** At that rate the cache is 12 h of rental after the solves. Until it is measured again: `--no-fetch-pairs` on a host whose first passes read under 2 MB/s, or the store as the way home | to decide |
+
+### The options that change the result
+
+Each leaves the default pack byte for byte as it was, and each is a variant
+the owner judges by ear (`docs/open-questions/listening-variants.md`):
+`--low-ppw 7.2`, `--rail-positions 8` on a recipe of another rail pitch,
+`--low-seconds 0.8`, `--rays 50000`. `python -m reverberate.trace variants`
+prices a named set of them on the whole scene and prints the command of
+each one's excerpt; `python -m reverberate.render check REF.h5 --against
+V1.h5 V2.h5 ...` writes a file to hear for each and a blind set; the audit
+page switches among them at one instant.
+
 ### Two grids, kept side by side
 
 The validated grid and the coarser one are both first class. `--low-ppw`

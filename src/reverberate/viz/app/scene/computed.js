@@ -14,6 +14,7 @@
  * geometry by `computed-data.js`. Each answer says whether it is the thing
  * itself, a derived view or a sample, and the panel repeats it.
  */
+import { sameScene, variantName } from "./variants.js";
 import { orderColour } from "../mirror.js";
 import {
   COLOURS,
@@ -620,7 +621,7 @@ export function createComputed({ THREE, viewport, minimap, scene, sound, root })
       say("pack", error.message, true);
       return;
     }
-    if (aboutB && aboutB.recipe_sha256 !== about.recipe_sha256) aboutB = null;
+    if (aboutB && !oneScene(about, aboutB)) aboutB = null;
     const names = Object.keys(about.tails);
     source.replaceChildren(...names.map((name) => new Option(name, name)));
     band.replaceChildren(...about.bands_hz.map((hz, index) => new Option(hz, index)));
@@ -632,12 +633,22 @@ export function createComputed({ THREE, viewport, minimap, scene, sound, root })
     for (const [name] of LAYERS) if (on[name] && name !== "bare") refresh(name);
   }
 
+  // Two packs are one scene when the sound stage's list says so (the same movements,
+  // whatever their recipes); packs it does not list are compared by their recipe.
+  function oneScene(one, other) {
+    const listed = sound.state().packs;
+    const [a, b] = [one, other].map((told) => listed.find((entry) => entry.id === told.pack));
+    return a && b ? sameScene(a, b) : one.recipe_sha256 === other.recipe_sha256;
+  }
+
   async function chooseB(id) {
     aboutB = null;
     if (id) aboutB = await ask("about", { pack: id }).catch(() => null);
-    if (aboutB && about && aboutB.recipe_sha256 !== about.recipe_sha256) {
-      say("pack", "B is not a pack of the same recipe as A", true);
+    if (aboutB && about && !oneScene(about, aboutB)) {
+      say("pack", "B is not a pack of the same scene as A", true);
       aboutB = null;
+    } else if (aboutB && about && aboutB.recipe_sha256 !== about.recipe_sha256) {
+      say("pack", "B is the same scene under another recipe: its rails are solved at another pitch");
     }
     fillGrids();
     header();
@@ -653,7 +664,7 @@ export function createComputed({ THREE, viewport, minimap, scene, sound, root })
       packsSeen = listed;
       const keep = pickB.value;
       // Two packs brought home under one name are told apart by their ids.
-      pickB.replaceChildren(new Option("none", ""), ...state.packs.map((entry) => new Option(`${entry.name} · ${entry.id.slice(0, 6)}`, entry.id)));
+      pickB.replaceChildren(new Option("none", ""), ...state.packs.map((entry) => new Option(`${variantName(entry)} · ${entry.id.slice(0, 6)}`, entry.id)));
       pickB.value = keep;
     }
     const expected = heard === "B" && aboutB ? aboutB.pack : idA;

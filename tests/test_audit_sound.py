@@ -318,6 +318,67 @@ def _get(url: str) -> Any:
         return json.loads(response.read())
 
 
+def test_a_pack_says_which_variant_it_is_and_which_packs_are_its_scene(
+    pack_path: Path, tmp_path: Path
+) -> None:
+    """What the page switches among: a variant's name and cost, and one scene's packs."""
+    from dataclasses import replace
+
+    from reverberate.viz.audit_api import describe_pack
+
+    kit = tmp_path / "kit"
+    with read_pack(pack_path) as held:
+        pack = replace(held, sources={name: s for name, s in held.sources.items()})
+        (kit / "reference" / "pulled").mkdir(parents=True)
+        (kit / "rail-12cm-x8" / "pulled").mkdir(parents=True)
+        (kit / "elsewhere").mkdir()
+        write_pack(kit / "reference" / "pulled" / "pack.h5", pack)
+        # The same movements under another recipe, as rails of another pitch give.
+        recipe = json.dumps({**json.loads(pack.recipe), "note": "rails every 0.12 m"}).encode()
+        header = replace(pack.header, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+        write_pack(
+            kit / "rail-12cm-x8" / "pulled" / "pack.h5",
+            replace(pack, recipe=recipe, header=header),
+        )
+        # And the head somewhere else: another scene.
+        moved = replace(pack.listener, position=np.asarray(pack.listener.position) + 0.5)
+        recipe = json.dumps({**json.loads(pack.recipe), "note": "another walk"}).encode()
+        header = replace(pack.header, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+        write_pack(
+            kit / "elsewhere" / "pack.h5",
+            replace(pack, recipe=recipe, header=header, listener=moved),
+        )
+    for name, flags, usd in (
+        ("reference", {}, 7.54),
+        ("rail-12cm-x8", {"rail_positions": 8}, 5.98),
+    ):
+        record = {"name": name, "flags": flags, "predicted": {"scene": {"usd": usd}}}
+        (kit / name / "variant.json").write_text(json.dumps(record))
+    reference = describe_pack(kit / "reference" / "pulled" / "pack.h5")
+    wider = describe_pack(kit / "rail-12cm-x8" / "pulled" / "pack.h5")
+    other = describe_pack(kit / "elsewhere" / "pack.h5")
+    assert reference is not None and wider is not None and other is not None
+    assert reference["name"] == "reference" and wider["name"] == "rail-12cm-x8"
+    assert wider["variant"]["flags"] == {"rail_positions": 8}
+    assert wider["variant"]["predicted_scene_usd"] == 5.98 and wider["variant"]["measured"] is None
+    assert other["name"] == "elsewhere" and other["variant"]["name"] is None
+    assert reference["recipe_sha256"] != wider["recipe_sha256"]
+    assert reference["scene_sha256"] == wider["scene_sha256"] != other["scene_sha256"]
+    assert describe_pack(pack_path)["scene_sha256"] == reference["scene_sha256"]  # type: ignore[index]
+    stems = StemService(tmp_path / "cache", workers=1, processes=False)
+    try:
+        audit = AuditService(stems, folders=[kit])
+        listed = audit.handle("GET", ["packs"], {"recipe_sha256": reference["recipe_sha256"]})
+        told = {entry["name"]: (entry["matches"], entry["same_scene"]) for entry in listed}
+        assert told == {
+            "elsewhere": (False, False),
+            "rail-12cm-x8": (False, True),
+            "reference": (True, True),
+        }
+    finally:
+        stems.close()
+
+
 def test_the_bytes_the_page_receives_are_the_engines_samples(
     site: tuple[str, AuditService], pack_path: Path
 ) -> None:

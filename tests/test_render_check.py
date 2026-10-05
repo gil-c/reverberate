@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -697,6 +698,109 @@ def test_two_packs_of_one_recipe_are_written_at_one_gain_and_differ_as_they_were
     assert "Nothing is normalised" in text and "| early |" in text and "+6.0" in text
     said = capsys.readouterr().out
     assert "A_mix" in said and "B_mix" in said and "ab.md" in said
+
+
+def test_several_packs_are_written_at_one_gain_named_by_their_variant_with_a_blind_set(
+    two_packs: dict[str, Any], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from reverberate.render.check import many
+
+    # Three packs in three homes, as ``trace variants`` lays them: the file beside each.
+    homes = {}
+    for name, source, flags in (
+        ("reference", "a", {}),
+        ("grid-7.2", "b", {"low_ppw": 7.2}),
+        ("low-0.8s", "a", {"low_seconds": 0.8}),
+    ):
+        home = tmp_path / "kit" / name / "pulled"
+        home.mkdir(parents=True)
+        shutil.copyfile(two_packs[source], home / "pack.h5")
+        record = {
+            "name": name,
+            "flags": flags,
+            "predicted": {"scene": {"usd": 7.54 - len(flags)}, "excerpt": {"usd": 0.84}},
+        }
+        (home.parent / "variant.json").write_text(json.dumps(record))
+        homes[name] = home / "pack.h5"
+    out = tmp_path / "many"
+    code = main(
+        [
+            "check",
+            str(homes["reference"]),
+            "--against",
+            str(homes["grid-7.2"]),
+            str(homes["low-0.8s"]),
+            "--out",
+            str(out),
+            "--blind-seed",
+            "3",
+            *two_packs["arguments"],
+        ]
+    )
+    assert code == 0
+    document = json.loads((out / "variants.json").read_text())
+    assert document["reference"]["name"] == "reference" and document["one_gain_for_all"] is True
+    assert list(document["variants"]) == ["grid-7.2", "low-0.8s"]
+    assert document["variants"]["grid-7.2"]["variant"]["flags"] == {"low_ppw": 7.2}
+    assert document["variants"]["grid-7.2"]["variant"]["predicted_scene_usd"] == 6.54
+    files = document["files"]
+    assert {"reference_mix", "grid-7.2_mix", "low-0.8s_mix", "reference_s1"} <= set(files)
+    heard = {name: soundfile.read(files[f"{name}_mix"])[0] for name in homes}
+    # One gain for all: the pack made twice as loud is twice as loud, the copy is the same.
+    assert np.abs(heard["reference"]).max() > 0
+    assert np.abs(heard["grid-7.2"] - 2.0 * heard["reference"]).max() < 4.0 / 2**23
+    assert np.array_equal(heard["low-0.8s"], heard["reference"])
+    # Each variant less the reference: 6.02 dB for the one, nothing for the other, and the
+    # largest of them each side of the crossover.
+    loud = document["variants"]["grid-7.2"]
+    clips = [v for v in loud["less_the_reference_db"]["s1"]["clips_db"] if v is not None]
+    assert clips == pytest.approx([6.02] * len(clips), abs=0.02)
+    assert loud["worst_abs_db"]["clips"]["under_the_crossover"] == pytest.approx(6.02, abs=0.02)
+    assert loud["worst_abs_db"]["early"]["over_the_crossover"] == pytest.approx(6.02, abs=0.02)
+    same = document["variants"]["low-0.8s"]
+    assert same["worst_abs_db"]["clips"] == {"under_the_crossover": 0.0, "over_the_crossover": 0.0}
+    # The blind set: the three mixes under names that say nothing, and a key that is sealed.
+    blind = out / "blind"
+    assert sorted(p.name for p in blind.glob("X*.wav")) == ["X1.wav", "X2.wav", "X3.wav"]
+    sealed = (blind / "key.sealed").read_text()
+    assert not any(name in sealed for name in homes)
+    key = many.unseal(blind / "key.sealed")
+    assert sorted(key.values()) == sorted(homes) and sorted(key) == ["X1", "X2", "X3"]
+    suffix = "_plus" + next(n for n in files if "_plus" in n).split("_plus")[1]
+    for hidden, name in key.items():
+        assert (blind / f"{hidden}.wav").read_bytes() == Path(
+            files[f"{name}_mix{suffix}"]
+        ).read_bytes()
+    capsys.readouterr()
+    assert main(["unseal", str(blind / "key.sealed")]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"{h}: {key[h]}" for h in sorted(key)]
+    text = (out / "variants.md").read_text()
+    assert "| grid-7.2 | low_ppw=7.2 | 6.54 | 0.84 |" in text
+    assert "## grid-7.2 less reference, dB, by third octave" in text
+    # Named as told, when told; and a name for each pack or none.
+    with pytest.raises(SystemExit, match="want 3 names"):
+        many.run(homes["reference"], [homes["grid-7.2"], homes["low-0.8s"]], out, names=["a"])
+
+
+def test_packs_of_another_scene_are_refused_and_of_another_rail_pitch_are_not(
+    two_packs: dict[str, Any], tmp_path: Path
+) -> None:
+    from reverberate.render.check.many import same_scene
+
+    pack = two_packs["pack"]
+    assert same_scene(pack, pack) is None
+    recipe = json.dumps({**json.loads(pack.recipe), "note": "rails at another pitch"}).encode()
+    header = replace(pack.header, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    other = replace(pack, recipe=recipe, header=header)
+    # Another recipe whose head and sources are where the first one's are: the same scene.
+    assert same_scene(pack, other) is None
+    walked = replace(
+        other,
+        listener=replace(other.listener, position=np.asarray(other.listener.position) + 0.01),
+    )
+    assert "elsewhere by 0.01 m" in str(same_scene(pack, walked))
+    shorter = replace(other, header=replace(header, steps=header.steps - 1))
+    assert "not the same window" in str(same_scene(pack, shorter))
 
 
 def test_two_packs_of_two_recipes_or_two_windows_are_refused(

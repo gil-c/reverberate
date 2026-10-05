@@ -58,7 +58,10 @@ def label_of(pack: Path, taken: set[str] | None = None) -> str:
     if variant and variant.get("name"):
         base = str(variant["name"])
     elif pack.parent.name == "pulled":
+        # As a run brings it home: every run's pack is ``pulled/pack.h5``, and the home says which.
         base = pack.parent.parent.name
+    elif pack.stem == "pack":
+        base = pack.parent.name
     else:
         base = pack.stem
     base = "".join(c if c.isalnum() or c in "-_." else "-" for c in base) or "pack"

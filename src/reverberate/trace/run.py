@@ -90,6 +90,7 @@ from reverberate.trace.level import (
     step_levels,
 )
 from reverberate.trace.plan import (
+    RAYS_MEASURED,
     Profile,
     Tracks,
     assign,
@@ -722,6 +723,12 @@ class Trace:
             # A cost without its rate is not written: the laptop, which rented, adds them.
             "cost": [],
         }
+        # What a variant changed, named only when it did: the reference's pack is as it was.
+        low_seconds = dict(self.told.get("low") or {}).get("seconds")
+        if low_seconds is not None:
+            provenance["low_seconds"] = float(low_seconds)
+        if settings.rays.rays != RAYS_MEASURED:
+            provenance["rays"] = int(settings.rays.rays)
         header = Header(
             profile="trace",
             recipe_sha256=provenance["recipe_sha256"],

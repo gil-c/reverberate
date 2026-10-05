@@ -437,6 +437,13 @@ CELLS = np.array([[20.0, 19.0, 18.0], [21.0, 18.0, 17.0]]) * H
 HEARD_AT = [[0, 1], [1], [0]]
 
 
+def whole_steps(campaign: LowbandPairs) -> int:
+    """The steps of a campaign's solve, which it knows once its arrays are placed."""
+    campaign.voxelise()
+    campaign.place()
+    return int(campaign.steps)
+
+
 class Driven(LowbandPairs):
     """The real campaign with the grid already voxelised, on ``numpy``."""
 
@@ -626,6 +633,20 @@ class TestTheCampaign:
         assert crowded.parted_launches == 3
         log = (machine["root"] / "crowded" / "campaign.log").read_text()
         assert "is more than card None has free; parted" in log
+
+    def test_a_pair_s_key_names_the_seconds_solved_so_two_durations_never_share_one(
+        self, machine: dict[str, Path]
+    ) -> None:
+        whole = a_campaign(machine)
+        spec = json.loads((machine["bundle"] / "campaign.json").read_text())
+        spec["bands"]["low"]["duration_s"] = DURATION / 2
+        (machine["bundle"] / "campaign.json").write_text(json.dumps(spec))
+        short = a_campaign(machine, out="short")
+        assert short.key_of(0, 0) != whole.key_of(0, 0)
+        short.run()
+        response = short.cache.read(short.key_of(0, 0))
+        # Half the steps, half the samples: the trace brings it back to the pack's length.
+        assert response.shape == (9, 16) and short.steps < whole_steps(whole)
 
     def test_halving_a_launch(self) -> None:
         many = [Item(s, (0,), 10) for s in range(5)]
