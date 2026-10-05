@@ -13,6 +13,16 @@ A block, a stem, a mix and a seek are slices of those runs, so blocks of
 any size give the same samples to the last bit, and a window round a cursor
 is rendered without what precedes it.
 
+**Two sets of parts.** On the host the engine renders with the parts of
+:mod:`.fast` unless told (:attr:`RenderSettings.engine`): single precision,
+and the same mathematics ordered so that nothing is computed that no sample
+reads. The parts named below are the reference they are held against, in
+double precision, and what a card runs. A mix by the fast parts is not
+summed from stems: what its sources share is summed before it is raised,
+transformed and encoded (:meth:`Engine._mixed`), so a mix is its stems' sum
+to the rounding of single precision and not to the bit.
+:mod:`.mix` renders a whole scene with several processes.
+
 Three parts are summed per source, as ``scene-pack.md`` orders them:
 :mod:`.early` (the arrivals above the crossover), :mod:`.tail` (the late
 part) and :mod:`.low` (the band under it); ``parts`` renders any of them
@@ -23,25 +33,31 @@ rotation is the decoder's.
 
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
 
 from reverberate.compute import to_numpy, xp_for
+from reverberate.render import tail
 from reverberate.render.dry import ClipLoader, DryTrack, band_filter, mask_kernel
 from reverberate.render.early import EarlyPart
+from reverberate.render.fast import FastEarly, FastLow, FastTail, HeadOperators
 from reverberate.render.low import LowPart
 from reverberate.render.pack import ScenePack, Source, sources_of
 from reverberate.render.seam import BandedTail, level_table
 from reverberate.render.tail import TailPart
 from reverberate.render.translate import SpatialTranslation, Translation
 
-__all__ = ["PARTS", "Engine", "RenderSettings", "SourceRenderer"]
+__all__ = ["ENGINES", "PARTS", "Engine", "RenderSettings", "SourceRenderer"]
 
 PARTS = ("early", "low", "tail")
+ENGINES = ("fast", "reference")
+#: Names the engine of a render that does not choose one: ``fast`` unless set.
+ENGINE_VARIABLE = "REVERBERATE_ENGINE"
 
 
 @dataclass(frozen=True)
@@ -61,9 +77,27 @@ class RenderSettings:
     workers: int = -1
     #: Runs kept per source, so that overlapping reads do not render twice.
     chunks_held: int = 2
+    #: ``fast``: the parts of :mod:`reverberate.render.fast`, in single precision, on
+    #: the host. ``reference``: the parts they are held against, in double precision,
+    #: which is also what a card runs whatever is asked.
+    #: ``REVERBERATE_ENGINE`` names the one a render takes when it does not say.
+    engine: str = field(default_factory=lambda: os.environ.get(ENGINE_VARIABLE, "fast"))
+    #: Steps the fast tail renders at once and keeps, a multiple of ``chunk_steps``; 0 is
+    #: the run itself. A tail's response is 1.2 s: rendered half a second at a time its
+    #: transform is 3.5 times what it gives, two seconds at a time 1.6 times. A setting
+    #: like ``chunk_steps``: another value moves the samples by a transform's rounding.
+    #: For a render that walks the scene in order; a worker handed scattered runs would
+    #: render two seconds to give half of one.
+    tail_steps: int = 0
     #: What is applied above the crossover (:mod:`reverberate.render.seam`): ``tapered``,
     #: the pack's level a band where it holds one; ``broadband``, its scalar always.
     seam: str = "tapered"
+
+    def __post_init__(self) -> None:
+        if self.engine not in ENGINES:
+            raise ValueError(f"an engine is one of {ENGINES}, not {self.engine!r}")
+        if self.tail_steps % self.chunk_steps:
+            raise ValueError("the tail's steps are a multiple of a run's")
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,9 +114,17 @@ class SourceRenderer:
         xp: Any,
         settings: RenderSettings,
         translation: Translation,
+        operators: HeadOperators | None = None,
     ) -> None:
         h = pack.header
         self.pack, self.source, self.xp, self.settings = pack, source, xp, settings
+        #: The fast parts are the host's; a card renders the reference.
+        self.fast = settings.engine == "fast" and xp is np
+        self.dtype = np.float32 if self.fast else np.float64
+        early_part: Any = FastEarly if self.fast else EarlyPart
+        low_part: Any = FastLow if self.fast else LowPart
+        tail_part: Any = FastTail if self.fast else TailPart
+        more: dict[str, Any] = {"operators": operators} if self.fast else {}
         track = (
             dry if isinstance(dry, DryTrack) else DryTrack.from_array(dry, rate=h.sample_rate_hz)
         )
@@ -107,7 +149,7 @@ class SourceRenderer:
         # rendered a set of bands of one level at a time.
         bands = level_table(source, settings.seam)
         self.parts: dict[str, Any] = {
-            "early": EarlyPart(
+            "early": early_part(
                 pack,
                 source,
                 early_tracks,
@@ -121,21 +163,31 @@ class SourceRenderer:
         if h.has_low:
             factor = int(round(h.sample_rate_hz / h.low_sample_rate_hz))
             taps = band_filter(h.sample_rate_hz, h.low_sample_rate_hz, pack.crossover.band_hz()[1])
-            self.parts["low"] = LowPart(
+            self.parts["low"] = low_part(
                 pack,
                 source,
                 base.decimated(factor, taps),
                 xp,
                 translation=translation,
                 workers=settings.workers,
+                **more,
             )
+        longer: dict[str, Any] = {"tail_steps": settings.tail_steps} if self.fast else {}
         if h.has_tail and bands is None:
-            self.parts["tail"] = TailPart(
-                pack, source, tail_track, xp, workers=settings.workers, mask=tail_mask
+            self.parts["tail"] = tail_part(
+                pack, source, tail_track, xp, workers=settings.workers, mask=tail_mask, **longer
             )
         elif h.has_tail and bands is not None:
             self.parts["tail"] = BandedTail(
-                pack, source, tail_track, xp, bands, workers=settings.workers, mask=tail_mask
+                pack,
+                source,
+                tail_track,
+                xp,
+                bands,
+                workers=settings.workers,
+                mask=tail_mask,
+                part=tail_part,
+                **longer,
             )
         self.step = h.step_samples
         self.chunk_samples = settings.chunk_steps * self.step
@@ -148,7 +200,7 @@ class SourceRenderer:
             return self._chunks[key]
         k0 = index * self.settings.chunk_steps
         k1 = min(k0 + self.settings.chunk_steps, self.pack.header.steps - 1)
-        made = self.xp.zeros((self.pack.header.channels, (k1 - k0) * self.step))
+        made = self.xp.zeros((self.pack.header.channels, (k1 - k0) * self.step), dtype=self.dtype)
         # Always in this order, so the sum rounds the same whatever was asked.
         for name in PARTS:
             if name in parts and name in self.parts:
@@ -159,12 +211,15 @@ class SourceRenderer:
         return made
 
     def render(self, start: int, stop: int, parts: Iterable[str] = PARTS) -> Any:
-        """Samples ``[start, stop)`` of the stem, ``[channel, sample]`` float64 on the device."""
+        """Samples ``[start, stop)`` of the stem, ``[channel, sample]`` on the device.
+
+        Float32 from the fast parts, float64 from the reference's.
+        """
         chosen = tuple(name for name in PARTS if name in set(parts))
         total = self.pack.header.samples
         if not 0 <= start <= stop <= total:
             raise ValueError(f"[{start}, {stop}) is not inside the scene's {total} samples")
-        out = self.xp.zeros((self.pack.header.channels, stop - start))
+        out = self.xp.zeros((self.pack.header.channels, stop - start), dtype=self.dtype)
         for index in range(start // self.chunk_samples, -(-stop // self.chunk_samples)):
             first = index * self.chunk_samples
             lo, hi = max(start, first), min(stop, first + self.chunk_samples)
@@ -204,7 +259,16 @@ class Engine:
         self.translation = translation or SpatialTranslation.from_fusion(
             h.fusion, h.order, h.sound_speed_m_s
         )
+        #: What moves a head off its cell, formed once for all the sources; with another
+        #: estimator than the library's the fast low band renders as the reference does.
+        self.operators = (
+            HeadOperators(self.translation)
+            if isinstance(self.translation, SpatialTranslation)
+            else None
+        )
         self._renderers: dict[str, SourceRenderer] = {}
+        self._mixes: OrderedDict[tuple[Any, ...], np.ndarray] = OrderedDict()
+        self._tails: tuple[tuple[Any, ...], np.ndarray] | None = None
 
     @property
     def samples(self) -> int:
@@ -231,8 +295,15 @@ class Engine:
                 dry = DryTrack.from_recipe(
                     recipe[source_id], self.clips, rate=self.pack.header.sample_rate_hz
                 )
+            if self.settings.engine == "fast" and self.pack.header.has_tail:
+                # A mix reads every source's carrier in turn: room for them all, not for
+                # three, or each run would draw the next source's noise again.
+                tail.HELD.limit_bytes = max(
+                    tail.HELD.limit_bytes,
+                    tail.HELD_BYTES + (len(self._renderers) + 1) * tail.CARRIER_BYTES,
+                )
             self._renderers[source_id] = SourceRenderer(
-                self.pack, source, dry, self.xp, self.settings, self.translation
+                self.pack, source, dry, self.xp, self.settings, self.translation, self.operators
             )
         return self._renderers[source_id]
 
@@ -247,7 +318,7 @@ class Engine:
         *,
         parts: Iterable[str] = PARTS,
     ) -> np.ndarray:
-        """One source alone over ``[start, stop)``: ``[channel, sample]``, float64, on the host."""
+        """One source alone over ``[start, stop)``: ``[channel, sample]``, on the host."""
         start, stop = self._range(start, stop)
         return to_numpy(self.source(source_id).render(start, stop, parts))
 
@@ -259,13 +330,113 @@ class Engine:
         sources: Iterable[str] | None = None,
         parts: Iterable[str] = PARTS,
     ) -> np.ndarray:
-        """The chosen sources summed over ``[start, stop)``: ``[channel, sample]``, float64."""
+        """The chosen sources summed over ``[start, stop)``: ``[channel, sample]``."""
         start, stop = self._range(start, stop)
         parts = tuple(parts)
-        total = self.xp.zeros((self.channels, stop - start))
+        if self.settings.engine == "fast" and self.xp is np:
+            names = tuple(source.id for source in sources_of(self.pack, sources))
+            return self._mixed(start, stop, tuple(p for p in PARTS if p in set(parts)), names)
+        total = None
         for source in sources_of(self.pack, sources):
-            total = total + self.source(source.id).render(start, stop, parts)
+            stem = self.source(source.id).render(start, stop, parts)
+            total = stem if total is None else total + stem
+        if total is None:
+            total = self.xp.zeros((self.channels, stop - start))
         return to_numpy(total)
+
+    # -- the fast engine's mix: what the sources share is paid once ---------------------
+
+    def _mixed(
+        self, start: int, stop: int, parts: tuple[str, ...], names: tuple[str, ...]
+    ) -> np.ndarray:
+        """The sources ``names`` summed over ``[start, stop)``, float32, by the fast parts.
+
+        The same runs as a stem's, and the same samples as the stems' sum to
+        the rounding of single precision. A mix is not summed from stems:
+        the low bands are summed at their own rate and raised once, and
+        the tails' plane waves are summed, as spectra wherever a response
+        is heard at one level, and transformed and encoded once
+        (:meth:`_mixed_tail`): the cost of fourteen sources' transforms is
+        then one source's.
+        """
+        total = self.samples
+        if not 0 <= start <= stop <= total:
+            raise ValueError(f"[{start}, {stop}) is not inside the scene's {total} samples")
+        run = self.settings.chunk_steps * self.pack.header.step_samples
+        out = np.zeros((self.channels, stop - start), dtype=np.float32)
+        for index in range(start // run, -(-stop // run)):
+            first = index * run
+            lo, hi = max(start, first), min(stop, first + run)
+            if hi > lo:
+                made = self._mixed_run(index, parts, names)
+                out[:, lo - start : hi - start] = made[:, lo - first : hi - first]
+        return out
+
+    def _mixed_run(self, index: int, parts: tuple[str, ...], names: tuple[str, ...]) -> np.ndarray:
+        key = (index, parts, names)
+        if key in self._mixes:
+            self._mixes.move_to_end(key)
+            return self._mixes[key]
+        h = self.pack.header
+        k0 = index * self.settings.chunk_steps
+        k1 = min(k0 + self.settings.chunk_steps, h.steps - 1)
+        made = np.zeros((self.channels, (k1 - k0) * h.step_samples), dtype=np.float32)
+        low: np.ndarray | None = None
+        raiser: Any = None
+        # The sources in the pack's order, so the sum rounds the same whatever was asked.
+        for name in names:
+            held = self.source(name).parts
+            if "early" in parts:
+                made += held["early"].render(k0, k1)
+            if "low" in parts and "low" in held:
+                part = held["low"]
+                if not part.joins:
+                    made += part.render(k0, k1)
+                    continue
+                band = part.low_band(k0, k1)
+                if band is not None:
+                    low = band if low is None else low + band
+                    raiser = part
+        if low is not None:
+            made += raiser.raised(low, k1 - k0)
+        if "tail" in parts and h.has_tail:
+            made += self._mixed_tail(k0, k1, names)
+        self._mixes[key] = made
+        while len(self._mixes) > self.settings.chunks_held:
+            self._mixes.popitem(last=False)
+        return made
+
+    def _mixed_tail(self, k0: int, k1: int, names: tuple[str, ...]) -> np.ndarray:
+        """The tails of ``names`` over the run, encoded once: ``[channel, (k1 - k0) step]``."""
+        h = self.pack.header
+        span = self.settings.tail_steps or self.settings.chunk_steps
+        index = k0 // span
+        first = index * span
+        last = min(first + span, h.steps - 1)
+        key = (index, names)
+        if self._tails is None or self._tails[0] != key:
+            length = (last - first) * h.step_samples
+            waves: np.ndarray | None = None
+            pool: dict[tuple[int, int], np.ndarray] = {}
+            encoder: Any = None
+            for name in names:
+                part = self.source(name).parts.get("tail")
+                if part is None:
+                    continue
+                encoder = part
+                got = part.waves(first, last, pool)
+                if got is not None:
+                    waves = got if waves is None else waves + got
+            for (_, size), spectrum in pool.items():
+                heard = np.fft.irfft(spectrum, size, axis=-1)[:, size - length :]
+                waves = heard if waves is None else waves + heard
+            if waves is None or encoder is None:
+                made = np.zeros((self.channels, length), dtype=np.float32)
+            else:
+                made = encoder.encoded(waves)
+            self._tails = (key, made)
+        step = h.step_samples
+        return self._tails[1][:, (k0 - first) * step : (k1 - first) * step]
 
     def blocks(
         self,

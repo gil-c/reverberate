@@ -50,6 +50,13 @@ TOP = Crossover().band_hz()[1]
 ALL = "bins,int16,degree=40,decay=60"
 
 
+@pytest.fixture(autouse=True)
+def _the_reference_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These hold the engine's mathematics to the rounding of double precision: the reference
+    parts. ``test_render_fast.py`` holds the fast parts, in single precision, against them."""
+    monkeypatch.setenv("REVERBERATE_ENGINE", "reference")
+
+
 def room_response(seed: int = 0, t60_s: float = 0.35, samples: int = 4800) -> np.ndarray:
     """64 channels that arrive at 15 ms and fall 60 dB in ``t60_s``, under the low mask."""
     rng = np.random.default_rng(seed)

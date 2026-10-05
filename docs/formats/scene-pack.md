@@ -973,8 +973,21 @@ one source and directivity off, steps 1 to 4 are
   the bit. The run's length is a setting of the render; another length moves
   the samples by 2e-8 of the peak.
 
-- *What it costs*, on the laptop the audit runs on (ten cores, four of them
-  fast), measured by `python -m reverberate.render benchmark --workers 1
+- *Two sets of parts.* What follows is the reference's order and cost
+  (`RenderSettings(engine="reference")`, double precision, the one a card
+  runs). The default on a host is `reverberate.render.fast`: the same
+  mathematics in single precision, a filter a row in place of the bank's
+  96 signals, a convolution a low band response in use in place of a
+  response a step, the head's operator in closed form and kept, and, for a
+  mix, the sources' low bands and tails summed before they are raised and
+  transformed. It differs from the reference by 3e-7 of the peak in the
+  early part and the tail and by the quadrature's own error under the
+  crossover (8e-5 on the first scene). The first scene's mix renders
+  several tens of times faster with it;
+  `docs/open-questions/engine-speed.md` has the cost model, each change
+  with what it was measured to give, and what bounds what is left.
+- *What the reference costs*, on the laptop the audit runs on (ten cores,
+  four of them fast), measured by `python -m reverberate.render benchmark --workers 1
   --processes 1,4,6,8,10` on the `synthetic-density` pack: seconds of one
   core per second of scene and source, then seconds of stem rendered per
   second of wall clock by processes of one thread each, a run at a time as

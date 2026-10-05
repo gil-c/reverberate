@@ -34,7 +34,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["SCHEMA", "Signal", "open_signal", "write_signal"]
+__all__ = ["SCHEMA", "Signal", "open_signal", "write_header", "write_signal"]
 
 SCHEMA = "reverberate.scene-signal"
 SCHEMA_VERSION = 1
@@ -92,6 +92,35 @@ def write_signal(
             frames += int(block.shape[1])
             if block.size:
                 peak = max(peak, float(np.max(np.abs(block))))
+    return write_header(
+        target,
+        frames=frames,
+        channels=channels,
+        peak=peak,
+        sha256=digest.hexdigest(),
+        sample_rate_hz=sample_rate_hz,
+        order=order,
+        recipe_sha256=recipe_sha256,
+        sources=sources,
+        extra=extra,
+    )
+
+
+def write_header(
+    target: Path,
+    *,
+    frames: int,
+    channels: int,
+    peak: float,
+    sha256: str,
+    sample_rate_hz: float,
+    order: int,
+    recipe_sha256: str = "",
+    sources: Iterable[str] = (),
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The header of frames already at ``target``, written last and atomically; returned."""
+    data_path, header_path = _paths(target)
     header = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -108,7 +137,7 @@ def write_signal(
         "recipe_sha256": recipe_sha256,
         "sources": list(sources),
         "peak": peak,
-        "sha256": digest.hexdigest(),
+        "sha256": sha256,
         "complete": True,
         **(extra or {}),
     }

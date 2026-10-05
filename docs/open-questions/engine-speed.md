@@ -1,0 +1,287 @@
+# How fast can the signal engine render a scene on the laptop, and what bounds it
+
+Date: 2026-10-05
+
+Status: measured on the first whole scene (`w45_clarify_scene/scene1/A`,
+twenty minutes, fourteen sources, order 7, 48 kHz). The engine has a second
+set of parts, `reverberate.render.fast`, which is the default; the parts it
+replaces are kept as `RenderSettings(engine="reference")` and the tests hold
+one against the other. Written for lot L20 of ADR 0016. The owner's
+question: the first scene took 3 h 26 min to render on the laptop, and a
+render that is "only convolution and gain" should take about two minutes.
+
+## The answer
+
+The owner is right about the order of magnitude, and the engine was wrong
+by most of it; **two minutes is not reached**. Three figures, each of the
+whole scene:
+
+- **one fast core, alone**: about 1 100 s of it (0.08 to 0.11 s a
+  source-second while the listener rests, 0.30 while he walks), against
+  6 100 s for the engine as it was: **5.5 times less work**, and the
+  whole scene in 18 minutes on one core where it took 100;
+- **the mix, as it was timed** (six processes, the laptop shared with
+  other agents' jobs at a load of 5 to 10): **14 minutes**, 837 s, against
+  3 h 26 min for the same scene's stems on the same shared laptop:
+  **15 times less**;
+- **the audit's stems**, the same way: 17 to 30 minutes at the rates
+  measured, against 3 h 26 min.
+
+What is left is not a constant to tune. It is, in this order: that the
+laptop has four fast cores and six slow ones that are worth one and a half
+between them (a slow core takes 4.5 times a fast one on a transform), so
+that six processes give 2.1 times one while the machine is shared; and the
+listener's walk, a fifth of the scene's time and half of its cost, where
+the format asks for new responses of every source every few steps. The
+last section says what would close each.
+
+## The floor: what cannot be avoided
+
+- **The output.** 64 channels by 48 000 samples by 1 200 s are 3.69e9
+  samples, 14.7 GB in float32. The laptop copies memory at 54 GB/s (one
+  core, measured) and hashes at about 2 GB/s: writing and checking the file
+  is under 10 s and is not what bounds anything.
+- **The sources.** The fourteen sources sound 8 360 seconds between them
+  (a voice a third of the time, a noise most of it). Silence costs nothing,
+  in the old engine as in the new: the unit of cost is the *source-second*.
+- **A convolution engine's count, per source-second.** A step's response
+  is 64 channels by 1.2 s. Rendered by brute force, as a workstation's
+  convolution plug-in would (uniform partitions of one step, 24 of them, a
+  cross-fade between two responses), a source-second is
+  `20 blocks x 24 partitions x 64 channels x 2401 bins x 8 x 2` = 1.2e9
+  floating point operations, and 64 inverse transforms a block besides:
+  about 1.5e9, 0.15 s of a core that does 1e10 a second. But the response
+  must also *exist*: 3.7 million numbers a source and a step, transformed
+  (4.4e8 operations a step, 9e9 a source-second) whenever anything moves.
+  Brute force is two minutes for a scene at rest and hours for one that
+  walks.
+- **The structure the pack already has** is cheaper than brute force, and
+  is the floor that matters:
+  - *early*: 3 to 15 arrivals a step, each one mono signal read at a moving
+    delay (12 taps at two ends) and laid on 64 harmonics that turn (two
+    products a channel): about 200 operations a path and a sample, 4e7 to
+    1.4e8 a source-second, plus one short transform a row for its bands;
+  - *low*: 4 kHz, twelve times fewer samples: the convolutions are nothing;
+    raising 64 channels to 48 kHz is 29 taps a sample, 9e7 a source-second,
+    once for a mix; a head off its cell applies a 64 by 64 or 64 by 128
+    matrix a frequency, 75 frequencies, 80 frames a second: 5e7 to 2e8;
+  - *tail*: 45 plane waves, each a convolution with 1.2 s of shaped noise:
+    45 inverse transforms, 2.1 ns a sample each on this machine, times how
+    much longer the transform is than what it gives.
+  Summed, 2e8 to 5e8 operations a source-second where nothing moves: 20 to
+  50 ms of one core, **170 to 420 s of one core for the scene, 30 to 70 s
+  on the laptop's cores if they all pulled**. That is the two minutes the
+  owner expected, and it is the floor for a scene at rest.
+- **What moves has another floor.** A listener who walks changes every
+  source's low band cells every 0.3 s and its tail histograms as often:
+  each new histogram is a response to build (noise shaped in 8 bands and 45
+  directions, brought to what the bank reads, transformed: about 30 ms),
+  each new pair of cells an inverse (16 ms) and each new response of the
+  low band a decode (1.4 ms). These are not per sample; they are per
+  *change*, and the scene has thousands.
+
+## The engine as it was, on the real pack
+
+One process, one thread, the window 1065 s to 1095 s (the listener at rest
+for 18.5 s, walking for 11.5 s), all fourteen sources, 238 source-seconds:
+173 s. By part, seconds of one core per source-second:
+
+| | early | low | tail | total |
+| --- | --- | --- | --- | --- |
+| reference engine, the window | 0.17 | 0.36 | 0.20 | 0.73 |
+
+8 360 source-seconds at 0.73 are 6 100 s of one core; six processes that
+gave four times one (`scene-pack.md`) and shared the machine made the 3 h
+26 min. Where each part spent ten to a hundred times its floor:
+
+- **early**: the dry signal filtered into *every* combination of band,
+  mask and air distance, 96 signals at twice the rate over the whole run,
+  whether the step had three arrivals or fifty; then each path a product
+  of a hundred coefficients by those signals, twice (5 200 operations a
+  path and a sample for a voice with four arrivals, against 200); in
+  double precision, with a 270 MB table of coefficients a noise source;
+- **low**: a transform as long as a response (1.2 s, 64 or 128 channels) to
+  keep 87 ms of it, twenty times a second; and the head moved off its cell
+  by a quadrature of 400 plane waves, 6e7 operations a frame, 80 frames a
+  second, *whether or not the head had moved since the last frame*: a
+  head that stands still paid the same operator again every 12.5 ms;
+- **tail**: a transform of 1.7 s to give 0.5 s, in double precision; and,
+  for a mix, every source's 45 inverse transforms and its encoding on 64
+  channels paid apart;
+- **all three**: 6 to 166 MB arrays allocated and copied per run, which is
+  why six processes gave four times one.
+
+## The leads, expected and measured
+
+Seconds of one core per source-second are of the same window unless said;
+"at rest" is 290 s to 310 s (113 source-seconds), "walking" 1084 s to
+1096 s (94 source-seconds).
+
+| lead | expected | measured |
+| --- | --- | --- |
+| a row's bands as one filter on the two steps it is read over, not 96 signals over the run | 5 to 15 times on the bank | early 0.17 to 0.034 with the next |
+| the read and the encoding as a loop in C over float32 (`render/native.py`) | 3 to 5 times on them | 0.8 ms a path and a step |
+| each low band response convolved once over a run, not a response a step | 20 times on the convolutions | low at rest 0.33 to 0.02 with the next two |
+| the translation in closed form (`spatial.translate.translation_matrices`): `sum_l i^l j_l(k d) M_l(direction)`, fifteen real matrices from a table of triple products | 25 times on forming an operator, no quadrature error | 0.5 ms an operator against 50; equals the quadrature's to 1e-7 where that is exact |
+| the operator kept: a head that stands still applies one matrix to every frame of every source | the whole of it at rest | 0.04 ms a frame |
+| two cells' inverse by blocks (`pair_inverse`): a 64 by 64 Schur complement | 5 times | 16 ms against 50, equal to 1e-11 |
+| the low bands of a mix summed at 4 kHz and raised once, in C | 13/14 of the raising | 0.1 s in 20 s of scene |
+| the tail in float32, its transforms two seconds long (`tail_steps`) | 2 by 2 | 0.20 to 0.047, then to 0.025 a source alone |
+| the tails of a mix summed as spectra wherever a response is heard at one level, transformed and encoded **once** for all the sources | 14 times on the tail at rest | less: the mix at rest is 0.078 a source-second against 0.097 for its stems apart. A source at one level the whole two seconds costs a product and no transform; a voice that starts or stops in them is still transformed apart, and a third of the voices' runs hold such an edge |
+| the carrier drawn in C, and mapped by every process of a render from one file | 0.9 s to 0.15 s a source; 1.3 GB once, not a process | as expected |
+| silence | nothing: already skipped | unchanged |
+| float32 end to end | 2 on memory traffic | inside the figures above |
+| the reference's table of coefficients made only when read; dry segments held once | memory, not time | a process from 9.3 GB to about 2 GB |
+| Accelerate's transform (vDSP) in place of scipy's | 2 on the transforms | not built: no binding without a new dependency |
+| a response built per step and convolved by partitions (the workstation's design) | worse: 9e9 a source-second while anything moves | not built, counted above |
+| stems stored at a lower order or rate | the audit's disk | not built: see the audit below |
+
+What did **not** pay, measured: Accelerate's matrix product does not scale
+across processes on this machine (four processes each take 2.7 times as
+long as one: the cores of a cluster share its matrix unit), so the parts
+avoid it in their inner loops; and a scene's dry signals are filtered
+twenty seconds at a time, which a process handed every sixth ten seconds
+did again each time: a render's shares are now a minute long.
+
+## What changes in the samples
+
+The fast parts are the reference's mathematics in another order and in
+single precision. On the real pack, the mix of all fourteen sources over
+1076 s to 1088 s (at rest, then walking), fast against reference:
+
+| part | largest difference, of the peak | rms, of the signal |
+| --- | --- | --- |
+| early | 2.9e-7 | -134 dB |
+| tail (the same noise, drawn from the same seed) | 4.2e-7 | -129 dB |
+| low | 8.3e-5 | -84 dB |
+| the mix | 6.1e-5 | -86 dB |
+
+- The early part and the tail differ by the rounding of float32. The
+  tail's noise is the *same* realisation: the generator is exact in both.
+- The low band differs by the reference's own quadrature. With the
+  quadrature's operator put in the fast part the difference falls to the
+  rounding; the closed form is the exact one. On the synthetic density
+  pack, whose responses are noise to 2 kHz read 0.3 m from two cells, the
+  quadrature's error is 6e-3 of the peak: the reference's error, not the
+  fast part's.
+- A walking head's fusion is solved in two products where the reference
+  spreads on plane waves; kept in double precision between the two (an
+  inverse is five hundred times its matrix), it is the same to 2e-7.
+- A mix is no longer the sum of its stems to the bit: it is their sum to
+  4e-7 of the peak, because what the sources share is summed before it is
+  transformed. The audit sums stems, as before.
+- A run's length (`chunk_steps`) and the tail's (`tail_steps`) move the
+  samples by 5e-7, where the reference's moved them by 2e-8.
+- The C text and its `numpy` twin give the same bits (no fused product):
+  a machine without a compiler renders the same file, more slowly.
+
+## The whole scene, timed
+
+`write_mix` (`python -m reverberate.render mix <pack> <out>`), the order 7
+mix of the fourteen sources to a file under a scratch folder, its SHA-256
+taken as it is written; the file removed afterwards.
+
+| what | processes | wall | processor | a process holds | load of the machine |
+| --- | --- | --- | --- | --- | --- |
+| the mix, 0 to 1200 s (8 361 source-seconds) | 6 | **837 s** (1.4 times real time) | 4 065 s | 5.1 GB at most | 5.3 before, 6.6 after; 10 during |
+| the mix, 280 to 340 s, at rest (362 source-seconds) | 4 | 20 s (3.0 times real time) | 57 s | 4.7 GB | 1.9 before, 2.3 after |
+| the mix, 300 to 360 s, at rest, one process, warm | 1 | 42 s (1.4 times real time) | 42 s | | 15 |
+| the mix, 290 to 310 s, at rest, one process, warm | 1 | 8.8 s (2.3 times real time) | 8.8 s | | 2 to 3 |
+| the mix, 1084 to 1096 s, walking, one process, warm | 1 | 28.7 s (0.42 times real time) | 28.7 s | | 2 to 3 |
+| the audit's stems, 90 s of its service from 280 s | 6 | 16.6 s of stem a second: the scene in 17 min at that rate | | 3.4 GB | 6 to 10 |
+
+The same bytes whatever the processes: the window of a minute has one
+SHA-256 with four processes and with eight, and the tests hold two
+processes to one engine. The 837 s were measured once, on a laptop that
+other agents' jobs loaded to 5 to 10 throughout (a photo analysis daemon
+at 180 per cent of a core besides): the processor time, 4 065 s, is 3.7
+times the 1 100 s one fast core needs alone, which is the slow cores and
+the sharing and not the engine. On a quiet laptop the same render is
+expected, not measured, at 4 to 5 minutes: 1 100 s over the five and a
+half fast cores the machine is worth.
+
+## What bounds it, and what would close it
+
+**The count of fast cores.** 1 100 s of a fast core is 2 minutes only on
+nine of them. The laptop is worth five and a half when it is quiet. This
+alone is a factor of two between the quiet laptop and the target, and no
+ordering of the mathematics moves it.
+
+**The walk.** While the listener walks, a scene-second costs 2.3 s of a
+fast core against 0.45 at rest: the walk is 246 s of the scene and half of
+its cost. By part, of the 28.7 s the walking window took: the tail 15 s
+(every new histogram is a response: its noise shaped and brought to the
+bank's reading, 13 ms, transformed, 12 ms, and convolved, 12 ms; four new
+ones a source-second), the low band 10 s (a new response decoded and
+transformed, 1.4 ms, seventeen a source-second; a new inverse a pair of
+cells, 16 ms; two products a frame in double precision), the early part
+3.5 s. None of this is per sample: it is per change of what the pack
+points at, and it is the format's own interpolation (a step reads up to
+four histograms and four low band responses, with weights that move).
+
+**What would close it**, in the order of what each is worth:
+
+1. *A card.* The design maps to one unchanged in its mathematics: the
+   parts are transforms, products and one gather, all of which `cupy`
+   has, and the reference parts already run there. The fast parts were
+   written for the host (the read and the encoding are a C loop, the
+   transforms `scipy`'s); their card twin is the same three files with
+   `xp` in place of `numpy` and the C loop as one `ElementwiseKernel`.
+   Not built in this lot, and so not measured: no figure is claimed.
+2. *More fast cores*, or a quiet machine: see above.
+3. *The walk's histograms.* A histogram's response is rebuilt whenever a
+   walk meets it; kept on disk beside the pack (45 by 57 600 float32,
+   10 MB each, 3 400 of them in the first scene: 34 GB) it would be read
+   and not made. Too large as it is; the bank's reading (`_norm`, a third
+   of the cost) is 64 bytes a histogram and could be kept in the pack by
+   the trace for nothing. Not built: it changes the pack.
+4. *Accelerate's transforms.* The transforms are half of what is left at
+   rest; vDSP is about twice `scipy`'s on this processor and has no
+   binding in the project. A `ctypes` call into it is a page of code and
+   a dependency on the system's framework on one platform only.
+5. *The audit's stems as two files a source*, the low band at 4 kHz and
+   the rest at 48 kHz, raised when a mix is served: a twelfth of the low
+   band's samples and no raising per source. Worth 10 per cent of the
+   stems' time and 0 of the disk (the high part is the 64 channels).
+   Not built.
+
+## The audit
+
+The audit renders stems, one source at a time, and keeps them: what a mix
+shares between its sources (the tails' transforms, the low bands' raising)
+is not shared there, which is the price of a solo that is instant. What
+changes for the owner:
+
+- **The cache is rendered again.** The engine's code is part of a stem's
+  key: the 112 GB of the first scene's stems are stale and the page
+  renders new ones as it is used, or
+  `python -m reverberate.viz.audit_stems <pack.h5>` does it beforehand:
+  17 to 30 minutes at the rates measured (16.6 s of stem a second with
+  six workers on the shared laptop), where it took 3 h 26 min.
+- **A worker keeps every source's engine** (sixteen, where it kept six and
+  built a source's engine again every other chunk: 9.6 s of stem a second
+  before that one change, 16.6 after), and the workers of a pack share
+  the sources' noise as files under `<cache>/<pack>/carriers` (1.3 GB a
+  scene, drawn once).
+- **What he hears is the same** to -86 dB of the mix: the same arrivals,
+  the same noise in the tails, a low band that differs from the old one
+  by the old one's quadrature. The sound check gives the verdicts below
+  on both engines.
+- **The stems stay, at order 7.** Rendering on demand instead of keeping
+  stems needs one source faster than real time on one core with room to
+  spare: it is (0.1 s a source-second at rest), but fourteen at once
+  while the listener walks are 2.3 s of a fast core a second, and a seek
+  would wait. The cache is still what makes solo and mute instant; it is
+  simply filled ten times sooner.
+
+## The sound check, both engines
+
+`python -m reverberate.render check <pack> --window 1078 1090 --sources
+noise_3 far_2 near_2` (the listener at rest, then walking), once with each
+engine (`REVERBERATE_ENGINE=reference` for the old parts): **186 verdicts,
+the same 186 on both**: 138 pass, 13 warn, 2 fail, 32 inform, 1 skipped.
+Of the report's 2 172 numbers, ten differ by more than 0.05: nine are
+levels of a silence, -142 to -156 dB with the fast engine where the
+reference's are -143 to -170 dB (single precision's floor under a signal
+that has stopped), and one is the sample at which an extreme is found. The
+two failures are the scene's own, as `first-scene-defects.md` has them.

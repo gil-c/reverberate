@@ -52,6 +52,15 @@ def main(argv: list[str] | None = None) -> int:
         "--seconds", type=float, default=2.0, help="averaged over this long either side"
     )
     level.add_argument("--undo", action="store_true", help="put the trace's table back")
+    whole = commands.add_parser(
+        "mix", help="render a pack's whole mix to <out>.f32 and <out>.json, in several processes"
+    )
+    whole.add_argument("pack", type=Path)
+    whole.add_argument("out", type=Path)
+    whole.add_argument("--processes", type=int, help="how many render; the cores less two unless")
+    whole.add_argument("--clips", type=Path, help="the clip libraries; <data root>/clips unless")
+    whole.add_argument("--manifest", type=Path, help="the library a placeholder is stood in from")
+    whole.add_argument("--scratch", type=Path, help="where the sources' noise is kept meanwhile")
     join = commands.add_parser(
         "seam",
         help="give a pack its level a band above the crossover, the tapered join, IN PLACE: "
@@ -151,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.render.compact import Levers, compact_pack
 
         print(json.dumps(compact_pack(args.pack, args.out, Levers.parse(args.levers), say=print)))
+    elif args.command == "mix":
+        from reverberate.render.check.report import defaults
+        from reverberate.render.mix import main_factory, write_mix
+
+        found = defaults(args.clips, args.manifest, None, None)
+        header = write_mix(
+            args.out,
+            main_factory(args.pack, found["clips_root"], found["manifest"]),
+            processes=args.processes,
+            scratch=args.scratch,
+            say=lambda text: print(text, flush=True),
+        )
+        print(json.dumps(header["render"], indent=1))
     elif args.command == "relevel":
         from reverberate.render.relevel import relevel_pack
 

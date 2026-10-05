@@ -61,6 +61,13 @@ from test_w44_interpolation import PlaneWaves
 FS = 48000
 
 
+@pytest.fixture(autouse=True)
+def _the_reference_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These hold the engine's mathematics to the rounding of double precision: the reference
+    parts. ``test_render_fast.py`` holds the fast parts, in single precision, against them."""
+    monkeypatch.setenv("REVERBERATE_ENGINE", "reference")
+
+
 def error_db(estimate: np.ndarray, truth: np.ndarray) -> float:
     return float(10 * np.log10(np.sum(np.abs(estimate - truth) ** 2) / np.sum(np.abs(truth) ** 2)))
 

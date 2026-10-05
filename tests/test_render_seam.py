@@ -266,7 +266,8 @@ def test_gains_are_set_in_place_said_in_the_provenance_and_put_back(
         dry = {"s1": np.random.default_rng(0).standard_normal(int(0.3 * FS))}
         quiet = Engine(read, dry).stem("s1")
     loud = Engine(pack, dry).stem("s1")
-    np.testing.assert_allclose(quiet, loud * 10.0 ** (-4.5 / 20.0), atol=1e-9 * np.abs(loud).max())
+    # To the rounding of the fast engine's single precision.
+    np.testing.assert_allclose(quiet, loud * 10.0 ** (-4.5 / 20.0), atol=1e-6 * np.abs(loud).max())
     # A kind is moved from what the trace wrote, so twice is once; a source named is not.
     for _ in range(2):
         set_gains(target, gains_db={"s1": -4.5}, add_db={kind: 12.0})
