@@ -8,7 +8,7 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--models-from EXPORT/storey | --hssd-root DIR]
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
     [--low-engine lowband|pffdtd] [--rate USD_PER_H] [--hours H] [--max-dph D] [--gpu NAME]
-    [--avoid ID ...]
+    [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--publish-pairs] [--allow-asset-mismatch] [--yes]
 
 ``--dry-run`` prints the plan and its cost and rents nothing. Besides:
@@ -17,9 +17,16 @@ python -m reverberate.trace assets --mirror-from RUN/mirror ... --models-from EX
     the recipe's ``assets`` block as a trace of this dwelling finds it, for ``scenes generate``
 python -m reverberate.trace bundle --recipe R.json --out B ...     the bundle alone
 python -m reverberate.trace finish --home H [--publish-pairs]      the homecoming alone
-python -m reverberate.trace run --bundle B --out O [--free-field] [--cpu]
+python -m reverberate.trace run --bundle B --out O [--free-field] [--cpu] [--check full|read]
     the trace on this machine; ``--free-field`` replaces the solves by a monopole in free
-    air, which is how the chain runs without a card
+    air, which is how the chain runs without a card, and on a card how every stage but
+    the solve is timed without paying for one
+
+``--check full`` reads the pack back whole and renders a minute of it on the host and on
+the card (V4, with the proof of which device computed); ``read`` reads the pack's
+structure. A smoke run checks in full and the whole scene reads, unless told. The pair
+cache comes home with the whole scene and stays on the machine after a smoke run, unless
+told: the pack holds every response a render reads.
 """
 
 from __future__ import annotations
@@ -70,6 +77,12 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         help="USD an hour, for the estimate; left out, the rate of the card the low band's"
         " engine was measured on",
     )
+    p.add_argument(
+        "--check",
+        choices=("full", "read"),
+        default=None,
+        help="the machine's check stage: both modules rendered, or the pack's structure read",
+    )
     p.add_argument("--allow-asset-mismatch", action="store_true")
 
 
@@ -94,6 +107,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--campaign-args", default="", help="extra flags for the machine's command")
     p.add_argument("--fetch-grid", action="store_true", help="bring the low grid home too")
     p.add_argument("--publish-pairs", action="store_true", help="send the pair cache to the store")
+    pairs = p.add_mutually_exclusive_group()
+    pairs.add_argument(
+        "--fetch-pairs",
+        dest="fetch_pairs",
+        action="store_true",
+        default=None,
+        help="bring the pair cache home (the whole scene's default)",
+    )
+    pairs.add_argument(
+        "--no-fetch-pairs",
+        dest="fetch_pairs",
+        action="store_false",
+        help="leave the pair cache on the machine (a smoke run's default)",
+    )
     p.add_argument("--yes", action="store_true")
 
     p = sub.add_parser("bundle", help="the bundle of a trace, on the laptop")
@@ -117,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cpu", action="store_true", help="numpy, even with a card")
     p.add_argument("--solvers", type=int, default=None)
     p.add_argument("--free-field", action="store_true", help="no solve: a monopole in free air")
+    p.add_argument("--check", choices=("full", "read"), default=None)
     return parser
 
 
@@ -206,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             pffdtd_dir=args.pffdtd,
             card_devices=args.devices,
             solvers=args.solvers,
+            check_mode=args.check,
         ).run()
         return 0
     if args.command == "finish":
@@ -249,7 +278,9 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.trace.plan import estimate, make_plan
 
         plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=centre)
-        priced = estimate(plan, rate_usd_per_hour=_rate(args), low_engine=args.low_engine)
+        priced = estimate(
+            plan, rate_usd_per_hour=_rate(args), low_engine=args.low_engine, check=args.check
+        )
         print(describe(plan, priced))
         build_bundle(
             args.out,
@@ -261,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_asset_mismatch=args.allow_asset_mismatch,
             rate_usd_per_hour=_rate(args),
             low_engine=args.low_engine,
+            check=args.check,
         )
         print(args.out)
         return 0
@@ -288,5 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         campaign_args=args.campaign_args,
         fetch_grid=args.fetch_grid,
         publish_pairs=args.publish_pairs,
+        fetch_pairs=args.fetch_pairs,
+        check=args.check,
     )
     return 0

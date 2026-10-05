@@ -74,13 +74,19 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
     rate = priced["billed_rate_usd_per_hour"]
     lines.append(f"cost at {rate:g} USD/h, machine-seconds and USD by stage:")
     for name, seconds in priced["seconds"].items():
-        measured = f"measured on {priced.get('measured_on', '2 x A100')}"
-        kind = measured if name in priced["measured"] else "projected"
-        lines.append(f"  {name:<12} {seconds:>9.1f} s  {priced['usd'][name]:>7.3f} USD  ({kind})")
+        where = priced.get("measured_on_by_stage", {}).get(name)
+        kind = f"measured on {where}" if where else "PROJECTED, no machine has run it"
+        lines.append(f"  {name:<14} {seconds:>9.1f} s  {priced['usd'][name]:>7.3f} USD  ({kind})")
     lines.append(
-        f"  {'total':<12} {priced['total_s']:>9.1f} s  {priced['total_usd']:>7.2f} USD"
+        f"  {'total':<14} {priced['total_s']:>9.1f} s  {priced['total_usd']:>7.2f} USD"
         f"   pack {priced['pack_gb']} GB, pair cache {priced['pair_cache_gb']} GB"
+        + ("" if priced.get("pairs_fetched", True) else " (left on the machine)")
     )
+    if "non_solve_s" in priced:
+        lines.append(
+            f"  all but the low band's solves: {priced['non_solve_s']:.1f} s,"
+            f" {priced['non_solve_usd']:.3f} USD; check: {priced.get('check')}"
+        )
     return "\n".join(lines)
 
 
@@ -196,14 +202,33 @@ def launch(
     campaign_args: str = "",
     fetch_grid: bool = False,
     publish_pairs: bool = False,
+    fetch_pairs: bool | None = None,
+    check: str | None = None,
     repo: Path | None = None,
     say: Any = print,
     low_engine: str = "lowband",
 ) -> dict[str, Any]:
-    """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish."""
+    """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
+
+    ``fetch_pairs`` brings the pair cache home beside the pack. The pack
+    holds every response a render reads; the cache holds them before their
+    air and their masks, which is what a trace of another crossover or
+    another scene of the dwelling would not solve again. ``None`` brings it
+    for the whole scene and leaves it for a smoke run; publishing needs it
+    home.
+    """
     home = Path(home)
     plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=patch_centre_xz)
-    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, low_engine=low_engine)
+    brought = (
+        plan.profile.seconds is None if fetch_pairs is None else bool(fetch_pairs)
+    ) or publish_pairs
+    priced = estimate(
+        plan,
+        rate_usd_per_hour=rate_usd_per_hour,
+        fetch_pairs=brought,
+        check=check,
+        low_engine=low_engine,
+    )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
     if dry_run:
@@ -232,6 +257,7 @@ def launch(
         allow_asset_mismatch=allow_asset_mismatch,
         rate_usd_per_hour=rate_usd_per_hour,
         repo=repo,
+        check=check,
         low_engine=low_engine,
     )
     found = found_assets(
@@ -250,6 +276,9 @@ def launch(
     say(f"bundle: {bundle}  grid {campaign['bands']['low']['cache_key']}")
     from reverberate.gpu import onebox
 
+    leave = () if brought else ("pairs",)
+    if leave:
+        say("the pair cache stays on the machine and goes with it: --fetch-pairs brings it home")
     record = onebox.run(
         bundle,
         home,
@@ -264,6 +293,7 @@ def launch(
         # The machine's command solves the pairs with PFFDTD unless told otherwise.
         campaign_args=f"--low-engine {low_engine} {campaign_args}".strip(),
         avoid=avoid,
+        leave=leave,
         say=say,
     )
     result["onebox"] = record

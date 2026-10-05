@@ -79,8 +79,13 @@ def rsync(
     *,
     download: bool,
     attempts: int = 4,
+    compress: bool = True,
 ) -> None:
     """Transfer with resume and retries, because one connection is one thing to lose.
+
+    ``compress=False`` leaves ``-z`` out: responses in single precision do
+    not compress (5 per cent, measured on solved pairs), and the machine
+    that deflates them is the one billed by the hour.
 
     Not hypothetical: the first whole-flat run voxelised correctly on a rented
     machine and then died on ``Connection closed by remote host`` while fetching
@@ -98,7 +103,7 @@ def rsync(
         ["ssh", "-p", str(machine.port), "-o", "StrictHostKeyChecking=accept-new", *identity]
     )
     remote = f"{machine.user}@{machine.host}"
-    argv = ["rsync", "-az", "--partial", "--timeout=120", "-e", shell]
+    argv = ["rsync", "-az" if compress else "-a", "--partial", "--timeout=120", "-e", shell]
     if download:
         argv += [f"{remote}:{source}" for source in sources]
         argv.append(destination)

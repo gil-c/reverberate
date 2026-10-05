@@ -74,7 +74,11 @@ __all__ = ["OnsetField", "onset_field", "onset_rows"]
 #: Legs to and from an edge are shrunk by this, as ``edges.edge_paths`` shrinks them.
 EDGE_EPSILON_M = 0.01
 #: Distance fields kept, one per cell a source stood in.
-ROOTS_KEPT = 4
+ROOTS_KEPT = 32
+#: Distance fields solved by one call of Dijkstra. An undirected search transposes
+#: the graph at every call, which costs four times one field's search: a call a
+#: field spent four fifths of the onsets' time on it (RTX 3090's host, hssd_0076).
+ROOTS_PER_CALL = 16
 
 
 @dataclass
@@ -93,15 +97,31 @@ class OnsetField:
         """Dijkstra's distances and predecessors from cell ``start``."""
         found = self._roots.get(start)
         if found is None:
-            distance, predecessor = dijkstra(
-                self.graph, directed=False, indices=start, return_predecessors=True
-            )
-            found = (np.asarray(distance), np.asarray(predecessor))
-            while len(self._roots) >= ROOTS_KEPT:
-                self._roots.pop(next(iter(self._roots)))
-            self._roots[start] = found
-            self.solved += 1
+            self.solve([start])
+            found = self._roots[start]
         return found
+
+    def solve(self, starts: Any) -> None:
+        """The fields of ``starts`` that are not held, :data:`ROOTS_PER_CALL` to a call.
+
+        A field is the same whichever call solved it: each start is its own
+        search. The last :data:`ROOTS_KEPT` are kept, those just asked for
+        among them.
+        """
+        wanted = list(dict.fromkeys(int(s) for s in starts))
+        missing = [s for s in wanted if s not in self._roots]
+        for first in range(0, len(missing), ROOTS_PER_CALL):
+            share = missing[first : first + ROOTS_PER_CALL]
+            distance, predecessor = dijkstra(
+                self.graph, directed=False, indices=share, return_predecessors=True
+            )
+            for row, start in enumerate(share):
+                self._roots[start] = (np.asarray(distance[row]), np.asarray(predecessor[row]))
+            self.solved += len(share)
+        for start in wanted:
+            self._roots[start] = self._roots.pop(start)
+        while len(self._roots) > max(ROOTS_KEPT, len(wanted)):
+            self._roots.pop(next(iter(self._roots)))
 
 
 def onset_field(
@@ -415,10 +435,18 @@ def onset_rows(
     width = ms.width
     solved = held.solved
     onsets: dict[int, _Onset] = {}
-    for job in (int(j) for j in shadowed):
-        onset = _geodesic(held, job_source[job], job_listener[job], width)
-        if onset is not None:
-            onsets[job] = onset
+    # By the cell the source stands in: a field is solved once, with its neighbours.
+    shadowed = np.asarray(shadowed, dtype=np.int64).reshape(-1)
+    occupancy = held.occupancy
+    start = np.asarray(occupancy.flat(occupancy.cell_of(job_source[shadowed])), dtype=np.int64)
+    cells = np.unique(start)
+    for first in range(0, cells.size, ROOTS_KEPT):
+        share = cells[first : first + ROOTS_KEPT]
+        held.solve(share)
+        for job in (int(j) for j in shadowed[np.isin(start, share)]):
+            onset = _geodesic(held, job_source[job], job_listener[job], width)
+            if onset is not None:
+                onsets[job] = onset
     with_edges = 0
     reflected = 0
     if held.settings.edges:

@@ -244,6 +244,7 @@ def traced(
         gpu=False,
         devices=Devices.host(1),
         quiet=True,
+        check_mode="full",
     )
     return trace, pairs, plan
 

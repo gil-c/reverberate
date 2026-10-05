@@ -297,6 +297,16 @@ def tail_from_histogram(
     return tail, record
 
 
+@lru_cache(maxsize=8)
+def _lowcut_response(n_fft: int, rate: float) -> np.ndarray:
+    """The reference chain's low cut at the bins of a transform of ``n_fft``: read once."""
+    sos = butter(LOWCUT_ORDER, LOWCUT_HZ, btype="high", fs=rate, output="sos")
+    _, lowcut = sosfreqz(sos, worN=np.fft.rfftfreq(n_fft, 1.0 / rate), fs=rate)
+    lowcut = np.asarray(lowcut)
+    lowcut.setflags(write=False)
+    return lowcut
+
+
 def _through_spectrum(
     signals: Any, rate: float, taps: np.ndarray | None, sos: np.ndarray, xp: Any
 ) -> Any:
@@ -313,7 +323,7 @@ def _through_spectrum(
     response = np.ones(n_fft // 2 + 1, dtype=complex)
     if taps is not None and taps.size:
         response *= np.fft.rfft(taps, n_fft)
-    _, lowcut = sosfreqz(sos, worN=np.fft.rfftfreq(n_fft, 1.0 / rate), fs=rate)
+    lowcut = _lowcut_response(n_fft, float(rate))
     spectrum *= xp.asarray(response * lowcut)[None, :]
     return xp.fft.irfft(spectrum, n_fft, axis=-1)[..., :n]
 

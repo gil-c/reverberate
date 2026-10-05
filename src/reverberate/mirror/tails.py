@@ -190,16 +190,18 @@ def cell_weights(
 
 
 def tail_key(
-    scene: DerivedScene, position: np.ndarray, cells: np.ndarray, rays: RaySettings
+    scene: DerivedScene | str, position: np.ndarray, cells: np.ndarray, rays: RaySettings
 ) -> str:
     """The identity of one source position's histograms over ``cells``.
 
     The scene's own key, which holds its geometry and the materials the rays
     read; the position and the cells in whole millimetres; the ray settings.
-    Sixty-four hexadecimal characters.
+    Sixty-four hexadecimal characters. ``scene`` may be that key itself: it
+    is a digest of every triangle, and a caller with many positions reads it
+    once.
     """
     record = {
-        "scene": scene.key,
+        "scene": scene if isinstance(scene, str) else scene.key,
         "position_mm": [int(v) for v in np.rint(np.asarray(position, dtype=float) * 1000.0)],
         "cells_mm": hashlib.sha256(
             np.rint(np.asarray(cells, dtype=float) * 1000.0).astype("<i8").tobytes()
@@ -217,6 +219,7 @@ class TailCache:
 
     def __post_init__(self) -> None:
         self._held: dict[str, Histogram] = {}
+        self._shared: dict[str, Any] = {}
         self.hits = 0
         self.misses = 0
 
@@ -278,18 +281,43 @@ def histograms(
     positions = np.asarray(positions, dtype=float).reshape(-1, 3)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
     cache = cache if cache is not None else TailCache()
-    scene = apply_parameters(catalogue, settings.parameters)
     rays = settings.traced_rays()
-    grid = None
+    # What every call on this scene shares: the scene with its materials, its key
+    # (a digest of every triangle), the occluders' grid and each card's upload.
+    shared = cache._shared
+    if (
+        shared.get("catalogue") is not catalogue
+        or shared.get("parameters") != settings.parameters.key
+        or shared.get("cell_m") != rays.cell_m
+    ):
+        scene = apply_parameters(catalogue, settings.parameters)
+        shared = {
+            "catalogue": catalogue,
+            "parameters": settings.parameters.key,
+            "cell_m": rays.cell_m,
+            "scene": scene,
+            "key": scene.key,
+            "grid": None,
+            "uploads": {},
+        }
+        cache._shared = shared
+    scene = shared["scene"]
     out = []
     for position in positions:
-        key = tail_key(scene, position, cells, rays)
+        key = tail_key(shared["key"], position, cells, rays)
         found = cache.get(key)
         if found is None:
-            if grid is None:
-                grid = occluder_grid(scene, rays.cell_m)
+            if shared["grid"] is None:
+                shared["grid"] = occluder_grid(scene, rays.cell_m)
             found = histogram_on_devices(
-                scene, position, cells, rays, devices=devices, grid=grid, say=say
+                scene,
+                position,
+                cells,
+                rays,
+                devices=devices,
+                grid=shared["grid"],
+                say=say,
+                held=shared["uploads"],
             )
             cache.put(key, found)
         out.append(found)

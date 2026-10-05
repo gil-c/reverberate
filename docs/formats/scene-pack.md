@@ -807,7 +807,10 @@ A cost record: `stage` (`low`, `paths`, `rays`, `level`, `write`, `check`,
 `transfer`, `rental`), `seconds`, `card` (the model's name), `cards`,
 `billed_rate_usd_per_hour`, `usd`, `instance`. `paths` holds the diffracted
 onsets, which the batched trace computes with the image paths; `check` is
-the pack read back and rendered on the host and on the card; `rental` is
+the pack read back, and for a smoke run, or when asked, ten seconds of
+three sources rendered on the host and on the card with the proof of which
+device computed ([the cost ledger](../adr/0016-appendix-trace-cost.md));
+`rental` is
 what the machine was billed for outside the stages: provisioning, the
 bundle's push, the watcher's polls. A cost without its rate is not written
 (roadmap constraint 10): the machine does not know its rate, so it writes
@@ -893,7 +896,10 @@ trace of L5 and what it is expected to cost are in
 12. Two traces of one identity agree in every dataset the mirror writes
     (`early`, `tail`): the paths and the histograms are the same on any
     device (ADR 0014). `low/ir` agrees to the solver's own repeatability and
-    is not promised to the bit.
+    is not promised to the bit: from one cached response, its air and its
+    masks are computed on the card when the trace has one, and agree with
+    the host's within 1e-6 of the response's peak (2.2e-13 measured), which
+    a full check verifies on eight pairs.
 
 ## The synthetic profile
 
