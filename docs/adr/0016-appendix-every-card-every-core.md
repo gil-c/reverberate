@@ -225,14 +225,20 @@ On 4 cards of 16 GB the hours are those of four cards at those cards' own
 rate, which no run here measured (the Tesla V100 are on the host that could
 not open them); 16 GB is four times what a solve needs.
 
-Against the code of before on the same eight cards (run A, still on its
-machine as this is written): its solves ended at 5.6 h, its early trace
-took 0.4 h, its rays began at 6.2 h and 8.57 USD with the levelling and the
-write still to come, about 7 h and 9.7 USD by its own ledger. **The queue
-removes what follows the solves, 1.3 to 1.7 h of eight cards and about a
-fifth of the bill, and adds nothing to the solves**: those were already a
-thread a card. What is left to gain on a scene is in the solves themselves
-(a card's rate, the solves counted) and in the pack's way home.
+Against the code of before, as the two whole scenes of that day ran it
+(their own `campaign.log`). Run A, the eight cards: after its solves the
+early trace took 17.9 min, the rays 18.2, the levelling 23.6 and the write
+2.6, 62 minutes of eight cards one stage after the other. Run B, four
+cards: 17.5 min of early trace and 21.1 of rays, then the same levelling
+and write. Through the queue the early trace and the levelling are under
+the solves, and the rays are a site a card: 7.6 minutes of eight cards, 15
+of four. **The queue removes about 50 of those 62 minutes on eight cards
+(1.2 USD of the 8.5 the run cost) and as many on four, and adds nothing to
+the solves**, which were already a thread a card: run A's took 4.9 h for
+what its first attempt had left, about 100 s a source in launches that
+held 84 cells' records on the card, against 90 s measured here. What is
+left to gain on a scene is in the solves themselves (a card's rate, the
+solves counted) and in the pack's way home.
 
 ### What still idles, and the next change
 
