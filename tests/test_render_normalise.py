@@ -54,7 +54,8 @@ def traced_pack(signature: np.ndarray | None = None, seed: int = 0) -> ScenePack
     low = source.low
     assert low is not None
     rng = np.random.default_rng(5)
-    seams = (1.9 + rng.uniform(-1.5, 1.5, low.seam_db.shape[0])).astype(np.float32)
+    count = int(low.seam_db.shape[0])
+    seams = np.asarray(1.9 + rng.uniform(-1.5, 1.5, count), dtype=np.float32)
     weight = seam_weight(
         np.asarray(source.audible, dtype=bool),
         np.asarray(low.pair),

@@ -72,4 +72,6 @@ not the one a reading can resolve).
 - **Open:** the calibration is fitted on one dwelling. Whether its parameters
   transfer to another is not measured; until it is, the mirror is only as good
   as the wave field it was calibrated on. The source signature and the clock
-  are also read from a wave field.
+  are also read from a wave field. (2026-10-05: a scene pack no longer takes
+  the signature nor the alignment's gain, only the clock; the appendix says
+  why.)

@@ -34,7 +34,7 @@ Stated once, here.
 | --- | --- |
 | the scale | a level of 0 dB re full scale stands for **86 dB SPL at 1 m** from the source, in free field (`FULL_SCALE_SPL_1M_DB`) |
 | a voice | stored at an **active speech level of -26 dB re full scale** (`VOICE_ACTIVE_DBFS`), so 60 dB SPL at 1 m: a normal vocal effort (ISO 9921) |
-| a noise | stored at the long term level (RMS over the whole clip) its source has at 1 m on that scale: `level.spl_1m_db - 86` dB re full scale |
+| a noise | stored at the long term level its source has at 1 m on that scale, `level.spl_1m_db - 86` dB re full scale, **read on what a render holds of the clip** (`measure: "heard"`, below) |
 | the engine | applies no normalisation: the source's `gain_db` and the interval's multiply the samples, and the free field gain is `1 / d`. A voice at `gain_db = 0` is therefore heard at 1 m at 60 dB SPL, if full scale of the output is read as 86 dB SPL |
 | `gain_db` of a recipe | a departure from the stored level: `-6` is a quiet voice (54 dB at 1 m), and a noise at `-12` is 12 dB under what its entry says. The generator draws a voice's from -6 to 0 and a noise's from -6 to +6, about its stored level |
 
@@ -45,6 +45,32 @@ threshold and for 200 ms after; the active level is the power over the
 active time, at the threshold that lies 15.9 dB under it. The thresholds are
 3 dB apart here, and interpolated. A programme's talk (the `television`
 clips) is levelled the same way; every other noise on its long term level.
+
+**A noise's long term level is read above the floor of the chain**
+(`measure: "heard"`, `clips.heard_level_db`): the RMS of the clip through
+the low cut every render applies, a Butterworth high pass of order 8 at
+40 Hz (`HEARD_FROM_HZ`, `HEARD_ORDER`; a pack is valid from 45 Hz,
+[`scene-pack.md`](scene-pack.md)). A recording made in a room can hold
+most of its energy where no one hears and nothing is rendered, and a
+level read on the whole band is then a level of that. The first library's
+`noise/appliance_washing_machine` (DEMAND, a washing machine in its room)
+holds 97.7 per cent of its energy between 10 and 20 Hz: -17.5 dB of its
+level lies over 20 Hz and -24.7 dB over 40 Hz, so that, stored at 58 dB
+SPL on its whole band, it was rendered 25 dB under that
+(`docs/open-questions/chain-audit.md`, D12). A-weighting would answer the
+same question and another one, how loud the clip is judged; the floor
+alone is what the engine does to it, and leaves the entry's level a
+physical one.
+
+`measure: "rms"` is the long term level of the whole band, as every noise
+of `clarify_v1` was levelled: its selection says so on each of them, so
+that curating it again gives the files it gave, digest for digest, and
+its entries keep `"measure": "rms"`. Of its 22 such noises the washing
+machine is the one whose level is not what is heard, and no clip is
+fetched or stored again for it: the scene that plays it sets its gain in
+the pack (`python -m reverberate.render gains`, [`scene-pack.md`](scene-pack.md)).
+A selection written from now on leaves `measure` out of a noise, which is
+`"heard"`, and the entry then also states `level.heard_dbfs`.
 
 A clip whose peaks would pass -1 dB re full scale at the level asked for is
 stored lower, by whole decibels, and its entry states the level it has: a
@@ -83,7 +109,7 @@ Each clip:
 | `duration_s` | float | of the file |
 | `loop` | bool | whether the end runs into the start without a seam |
 | `utterances` | array of `[start_s, end_s]` | for a voice: where the clip may be cut. In order, none overlapping, each end in a silence |
-| `level` | object | `measure` (`"active"` or `"rms"`), `spl_1m_db`, and what the file measures: `rms_dbfs`, `peak_dbfs`, for a voice `active_dbfs` and `activity`, and for a clip of sentences `source_floor_dbfs` and `source_decay_db` (below) |
+| `level` | object | `measure` (`"active"`, `"heard"` or `"rms"`), `spl_1m_db`, and what the file measures: `rms_dbfs`, `peak_dbfs`, for a noise levelled on what is heard `heard_dbfs`, for a voice `active_dbfs` and `activity`, and for a clip of sentences `source_floor_dbfs` and `source_decay_db` (below) |
 | `licence`, `credit` | string | of this clip: the dataset's, or the clip's own where the dataset gives one a clip |
 | `what` | string | what is heard, and where it comes from |
 | `origin` | object | what the file is made of |
