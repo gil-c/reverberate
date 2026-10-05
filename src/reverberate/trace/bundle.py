@@ -150,8 +150,16 @@ def build_bundle(
     low_seconds: float | None = None,
     reuse_from: Path | None = None,
     low_levers: str | None = None,
+    seam: str | None = None,
+    seam_constant_db: float | None = None,
 ) -> dict[str, Any]:
     """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``.
+
+    ``seam`` is the way the pack's level above the crossover is written
+    (``trace.level.seam``; :data:`reverberate.render.relevel.SEAMS` but
+    ``tapered``, which no pack holds): left out, each step its pairs' own
+    seam, as every pack before it. ``seam_constant_db`` is the number of a
+    ``constant`` seam; left out, the median of the run's pairs' seams.
 
     ``low_levers`` is the form the pack's low band is written in on the
     machine (:data:`LOW_LEVERS` when left out, ``none`` for ``low/ir``),
@@ -285,6 +293,12 @@ def build_bundle(
         "recipe_sha256": plan.recipe_sha256,
         "low_levers": levers,
     }
+    if seam is not None and seam != "pair":
+        if seam not in ("smooth", "constant"):
+            raise ValueError(f"a pack's seam is pair, smooth or constant, not {seam!r}")
+        campaign["trace"]["level"] = {"seam": seam}
+        if seam == "constant" and seam_constant_db is not None:
+            campaign["trace"]["level"]["constant_db"] = float(seam_constant_db)
     if levers != "none":
         from reverberate.accel.pairs import CACHE_LEVERS
 

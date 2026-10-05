@@ -327,6 +327,9 @@ def step_levels(
     trail_s_of: np.ndarray,
     early: EarlyTable,
     alignment_gain: float,
+    seam: str = "pair",
+    constant_db: float = 0.0,
+    half_steps: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """``level/high_gain_db`` and ``level/onset_s`` of one source, ``[step]`` each.
 
@@ -336,7 +339,19 @@ def step_levels(
     first arrival at the pair by. The pairs of a step are weighted by
     ``position_weight`` across the source's two positions and by inverse
     distance across the two cells.
+
+    ``seam`` is the way ``high_gain_db`` is written
+    (:data:`reverberate.render.relevel.SEAMS`): ``pair``, each step its
+    pairs' own seam; ``smooth``, that averaged under a raised cosine
+    ``half_steps`` either side; ``constant``, the alignment's gain plus
+    ``constant_db`` at every audible step. A ``tapered`` seam is a level a
+    band, which a pack does not hold: it is refused here. ``onset_s`` is
+    the same under each.
     """
+    from reverberate.render.relevel import levelled
+
+    if seam == "tapered":
+        raise ValueError("a tapered seam is a level a band: the engine takes it, a pack does not")
     steps = int(audible.shape[0])
     high_gain_db = np.zeros(steps, dtype=np.float32)
     onset = np.zeros(steps, dtype=np.float64)
@@ -349,15 +364,24 @@ def step_levels(
             total = float(away.sum())
             if total > 0.0:
                 between = np.array([away[1], away[0]]) / total
-        seam = 0.0
+        own = 0.0
         trail = 0.0
         for a in range(2):
             for b in range(2):
                 weight = across[a] * between[b]
                 row = int(pair[step, a, b])
                 if weight > 0.0 and row >= 0:
-                    seam += weight * float(seam_db_of[row])
+                    own += weight * float(seam_db_of[row])
                     trail += weight * float(trail_s_of[row])
-        high_gain_db[step] = base + seam
+        high_gain_db[step] = base + own
         onset[step] = first_arrival_s(early, int(step)) + trail
+    if seam != "pair":
+        high_gain_db = levelled(
+            high_gain_db,
+            audible,
+            seam=seam,
+            base_db=base,
+            constant_db=constant_db,
+            half_steps=half_steps,
+        )
     return high_gain_db, onset

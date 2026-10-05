@@ -9,6 +9,7 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
     [--low-engine lowband|pffdtd] [--low-ppw P] [--low-scheme cartesian|fcc]
     [--low-seconds S] [--rays N] [--rail-positions N] [--low-levers TEXT]
+    [--seam pair|smooth|constant [--seam-constant-db DB]]
     [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
@@ -136,6 +137,21 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         default=None,
         metavar="N",
         help="the rays a tail site casts; left out, the mirror's own (100 000)",
+    )
+    p.add_argument(
+        "--seam",
+        choices=("pair", "smooth", "constant"),
+        default=None,
+        help="the way the pack's level above the crossover is written: pair, each step its"
+        " pairs' own seam (left out: that); smooth, that averaged over 2 s either side;"
+        " constant, one number for the scene",
+    )
+    p.add_argument(
+        "--seam-constant-db",
+        type=float,
+        default=None,
+        metavar="DB",
+        help="with --seam constant: the number; left out, the median of the run's pairs' seams",
     )
     p.add_argument(
         "--low-levers",
@@ -608,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
             reuse_from=args.reuse_from,
             check=args.check,
             low_levers=args.low_levers,
+            seam=args.seam,
+            seam_constant_db=args.seam_constant_db,
         )
         print(args.out)
         return 0
@@ -647,6 +665,8 @@ def main(argv: list[str] | None = None) -> int:
         fetch_early=args.fetch_early,
         destroy_failed=args.destroy_failed,
         low_levers=args.low_levers,
+        seam=args.seam,
+        seam_constant_db=args.seam_constant_db,
         line=args.line,
         relaunch=args.relaunch,
         # The same words again, on the machine this run leaves: what its last lines say.

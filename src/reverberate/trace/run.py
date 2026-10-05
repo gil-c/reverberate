@@ -110,6 +110,7 @@ from reverberate.render.pack import (
     read_pack,
     tail_seed,
 )
+from reverberate.render.relevel import STEADY_S, scene_constant_db
 from reverberate.scenes import canonical_bytes, load_recipe
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
@@ -1542,6 +1543,25 @@ class Trace:
             # A cost without its rate is not written: the laptop, which rented, adds them.
             "cost": [],
         }
+        # The way the level above the crossover is written (``render.relevel``): each step
+        # its pairs' own seam unless the bundle says another; a constant is the median of
+        # the run's pairs' seams unless the bundle gives it.
+        level_told = dict(self.told.get("level") or {})
+        way = str(level_told.get("seam") or "pair")
+        told_db = level_told.get("constant_db")
+        if way not in ("pair", "smooth", "constant"):
+            raise ValueError(f"a pack's seam is pair, smooth or constant, not {way!r}")
+        constant = (
+            scene_constant_db(np.array([r["seam_db"] for r in self.levels], dtype=float))
+            if told_db is None
+            else float(told_db)
+        )
+        if way != "pair":
+            provenance["seam"] = {"seam": way}
+            if way == "smooth":
+                provenance["seam"]["seconds"] = STEADY_S
+            else:
+                provenance["seam"]["constant_db"] = round(constant, 3)
         # What a variant changed, named only when it did: the reference's pack is as it was.
         low_seconds = dict(self.told.get("low") or {}).get("seconds")
         if low_seconds is not None:
@@ -1653,6 +1673,9 @@ class Trace:
                     trail_s_of=trail[mine],
                     early=self.early[name],
                     alignment_gain=self.assets.pack_gain,
+                    seam=way,
+                    constant_db=constant,
+                    half_steps=int(round(STEADY_S / header.step_s)),
                 )
                 source = recipe.source(name)
                 writer.add_source(

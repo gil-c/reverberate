@@ -343,6 +343,8 @@ def launch(
     say: Any = print,
     low_engine: str = "lowband",
     low_levers: str | None = None,
+    seam: str | None = None,
+    seam_constant_db: float | None = None,
     line: str = "proxy",
     resume: str = "",
     relaunch: bool = False,
@@ -451,6 +453,8 @@ def launch(
         low_seconds=low_seconds,
         reuse_from=reuse_from,
         low_levers=levers,
+        seam=seam,
+        seam_constant_db=seam_constant_db,
     )
     found = found_assets(
         recipe,
