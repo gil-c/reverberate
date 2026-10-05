@@ -35,6 +35,7 @@ from reverberate.render.dry import ClipLoader, DryTrack, band_filter, mask_kerne
 from reverberate.render.early import EarlyPart
 from reverberate.render.low import LowPart
 from reverberate.render.pack import ScenePack, Source, sources_of
+from reverberate.render.seam import BandedTail, level_table
 from reverberate.render.tail import TailPart
 from reverberate.render.translate import SpatialTranslation, Translation
 
@@ -60,6 +61,9 @@ class RenderSettings:
     workers: int = -1
     #: Runs kept per source, so that overlapping reads do not render twice.
     chunks_held: int = 2
+    #: What is applied above the crossover (:mod:`reverberate.render.seam`): ``tapered``,
+    #: the pack's level a band where it holds one; ``broadband``, its scalar always.
+    seam: str = "tapered"
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -98,6 +102,10 @@ class SourceRenderer:
         directivity = (
             source.directivity_enabled if settings.directivity is None else settings.directivity
         ) and source.directivity_model in pack.directivity
+        # THE SEAM (reverberate.render.seam): ``[step, bank]`` in dB, or ``None`` for the
+        # pack's scalar. The arrivals take it as their gain a band; the late part is
+        # rendered a set of bands of one level at a time.
+        bands = level_table(source, settings.seam)
         self.parts: dict[str, Any] = {
             "early": EarlyPart(
                 pack,
@@ -107,6 +115,7 @@ class SourceRenderer:
                 directivity=directivity,
                 direction_nodes=settings.direction_nodes,
                 workers=settings.workers,
+                band_gain_db=bands,
             )
         }
         if h.has_low:
@@ -120,9 +129,13 @@ class SourceRenderer:
                 translation=translation,
                 workers=settings.workers,
             )
-        if h.has_tail:
+        if h.has_tail and bands is None:
             self.parts["tail"] = TailPart(
                 pack, source, tail_track, xp, workers=settings.workers, mask=tail_mask
+            )
+        elif h.has_tail and bands is not None:
+            self.parts["tail"] = BandedTail(
+                pack, source, tail_track, xp, bands, workers=settings.workers, mask=tail_mask
             )
         self.step = h.step_samples
         self.chunk_samples = settings.chunk_steps * self.step

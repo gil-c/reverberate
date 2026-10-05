@@ -295,6 +295,62 @@ so that neither alone is the difficulty.
   `gain_db` as the pack's attribute says. Raising the five noises by 12 dB
   there is the default above.
 
+**The gains chosen for this scene** (2026-10-06; `python -m
+reverberate.render gains`, which sets a traced pack's gains in place and
+back, the recipe and its digest untouched and the difference said in the
+provenance). The target: each noise heard, 38 to 46 dBA at the head in
+the median while it sounds, by kind (a shower over a television over a
+street over a kitchen and a washing machine); nothing over 75 dBA; the
+noises together within 5 dB of the far voices together; a near voice 0 to
++5 dB over everything else in the median. A flat +12 dB, the generator's
+new default, does not give it: the shower then stands at 57 dBA and a near
+voice 2.5 to 6 dB under the rest, while the washing machine and the
+kitchen are still under 30 dBA.
+
+The washing machine is levelled on its A weighted level and not on its
+stored one: 25 dB of the clip lie under 80 Hz, which neither band renders
+(stored at 57.3 dB SPL at 1 m, it is 32.2 dB SPL above 100 Hz and
+30.0 dBA). The kitchen likewise (45.6 dB SPL, 36.4 dBA).
+
+| source | gain, traced | gain, chosen | at the head, traced: median (first to ninth decile) | chosen |
+| --- | --- | --- | --- | --- |
+| noise_1, shower | -7.74 dB | **-6.5 dB** | 44.7 dBA (16 to 50) | 45.9 (17 to 51) |
+| noise_2, washing machine | -10.48 dB | **+13.0 dB** | 14.4 dBA (-17 to 20) | 37.9 (7 to 43) |
+| noise_3, street | -8.29 dB | **+0.5 dB** | 31.1 dBA (6 to 35) | 39.9 (14 to 44) |
+| noise_4, kitchen | -9.45 dB | **+11.0 dB** | 17.4 dBA (-8 to 22) | 37.9 (12 to 42) |
+| noise_5, television | -10.62 dB | **-0.5 dB** | 33.9 dBA (26 to 44) | 44.0 (37 to 54) |
+| the five together | | | 45.3 dBA (28 to 51) | 50.0 (38 to 56) |
+| the six far voices together | | | 51.3 dBA (27 to 58) | the same |
+| near_1, near_2, near_3 | -3.44, -5.50, -3.01 dB | the same | 56.6, 53.7, 53.7 dBA | the same |
+
+These are the tables' reading above (1 to 4 kHz, every half second a
+source sounds) **plus what two rendered windows say it leaves out**: +8.5
+dB for a voice (the median of eight voices rendered on 660 to 720 s), and
+for a noise the mean of its two windows, 485 to 495 s and 660 to 720 s
+(+3.5, +6.5, +1.6, +0.5 and +4.6 dB for noise_1 to noise_5). The two
+windows of one noise differ by 1 to 10 dB, so a level here is good to
+3 dB and a difference between two gains of one source is exact. Rendered
+with the chosen gains on 485 to 495 s: the washing machine 35.2 dBA where
+it was 11.7 (7.8 m away), the kitchen 34.3 where it was 13.8 (4.2 m), the
+television 56.4 where it was 46.3 (2.3 m), each moved by its gain to
+0.01 dB; and on the first check's minute the loudest eighth of a second is
+then 69.8 dBA (the television) and 62.8 (the kitchen's clatter).
+
+A near voice while it speaks, on that reading, first decile, median and
+ninth decile:
+
+| | over the five noises | over everything else |
+| --- | --- | --- |
+| traced | +9.5 to +13.8 dB in the median | -25 to -33, **+1.4 to +4.3**, +12 to +18 dB |
+| the noises' gains chosen | +2.8 to +6.4 dB | -30 to -34, **-1.3 to +0.5**, +8 to +11 dB |
+| and the three near voices at 0 dB | +6.0 to +9.8 dB | -26 to -31, **+1.7 to +5.3**, +11 to +17 dB |
+
+The noises' gains alone bring the noises together to the far voices
+together (0.1 dB in the median) and leave a near voice at the low edge of
+the target; the near voices at 0 dB, the top of the generator's range and
+57 dBA at 1 m, put it inside. The second is the owner's to take: what was
+asked is the noises.
+
 ## 4. `interval_edge`: a loop is a join
 
 The three failures are a noise's clip coming round: the generator writes a
@@ -403,6 +459,71 @@ under a raised cosine 2 s either side within every run of audible steps,
 bit. It is **off**: nothing was written to the scene's pack, and the trace
 writes each step's own seam as before. If the owner's ear keeps it, the
 trace's part is one call at the end of `trace.level.step_levels`.
+
+**Closed by the tapered join** (2026-10-06, the owner's ruling of
+2026-10-05; `reverberate.render.seam`, `docs/formats/scene-pack.md`). The
+level above the crossover is a band's: the pair's own seam whole at 1 kHz,
+half of it, in decibels, at 2 kHz, and the scene's one number, the median
+of its pairs' seams (+1.89 dB on this pack), from 4 kHz up. `relevel` is
+not what was kept. The trace writes the table; `python -m
+reverberate.render seam PACK` gives it to a traced pack in place, the
+scalar untouched, and the engine renders the scalar when asked
+(`RenderSettings.seam = "broadband"`), to the bit.
+
+What the level applied does within half a second, per source over the
+whole scene (every half second a source is audible, those where it stands
+still included; the range over the fourteen sources):
+
+| | ninth decile | 99th percentile | largest |
+| --- | --- | --- | --- |
+| the scalar, every band | 0.8 to 1.5 dB | 2.0 to 3.6 dB | 3.7 to 6.8 dB |
+| tapered, 1 kHz | the same | the same | the same |
+| tapered, 2 kHz | 0.4 to 0.7 dB | 1.0 to 1.8 dB | 1.8 to 3.4 dB |
+| tapered, 4, 8 and 16 kHz | 0 | 0 | 0 |
+
+**What is left is the mirror's own.** The level heard is the level applied
+times what the mirror holds, and the mirror's arrivals are born and die as
+the head walks. Counted with them (the arrivals' gains squared and the
+tail's histograms of the band, summed in energy, from the tables), at
+4 kHz and within half a second: the ninth decile goes from 1.1 to 1.9 dB
+under the scalar to 0.6 to 1.6 dB under the table, down for every source;
+the 99th percentile, 2.8 to 10.7 dB, becomes 2.8 to 11.9 dB and the
+largest, 9.2 to 13.9 dB, becomes 10.2 to 15.3 dB. The rare large changes
+were never the seam's: they are a set of image paths appearing at the edge
+of a doorway, and at some of them the pair's seam, which read the mirror
+too loud in the crossover's octave, had been taking 1 to 4 dB of the jump
+back over the whole band.
+
+The two passages, the source fed a steady white noise, the first channel
+of the stem per octave in frames of 0.25 s, the range within half a
+second (median, ninth decile, largest):
+
+| | 1 kHz | 2 kHz | 4 kHz | 8 kHz |
+| --- | --- | --- | --- | --- |
+| far_6, 92 to 102 s, scalar | 0.9, 2.0 | 1.0, 4.2 | 0.9, 4.1 | 0.7, 4.2 dB |
+| far_6, tapered | 0.9, 1.9 | 0.6, 1.5 | 0.6, 1.8 | 0.6, 1.8 dB |
+| noise_3, 483 to 493 s, scalar | 1.3, 2.6, 3.8 | 1.0, 2.5, 3.2 | 1.0, 2.2, 4.1 | 1.0, 2.4, 3.2 dB |
+| noise_3, tapered | 1.3, 2.6, 3.7 | 0.7, 2.7, 4.4 | 0.9, 4.0, 5.5 | 0.7, 3.8, 5.1 dB |
+
+(far_6 starts in the window, so its largest is the onset and is left
+out.) far_6 is the finding as it was told: the band above 1 kHz went up
+and down with the scalar and no longer does. noise_3 is the other case:
+at 487.25 to 487.75 s the mirror's arrivals at 4 kHz rise by 24 dB (7
+rows become 17) and fall back, the pair's seam went 4.2 dB under the
+median for that half second, and the scalar hid 4 dB of a bump that the
+table lets through. The median motion is down in both; what remains to be
+steadied there is the birth of the paths, not the join.
+
+The check on 480 to 500 s (noise_3, near_3, far_3, noise_1; two threads),
+the pack as traced and with the table: 3 FAIL, 26 WARN, 159 PASS before
+and 3 FAIL, 24 WARN, 161 PASS after, 47 INFO and 4 SKIP both. The three
+failures are the same (a near voice behind a wall at 43.8 dBA, the anchor
+of near_3 at 494 s, the level of noise_3 against its distance, -13.8 then
+-10.5 dB a decade). `seam_third_octaves` warns 8 times where it warned 10,
+`direct_level` of noise_1 passes (-3.1 then -1.8 dB), and
+`direct_band_balance` of near_3 at 494.07 s warns (+1.2 then +3.6 dB): a
+pair whose seam is far from the median now has its own level at 1 kHz
+only.
 
 ## 9. Not flagged: a near voice behind a wall
 
@@ -520,8 +641,9 @@ Times are the scene's. The files of the first check
   levelling and the rows are made again under their new names and the pack
   is written. On the laptop a third of the pairs are missing, so it is a
   run on a machine that holds the cache.
-- **The scalar**, if `relevel` is kept: nothing; the command, or one call
-  in the trace.
-- **The noises' levels**: nothing; a recipe's gains, applied by the engine.
+- **The scalar**: nothing; `python -m reverberate.render seam PACK` gives a
+  traced pack the tapered join, and the trace writes it.
+- **The noises' levels**: nothing; `python -m reverberate.render gains
+  PACK --set ...`, applied by the engine.
 - **A near voice in sight of its listener**: a new recipe, so a new trace
   with its solves.

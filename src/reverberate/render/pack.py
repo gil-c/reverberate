@@ -302,6 +302,8 @@ class Tail:
 class Level:
     high_gain_db: np.ndarray
     onset_s: np.ndarray
+    #: ``[step, bank]``: the level a band, where the pack holds the tapered join.
+    band_gain_db: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -439,6 +441,8 @@ _TAIL = {
     "cell_weight": ("<f4", "step"),
 }
 _LEVEL = {"high_gain_db": ("<f4", "step"), "onset_s": ("<f8", "step")}
+#: The level a band of the tapered join (``reverberate.render.seam``): there or not.
+_LEVEL_BANDS = {"band_gain_db": ("<f4", "step,bank")}
 #: Kept in the file when a pack is read; everything else is loaded.
 _LAZY = {"ir", "energy", "moments"}
 
@@ -571,6 +575,8 @@ class PackWriter:
         _write_group(group, _SOURCE, source)
         _write_group(group.create_group("early"), _EARLY, source.early)
         _write_group(group.create_group("level"), _LEVEL, source.level)
+        if source.level.band_gain_db is not None:
+            _write_group(group["level"], _LEVEL_BANDS, source.level)
         if source.low is not None:
             low = group.create_group("low")
             held = source.low.ir
@@ -738,7 +744,14 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 tail_seed=int(group.attrs["tail_seed"]),
                 **_read_group(group, _SOURCE),
                 early=Early(**_read_group(group["early"], _EARLY)),
-                level=Level(**_read_group(group["level"], _LEVEL)),
+                level=Level(
+                    **_read_group(group["level"], _LEVEL),
+                    **(
+                        _read_group(group["level"], _LEVEL_BANDS)
+                        if "band_gain_db" in group["level"]
+                        else {}
+                    ),
+                ),
                 low=_read_low(group["low"], header) if "low" in group else None,
                 tail=Tail(**_read_group(group["tail"], _TAIL)) if "tail" in group else None,
             )
@@ -915,6 +928,12 @@ def validate(pack: ScenePack, *, deep: bool = False) -> None:
             )
             _need(np.all(early.kind <= 3), f"{where}/early/kind is not 0 to 3")
         _need(np.all(np.isfinite(source.level.high_gain_db)), f"{where}/level is not finite")
+        if source.level.band_gain_db is not None:
+            _shapes(f"{where}/level", _LEVEL_BANDS, source.level, local)
+            _need(
+                np.all(np.isfinite(source.level.band_gain_db)),
+                f"{where}/level/band_gain_db is not finite",
+            )
         if source.low is not None:
             _check_low(where, source.low, audible, local, cells, pack, deep)
         if source.tail is not None:

@@ -261,7 +261,8 @@ speed.
   path is read at the two steps and multiplied into that gain before it is
   interpolated: the directivity's gain for the step's `departure` and
   `yaw_deg`, the air's loss for the step's `delay_s`, the crossover's
-  window for the step's `delay_s` and `level/onset_s`, and `high_gain_db`.
+  window for the step's `delay_s` and `level/onset_s`, and the step's
+  level, `band_gain_db` of the band or `high_gain_db`.
   The product is linear in `u`; none of its factors is interpolated on its
   own, and the departure direction is not interpolated at all.
 - **Birth and death**: a `path_id` present at one of the two steps only has
@@ -663,7 +664,9 @@ nothing removed.
 
 **Between two steps** the outputs of the two steps' responses are
 cross-faded linearly, each times its own `high_gain_db`: the quasi-static
-rule.
+rule. Under a `band_gain_db` whose bands do not all hold one level, the
+bands of one level are rendered so, on the dry signal through their
+filters of the bank, and the sets are summed (see `level`).
 
 **What this replaced, and what it changes in the samples** (lot L7b,
 2026-10). The first engine made one response per step from the four
@@ -719,8 +722,15 @@ moving (31 histograms in 5 s, their decay times drawn apart between 0.3 and
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `high_gain_db` | float32 | `[step]` | what multiplies everything of `early` and `tail` at this step |
+| `high_gain_db` | float32 | `[step]` | the step's level above the crossover as a scalar: the alignment's gain plus the step's seam |
+| `band_gain_db` | float32 | `[step, bank]` | optional: what multiplies `early` and `tail` at this step, a band of the bank: the tapered join |
 | `onset_s` | float64 | `[step]` | where the crossover's coherent window is anchored, on the pack's clock |
+
+**What the engine multiplies by** is `band_gain_db` where the pack holds
+it, band by band, and `high_gain_db` on every band where it does not. A
+render may ask for the scalar whatever the pack holds
+(`RenderSettings.seam = "broadband"`; the default is `"tapered"`), and that
+render is the one every pack gave before 2026-10-06, to the bit.
 
 `high_gain_db` is `20 log10(alignment_gain)` plus the step's seam: the
 `low/seam_db` of the step's pairs, weighted by `low/position_weight` across
@@ -743,7 +753,56 @@ under the same weighting. Neither is interpolated between steps on its own:
 each is read at the step and enters the path's gain there (see `early`),
 and the tail's.
 
-**Along a walk `high_gain_db` may be steadied**, an option that is off
+**The tapered join** (`reverberate.render.seam`; the owner's ruling of
+2026-10-05). A seam is two things: a constant, one error of scale between
+the two solvers, the same within 0.3 dB whatever the room and the distance
+(1.9 dB in the median of the first whole scene's 18 219 pairs); and each
+pair's own distance from it, 1.1 to 1.4 dB of scatter that is decided
+within a wavelength at 1 kHz. The second makes the two bands meet at the
+crossover and says nothing of the octaves above; laid on all of them it
+made everything over 1 kHz of a source go up and down by 2 to 5 dB within
+half a second of a walk. So the level is a band's:
+
+```
+K                 = 20 log10(alignment_gain) + constant_db
+band_gain_db[k,b] = K + share[b] (high_gain_db[k] - K)
+```
+
+`share` is 1 in the crossover's band and under it, 0.5 in the band above
+(2 kHz), 0 from 4 kHz up: the pair's own seam whole at the join, half of
+it, in decibels, an octave up, and the scene's one number above. A share
+of 1 is `high_gain_db[k]` to the bit, a share of 0 is `K` in single
+precision, and a step that is not audible holds `high_gain_db[k]` in every
+band. `constant_db` is the scene's one number: the median of its pairs'
+`low/seam_db`, each pair once, unless one is given
+(`reverberate.render.seam.SEAM_CONSTANT_DB`, `--constant-db`), which is
+where a calibration of the mirror's scale puts its result. The taper, the
+constant and where it came from are in the provenance (`seam`).
+
+The bank's filters are zero phase and cross in amplitude between two
+centres, so a level that differs between two bands is a slope and not a
+step: a seam of +3 dB is +3.00 dB to 1 kHz, +2.78 at 1.26 kHz, +2.08 at
+1.6 kHz, +1.50 at 2 kHz, +1.28 at 2.5 kHz, +0.58 at 3.2 kHz and 0.00 from
+4 kHz, 2.5 dB an octave at the steepest. The arrivals carry a gain a band
+and take the table as it is. The late part has one gain a step: the bands
+of one level are rendered together, on the dry signal through the sum of
+their filters of the bank, the sets adding to the signal exactly
+(`seam.group_kernels`); three sets under the default taper, which is
+three times the late part's transforms.
+
+The trace writes the table. A pack traced before it is given one **in
+place** by `python -m reverberate.render seam PACK [--taper SHARE ...]
+[--constant-db DB]`, from the scalar the trace wrote, which is never
+rewritten; `--undo` removes the table and the provenance's `seam`, and
+`--dry-run` writes nothing and says how far each band's level moves.
+On the first whole scene's fourteen sources, within half a second, over
+every half second a source is audible: the scalar moved by 0.8 to 1.5 dB
+at the ninth decile, 2.0 to 3.6 dB at the 99th percentile and 3.7 to
+6.8 dB at the worst; under the table the 1 kHz band moves as it did, the
+2 kHz band by half of it (0.4 to 0.7, 1.0 to 1.8 and 1.8 to 3.4 dB) and
+the bands from 4 kHz not at all.
+
+**Along a walk `high_gain_db` may also be steadied**, an option that is off
 (`reverberate.render.relevel.steadied`): within every run of audible steps
 it is then the step's seam averaged, in decibels, under a raised cosine 2 s
 either side, and a source at rest before a head at rest keeps its pair's
@@ -758,7 +817,8 @@ The trace writes each step's own seam;
 `python -m reverberate.render relevel PACK` steadies a pack's tables **in
 place**, keeps the trace's as `level/high_gain_db_traced` (a dataset a
 reader ignores) and `--undo` puts them back. `low/seam_db` is each pair's
-own, always. Nothing is decided: the owner hears a pack both ways first
+own, always. It was not kept: the tapered join is what a pack holds, and
+its table is made from the trace's scalar whether or not `relevel` was run
 (`docs/open-questions/first-scene-defects.md`).
 
 **The anchor of a pair** (`reverberate.trace.level.pair_anchor_s`) is its
@@ -864,7 +924,9 @@ Per source, at every output sample, in this order:
    the air's `exp(-m(f) c delay)`, encoded on the arrival direction.
 2. **Tail.** As above, with the air's loss at each bin's time.
 3. **High side.** The sum of 1 and 2, through the signature and the low cut,
-   times `high_gain_db`, through the crossover's high masks: an arrival at
+   times the step's level (`band_gain_db` a band of the bank where the
+   pack holds it, `high_gain_db` otherwise), through the crossover's high
+   masks: an arrival at
    pack time `tau` takes `w hi_press + (1 - w) hi_power`, `w` being the
    value at `tau` of `Crossover.onset_window` anchored on `level/onset_s`.
    The tail starts after the window and takes the power mask.
@@ -947,6 +1009,8 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
 | `low_seconds` | present only when the low band was solved for fewer seconds than `low_samples` hold (`--low-seconds`): every `low/ir` is then faded to nothing over the 20 ms before that time and silent after it |
 | `rays` | present only when a tail site cast another number of rays than 100 000 (`--rays`) |
+| `seam` | present when the pack holds `level/band_gain_db`: `{"mode": "tapered", "bank_hz", "shares" (one a band of the bank), "constant_db", "constant" (`"the median of the pairs' seams"` or `"given"`), "level_db" (the alignment's gain plus the constant, in dB: what a band whose share is 0 is multiplied by)}` |
+| `gains` | present only when a source is rendered at another gain than the recipe's (`python -m reverberate.render gains`): `{"recipe": a sentence, "sources": {id: {"recipe_db", "db"}}}` |
 | `low_levers` | present only when the pack holds `low/compact`: the levers it was written with, as `low/compact`'s own `levers_json` |
 | `pair_cache` | present only when the pair cache the responses were read from was kept compact: its levers, `bins,int16` |
 | `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |
