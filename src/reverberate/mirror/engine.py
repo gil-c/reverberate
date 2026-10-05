@@ -464,6 +464,7 @@ def histogram_on_device(
                 ),
             )
             cupy.cuda.Stream.null.synchronize()
+            _clocked(stats, t0)
             if say is not None:
                 say(
                     f"rays: {first}..{first + count} on device {held.device},"
@@ -471,6 +472,13 @@ def histogram_on_device(
                 )
         _counted(stats, cupy.asnumpy(counted))
         return cupy.asnumpy(energy), cupy.asnumpy(moments), cupy.asnumpy(hits)
+
+
+def _clocked(stats: dict[str, int] | None, started: float) -> None:
+    """A launch's own time, the card waited for, added to ``stats`` in microseconds."""
+    if stats is not None:
+        spent = int(round((time.time() - started) * 1e6))
+        stats["kernel_us"] = stats.get("kernel_us", 0) + spent
 
 
 def _counted(stats: dict[str, int] | None, counted: np.ndarray) -> None:
@@ -580,6 +588,7 @@ def histogram_tree_on_device(
                 ),
             )
             cupy.cuda.Stream.null.synchronize()
+            _clocked(stats, t0)
             if say is not None:
                 say(
                     f"rays: {first}..{first + count} through the tree on device {device},"
@@ -612,7 +621,8 @@ def histogram_on_devices(
     (:func:`reverberate.mirror.tracer.structure`): what the triangles are
     looked up in, which changes the time and not the histogram. ``store``
     keeps the tree from one process to the next. ``stats`` gains the counts
-    of :data:`reverberate.mirror.tracer.STATS`.
+    of :data:`reverberate.mirror.tracer.STATS`, and ``kernel_us``, the
+    microseconds the launches themselves took.
     """
     settings = settings or RaySettings()
     devices = devices or Devices.detect()

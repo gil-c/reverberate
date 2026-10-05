@@ -12,7 +12,8 @@ The stages, each leaving what the next and a rerun look for:
    steps, and of every pair at rest for the levelling, with the diffracted
    onsets (``early/<source>.npz``), a block of steps a job;
 5. ``rays``: the histograms at the tail's sites over the tail's cells, in
-   their cache (``tails/``), a site a job, and each source's table;
+   their cache (``tails/``, a (site, cell) an entry, the dwelling's own under
+   ``REVERBERATE_MIRROR_STORE``), a site a job, and each source's table;
 6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), the
    pairs of some cells a job;
 7. ``rows``: a pair as the pack stores it, a block of pairs a job;

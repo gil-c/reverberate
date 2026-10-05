@@ -38,6 +38,7 @@ import hashlib
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1243,6 +1244,7 @@ def counts_on_host(
     counted = np.zeros(len(STATS), dtype=np.int64)
     shot = _Shot(**{name: int(a.ctypes.data) for name, a in arrays.items()}, **scalars)
     entry = built.rt_trace_s if settings.precision == "single" else built.rt_trace_d
+    started = time.time()
     entry(
         ctypes.byref(shot),
         int(ray_start),
@@ -1253,6 +1255,8 @@ def counts_on_host(
         int(counted.ctypes.data),
     )
     if stats is not None:
+        spent = int(round((time.time() - started) * 1e6))
+        stats["kernel_us"] = stats.get("kernel_us", 0) + spent
         for name, value in zip(STATS, counted, strict=True):
             stats[name] = stats.get(name, 0) + int(value)
     return energy, moments, hits

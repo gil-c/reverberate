@@ -14,12 +14,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from reverberate.compute import Devices
 from reverberate.mirror.moving import prepare
 from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.rays import RaySettings, trace
 from reverberate.mirror.render import band_pulse_energy
+from reverberate.mirror.shared import Store
 from reverberate.mirror.tails import (
     SPACING_M,
     TailCache,
@@ -32,6 +34,7 @@ from reverberate.mirror.tails import (
     tail_sites,
     tail_table,
 )
+from reverberate.mirror.tracer import STRUCTURE_VARIABLE, trace_tree
 from test_mirror_diffract import walled_box
 
 SETTINGS = MirrorSettings(
@@ -103,25 +106,32 @@ def test_a_histogram_is_traced_once_per_position_cell_scene_and_settings(tmp_pat
 
 
 def test_a_second_recipe_of_the_dwelling_traces_only_the_cells_the_first_did_not(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another set of cells at the same site: the shared cells are read, the new one traced.
 
     And a cell's histogram is the same whichever cells were cast with it:
     what a launch over the new cell alone leaves is what one launch over
-    every cell gives.
+    every cell gives. Cast through the tree, whose store holds it once.
     """
+    monkeypatch.setenv(STRUCTURE_VARIABLE, "tree")
     catalogue = walled_box()
-    histograms(catalogue, SETTINGS, STATION[None, :], CELLS[:3], cache=TailCache(tmp_path / "t"))
+    store = Store(tmp_path / "store")
+    first = TailCache(tmp_path / "t")
+    histograms(catalogue, SETTINGS, STATION[None, :], CELLS[:3], cache=first, store=store)
     second = TailCache(tmp_path / "t")
     stats: dict[str, int] = {}
     other = np.stack([CELLS[3], CELLS[1], CELLS[0]])
-    found = histograms(catalogue, SETTINGS, STATION[None, :], other, cache=second, stats=stats)
+    found = histograms(
+        catalogue, SETTINGS, STATION[None, :], other, cache=second, store=store, stats=stats
+    )
     # Two of the three were kept; the third was cast, once, for itself alone.
     assert (second.cells_found, second.cells_absent) == (2, 1)
     assert len(list((tmp_path / "t").glob("*/*.npz"))) == 4
+    assert stats["segments"] > 0 and store.made == {"rays_tree": 1}
+    assert store.found == {"rays_tree": 1}
     scene = prepare(catalogue, SETTINGS).scene
-    whole = trace(scene, STATION, other, SETTINGS.traced_rays())
+    whole = trace_tree(scene, STATION, other, SETTINGS.traced_rays())
     np.testing.assert_array_equal(found[0].energy, whole.energy)
     np.testing.assert_array_equal(found[0].moments, whole.moments)
     np.testing.assert_array_equal(found[0].hits, whole.hits)

@@ -3,7 +3,9 @@
 On the host, split over cores, the paths and the histogram are the one
 process's exactly. With a card (the ``gpu`` marker) the kernels are held to
 the numpy code: the same valid images per receiver, the hit points to a
-nanometre, the histogram to the integer, bin by bin.
+nanometre, the histogram to the integer, bin by bin; and the rays' C text
+through the tree, a thread a ray, to the twin through the tree and to the
+grid's kernel, with single precision keeping every ray in a closed room.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ from reverberate.mirror.ism import (
 )
 from reverberate.mirror.rays import RaySettings, trace
 from test_mirror_ism import RECEIVER, SOURCE, box_scene
+from test_mirror_tracer import CELLS, furnished_room
+from test_mirror_tracer import SOURCE as ROOM_SOURCE
 
 gpu = pytest.mark.skipif(not cuda_available(), reason="needs a CUDA device and cupy")
 
@@ -149,3 +153,63 @@ def test_one_card_and_every_card_give_the_same_field() -> None:
     h2 = histogram_on_devices(scene, SOURCE, RECEIVERS, rays)
     np.testing.assert_array_equal(h1.energy, h2.energy)
     np.testing.assert_array_equal(h1.moments, h2.moments)
+
+
+@gpu
+@pytest.mark.parametrize("skip_order", [0, 3])
+def test_the_tree_s_kernel_counts_what_the_twin_and_the_grid_s_kernel_count(
+    skip_order: int,
+) -> None:
+    from reverberate.mirror.tracer import trace_tree
+
+    scene = furnished_room()
+    settings = RaySettings(
+        rays=3000,
+        duration_s=0.15,
+        bin_s=0.002,
+        receiver_radius_m=0.4,
+        seed=9,
+        skip_specular_order=skip_order,
+        skip_window_s=0.012 if skip_order else 0.0,
+    )
+    stats: dict[str, int] = {}
+    twin_stats: dict[str, int] = {}
+    card = histogram_on_devices(scene, ROOM_SOURCE, CELLS, settings, structure="tree", stats=stats)
+    twin = trace_tree(scene, ROOM_SOURCE, CELLS, settings, stats=twin_stats)
+    grid = histogram_on_devices(scene, ROOM_SOURCE, CELLS, settings, structure="grid")
+    assert twin.hits.sum() > 1000
+    for other in (twin, grid):
+        np.testing.assert_array_equal(card.hits, other.hits)
+        assert np.max(np.abs(card.energy - other.energy) * 2**40) <= 2.0
+        assert np.max(np.abs(card.moments - other.moments) * 2**40) <= 2.0
+    for name in ("segments", "nodes", "tests", "escapes", "deposits"):
+        assert stats[name] == twin_stats[name], name
+
+
+@gpu
+def test_the_tree_s_kernel_in_single_precision_keeps_the_rays_in_a_closed_room() -> None:
+    from dataclasses import replace
+
+    scene = furnished_room(cuts=5, alpha=0.12, scattering=0.5)
+    settings = RaySettings(rays=100_000, duration_s=0.3, bin_s=0.002, receiver_radius_m=0.5)
+    counted: dict[str, dict[str, int]] = {"double": {}, "single": {}}
+    found = {
+        precision: histogram_on_devices(
+            scene,
+            ROOM_SOURCE,
+            CELLS,
+            replace(settings, precision=precision),
+            structure="tree",
+            stats=counted[precision],
+        )
+        for precision in counted
+    }
+    # Five million segments each. Double precision, with its bound of a micrometre on a
+    # hit's distance, lets a ray or two through a corner of the room; single must not
+    # let more.
+    assert counted["single"]["segments"] > 5_000_000
+    assert counted["single"]["escapes"] <= max(counted["double"]["escapes"], 2)
+    # The same tail: windows of 50 ms hold tens of thousands of crossings each.
+    windows = {k: h.energy.reshape(3, 6, 25, -1).sum(axis=2)[:, 1:] for k, h in found.items()}
+    level = 10.0 * np.log10(windows["single"] / windows["double"])
+    assert float(np.abs(level).max()) < 0.1
