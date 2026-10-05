@@ -258,11 +258,13 @@ def test_the_tail_of_a_flat_histogram_is_flat() -> None:
         "mirror.render.tail_from_histogram and render.tail.TailPart start the tail "
         "tail_from_s = 10 ms after the first arrival and drop what the rays hold before: "
         "everything scattered, everything off a surface the tree does not mirror, and every "
-        "order above 3 in those 10 ms. In a 4 x 3 x 2.5 m box, absorption 0.2 and scattering "
-        "0.2, 1 m from the source: 21 per cent of what the rays hold apart from the images "
-        "over the first 80 ms, 0.6 dB of the whole response; on the validated field the "
-        "mirror is 0.5 dB short of the wave field from 1.5 to 10 ms in the median and 4 to "
-        "5 dB at the ninth decile"
+        "order above 3 in those 10 ms. The first bounce's scattered part alone, integrated "
+        "over the walls of a box of absorption 0.2: the reflections of the first 10 ms are "
+        "0.3 to 1.5 dB short at scattering 0.2 and 0.9 to 3.1 dB short at 0.4, the shell's "
+        "under the calibration in use (boxes of 4 x 3 x 2.5 m and 9 x 6 x 2.6 m, 1 to 6 m "
+        "from the source; the tracer's own rays give -0.72 dB where the integral gives "
+        "-0.74). On the validated field the mirror is 0.5 dB short of the wave field from "
+        "1.5 to 10 ms in the median, over its 2.4 dB, and 4 to 5 dB at the ninth decile"
     ),
 )
 def test_what_the_rays_hold_before_the_tail_starts_is_rendered() -> None:
@@ -308,8 +310,9 @@ def test_what_the_rays_hold_before_the_tail_starts_is_rendered() -> None:
         "mirror.ism.IsmSettings.flutter_order = 6 renders the images of orders 4 to 6 "
         "between two facing walls, and MirrorSettings.traced_rays tells the rays to leave "
         "out orders 1 to max_order = 3 only: those reflections are in the images and in "
-        "the histogram. In a 4 x 3 x 2.5 m box, 18 of 75 paths; they hold 3 per cent of "
-        "the images' energy 1 m from the source and 7 per cent at 3 m, counted twice"
+        "the histogram. In a 4 x 3 x 2.5 m box, 18 of 75 paths. By the box's own lattice of "
+        "images they hold 0.5 to 3.8 per cent of the images' energy (two boxes, 1 to 6 m, "
+        "scattering 0 to 0.4), counted twice: 0.02 to 0.16 dB of the early reflections"
     ),
 )
 def test_no_image_is_also_a_ray() -> None:
@@ -459,3 +462,206 @@ def test_a_voice_on_its_axis_is_above_the_clip_s_level_by_its_directivity() -> N
     axis = voice_v1().gain_db[:, 0]
     np.testing.assert_allclose(axis, [0.96, 1.41, 2.26, 3.04, 4.08, 5.26, 6.25], atol=0.01)
     assert band_centres(int(RATE))[3] == 1000
+
+
+# --------------------------------------------------------------------------
+# the mirror's colour above the crossover, and what a bounce returns
+# --------------------------------------------------------------------------
+
+
+def _band_limited_pulse(cut_hz: float, size: int = 256) -> np.ndarray:
+    """A pulse flat to ``cut_hz`` and gone above it, as a field solved to there holds its own."""
+    freqs = np.fft.rfftfreq(size, 1.0 / RATE)
+    pulse = np.fft.irfft(1.0 / (1.0 + (freqs / cut_hz) ** 16), size)
+    return np.asarray(np.roll(pulse, size // 4))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "mirror.direct.measure_signature gives the mirror the reference's direct spectrum, "
+        "the band limit of its grid with it, and trace.assets.MirrorAssets carries that "
+        "filter into a pack whose scale is physical and whose wave band ends at 1414 Hz: "
+        "render.engine.SourceRenderer puts every dry signal through it (DryTrack.high). In "
+        "the first scene's pack the mirror's direct sound is -2.4 dB re 1 / d at 1 kHz, "
+        "-2.6 at 2 kHz, -2.5 at 4 kHz, -4.2 at 8 kHz, -5.7 at 12 kHz and -7.4 at 16 kHz: "
+        "1.8 to 5 dB of treble that no physics took, over what the gain takes"
+    ),
+)
+def test_the_mirror_s_direct_sound_is_as_flat_as_a_unit_source_s(tmp_path: Path) -> None:
+    """A pack is physical: ``1 / d`` at 12 kHz as at 2 kHz, whatever grid the reference was on."""
+    distances = np.linspace(0.8, 3.0, 6)
+    reference = _reference_field(
+        tmp_path / "S1.h5", distances, _band_limited_pulse(8000.0), lead_s=0.01
+    )
+    with h5py.File(reference, "r") as handle:
+        omni = [np.asarray(handle["ir"][p, 0], dtype=float) for p in range(distances.size)]
+    taps, _ = measure_signature(omni, RATE)
+    freqs = np.fft.rfftfreq(4096, 1.0 / RATE)
+    colour = db(np.abs(np.fft.rfft(taps, 4096)))
+    assert abs(float(colour[at(freqs, 12000.0)] - colour[at(freqs, 2000.0)])) < 0.5
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "mirror.parameters.image_scene gives the images the class's scattering and "
+        "image_absorption_scale, and apply_parameters gives the rays shell_scattering and "
+        "absorption_scale: the rays leave the images (1 - alpha)(1 - 0.4) of a bounce on "
+        "the shell and scatter the rest, and the images render (1 - alpha')(1 - 0.095) of "
+        "it. Under the calibration in use (c3cec6aab28bb582, hssd_0076, the shell 975 of "
+        "1070 m2) a bounce of orders 1 to 3 returns 1.17 of what it received at 1 kHz "
+        "where the wall keeps 0.82: the images are 2.4 dB a bounce over what the rays left "
+        "them (1.0 dB at 125 Hz, 2.7 dB at 8 kHz), and the fit's tail_gain_db and the tail's "
+        "first 10 ms, which are dropped, take some of it back"
+    ),
+)
+def test_a_bounce_returns_no_more_than_the_wall_keeps() -> None:
+    """Images and rays share a bounce: what one renders is what the other left out."""
+    from dataclasses import replace
+
+    from reverberate.mirror.geometry import MaterialTable
+    from reverberate.mirror.parameters import Parameters, apply_parameters, image_scene
+
+    scene = box_scene(alpha=0.18, scattering=0.05)
+    shell = MaterialTable(("shell",), scene.materials.absorption, scene.materials.scattering)
+    scene = replace(scene, labels=("shell",), materials=shell)
+    # The calibration in use, at 1 kHz, on every band.
+    fitted = Parameters(
+        absorption_scale=tuple(1.039 for _ in OCTAVE_BANDS),
+        scattering_scale=1.906,
+        shell_scattering=0.4,
+        image_absorption_scale=tuple(0.362 for _ in OCTAVE_BANDS),
+    )
+    rays = apply_parameters(scene, fitted).materials
+    images = image_scene(scene, fitted).materials
+    kept = 1.0 - rays.absorption[0]
+    scattered = kept * rays.scattering[0]
+    mirrored = (1.0 - images.absorption[0]) * (1.0 - images.scattering[0])
+    assert float(np.max((scattered + mirrored) / kept)) < 1.02
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "mirror.render.render_point, trace.level.mirror_omni and the engine's tail take "
+        "what a sphere of radius r catches of the direct rays as r^2 / (4 d^2), the small "
+        "angle's value; a sphere catches (1 - sqrt(1 - r^2 / d^2)) / 2, which the tracer "
+        "gives to 0.05 dB (40 000 rays). The tail of a source 0.25 m away is 0.97 dB too "
+        "loud, 0.18 dB at 0.5 m, 0.04 dB at 1 m, with the 0.2 m sphere of every field"
+    ),
+)
+def test_the_tail_s_scale_is_what_the_sphere_catches() -> None:
+    """The rays' own direct energy at 0.25 m against what the renderer expects of it."""
+    from reverberate.mirror.rays import RaySettings, trace
+
+    scene = box_scene(alpha=0.2, scattering=0.2, size=np.array([6.0, 5.0, 4.0]))
+    source = np.array([2.0, 2.5, 2.0])
+    radius, distance = 0.2, 0.25
+    histogram = trace(
+        scene,
+        source,
+        source[None, :] + np.array([[distance, 0.0, 0.0]]),
+        RaySettings(rays=3000, duration_s=0.002, bin_s=0.0001, receiver_radius_m=radius, order=0),
+    )
+    caught = float(histogram.energy[0, :, 3].sum())
+    expected = radius**2 / (4.0 * max(distance, 1.05 * radius) ** 2)
+    assert abs(10.0 * np.log10(caught / expected)) < 0.5
+
+
+# --------------------------------------------------------------------------
+# 6. the bottom of the spectrum
+# --------------------------------------------------------------------------
+
+
+def test_the_wave_band_is_whole_from_50_hz_and_gone_at_20() -> None:
+    """The fit's integrator and low cut against a plain integrator: where the band starts.
+
+    -3 dB at 40 Hz, -1 dB at 43.7 Hz, -0.14 dB at 50 Hz, nothing lost from
+    63 Hz up; -17 dB at 31.5 Hz, -49 dB at 20 Hz. The pair cache of the first
+    scene holds the same: its third octaves from 40 Hz up are level with the
+    rest, 31.5 Hz 8 to 10 dB under and 20 Hz 40 dB under. Nothing in the
+    chain cuts at 80 Hz but the stand-in of the next test.
+    """
+    from scipy.signal import sosfreqz
+
+    from reverberate.accel import dsp
+    from reverberate.accel.pairs import LOWCUT_HZ, LOWCUT_ORDER
+
+    grid_rate = np.sqrt(3.0) * 10.5 * 1500.0
+    sections = dsp.lowcut_sos(grid_rate, LOWCUT_HZ, LOWCUT_ORDER, differentiated=True)
+    freqs = np.array([20.0, 31.5, 40.0, 50.0, 63.0, 80.0, 125.0, 250.0])
+    _, response = sosfreqz(sections, worN=freqs, fs=grid_rate)
+    level = db(np.abs(response) * 2.0 * np.pi * freqs)
+    level -= level[-1]
+    np.testing.assert_allclose(level[3:], 0.0, atol=0.2)
+    assert level[2] == pytest.approx(-3.0, abs=0.2)
+    assert level[1] == pytest.approx(-16.6, abs=1.0)
+    assert level[0] < -45.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "trace.engines.FreeFieldPairs.response keeps nothing under 80 Hz and raises a "
+        "cosine from 80 to 160 Hz (-6 dB at 120 Hz), and render.pack.synthetic_free_field "
+        "does the same (SYNTHETIC_HIGHPASS_HZ): the stand-in for a solve starts an octave "
+        "over the solve, whose band is whole from 50 Hz. A level read on a free field pack "
+        "is short of what a solved pack holds from 40 to 160 Hz, and 'neither band renders "
+        "under 80 Hz' (first-scene-defects.md) is true of the stand-in alone"
+    ),
+)
+def test_the_free_field_stand_in_holds_the_band_a_solve_holds(tmp_path: Path) -> None:
+    """A monopole 2 m away at 63 Hz: the level a solve's own low cut leaves it, -0.0 dB."""
+    from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES
+    from reverberate.trace.engines import FreeFieldPairs
+
+    pairs = FreeFieldPairs(np.array([[2.0, 0.0, 0.0]]), np.zeros((1, 3)), tmp_path, gain=1.0)
+    omni = np.asarray(pairs.response(0, 0)[0], dtype=float)
+    freqs = np.fft.rfftfreq(LOW_SAMPLES, 1.0 / LOW_RATE_HZ)
+    spectrum = np.abs(np.fft.rfft(omni))
+    assert float(db(spectrum[at(freqs, 63.0)] / spectrum[at(freqs, 400.0)])) > -1.0
+
+
+def test_a_sealed_room_keeps_the_volume_its_source_gave_it() -> None:
+    """Why the wave band has a low cut at all: the pressure zone of a room with no leak.
+
+    The solver's unit source is a step of volume velocity: in free air its
+    pressure is a pulse, ``1 / (4 pi d)``, and in a closed room the volume it
+    goes on giving has nowhere to go, so the mean pressure climbs, by
+    ``c^2 / V`` a second for a unit source, under the room's first
+    resonance. That is the model's own answer and a sealed room's (cabin
+    gain), not an error of the scheme; a dwelling leaks and its walls give,
+    which the model does not hold, so what it computes down there is not a
+    dwelling's. The plain integral of the solver's record shows it and the
+    fit's low cut removes it. Measured in this box of 25 litres: the plain
+    integral stands at 8 to 11 after 55 to 110 ms, where the direct pulse
+    is under 1 for one step, and the low cut leaves a mean of 5e-5.
+    """
+    from scipy.signal import sosfilt
+
+    import test_wave_lowband as wave
+    from reverberate.accel import dsp
+    from reverberate.wave.lowband.box import box_arrays
+    from reverberate.wave.lowband.problem import build_problem
+    from reverberate.wave.lowband.solver import drive_for, solve
+
+    arrays, grid = box_arrays(wave.CARTESIAN, (26, 22, 18), room=((4, 4, 4), (20, 17, 13)))
+    source = np.array([[8.0, 9.0, 8.0]]) * grid.h
+    nodes = np.array([wave.node(grid, s) for s in ((12, 11, 9), (18, 6, 6), (6, 15, 11))])
+    problem = build_problem(arrays, wave.seeds_of(grid, source))
+    steps = 2000
+    record = solve(problem, drive_for(problem, grid, source, [nodes], steps * grid.Ts), np)
+    record = np.asarray(record, dtype=float)
+    plain = np.cumsum(record, axis=-1) * grid.Ts
+    cut = sosfilt(dsp.lowcut_sos(1.0 / grid.Ts, 40.0, 8, differentiated=True), record)
+    late = slice(steps // 2, steps)
+    # The same at the three nodes, as a pressure with no wavelength is, and far over the pulse.
+    held = plain[:, late].mean(axis=1)
+    assert held.min() > 3.0 and held.max() / held.min() < 1.2
+    assert abs(float(cut[:, late].mean())) < 0.02 * float(held.mean())
+    # And it climbs as the volume says: c^2 / V a second for the unit source, within a third.
+    volume = float(np.prod(np.array([17, 14, 10]) * grid.h))
+    early = slice(steps // 8, steps // 2)
+    slope = np.polyfit(np.arange(steps)[early] * grid.Ts, plain[:, early].mean(axis=0), 1)[0]
+    assert slope == pytest.approx(C**2 / volume * grid.Ts, rel=0.35)
