@@ -749,6 +749,28 @@ core (`docs/adr/0016-appendix-every-card-every-core.md`):
   pair cache's size again) and is removed when the pack is checked: **the
   disk needs the pair cache twice** besides the pack.
 
+Since lot L15b (the laptop alone: no card has run it) the early trace's
+pairs are sieved and validated by a C text the machine's own compiler
+builds at the first run (`cc`, `gcc`, `clang` or `CC`; 0.25 s, kept under
+`~/.cache/reverberate/native` or `REVERBERATE_NATIVE_CACHE`), and what its
+workers prepared each for themselves is kept once in the run's
+`mirror_store`:
+
+- the log's line `paths: sieved and validated by the compiled text` is the
+  one to look for. `paths: on numpy, about ten times the seconds` names a
+  machine without a compiler: the tables are the same, the stage is not
+  hidden under short solves any more. Install one, or accept it;
+- `mirror_store` is about 8 GB for the whole scene (trees, distance
+  fields). `REVERBERATE_MIRROR_STORE=DIR` puts it where a second run or a
+  second scene of the dwelling finds it; deleting it costs time only;
+- `REVERBERATE_NO_NATIVE=1` forces the `numpy` twin;
+  `REVERBERATE_PATHS_ON_CARD=1` lets a card's worker sieve and validate on
+  its card, and is off until a card has shown one digest with and without
+  it (the commands in the appendix);
+- `trace_report.json` says what made each table (`paths`, `engine`), what
+  the store made and what was read from it (`mirror_store`), and the
+  distance fields solved and read.
+
 ### The options that change the result
 
 Each leaves the default pack byte for byte as it was, and each is a variant
