@@ -46,7 +46,7 @@ grid's kernel stays the one a trace uses until then:
   wide because it is a prediction; section 10 says what it rests on.
 - **Found on the way, and not this lot's to repair** (section 9): at
   100 000 rays the tail is known to a few tenths of a decibel in its first
-  30 dB and to nothing better than 5 to 9 dB from 50 dB down, with every
+  30 dB and to no better than 2 to 9 dB from 50 dB down, with every
   cell's crossings together. It is the estimator, not the precision; rays
   a hundred times cheaper are the first remedy.
 

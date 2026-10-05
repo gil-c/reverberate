@@ -67,7 +67,7 @@ CROSSINGS = 100
 #: ... and where its level is within so many decibels of the loudest the cell holds in the
 #: band; ``None`` reads every one. The tail falls 14 dB every 100 ms on the storey, and
 #: from 50 dB down a window's energy is a few rays that lost least of a hundred bounces:
-#: two seeds of 100 000 rays stand 5 to 9 dB apart there with every cell's crossings
+#: two seeds of 100 000 rays stand 2 to 9 dB apart there with every cell's crossings
 #: together. The figures are given for each depth so that the first does not hide the last.
 DYNAMICS_DB: tuple[float | None, ...] = (30.0, 60.0, None)
 WINDOW_BINS = 25
