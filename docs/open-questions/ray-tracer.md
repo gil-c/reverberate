@@ -413,8 +413,11 @@ count of rays are the owner's, with the figures.
   the identity and leaves one or two double tests a segment; nodes of
   eight children.
 - **The host's side of a site is now visible**: 30 MB of counts brought
-  home, turned to double precision and written as 53 files. Measured by the
-  run; the remedy is the audit's fifth (smaller entries), a lot of its own.
+  home, turned to double precision and written as 53 files: 0.10 s on the
+  laptop (0.02 s to turn them, 0.08 s to write 30.6 MB), and 0.09 s to read
+  a site back, which is the order of the launch itself. Measured by the run
+  on its machine; the remedy is the audit's fifth (smaller entries), a lot
+  of its own.
 - **A site whose cells are partly kept is cast whole** for the cells that
   are not: rays cost the same for one cell or 53. With sites at a second
   or less this is cheaper than any bookkeeping of which rays went where.
