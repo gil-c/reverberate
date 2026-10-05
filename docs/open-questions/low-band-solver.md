@@ -73,18 +73,35 @@ the measure the bar is written in, and 9 points are worse than 7.2 under
 400 Hz: the staircase, not the dispersion, rules. A cheaper grid is
 therefore not shown to be worse than the present one for the listener, and
 not shown to be as good either: the bar as written admits the present grid
-and nothing else. The face centred grid was not measured: PFFDTD's
-voxeliser on the host's nine cores had not finished the storey after 80
-minutes, which alone rules it out of a campaign until the card's voxeliser
-makes that grid. Its wall correction (a wall node's mass scaled to its
-remaining links) was not tried: it changes the grid as any other step does.
+and nothing else.
 
-**Against the three band line** (`compare --line`) the level agrees within
-2.7 dB in the worst band and the error is 0 dB at every band, 100 Hz
-included: the two are not aligned in time or in what they are, a field's
-low side being its 1 kHz grid under 800 Hz and its 4 kHz grid above, with a
-field's own clock. That reference cannot judge a solver until it is
-aligned, and the pairs of the present engine, which can, were used.
+**The face centred grid, measured, is the furthest.** 341 cells against the
+present engine, 7.7 points per wavelength:
+
+| third octave | 100 | 125 | 160 | 200 | 250 | 315 | 400 | 500 | 630 | 800 | 1000 | 1250 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| error, median | -13.6 | -8.8 | -11.2 | -11.8 | -6.4 | -5.5 | -4.3 | -4.0 | -2.8 | -0.9 | 0.1 | 2.2 |
+| error, worst | -5.1 | -3.2 | -3.1 | -3.4 | -2.0 | -1.7 | 2.6 | 1.9 | 4.9 | 4.0 | 5.5 | 11.8 |
+| level, worst | 1.57 | 1.84 | 2.31 | 2.04 | 2.01 | 1.33 | 2.07 | 4.35 | 1.84 | 1.80 | 4.43 | 7.63 |
+
+Its grid was as counted (9.5 M reached nodes of 13.0 M, 0.79 M lossy nodes,
+13 874 steps) and a source position took **15.5 s, 0.059 US cents, seven
+times less than the bundle's grid**, and a pair 0.09 s. But it is 5 dB
+further from the present engine than the Cartesian grid at 7.2 points in
+every band, its level is off by 2 dB in most bands and by 4 to 8 dB in
+three, which is the walls' deficit found on the box, and PFFDTD's voxeliser
+took 120 minutes on the host's nine cores to make it. Its wall correction (a
+wall node's mass scaled to its remaining links) was not tried: at a Courant
+number of 1 a lighter node is past the stability limit, so the correction
+also costs time steps, and the result would still be another staircase.
+
+**Against the three band line** (`compare --line`) the error is 0 dB at
+every band, because the two are not on one clock: a field carries its lead
+and the pair cache is on the geometric clock. Channel 0 of three cells
+correlates best 43 samples at 4 kHz later, 10.75 ms, the lead of that field,
+at 0.84 to 0.87, with levels within 5 %: two grids' agreement, as above.
+`compare --line` does not delay the pairs and its table is not a verdict;
+the pairs of the present engine were the reference.
 
 **Speed, one RTX 3080, the bundle's grid** (47.4 M reached nodes of 63.3 M,
 2.69 M lossy nodes, 32 769 steps):
@@ -96,6 +113,8 @@ aligned, and the pairs of the present engine, which can, were used.
 | batched, 2 | 118 | 0.44 |
 | batched, 4 | 109 | 0.41 |
 | batched, 8 | 105 | 0.40 |
+| batched, Cartesian 7.2 (fails the bar) | 36 | 0.14 |
+| batched, face centred 7.7 (fails the bar) | 15.5 | 0.059 |
 
 1.4e10 node updates a second, whatever the batch: **a batch buys nothing
 on a card whose memory is the limit**, it only spares the launches. A step
