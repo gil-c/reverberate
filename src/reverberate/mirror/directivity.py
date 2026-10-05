@@ -135,6 +135,7 @@ class Directivity:
             "gain_db": np.ascontiguousarray(self.gain_db, dtype=np.float32),
             "angles_deg": np.asarray(self.angles_deg, dtype=np.float64),
             "normalised": self.normalised,
+            "pattern_digest": self.digest,
         }
 
 

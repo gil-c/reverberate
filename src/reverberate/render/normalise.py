@@ -63,6 +63,7 @@ The recipe and its digest are not touched.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -171,10 +172,11 @@ def _restore(f: Any) -> None:
     for model, held in kept["directivity"].items():
         group = f["directivity"][model]
         group["gain_db"][...] = held["gain_db"][...]
-        if "normalised" in held.attrs:
-            group.attrs["normalised"] = _text(held.attrs["normalised"])
-        else:
-            group.attrs.pop("normalised", None)
+        for word in ("normalised", "pattern_sha256"):
+            if word in held.attrs:
+                group.attrs[word] = _text(held.attrs[word])
+            else:
+                group.attrs.pop(word, None)
     for name, held in kept["sources"].items():
         source = f["sources"][name]
         if "seam_db" in held:
@@ -195,8 +197,9 @@ def _keep(f: Any) -> None:
     for model, group in f["directivity"].items():
         held = tables.create_group(model)
         held.create_dataset("gain_db", data=np.asarray(group["gain_db"][...]))
-        if "normalised" in group.attrs:
-            held.attrs["normalised"] = _text(group.attrs["normalised"])
+        for word in ("normalised", "pattern_sha256"):
+            if word in group.attrs:
+                held.attrs[word] = _text(group.attrs[word])
     sources = kept.create_group("sources")
     for name, source in f["sources"].items():
         held = sources.create_group(name)
@@ -402,9 +405,14 @@ def _normalise(
             level = table[:, :1]
         made = (table - level).astype(np.float32)
         if not dry_run:
+            if was == "mean" and "pattern_sha256" not in group.attrs:
+                # The recipe's key is that of the table the trace wrote: kept as a word.
+                stored = np.ascontiguousarray(traced["gain_db"][...], dtype="<f4")
+                group.attrs["pattern_sha256"] = hashlib.sha256(stored.tobytes()).hexdigest()
             group["gain_db"][...] = made
             group.attrs["normalised"] = wanted["directivity"]
-        if np.any(np.abs(level) > 1e-9):
+        # A table already level as asked moves by its single precision, which is nothing.
+        if np.any(np.abs(level) > 1e-5):
             tables[model] = {
                 "was": was,
                 "is": wanted["directivity"],
