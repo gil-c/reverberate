@@ -104,6 +104,19 @@ class Drive:
     record_index: np.ndarray
     record_source: np.ndarray
 
+    @classmethod
+    def nothing(cls, batch: int = 1) -> Drive:
+        """A drive that adds no source and reads no node: a grid stepped for its own sake."""
+        return cls(
+            batch=batch,
+            steps=1,
+            inject_index=np.zeros(0, dtype=np.int64),
+            inject_source=np.zeros(0, dtype=np.int32),
+            inject_signal=np.zeros((0, 1), dtype=np.float32),
+            record_index=np.zeros(0, dtype=np.int64),
+            record_source=np.zeros(0, dtype=np.int32),
+        )
+
 
 def drive_for(
     problem: Problem,
@@ -685,6 +698,7 @@ class CardStepper:
         *,
         boundary: str = "stencil",
         compile: Any = raw_kernel,  # noqa: A002 - what it does
+        shared: CardStepper | None = None,
     ) -> None:
         if problem.max_branches > MAX_BRANCHES:
             raise ValueError(f"a material has more than {MAX_BRANCHES} branches")
@@ -693,6 +707,29 @@ class CardStepper:
         self.problem, self.drive, self.xp, self.boundary = problem, drive, xp, boundary
         p, batch = problem, drive.batch
         in_stencil = boundary == "stencil"
+        threads = self.THREADS
+        self.inject_at = xp.asarray(drive.inject_index * batch + drive.inject_source)
+        self.inject_signal = xp.asarray(np.ascontiguousarray(drive.inject_signal).reshape(-1))
+        self.record_at = xp.asarray(drive.record_index * batch + drive.record_source)
+        self.air_grid = (p.column_count, (p.nz * batch + threads - 1) // threads)
+        if not in_stencil:
+            # What each lossy node held one and two steps before, ``[source, node]``.
+            self.before = [
+                xp.zeros((batch, p.lossy), dtype=xp.float32),
+                xp.zeros((batch, p.lossy), dtype=xp.float32),
+            ]
+            self.lossy_grid = ((p.lossy + threads - 1) // threads, batch)
+        if shared is not None:
+            # The grid and the kernels of a stepper of this problem, on this card: a launch
+            # then uploads its own sources and records, and the grid stays where it is.
+            if shared.problem is not problem or shared.boundary != boundary:
+                raise ValueError("a stepper shares the grid of its own problem and boundary")
+            for name in ("air", "copy", "inject_kernel", "record", "mask", "lateral"):
+                setattr(self, name, getattr(shared, name))
+            for name in ("materials", "lossy", "copies", "words", "lossy_kernel"):
+                if hasattr(shared, name):
+                    setattr(self, name, getattr(shared, name))
+            return
         name = "lowband_step" if in_stencil else "lowband_air"
         self.air = compile(
             _AIR_KERNEL
@@ -729,18 +766,7 @@ class CardStepper:
                 xp.asarray(a)
                 for a in (p.bn_column[rows], p.bn_z[rows], p.lossy_material, p.lossy_ssaf)
             )
-            # What each lossy node held one and two steps before, ``[source, node]``.
-            self.before = [
-                xp.zeros((batch, p.lossy), dtype=xp.float32),
-                xp.zeros((batch, p.lossy), dtype=xp.float32),
-            ]
-            self.lossy_grid = ((p.lossy + self.THREADS - 1) // self.THREADS, batch)
         self.copies = [(xp.asarray(dst), xp.asarray(src), int(dst.size)) for dst, src in p.copies]
-        self.inject_at = xp.asarray(drive.inject_index * batch + drive.inject_source)
-        self.inject_signal = xp.asarray(np.ascontiguousarray(drive.inject_signal).reshape(-1))
-        self.record_at = xp.asarray(drive.record_index * batch + drive.record_source)
-        threads = self.THREADS
-        self.air_grid = (p.column_count, (p.nz * batch + threads - 1) // threads)
 
     def state(self) -> State:
         return State.zeros(self.problem, self.drive.batch, self.xp)

@@ -410,6 +410,17 @@ def build_problem(arrays: EngineArrays, seeds: np.ndarray | None = None) -> Prob
     bits = np.zeros(bn.size, dtype=np.uint16)
     for j in range(len(scheme.neighbours)):
         bits |= arrays.adj_bn[:, j].astype(np.uint16) << np.uint16(j)
+    mat_bn = np.asarray(arrays.mat_bn, dtype=np.int8)
+    saf_bn = np.asarray(arrays.saf_bn, dtype=np.float64)
+    if bn.size and bool((np.diff(bn) < 0).any()):
+        # The grid's order, a column after another: the order a card walks the branches in.
+        ascending = np.argsort(bn, kind="stable")
+        bn, bits, mat_bn, saf_bn = (
+            bn[ascending],
+            bits[ascending],
+            mat_bn[ascending],
+            saf_bn[ascending],
+        )
     interior = _interior(arrays.shape)
     if bn.size and not interior[bn].all():
         raise ValueError("a boundary node lies on the box's outer layer")
@@ -466,8 +477,8 @@ def build_problem(arrays: EngineArrays, seeds: np.ndarray | None = None) -> Prob
 
     chosen = reached[bn]
     bn_kept = bn[chosen]
-    material = np.asarray(arrays.mat_bn, dtype=np.int8)[chosen]
-    saf = np.asarray(arrays.saf_bn, dtype=np.float64)[chosen]
+    material = mat_bn[chosen]
+    saf = saf_bn[chosen]
     # ``ssaf_bn``: the surface factor cast to single, rescaled on the face centred grid.
     if arrays.fcc_flag > 0:
         ssaf = (np.float32(0.5 / np.sqrt(2.0)) * saf).astype(np.float32)
@@ -529,15 +540,42 @@ def load_problem(
     *,
     prune_above: float | None = None,
     fmax_hz: float | None = None,
+    walls: Any = None,
+    walls_file: Path | str | None = None,
+    outside: str | None = None,
 ) -> Problem:
-    """:func:`build_problem` of a cache entry; ``prune_above`` drops the high branches."""
+    """:func:`build_problem` of a cache entry, as it is unless told otherwise.
+
+    ``prune_above`` drops the high branches. ``walls``, a
+    :class:`reverberate.wave.lowband.walls.WallFit`, fits every material
+    again for the band with fewer branches; the fit is kept in
+    ``walls_file`` when given, so that the workers of a campaign read one
+    fit and do not each make their own. ``outside`` (``"open"`` or
+    ``"rigid"``) cuts off the air between the dwelling's outer walls and
+    its shell (:mod:`reverberate.wave.lowband.outside`) and needs
+    ``seeds``. Each changes what is solved, and is in the problem's record.
+    """
     arrays = read_entry(entry_dir)
-    pruned = None
+    record: dict[str, Any] = {}
     if prune_above is not None:
         if fmax_hz is None:
             raise ValueError("pruning the branches needs the band's fmax")
-        arrays.materials, pruned = prune_branches(arrays.materials, fmax_hz, above=prune_above)
+        arrays.materials, record["pruned"] = prune_branches(
+            arrays.materials, fmax_hz, above=prune_above
+        )
+    if outside is not None:
+        from reverberate.wave.lowband.outside import outside_air, reach_of, without
+
+        if seeds is None:
+            raise ValueError("the outside is what the sources reach beyond the walls: give seeds")
+        mask, found = outside_air(reach_of(arrays, seeds), arrays.h)
+        arrays, cut = without(arrays, mask, closure=outside)
+        record["outside"] = {**found, **cut}
+    if walls is not None:
+        from reverberate.wave.lowband.walls import refit_kept
+
+        arrays.materials, record["walls"] = refit_kept(arrays.materials, walls, walls_file)
     problem = build_problem(arrays, seeds)
-    if pruned is not None:
-        problem.record["pruned"] = pruned
+    problem.record.update(record)
+    problem.record["branches"] = problem.max_branches
     return problem
