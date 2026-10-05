@@ -2,15 +2,17 @@
 
 Date: 2026-10-05
 
-Status: **designed, written and proven on the host; no card has run it.**
-Lot L24 of ADR 0016, after the performance audit
+Status: **measured on a card (section 13) and the default since**: an RTX
+3090 Ti casts a site of 100 000 rays in 0.58 s through the tree, in double
+precision, where the grid took 9.7 s, and gives the grid's histograms.
+Sections 1 to 12 are the design as it was written before the card, with its
+predictions left as they were made. Lot L24 of ADR 0016, after the
+performance audit
 (`performance-audit.md`, section 3) counted the tail's rays at 130 to 1300
 times their floor. Every figure says where it comes from: a count made on
 the laptop on the storey's own mirror (`hssd_0076`, 1 478 245 triangles, the
 bundle of the first scene), a test of the suite, or a prediction with its
-basis. What a card must still say is in section 11, with the commands. The
-grid's kernel stays the one a trace uses until then:
-`REVERBERATE_RAY_STRUCTURE=tree` selects what is described here.
+basis. `REVERBERATE_RAY_STRUCTURE=grid` selects the grid's kernel again.
 
 ## 1. The answer
 
@@ -429,3 +431,117 @@ count of rays are the owner's, with the figures.
 - **Not done**: the plan's cost constants (after the card); the
   histograms' storage; the viewer's sample of rays (`viz/computed_rays.py`)
   still walks the grid's twin.
+
+## 13. Measured on a card
+
+One RTX 3090 Ti (24 GB, 18 cores), 2026-10-05, the code of this lot, the
+first scene's bundle (1 478 245 triangles, 53 tail cells), 20 source
+positions of the dwelling taken evenly; `scripts/bench_rays.py` and
+`scripts/profile_rays_site.py`. **The card's compiler took the text as the
+host's had it: nothing was changed.** The tests of section 11 passed at the
+first run (29 passed, the two-card one skipped).
+
+### What a site costs
+
+| | 100 000 rays | | 1 000 000 rays | |
+| --- | --- | --- | --- | --- |
+| | a site | segments a second | a site | segments a second |
+| the grid, double precision | 9.67 s | 1.45e6 | 93.7 s | 1.49e6 |
+| the tree, double precision | 0.54 s | 28.1e6 | 4.45 s | 31.3e6 |
+| the tree, single precision | 0.19 s | 94.7e6 | 1.31 s | 109e6 |
+
+(The whole call, the counts brought home; 13.8e6 segments a site, 45.2
+nodes and 8.48 tests a segment; the grid on one site, the tree on twenty.)
+**The tree is 18 times the grid in double precision and 50 times in
+single.** The prediction was 0.1 to 1 s and 0.05 to 0.5 s: the middle of
+both brackets, and one order short of the audit's floor, which is a tuned
+wide tree's.
+
+Where the 0.58 s of a site go, as `mirror.tails.histograms` makes it:
+
+| | double | single |
+| --- | --- | --- |
+| the launch | 0.489 s | 0.147 s |
+| its arrays (the receivers' tree, the source), the counts home | 0.011 s | 0.012 s |
+| counts to energies | 0.009 s | 0.009 s |
+| 53 entries written | 0.056 s | 0.059 s |
+| 53 entries read back | about 0.09 s, removed since | |
+| the whole | 0.58 s | 0.29 s |
+
+The card is at 100 per cent for the launch. In double precision the host is
+a sixth of a site; the triangle tests are the other two thirds of the
+launch (0.49 s against 0.15 s for the same nodes). What was weighed and not
+done, with the measure that decides:
+
+- **Several sites a launch, the writes off the critical path**: 0.07 s of
+  0.58 s a site, 14 s a recipe. Not worth a queue. The entries read back
+  after they were written were 0.09 s and are held in memory instead.
+- **Compacting or sorting the rays**: of 3200 rays of a site followed one
+  by one, the mean lives 140 segments, nineteen in twenty between 124 and
+  157, and one 1214. A warp of 32 lasts 194 segments in the mean: its lanes
+  idle 28 per cent of their time. A wavefront would recover at most that, a
+  factor of 1.4 on the launch, and pay a ray's state read and written at
+  every bounce. Not done.
+- **What would pay**, if the tail's seconds matter again: a single
+  precision test before the double one, conservative as the boxes are. It
+  keeps the identity and takes the launch from 0.49 s towards 0.15 s.
+
+### The same histograms
+
+The tree in double precision against the grid's kernel, the same seed, 20
+sites, 8 136 926 crossings: **13 sites equal in every bin; 19 crossings
+differ in all**, six at most at a site, by one ray's energy each (section 4
+says why: the grid's kernel tests on the scaled direction). The card's text
+is the twin's to the count on the furnished room, nodes and tests included.
+
+Rays that meet no triangle, per million: the grid 30.5, the tree 30.5, single
+precision 28.0. (The grid's count first read 1364: it took a ray that ran
+out of reach for one that left the dwelling. Corrected in the kernel.)
+
+### Single precision, and what a million rays buy
+
+Two seeds of double precision, and single against double at one seed; the
+median site of twenty and the worst; root mean square, dB:
+
+| | two seeds, 1e5 | two seeds, 1e6 | single, 1e5 | single, 1e6 |
+| --- | --- | --- | --- | --- |
+| every cell together, windows of 50 ms, the first 30 dB | 0.09, 0.28 | 0.03, 0.09 | 0.02, 0.04 | 0.01, 0.01 |
+| the same, the first 60 dB | 0.57, 6.6 | 0.34, 1.3 | 0.11, 0.49 | 0.07, 0.57 |
+| a cell's windows of 50 ms, the first 30 dB | 1.41, 2.39 | 0.58, 1.13 | 0.48, 1.03 | 0.17, 0.24 |
+| the same, the first 60 dB | 3.14, 3.92 | 1.90, 2.73 | 1.60, 2.03 | 0.98, 1.73 |
+| a cell's bins of 2 ms, the first 30 dB, at 1e5 (178 bins) | 0.53, 0.86 | | 0.00, 0.03 | |
+
+- **Single precision is the same tail**: in every root mean square within
+  60 dB it stands nearer to double than a second seed does, at all 20
+  sites; with every cell together, four to seven times nearer. In single
+  worst values and over the whole depth, where a window is a few rays, it
+  is farther than the second seed at up to 7 sites of 20, as an independent
+  draw would be at 10.
+- **A million rays take a cell's windows from 1.4 dB to 0.6 dB in the first
+  30 dB** (2.4 times, where the square root of ten is 3.2) **and from 3.1
+  to 1.9 dB in the first 60 dB** (1.65 times). The last 20 dB are not a
+  matter of count: section 9's remedy stands.
+
+### The tail's cost, as measured
+
+On this card at 0.196 USD an hour, the rays in double precision, the host's
+side included:
+
+| | the grid, 1e5 | the tree, 1e5 | the tree, 1e6 | single, 1e6 |
+| --- | --- | --- | --- | --- |
+| a site | 9.7 s | 0.58 s | 4.5 s | 1.4 s |
+| a recipe (202 sites) | 1950 s | 117 s, 0.006 USD | 910 s, 0.05 USD | 285 s |
+| a dwelling (340 sites, once, then read by every recipe) | 3290 s a recipe's worth | 197 s, 0.011 USD | 1530 s, 0.083 USD | 480 s |
+
+### What was set
+
+- **The tree is the default structure** (`mirror.tracer.structure`); the
+  grid's kernel is asked for with `REVERBERATE_RAY_STRUCTURE=grid`.
+- **Double precision stays the default**: 117 s a recipe is nothing against
+  its solves, and the histograms are the validated ones with no statistics
+  to argue. Single precision is `RaySettings.precision = "single"`, proven
+  above, for whoever casts a million rays.
+- `trace/plan.py`: `RAYS_SITE_S = 0.53`, `RAYS_SITE_CELL_S = 0.001` (0.58 s a
+  site over 53 cells; a cell adds its entry's write).
+- The count of rays is the owner's: the table above is the evidence.
+

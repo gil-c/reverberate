@@ -344,7 +344,11 @@ extern "C" __global__ void rays(
         });
         double segment = best_t < remaining ? best_t : remaining;
         segments += 1;
-        if (best_tri < 0) escaped = 1;
+        /* Met no triangle, and not for want of reach: the segment's end is out of the grid. */
+        if (best_tri < 0) {
+            for (int k = 0; k < 3; ++k)
+                if (end[k] < g.origin[k] || end[k] > g.origin[k] + g.shape[k] * g.cell) escaped = 1;
+        }
         /* Receivers whose sphere the segment enters: the twin's ``_sphere_crossings``,
            over the receivers listed in the cells the segment crosses, each counted in
            the cell its entry point lies in. */

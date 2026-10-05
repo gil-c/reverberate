@@ -122,10 +122,12 @@ PATHS_FIXED_S = 10.0
 #: A distinct (source, head) position of the batched trace, its diffracted onset included:
 #: 26 ms on a window of 8257 of them, 20 ms on one of 18 809.
 PATH_JOB_S = 0.0223
-#: A tail site's rays, and what a tail cell adds to them: 12.8 s a site over 18 cells and
-#: 14.5 s over 29. Two points: beyond 29 cells this is an extrapolation.
-RAYS_SITE_S = 10.0
-RAYS_SITE_CELL_S = 0.155
+#: A tail site's rays through the tree, in double precision, and what a tail cell adds to
+#: them: 0.58 s a site over 53 cells on an RTX 3090 Ti (2026-10-05), of which 0.49 s are the
+#: launch, whatever the cells, and 0.056 s the 53 entries written. Through the grid it was
+#: 12.8 s a site over 18 cells and 14.5 s over 29 on an RTX 3090.
+RAYS_SITE_S = 0.53
+RAYS_SITE_CELL_S = 0.001
 #: The rays those were measured with; a site of another count is priced in proportion.
 RAYS_MEASURED = 100_000
 #: A pair's seam and onset, the tails' tables of the pairs included: 62 and 83 ms.

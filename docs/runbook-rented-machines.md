@@ -775,9 +775,11 @@ workers prepared each for themselves is kept once in the run's
   an entry a (site, cell)): a second recipe of the dwelling casts rays only
   from the sites, and for the cells, that no earlier recipe read. Without
   it they stay in the run's own `tails`;
-- `REVERBERATE_RAY_STRUCTURE=tree` casts the rays through a hierarchy of
-  boxes in place of the uniform grid (`docs/open-questions/ray-tracer.md`):
-  the same histograms, and off until a card has shown it;
+- the rays are cast through a hierarchy of boxes
+  (`docs/open-questions/ray-tracer.md`): 0.58 s a site of 100 000 rays on
+  an RTX 3090 Ti where the uniform grid took 9.7 s, and the same
+  histograms. `REVERBERATE_RAY_STRUCTURE=grid` casts them through the grid
+  again;
 - `REVERBERATE_NO_NATIVE=1` forces the `numpy` twin;
   `REVERBERATE_PATHS_ON_CARD=1` lets a card's worker sieve and validate on
   its card, and is off until a card has shown one digest with and without

@@ -430,6 +430,15 @@ def test_through_the_tree_the_engine_gives_the_grid_s_histogram(cores: int) -> N
         tracer.structure("octree")
 
 
+def test_the_tree_is_what_the_rays_go_through_and_the_grid_can_be_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(tracer.STRUCTURE_VARIABLE, raising=False)
+    assert tracer.structure() == "tree" and tracer.structure("grid") == "grid"
+    monkeypatch.setenv(tracer.STRUCTURE_VARIABLE, "grid")
+    assert tracer.structure() == "grid" and tracer.structure("tree") == "tree"
+
+
 def test_a_precision_is_recorded_where_it_is_not_the_reference_s() -> None:
     assert "precision" not in RaySettings().record()
     assert RaySettings(precision="single").record()["precision"] == "single"
