@@ -262,8 +262,11 @@ def test_two_processes_on_one_store_make_each_entry_once_between_them(tmp_path: 
             target=_walk_in_a_process, args=(str(tmp_path / "both"), there), daemon=True
         )
         process.start()
+        there.close()
         links.append(here)
         processes.append(process)
+    # A process that dies answers nothing: said within a minute, not waited for.
+    assert all(link.poll(60.0) for link in links), "a process did not answer"
     answers = [link.recv() for link in links]
     for process in processes:
         process.join(timeout=20)
