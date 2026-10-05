@@ -33,7 +33,7 @@ from reverberate.mirror.hybrid import Crossover
 from reverberate.scenes import Recipe, save_recipe
 from reverberate.spatial.lowband import pair_key
 from reverberate.trace.assets import MirrorAssets
-from reverberate.trace.plan import Plan, estimate
+from reverberate.trace.plan import RAYS_MEASURED, Plan, estimate
 from reverberate.trace.run import KIND
 
 __all__ = ["build_bundle", "carry_early", "carry_pairs", "code_version", "export_digest"]
@@ -117,6 +117,7 @@ def build_bundle(
     low_engine: str = "lowband",
     low_scheme: str = "cartesian",
     low_ppw: float | None = None,
+    low_seconds: float | None = None,
     reuse_from: Path | None = None,
 ) -> dict[str, Any]:
     """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``.
@@ -128,6 +129,12 @@ def build_bundle(
     its pairs never meet the validated grid's, in this machine's cache or
     in the store, and the recipe's ``voxel_low_key`` is then allowed to
     differ, that key alone.
+
+    ``low_seconds`` solves the low band for fewer seconds than the pack's
+    1.2: the campaign simulates that long, a pair's key names it (so the
+    two never meet in a cache), and the trace stores each response at the
+    pack's length, faded to nothing at its end
+    (:func:`reverberate.trace.level.at_pack_length`).
 
     ``reuse_from`` is the home of an earlier run of the recipe: the early
     tables it brought home are carried (``early_cache``), and a table whose
@@ -143,6 +150,8 @@ def build_bundle(
         check=check,
         low_engine=low_engine,
         low_ppw=low_ppw if low_engine == "lowband" else None,
+        low_seconds=low_seconds,
+        rays=None if assets.settings.rays.rays == RAYS_MEASURED else assets.settings.rays.rays,
     )
     plan.save(held)
     (held / "plan.json").write_text(
@@ -159,6 +168,7 @@ def build_bundle(
     if models_from is not None or hssd_root is not None:
         from reverberate.accel.pairs import PairCache, prepare_pairs_bundle
 
+        seconds: dict[str, Any] = {} if low_seconds is None else {"duration_s": float(low_seconds)}
         pairs = prepare_pairs_bundle(
             bundle / "pairs",
             scene_id=recipe.dwelling.scene_id,
@@ -167,6 +177,7 @@ def build_bundle(
             heard_at=plan.heard_at,
             models_from=models_from,
             hssd_root=hssd_root,
+            **seconds,
         )
         export = export_digest(bundle / "pairs" / pairs["models"])
         # What the rental is sized by, read from this directory and not from ``pairs``.
@@ -198,6 +209,8 @@ def build_bundle(
             "solver": solver,
             "bundle_grid": key == str(pairs["bands"]["low"]["cache_key"]),
         }
+        if low_seconds is not None:
+            low["seconds"] = float(low_seconds)
         if with_cache:
             campaign["pairs_carried"] = carry_pairs(
                 bundle / "pairs_cache",

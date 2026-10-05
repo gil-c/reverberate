@@ -1,0 +1,40 @@
+{
+ "set": "listening_v1",
+ "variants": [
+  {
+   "name": "reference",
+   "says": "Cartesian grid at 10.5 points per wavelength, rails every 8 cm read from 2 positions, low response 1.2 s, 100 000 rays",
+   "flags": {}
+  },
+  {
+   "name": "grid-7.2",
+   "says": "the wave grid at 7.2 points per wavelength: a solve three times cheaper, more dispersion towards 1.5 kHz",
+   "flags": {"low_ppw": 7.2}
+  },
+  {
+   "name": "rail-10cm-x8",
+   "says": "rails solved every 10 cm, a moving source read from 8 positions weighted per frequency",
+   "flags": {"rail_pitch_m": 0.1, "rail_positions": 8}
+  },
+  {
+   "name": "rail-12cm-x8",
+   "says": "rails solved every 12 cm, read from 8 positions: half a wavelength at 1.4 kHz, where the low mask ends",
+   "flags": {"rail_pitch_m": 0.12, "rail_positions": 8}
+  },
+  {
+   "name": "low-0.8s",
+   "says": "the low band solved for 0.8 s and faded to nothing over its last 20 ms",
+   "flags": {"low_seconds": 0.8}
+  },
+  {
+   "name": "rays-50k",
+   "says": "a tail site casts 50 000 rays: the same energy, read with more noise",
+   "flags": {"rays": 50000}
+  },
+  {
+   "name": "all-cheap",
+   "says": "7.2 points per wavelength, rails every 12 cm read from 8 positions, low response 0.8 s",
+   "flags": {"low_ppw": 7.2, "rail_pitch_m": 0.12, "rail_positions": 8, "low_seconds": 0.8}
+  }
+ ]
+}

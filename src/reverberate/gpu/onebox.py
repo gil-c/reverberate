@@ -848,7 +848,8 @@ def watch(
 
     A failed or stalled campaign is relaunched once from its state on disk;
     the second time it is the outcome. Every ``sync_s`` what ``sync`` names
-    is brought home (:func:`sync_home`), within the pause between two looks. A look that cannot be taken (the
+    is brought home (:func:`sync_home`), within the pause between two looks.
+    A look that cannot be taken (the
     API or the laptop's own line failing) is said and taken again: only
     the deadline, the campaign's end or the instance's ends the watch.
     """

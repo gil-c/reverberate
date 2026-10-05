@@ -549,8 +549,8 @@ class TestTheHomecoming:
 
         monkeypatch.setattr(onebox, "monitor_once", look)
         monkeypatch.setattr(onebox, "sync_home", home_pass)
-        monkeypatch.setattr(onebox.time, "time", lambda: clock["t"])
-        monkeypatch.setattr(onebox.time, "sleep", sleep)
+        monkeypatch.setattr(time, "time", lambda: clock["t"])
+        monkeypatch.setattr(time, "sleep", sleep)
         onebox.watch(
             None,
             1,

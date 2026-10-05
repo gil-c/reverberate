@@ -602,12 +602,13 @@ class TestTheCampaign:
             """A card with all its memory when the plan is made, and little of it after."""
 
             looks = 0
+            holds = 0.0
 
             def free_bytes(self, xp: Any) -> float:
                 self.looks += 1
                 if self.looks == 1:
                     return 1e12
-                return (self.problem_bytes + 1.0) / 0.8
+                return (self.holds + 1.0) / 0.8
 
         crowded = Crowded(
             bundle=machine["bundle"], out=machine["root"] / "crowded", pffdtd_dir=machine["root"]
@@ -617,7 +618,7 @@ class TestTheCampaign:
         problem = build_problem(read_entry(crowded.entry_path), seeds_of(crowded.grid, SOURCES))
         rows = int(crowded.cell_nodes(0).size)
         # What is free after the plan holds one source read at one cell, and no more.
-        crowded.problem_bytes = problem.bytes_shared() + batch_bytes(
+        crowded.holds = problem.bytes_shared() + batch_bytes(
             [Item(0, (0,), rows)], problem, crowded.steps
         )
         crowded.run()

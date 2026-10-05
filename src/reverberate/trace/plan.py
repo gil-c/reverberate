@@ -47,7 +47,7 @@ from reverberate.scenes import (
     source_state,
 )
 from reverberate.scenes.recipe import Rail, Rise, Travel
-from reverberate.spatial.lowband import solve_fmax_hz
+from reverberate.spatial.lowband import LOW_DURATION_S, solve_fmax_hz
 from reverberate.spatial.rail import band_limited_weights, knots_hz, nearest_samples
 from reverberate.spatial.translate import (
     EXACT_UNDER_M,
@@ -126,6 +126,8 @@ PATH_JOB_S = 0.0223
 #: 14.5 s over 29. Two points: beyond 29 cells this is an extrapolation.
 RAYS_SITE_S = 10.0
 RAYS_SITE_CELL_S = 0.155
+#: The rays those were measured with; a site of another count is priced in proportion.
+RAYS_MEASURED = 100_000
 #: A pair's seam and onset, the tails' tables of the pairs included: 62 and 83 ms.
 LEVEL_PAIR_S = 0.083
 #: A pair's 64 channels through the air and the masks, into the pack: 7 ms a pair on 1894
@@ -1087,6 +1089,8 @@ def estimate(
     check: str | None = None,
     low_engine: str = "lowband",
     low_ppw: float | None = None,
+    low_seconds: float | None = None,
+    rays: int | None = None,
 ) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
 
@@ -1096,7 +1100,11 @@ def estimate(
     makes them: a source position heard at more cells than its 20 GB hold
     records for is solved more than once (``low.solves``,
     ``extra_solves``). ``low_ppw`` prices the batched solver on another
-    Cartesian grid than the bundle's.
+    Cartesian grid than the bundle's. ``low_seconds`` prices a solve of
+    fewer seconds than the pack's 1.2: the solve and a cell's records go
+    as them, and so does the pair cache's way home; the pack is as long.
+    ``rays`` prices a tail site of another count than the 100 000 the
+    rays' constants were measured at, in proportion.
 
     The low band is priced by the engine that solves it: the batched solver
     (:func:`reverberate.wave.lowband.pairs.estimate`, measured on one RTX
@@ -1129,26 +1137,34 @@ def estimate(
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
     scene_pairs = pairs - int(record.get("pairs_of_the_patch", 0))
     solves = positions
+    window = LOW_DURATION_S if low_seconds is None else float(low_seconds)
+    if not 0.0 < window <= LOW_DURATION_S:
+        raise ValueError(f"the low band is solved for up to {LOW_DURATION_S} s, not {window}")
+    cast = RAYS_MEASURED if rays is None else int(rays)
     if low_engine == "lowband":
         counts = [int(c) for c in record.get("cells_a_position", [])]
-        counted = batched.solves_needed(counts, batched.MEASURED_CARD_GIB, ppw=low_ppw)
+        counted = batched.solves_needed(
+            counts, batched.MEASURED_CARD_GIB, ppw=low_ppw, duration_s=window
+        )
         solves = counted if counts and counted is not None else positions
         low = batched.estimate(
             solves,
             pairs,
             fmax_hz=solve_fmax_hz(),
+            duration_s=window,
             rate_usd_per_hour=rate_usd_per_hour,
             ppw=low_ppw,
         )
     else:
-        if low_ppw is not None:
-            raise ValueError("only the batched solver is priced on another grid")
+        if low_ppw is not None or low_seconds is not None:
+            raise ValueError("only the batched solver is priced on another grid or duration")
         low = pairs_estimate(
             positions, pairs, fmax_hz=solve_fmax_hz(), rate_usd_per_hour=rate_usd_per_hour
         )
     histograms = int(record["tail_sites"]) * int(record["tail_cells"])
     pack_bytes = scene_pairs * PAIR_BYTES + histograms * HISTOGRAM_BYTES
     jobs = int(record["step_pairs"]) + scene_pairs
+    pair_bytes = pairs * PAIR_BYTES * (window / LOW_DURATION_S)
     if check is None:
         check = "full" if dict(record.get("profile", {})).get("seconds") is not None else "read"
     seconds = {
@@ -1156,12 +1172,13 @@ def estimate(
         "low": float(low["seconds"]),
         "paths": (PATHS_FIXED_S if jobs else 0.0) + jobs * PATH_JOB_S,
         "rays": int(record["tail_sites"])
-        * (RAYS_SITE_S + int(record["tail_cells"]) * RAYS_SITE_CELL_S),
+        * (RAYS_SITE_S + int(record["tail_cells"]) * RAYS_SITE_CELL_S)
+        * (cast / RAYS_MEASURED),
         "level": scene_pairs * LEVEL_PAIR_S,
         "write": scene_pairs * WRITE_PAIR_S,
         "check": CHECK_READ_S + (CHECK_FULL_S if check == "full" else 0.0),
         "transfer_pack": pack_bytes / FETCH_BYTES_PER_S,
-        "transfer_pairs": pairs * PAIR_BYTES / FETCH_BYTES_PER_S if fetch_pairs else 0.0,
+        "transfer_pairs": pair_bytes / FETCH_BYTES_PER_S if fetch_pairs else 0.0,
     }
     total = float(sum(seconds.values()))
     measured = [name for name in seconds if name in MEASURED_ON]
@@ -1176,12 +1193,15 @@ def estimate(
         "non_solve_s": round(total - seconds["low"], 1),
         "non_solve_usd": round((total - seconds["low"]) / 3600.0 * rate_usd_per_hour, 3),
         "pack_gb": round(pack_bytes / 1e9, 2),
-        "pair_cache_gb": round(pairs * PAIR_BYTES / 1e9, 2),
+        "pair_cache_gb": round(pair_bytes / 1e9, 2),
         "pairs_fetched": bool(fetch_pairs),
         "check": check,
         "low": low,
         "low_engine": low_engine,
         "low_ppw": low_ppw,
+        # Named only when they are not the reference's, whose records they leave as they were.
+        **({} if low_seconds is None else {"low_seconds": window}),
+        **({} if rays is None else {"rays": cast}),
         "solves": solves,
         "extra_solves": solves - positions,
         "measured": measured,

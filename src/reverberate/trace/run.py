@@ -81,6 +81,7 @@ from reverberate.trace.assets import MirrorAssets, directivity_models, found_ass
 from reverberate.trace.computed import write_as_computed
 from reverberate.trace.engines import CardPairs, PairsEngine
 from reverberate.trace.level import (
+    at_pack_length,
     first_arrival_s,
     mirror_omni,
     pair_low,
@@ -562,8 +563,9 @@ class Trace:
         assert self.engine is not None
         settings = self.assets.settings
         # The seam and the onset are read on channel 0 alone: the others wait for ``write``.
+        solved = self.engine.cache.read(self.pair_key[j])[:1]
         onset, aired = pair_omni(
-            self.engine.cache.read(self.pair_key[j])[:1],
+            at_pack_length(solved),
             atmosphere,
             sound_speed_m_s=settings.sound_speed_m_s,
             lead_s=self.assets.pack_lead_s,
@@ -584,8 +586,9 @@ class Trace:
             # A diffracted onset has no reflection either: the direct path is a kind, not an order.
             "direct": bool(np.any(self.pair_early.kind[self.pair_early.rows(j)] == KIND_DIRECT)),
             # The engine convolves a response as it stands: one that rings up to its
-            # last 50 ms was cut, or wrapped, by whatever made it.
-            "end_db": _end_db(aired),
+            # last 50 ms was cut, or wrapped, by whatever made it. One solved for fewer
+            # seconds than the pack keeps is read where its solve ended, before its fade.
+            "end_db": _end_db(aired if solved.shape[-1] == aired.shape[-1] else solved[0]),
         }
 
     def level(self) -> None:
@@ -673,7 +676,7 @@ class Trace:
         t0 = time.time()
         # On the card when there is one: 64 channels of air and masks a pair.
         row = pair_low(
-            self.engine.cache.read(self.pair_key[j]),
+            at_pack_length(self.engine.cache.read(self.pair_key[j])),
             self.crossover,
             atmosphere,
             sound_speed_m_s=self.assets.settings.sound_speed_m_s,
@@ -893,7 +896,7 @@ class Trace:
             worst = 0.0
             some = list(range(0, len(self.pairs), max(1, len(self.pairs) // 8)))[:8]
             for j in some:
-                cached = self.engine.cache.read(self.pair_key[j])
+                cached = at_pack_length(self.engine.cache.read(self.pair_key[j]))
                 c = self.assets.settings.sound_speed_m_s
                 on_host, on_card = (
                     pair_low(cached, self.crossover, atmosphere, sound_speed_m_s=c, xp=xp)[0]

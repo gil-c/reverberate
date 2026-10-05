@@ -90,11 +90,19 @@ PPW_EXPONENT = 2.96
 #: solve held on it: the realistic recipe's 1646 positions took 1763 solves there.
 MEASURED_CARD_GIB = 20.0
 CELLS_A_SOLVE_MEASURED = 57
+#: The seconds those solves simulated: a solve, and a cell's records, go as them.
+MEASURED_DURATION_S = 1.2
 #: Bytes of record a cell takes on the measured grid: 984 nodes, 4 bytes a step.
 CELL_RECORD_BYTES_AT_1500 = 984 * 4.0 * STEPS_AT_1500
 
 
-def cells_a_solve(card_gib: float, *, ppw: float | None = None, fmax_hz: float = 1500.0) -> int:
+def cells_a_solve(
+    card_gib: float,
+    *,
+    ppw: float | None = None,
+    fmax_hz: float = 1500.0,
+    duration_s: float = MEASURED_DURATION_S,
+) -> int:
     """The cells one solve can be read at on a card of ``card_gib``; 0 when it holds none.
 
     The batch's share of the card (:data:`MEMORY_SHARE`) less what the
@@ -103,21 +111,25 @@ def cells_a_solve(card_gib: float, *, ppw: float | None = None, fmax_hz: float =
     makes this give the 57 cells measured on a 20 GiB card, 9.8 GB, scaled
     as the nodes of another grid. A cell's array has the same number of
     nodes on every grid (its radius is twelve steps) and its records go as
-    the steps.
+    the steps, which go as the grid's step and as the seconds simulated.
     """
     points = MEASURED_PPW if ppw is None else float(ppw)
     grid = (points / MEASURED_PPW) * (fmax_hz / 1500.0)
-    record = CELL_RECORD_BYTES_AT_1500 * grid
+    record = CELL_RECORD_BYTES_AT_1500 * grid * (float(duration_s) / MEASURED_DURATION_S)
     share = MEMORY_SHARE * MEASURED_CARD_GIB * 2.0**30
     taken = (share - CELLS_A_SOLVE_MEASURED * CELL_RECORD_BYTES_AT_1500) * grid**3
     return int(max(0.0, MEMORY_SHARE * float(card_gib) * 2.0**30 - taken) // record)
 
 
 def solves_needed(
-    cells_a_position: list[int], card_gib: float, *, ppw: float | None = None
+    cells_a_position: list[int],
+    card_gib: float,
+    *,
+    ppw: float | None = None,
+    duration_s: float = MEASURED_DURATION_S,
 ) -> int | None:
     """Solves for positions heard at these many cells each; ``None`` on a card too small."""
-    held = cells_a_solve(card_gib, ppw=ppw)
+    held = cells_a_solve(card_gib, ppw=ppw, duration_s=duration_s)
     if held < 1:
         return None
     return int(sum(-(-int(count) // held) for count in cells_a_position if count > 0))

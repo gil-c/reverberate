@@ -15,7 +15,7 @@ from reverberate.scenes.recipe import Dwell, Recipe, Rise, Travel, canonical_byt
 __all__ = ["describe", "low_band_positions"]
 
 
-def low_band_positions(recipe: Recipe) -> dict[str, int]:
+def low_band_positions(recipe: Recipe, rail_positions: int = 2) -> dict[str, int]:
     """How many source positions the low band is solved at for this recipe.
 
     ``all`` is every position the sources pass through, each once: a station
@@ -24,14 +24,31 @@ def low_band_positions(recipe: Recipe) -> dict[str, int]:
     ``seat_rail_samples`` split it, an end a rail shares with a station being
     the rail's. ``audible`` is how many of them a source is audible at, which
     is what a trace solves (:func:`~.kinematics.low_band_source_positions`).
+
+    ``rail_positions`` is the solved positions a source on a rail reads, as
+    a trace's ``--rail-positions``: two are the samples either side of it.
+    With more, ``audible`` is counted by the trace's own plan
+    (:func:`reverberate.trace.plan.tracks_of`), which reads the nearest
+    that many at every audible step, so that this count, the generator
+    panel's and a dry run's are one number.
     """
     every = low_band_source_positions(recipe, audible_only=False)
-    heard = low_band_source_positions(recipe, audible_only=True)
-    return {**every.counts(), "all": every.count, "audible": heard.count}
+    if int(rail_positions) == 2:
+        heard = low_band_source_positions(recipe, audible_only=True).count
+    else:
+        from reverberate.trace.plan import Profile, tracks_of
+
+        tracks = tracks_of(recipe, Profile(rail_positions=int(rail_positions)))
+        heard = int(tracks.positions.shape[0])
+    return {**every.counts(), "all": every.count, "audible": heard}
 
 
-def describe(recipe: Recipe) -> str:
-    """A summary a person reads: per source, stations, metres, share active."""
+def describe(recipe: Recipe, rail_positions: int = 2) -> str:
+    """A summary a person reads: per source, stations, metres, share active.
+
+    ``rail_positions`` counts the low band's positions as a trace of that
+    ``--rail-positions`` solves them.
+    """
     duration = recipe.duration_s
     times = np.arange(0.0, duration + 1e-9, 0.5)
     head = listener_state(recipe, times).position
@@ -46,12 +63,19 @@ def describe(recipe: Recipe) -> str:
         f"{kinds.count('stand')} standing, {kinds.count('waypoint')} doors), "
         f"{len(recipe.rails)} rails, {metres:.1f} m of rail",
     ]
-    positions = low_band_positions(recipe)
+    positions = low_band_positions(recipe, rail_positions)
+    pitch = recipe.rails[0].pitch_m if recipe.rails else 0.08
     lines.append(
         f"  low band source positions: {positions['all']} "
         f"({positions['stations']} stations, {positions['rail_samples']} on rails, "
         f"{positions['seat_rail_samples']} on seats' vertical rails), "
         f"{positions['audible']} where a source is audible"
+        # Said only when it is not the first rule, whose line stays as it was.
+        + (
+            ""
+            if int(rail_positions) == 2 and pitch == 0.08
+            else f" (rails every {pitch:g} m, {int(rail_positions)} positions read)"
+        )
     )
     spoken = moving = 0.0
     for source in recipe.sources:
