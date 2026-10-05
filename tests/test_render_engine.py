@@ -51,6 +51,13 @@ C = 343.2
 FS = 48000
 
 
+@pytest.fixture(autouse=True)
+def _the_reference_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These hold the engine's mathematics to the rounding of double precision: the reference
+    parts. ``test_render_fast.py`` holds the fast parts, in single precision, against them."""
+    monkeypatch.setenv("REVERBERATE_ENGINE", "reference")
+
+
 def noise(seconds: float, seed: int = 0) -> np.ndarray:
     return np.asarray(np.random.default_rng(seed).standard_normal(int(round(seconds * FS))))
 
@@ -683,7 +690,10 @@ def test_two_processes_give_one_output() -> None:
         capture_output=True,
         text=True,
         check=True,
-        env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        env={
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            "REVERBERATE_ENGINE": "reference",
+        },
     )
     assert child.stdout.strip() == here
 

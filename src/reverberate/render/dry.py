@@ -56,7 +56,7 @@ class _Segment:
 class DryTrack:
     """Signals placed on the scene's clock at one rate, read by range, zero elsewhere."""
 
-    def __init__(self, segments: list[_Segment], rate: float, *, held: int = 4) -> None:
+    def __init__(self, segments: list[_Segment], rate: float, *, held: int = 2) -> None:
         self.segments = sorted(segments, key=lambda s: s.start)
         self.rate = float(rate)
         self._held = held
@@ -140,6 +140,10 @@ class DryTrack:
         def maker(index: int) -> Callable[[], np.ndarray]:
             return lambda: filt(self._samples(index))
 
+        # What is read through a filter is kept by the track it makes: this one holds
+        # the segment being filtered and no other (8 MB a segment of twenty seconds).
+        self._held = 1
+
         return DryTrack(
             [
                 _Segment(s.start - before, s.length + before + after, maker(i))
@@ -182,6 +186,7 @@ class DryTrack:
         """At ``1 / factor`` of the rate through the zero phase ``taps``, on the scene's grid."""
         half = taps.size // 2
         segments = []
+        self._held = 1
         for index, s in enumerate(self.segments):
             # Low sample m is the sample factor * m; the filter reaches half either side.
             first = -((half - s.start) // factor)

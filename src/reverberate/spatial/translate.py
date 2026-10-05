@@ -96,7 +96,9 @@ __all__ = [
     "fusion_weights",
     "kernels",
     "namespace_of",
+    "pair_inverse",
     "serving_radius_m",
+    "translation_matrices",
     "translation_operator",
     "translation_weights",
 ]
@@ -226,6 +228,80 @@ def translation_operator(
     return out
 
 
+@lru_cache(maxsize=4)
+def _triple_products(order: int) -> np.ndarray:
+    """``[c, a b]``: the mean over the sphere of ``Y_a Y_b Y_c``, ``c`` to degree ``2 order``.
+
+    A product of two harmonics of degree ``order`` at most has no part above
+    degree ``2 order``, and the quadrature takes the three exactly.
+    """
+    directions, weights = quadrature(4 * order)
+    low = real_sh(order, directions)
+    high = real_sh(2 * order, directions)
+    found = np.einsum("q,qa,qb,qc->cab", weights / weights.sum(), low, low, high)
+    flat: np.ndarray = np.ascontiguousarray(found.reshape(found.shape[0], -1))
+    flat.setflags(write=False)
+    return flat
+
+
+def translation_matrices(
+    offset_scene: np.ndarray,
+    freqs_hz: np.ndarray,
+    order: int,
+    *,
+    sound_speed_m_s: float = SOUND_SPEED_M_S,
+) -> np.ndarray:
+    """:func:`translation_operator` in closed form, on the host.
+
+    The plane wave's phase is its own expansion,
+    ``exp(i k s . d) = sum_l i^l j_l(k |d|) sum_m Y_lm(s) Y_lm(d / |d|)``,
+    and the integral of ``Y_a Y_b Y_lm`` over ``s`` is a table that depends
+    on nothing (:func:`_triple_products`). The operator is then fifteen
+    real matrices for the direction, weighed at each frequency by
+    ``i^l j_l``: 6e4 products a frequency against the quadrature's 1.6e6,
+    and no quadrature error (the quadrature's is 1e-7 of the operator at
+    ``k d = 3.6`` and 6e-4 at 7.3). ``offset_scene`` is one offset or
+    ``[offset, 3]``. Returns ``[frequency, channel out, channel in]``,
+    complex64, with the offsets' axis before them when several were given.
+    What the fast engine moves a head with.
+    """
+    offsets = np.asarray(offset_scene, dtype=float)
+    single = offsets.ndim == 1
+    offsets = offsets.reshape(-1, 3)
+    freqs = np.asarray(freqs_hz, dtype=float)
+    channels = (order + 1) ** 2
+    amb = scene_to_ambisonic(offsets)
+    r = np.linalg.norm(amb, axis=1)
+    top = 2 * order
+    # At the centre the direction is not read: every degree but the first is nothing.
+    unit = np.where(r[:, None] > 0.0, amb / np.maximum(r, 1e-300)[:, None], [1.0, 0.0, 0.0])
+    towards = real_sh(top, unit)
+    products = _triple_products(order)
+    n = np.arange(top + 1)
+    turn = 1j**n
+    made = np.empty((offsets.shape[0], freqs.size, channels * channels), dtype=np.complex64)
+    for index in range(offsets.shape[0]):
+        # Degree ``n`` is the channels ``n^2`` to ``(n + 1)^2`` of the ACN order.
+        per_degree = np.stack(
+            [
+                # A sum of rows, taken a row at a time: a vector by a matrix is the
+                # library's level 2, whose rounding moves with where its arrays lie.
+                (
+                    towards[index, d * d : (d + 1) * (d + 1), None]
+                    * products[d * d : (d + 1) * (d + 1)]
+                ).sum(axis=0)
+                for d in range(top + 1)
+            ]
+        ).astype(np.float32)
+        radial = turn[None, :] * spherical_jn(
+            n[None, :], (2.0 * np.pi * freqs / sound_speed_m_s * r[index])[:, None]
+        )
+        made[index].real = radial.real.astype(np.float32) @ per_degree
+        made[index].imag = radial.imag.astype(np.float32) @ per_degree
+    shaped = made.reshape(offsets.shape[0], freqs.size, channels, channels)
+    return shaped[0] if single else shaped
+
+
 def _cell_rows(positions: Any, k: Any, order: int, quadrature_degree: int, xp: Any) -> Any:
     """``A W^(1/2)``: each cell's coefficients of every plane wave, ``[..., f, cell x channel, d]``.
 
@@ -271,6 +347,47 @@ def fusion_inverse(
         scale = xp.real(xp.trace(gram, axis1=-2, axis2=-1)) / size
         gram = gram + regularisation * scale[:, None, None] * eye
         out[start : start + step] = xp.linalg.inv(gram)
+    return out
+
+
+def pair_inverse(
+    between_scene: np.ndarray,
+    freqs_hz: np.ndarray,
+    order: int,
+    *,
+    regularisation: float = REGULARISATION,
+    sound_speed_m_s: float = SOUND_SPEED_M_S,
+    quadrature_degree: int = QUADRATURE_DEGREE,
+) -> np.ndarray:
+    """:func:`fusion_inverse` of two cells, the second ``between_scene`` from the first, by blocks.
+
+    A cell's own block of the Gram matrix is the identity, the quadrature
+    taking a product of two harmonics exactly, so the matrix is
+    ``[[a I, C], [C^H, a I]]`` with ``a = 1 + lambda`` and ``C`` the two
+    cells' rows against each other. Its inverse is then that of the 64 by
+    64 Schur complement ``S = a I - C^H C / a`` and four products, in a
+    fifth of the time of the 128 by 128 inverse: what a walk pays at every
+    pair of cells it crosses. On the host, in double precision; returns
+    ``[frequency, 2 channel, 2 channel]``, complex128, :func:`fusion_inverse`
+    of ``[0, between_scene]`` to rounding.
+    """
+    directions, weights, basis = _plane_waves(order, quadrature_degree)
+    channels = basis.shape[1]
+    k = 2.0 * np.pi * np.asarray(freqs_hz, dtype=float) / sound_speed_m_s
+    projection = np.asarray(between_scene, dtype=float) @ directions.T  # [direction]
+    turned = np.exp(-1j * k[:, None] * projection[None, :])  # the second cell's rows, conjugate
+    weighted = (basis * weights[:, None]).T.astype(np.complex128)  # [channel, direction]
+    cross = (weighted[None, :, :] * turned[:, None, :]) @ basis.astype(np.complex128)
+    a = 1.0 + regularisation
+    eye = np.eye(channels)
+    back = np.conj(np.swapaxes(cross, -1, -2))
+    schur = np.linalg.inv(a * eye - back @ cross / a)
+    out = np.empty((k.size, 2 * channels, 2 * channels), dtype=np.complex128)
+    upper = -(cross @ schur) / a
+    out[:, :channels, :channels] = eye / a - (upper @ back) / a
+    out[:, :channels, channels:] = upper
+    out[:, channels:, :channels] = np.conj(np.swapaxes(upper, -1, -2))
+    out[:, channels:, channels:] = schur
     return out
 
 

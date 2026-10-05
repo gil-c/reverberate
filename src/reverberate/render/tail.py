@@ -74,6 +74,9 @@ __all__ = ["HELD", "Held", "TailPart"]
 #: What the tails of one process keep between runs, in bytes: the carriers (95 MB a
 #: source) and the histograms' spectra (30 MB each), the least recently used out first.
 HELD_BYTES = 320 << 20
+#: What one source's carrier and a few of its histograms' spectra take, in bytes: what
+#: an engine that mixes many sources adds to :data:`HELD_BYTES` for each.
+CARRIER_BYTES = 100 << 20
 #: Places of the carrier a histogram's response may be read from. Two histograms of one
 #: step read it further apart than the bank's filter is long, so their noises are
 #: independent and their energies add.

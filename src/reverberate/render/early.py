@@ -196,10 +196,11 @@ class EarlyPart:
         else:
             mask = np.ones((rows, 1))
         air = air_weights(delay_s * h.sound_speed_m_s, self.air_m)
+        # The three factors of a row's coefficients, which the fast engine multiplies
+        # as filters and never lays out as variants (``reverberate.render.fast``).
+        self.row_mask, self.row_gain, self.row_air = mask, gain, air
         self.variants = self.masks * bands * self.air_m.size
-        self.coefficients = (
-            mask[:, :, None, None] * gain[:, None, :, None] * air[:, None, None, :]
-        ).reshape(rows, self.variants)
+        self._coefficients: np.ndarray | None = None
         listener = np.asarray(pack.listener.position, dtype=float)
         # The apparent source of every row: the image itself for a specular path. The
         # pack's float32 direction is unit to 1e-7 only; made unit here, so the delay
@@ -212,6 +213,20 @@ class EarlyPart:
         self.sound_speed = h.sound_speed_m_s
         atmosphere = pack.air.atmosphere
         self._attenuation = atmosphere.attenuation_np_per_m
+
+    @property
+    def coefficients(self) -> np.ndarray:
+        """``[row, variant]``: the product of a row's three factors, made when first read.
+
+        A hundred numbers a row, 270 MB for a source of twenty minutes with
+        fourteen arrivals a step: the fast part never reads it.
+        """
+        if self._coefficients is None:
+            mask, gain, air = self.row_mask, self.row_gain, self.row_air
+            self._coefficients = (
+                mask[:, :, None, None] * gain[:, None, :, None] * air[:, None, None, :]
+            ).reshape(mask.shape[0], self.variants)
+        return self._coefficients
 
     # ----------------------------------------------------------------------
 

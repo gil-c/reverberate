@@ -229,4 +229,15 @@ its limit that add up. Anything of the headphones.
 3. The samples do not depend on the size of the blocks they were rendered
    in (`tests/test_render_engine.py`).
 4. Stems of one pack rendered with the same settings, summed in float64 in
-   the pack's order, are the mix before its conversion to float32.
+   the pack's order, are the mix before its conversion to float32: to the
+   bit from the reference engine (`RenderSettings(engine="reference")`), and
+   to 1e-6 of the peak from the fast one, the default, which renders in
+   single precision and sums what the sources of a mix share before it
+   transforms it (`docs/open-questions/engine-speed.md`).
+5. A mix written by several processes (`reverberate.render.mix.write_mix`,
+   `python -m reverberate.render mix`) is the mix one engine with the same
+   settings writes from start to end: byte for byte on the laptop it was
+   measured on, and to 1e-12 of the peak wherever the tests run
+   (`engine-speed.md` has what is not yet understood there); its header
+   holds besides, under `render`, the settings, the processes, the time
+   and the processor time it took.

@@ -70,6 +70,7 @@ from typing import Any
 import numpy as np
 
 from reverberate.render.engine import Engine, RenderSettings
+from reverberate.render.fast import CARRIERS_VARIABLE
 from reverberate.render.output import SCHEMA as SIGNAL_SCHEMA
 from reverberate.render.output import SCHEMA_VERSION as SIGNAL_SCHEMA_VERSION
 from reverberate.render.pack import ScenePack, read_pack
@@ -95,6 +96,8 @@ __all__ = [
 ENGINE_SOURCES = (
     "render/engine.py",
     "render/early.py",
+    "render/fast.py",
+    "render/native.py",
     "render/delay.py",
     "render/low.py",
     "render/tail.py",
@@ -123,8 +126,10 @@ WINDOW_CHUNKS = 60
 IDLE_S = 20.0
 #: Rendering stops when the cache's disk has less than this free.
 RESERVE_BYTES = 5 << 30
-#: Engines a worker keeps, one per source: the rest are rebuilt on demand.
-ENGINES_HELD = 6
+#: Engines a worker keeps, one per source: the rest are rebuilt on demand. A scene has
+#: fourteen sources and a worker is handed them all in turn: with six kept, every other
+#: chunk built its source's engine again, which cost more than the chunk.
+ENGINES_HELD = 16
 #: Over how long the render rate is averaged, seconds.
 RATE_WINDOW_S = 20.0
 #: The level of a step in which the engine returned zeros.
@@ -333,6 +338,11 @@ class _Engines:
         if name in self.engines:
             self.engines.move_to_end(name)
             return self.engines[name]
+        if task.get("carriers"):
+            # The sources' noise, 95 MB each, as files the workers all map: drawn once
+            # a pack and not once a worker and an engine (``render.fast``).
+            Path(str(task["carriers"])).mkdir(parents=True, exist_ok=True)
+            os.environ[CARRIERS_VARIABLE] = str(task["carriers"])
         if path not in self.packs:
             # Validated once by whoever opened the session, not by every worker.
             pack = read_pack(Path(path), check=False)
@@ -445,6 +455,9 @@ class Session:
         self.pack_path, self.pack_sha256, self.pack = pack_path, pack_sha256, pack
         self.settings, self.dry, self.stems, self.plans = settings, dry, stems, plans
         self.order = list(pack.sources)
+        #: Whether the chunks are rendered by processes of their own, which then share
+        #: the sources' noise as files; a service that renders in its own threads does not.
+        self.processes = True
         first = next(iter(stems.values()))
         self.chunks, self.chunk_samples = first.chunks, first.chunk_samples
         self.cursor = 0
@@ -466,6 +479,7 @@ class Session:
             "start": start,
             "stop": stop,
             "data": str(stem.data_path),
+            "carriers": str(stem.folder.parent.parent / "carriers") if self.processes else "",
             "step_samples": self.pack.header.step_samples,
         }
 
@@ -618,6 +632,7 @@ class StemService:
                     )
                 stems[source_id] = self._stems[folder]
             session = Session(pack_path, digest, pack, settings, self.dry, stems, plans)
+            session.processes = self.processes
             self._sessions[name] = session
             self._start()
             self._lock.notify_all()

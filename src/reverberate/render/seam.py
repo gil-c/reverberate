@@ -314,22 +314,28 @@ class BandedTail:
         *,
         workers: int,
         mask: np.ndarray | None,
+        part: Any = TailPart,
+        **more: Any,
     ) -> None:
+        #: ``part`` is the late part the sets are made of: the reference's, or the fast
+        #: engine's (:class:`reverberate.render.fast.FastTail`), with what it takes besides.
+        make = part
         columns: dict[bytes, list[int]] = {}
         for band in range(table.shape[1]):
             columns.setdefault(np.ascontiguousarray(table[:, band]).tobytes(), []).append(band)
         groups = [tuple(bands) for bands in columns.values()]
         kernels = group_kernels(pack.header.sample_rate_hz, groups)
-        self.parts: list[TailPart] = []
+        self.parts: list[Any] = []
         for group, kernel in zip(groups, kernels, strict=True):
             level = replace(source.level, high_gain_db=np.ascontiguousarray(table[:, group[0]]))
-            part = TailPart(
+            part = make(
                 pack,
                 replace(source, level=level),
                 track if len(groups) == 1 else track.masked(kernel),
                 xp,
                 workers=workers,
                 mask=mask,
+                **more,
             )
             if self.parts:
                 # One source, one seed, one mask: what the first made is the others' too.
@@ -344,6 +350,21 @@ class BandedTail:
         for part in self.parts[1:]:
             made = made + part.render(k0, k1)
         return made
+
+    def waves(self, k0: int, k1: int, pool: Any = None) -> Any:
+        """The sets' plane waves summed, for a mix that encodes every source's at once.
+
+        Of the fast engine's parts only (:meth:`reverberate.render.fast.FastTail.waves`).
+        """
+        made = None
+        for part in self.parts:
+            got = part.waves(k0, k1, pool)
+            if got is not None:
+                made = got if made is None else made + got
+        return made
+
+    def encoded(self, waves: Any) -> Any:
+        return self.parts[0].encoded(waves)
 
 
 # --------------------------------------------------------------------------
