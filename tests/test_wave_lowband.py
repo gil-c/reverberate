@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import itertools
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import h5py
@@ -30,6 +32,7 @@ from reverberate.wave.lowband.box import TEST_BRANCHES, box_arrays, write_entry
 from reverberate.wave.lowband.cli import main
 from reverberate.wave.lowband.fit import FitOperator, level_scale
 from reverberate.wave.lowband.harness import compare_responses, paper_numbers
+from reverberate.wave.lowband.hostkernel import compiler, host_kernel
 from reverberate.wave.lowband.pairs import (
     Item,
     LowbandPairs,
@@ -58,12 +61,18 @@ from reverberate.wave.lowband.scheme import (
     wavenumber,
 )
 from reverberate.wave.lowband.solver import (
+    BOUNDARIES,
+    MASK_LOSSY,
+    CardStepper,
     Drive,
     NumpyStepper,
     State,
     drive_for,
+    lossy_rows,
+    node_masks,
     reference_step,
     solve,
+    step_bytes,
 )
 
 C = 343.2
@@ -230,6 +239,82 @@ class TestAStep:
         for name in ("u0", "u1", "vh", "gh"):
             assert np.array_equal(getattr(fast, name), getattr(slow, name)), name
         assert np.array_equal(out_fast, out_slow)
+
+    @pytest.mark.skipif(compiler() is None, reason="no C++ compiler on this host")
+    @pytest.mark.parametrize("boundary", BOUNDARIES)
+    @pytest.mark.parametrize("scheme", SCHEMES, ids=lambda s: s.name)
+    def test_the_card_s_kernels_compiled_for_the_host_are_the_numpy_step_bit_for_bit(
+        self, scheme: Scheme, boundary: str
+    ) -> None:
+        """The CUDA text itself, both ways of the boundary, a batch and its sources alone."""
+        arrays, grid, sources, receivers = lossy_room(scheme)
+        duration = 60 * grid.Ts
+        # The whole box steps the halo's copies and the absorbing layer; the cut, the reach.
+        for problem in (
+            build_problem(arrays, None),
+            build_problem(arrays, seeds_of(grid, sources)),
+        ):
+            drive = drive_for(problem, grid, sources, receivers, duration)
+            on_numpy, on_host = (
+                NumpyStepper(problem, drive),
+                CardStepper(problem, drive, np, boundary=boundary, compile=host_kernel),
+            )
+            mine, theirs = on_numpy.state(), on_host.state()
+            out_mine, out_theirs = on_numpy.records(), on_host.records()
+            for n in range(drive.steps):
+                on_numpy.step(mine, n, out_mine)
+                on_host.step(theirs, n, out_theirs)
+            assert np.abs(out_mine).max() > 0 and np.abs(mine.vh).max() > 0
+            for name in ("u0", "u1", "vh", "gh"):
+                assert np.array_equal(getattr(mine, name), getattr(theirs, name)), name
+            assert np.array_equal(out_mine, out_theirs)
+            for b in range(2 if problem.reached < problem.box_nodes else 0):
+                alone = drive_for(problem, grid, sources[b : b + 1], [receivers[b]], duration)
+                stepper = CardStepper(problem, alone, np, boundary=boundary, compile=host_kernel)
+                assert np.array_equal(
+                    solve(problem, alone, np, stepper=stepper), out_mine[3 * b : 3 * b + 3]
+                )
+
+    @pytest.mark.parametrize("scheme", SCHEMES, ids=lambda s: s.name)
+    def test_a_lossy_node_s_row_is_its_column_s_base_and_the_bits_under_it(
+        self, scheme: Scheme
+    ) -> None:
+        arrays, grid, sources, _ = lossy_room(scheme)
+        problem = build_problem(arrays, seeds_of(grid, sources))
+        base, bits = lossy_rows(problem)
+        mask = node_masks(problem)
+        rows = np.flatnonzero(problem.bn_lossy >= 0)
+        assert rows.size == problem.lossy > 0
+        assert int((mask & MASK_LOSSY > 0).sum()) == problem.lossy
+        for row, (column, z) in enumerate(
+            zip(problem.bn_column[rows], problem.bn_z[rows], strict=True)
+        ):
+            under = sum(bin(int(w)).count("1") for w in bits[column, : z >> 5])
+            under += bin(int(bits[column, z >> 5]) & ((1 << (z & 31)) - 1)).count("1")
+            assert base[column] + under == row
+            assert mask[column, z] & MASK_LOSSY
+        shuffled = replace(problem, bn_lossy=problem.bn_lossy[::-1].copy())
+        with pytest.raises(ValueError, match="grid's order"):
+            lossy_rows(shuffled)
+
+    def test_the_walls_move_half_a_step_s_bytes_apart_and_two_fifths_in_the_stencil(self) -> None:
+        """The reference grid of hssd_0076 to 1500 Hz, from its own counts (run A's ledger)."""
+        grid: Any = SimpleNamespace(
+            updated=47_371_003, lossy=2_687_916, max_branches=11, column_count=383_884, nz=146
+        )
+        apart, stencil = step_bytes(grid, "apart"), step_bytes(grid, "stencil")
+        assert apart["walls_a_lossy_node"] == 264.0 and stencil["walls_a_lossy_node"] == 184.0
+        assert apart["air"] == stencil["air"] == 12.0 * grid.updated
+        assert apart["step"] == pytest.approx(1.39e9, rel=0.005)
+        assert stencil["step"] == pytest.approx(1.18e9, rel=0.005)
+        assert apart["walls_share"] == pytest.approx(0.51, abs=0.005)
+        assert stencil["walls_share"] == pytest.approx(0.42, abs=0.005)
+        # ... and with seven branches a material, what the refit of the walls is for.
+        grid.max_branches = 7
+        assert step_bytes(grid, "stencil")["walls_a_lossy_node"] == 120.0
+        assert step_bytes(grid, "stencil")["step"] == pytest.approx(1.01e9, rel=0.005)
+        with pytest.raises(ValueError, match="boundary"):
+            step_bytes(grid, "elsewhere")
 
     @pytest.mark.parametrize("scheme", SCHEMES, ids=lambda s: s.name)
     def test_the_absorbing_layer_is_the_engine_s(self, scheme: Scheme) -> None:
