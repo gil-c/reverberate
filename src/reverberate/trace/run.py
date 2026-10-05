@@ -706,7 +706,11 @@ class Trace:
         engine: Any = self.engine
         self.made_by: dict[tuple[int, int], str] = {}
         self.planned: dict[str, float] = {"node_updates": 0.0, "pairs": 0.0}
-        if not hasattr(engine, "launches"):
+        # In one process a launch at a time would leave every card but one idle: the
+        # engine's own solve, a thread a card, is then the whole of the stage, as it was
+        # before the queue (``--host-workers 0`` on a machine of several cards).
+        alone = self.pool.make is None and self.xp is not np and len(machine.cards) > 1
+        if not hasattr(engine, "launches") or alone:
             for pair in self.pairs:
                 self.made_by[pair] = "solve/all"
             return [Job("solve", "all", on=THREAD, work=self.solve)]
