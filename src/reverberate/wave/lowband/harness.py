@@ -37,7 +37,15 @@ import numpy as np
 from scipy.special import spherical_jn
 
 from reverberate.audio import Atmosphere
-from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, onset_s, to_stored
+from reverberate.spatial.lowband import (
+    LOW_RATE_HZ,
+    LOW_SAMPLES,
+    delayed,
+    low_side,
+    onset_s,
+    to_stored,
+    with_air,
+)
 from reverberate.spatial.sh import degrees_of
 from reverberate.spatial.translate import apply_translation
 from reverberate.wave.comms import engine_indices, interp_weights, nearest_node
@@ -325,6 +333,7 @@ def extract_line(field: Path, plan: Path, out: Path, *, every: int = 1) -> dict[
         positions = np.asarray(handle["positions"][...])[::every]
         rate = float(handle.attrs["sample_rate_hz"])
         source = np.asarray(handle.attrs["source_position"], dtype=float)
+        lead = field_lead_s(handle.attrs)
         stored = np.zeros((index.size, 64, LOW_SAMPLES), dtype=np.float32)
         for row, point in enumerate(range(0, handle["ir"].shape[0], every)):
             stored[row] = to_stored(np.asarray(handle["ir"][point], dtype=np.float64), rate)
@@ -343,16 +352,68 @@ def extract_line(field: Path, plan: Path, out: Path, *, every: int = 1) -> dict[
         centres_mid=centres["mid"],
         source=source,
         seam_hz=np.float64(800.0),
+        # The clock the field is on: what a pair is delayed by before it is compared.
+        lead_s=np.float64(np.nan if lead is None else lead),
     )
-    return {"points": int(index.size), "source": source.tolist(), "out": str(out)}
+    return {
+        "points": int(index.size),
+        "source": source.tolist(),
+        "out": str(out),
+        "lead_s": lead,
+    }
 
 
-def stored_of_cache(cache: Any, key: str, *, atmosphere: Atmosphere | None = None) -> np.ndarray:
-    """A cached pair as the pack keeps it: its air and its masks taken, ``[64, 4800]``."""
+def stored_of_cache(
+    cache: Any, key: str, *, atmosphere: Atmosphere | None = None, lead_s: float = 0.0
+) -> np.ndarray:
+    """A cached pair as the pack keeps it: its air and its masks taken, ``[64, 4800]``.
+
+    The cache is on the geometric clock. ``lead_s`` puts the pair on the
+    clock of what it is compared with, by the trace's own rule
+    (:func:`reverberate.trace.level.pair_low`): the air on the geometric
+    clock, then :func:`reverberate.spatial.lowband.delayed`, then the
+    masks. A field carries its mirror's lead; against it a pair that is
+    not delayed reads an error of 0 dB whatever its grid.
+    """
     response = np.asarray(cache.read(key), dtype=np.float64)
-    return np.asarray(
-        to_stored(response, LOW_RATE_HZ, atmosphere=atmosphere or Atmosphere()), dtype=np.float64
-    )
+    air = atmosphere or Atmosphere()
+    if lead_s == 0.0:
+        return np.asarray(to_stored(response, LOW_RATE_HZ, atmosphere=air), dtype=np.float64)
+    late = delayed(with_air(response, LOW_RATE_HZ, air), LOW_RATE_HZ, lead_s)
+    return np.asarray(low_side(late, LOW_RATE_HZ), dtype=np.float64)
+
+
+def field_lead_s(attributes: Any) -> float | None:
+    """The lead a field says it was written with, s; ``None`` when it does not say.
+
+    Read in its ``lead_s`` attribute, or in the ``lead_s`` of its
+    ``provenance_json``, at any depth.
+    """
+    if "lead_s" in attributes:
+        return float(attributes["lead_s"])
+    text = attributes.get("provenance_json")
+    if text is None:
+        return None
+
+    def found(node: Any) -> float | None:
+        if isinstance(node, dict):
+            if isinstance(node.get("lead_s"), int | float):
+                return float(node["lead_s"])
+            for value in node.values():
+                inner = found(value)
+                if inner is not None:
+                    return inner
+        elif isinstance(node, list):
+            for value in node:
+                inner = found(value)
+                if inner is not None:
+                    return inner
+        return None
+
+    try:
+        return found(json.loads(text.decode() if isinstance(text, bytes) else str(text)))
+    except json.JSONDecodeError:
+        return None
 
 
 def compare_caches(reference: Path, candidate: Path) -> dict[str, Any]:

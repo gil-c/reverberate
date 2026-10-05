@@ -780,3 +780,199 @@ class TestTheEstimate:
         assert theirs["measured_on"] == "2 x A100" and theirs["usd"]["low"] > ours["usd"]["low"]
         with pytest.raises(ValueError, match="unknown low band engine"):
             plan_estimate(record, rate_usd_per_hour=1.0, low_engine="other")
+
+
+class TestTheTwoGrids:
+    """The validated grid and a coarser one, side by side: one name each, read alike everywhere."""
+
+    @pytest.fixture
+    def export(self, machine: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> Any:
+        """The bundle's export as a real spec, so that another grid's key is really computed."""
+        import reverberate.experiments.run as run_module
+        from reverberate.wave.voxelise import SceneSpec
+
+        models = machine["bundle"] / "models" / "storey"
+        models.mkdir(parents=True)
+        model = models / "apartment_full.json"
+        model.write_text(json.dumps({"mats_hash": {"wall": {"pts": [[0, 0, 0], [3, 3, 3]]}}}))
+        (machine["bundle"] / "models" / "materials").mkdir()
+
+        def scene_spec(given: Path, scene: str, fmax: float) -> tuple[Any, Path, int]:
+            spec = SceneSpec(
+                model_json=Path(given) / f"{scene}.json",
+                mat_folder=machine["bundle"] / "models" / "materials",
+                mat_files={},
+                fmax=fmax,
+                ppw=10.5,
+                nh=4,
+            )
+            return spec, model, 0
+
+        monkeypatch.setattr(run_module, "scene_spec", scene_spec)
+        return scene_spec(models, "apartment_full", BAND_FMAX)[0]
+
+    def test_the_laptop_names_a_pair_as_the_machine_s_engine_will(
+        self, machine: dict[str, Path], export: Any
+    ) -> None:
+        from reverberate.spatial.lowband import pair_key
+        from reverberate.wave.lowband.pairs import low_grid
+
+        spec = json.loads((machine["bundle"] / "campaign.json").read_text())
+        spec["bands"]["low"]["cache_key"] = export.key
+        (machine["bundle"] / "campaign.json").write_text(json.dumps(spec))
+        models = machine["bundle"] / "models" / "storey"
+        named: dict[float | None, tuple[str, str]] = {}
+        for ppw in (None, 7.2):
+            campaign = a_campaign(machine, out=f"out{ppw}", ppw=ppw)
+            scene, solver = low_grid(models, "apartment_full", BAND_FMAX, ppw=ppw)
+            # The grid's key, the solver's name and so the pair's key are the campaign's own.
+            assert scene.key == campaign.keys["low"] == campaign.cache.voxel_low_key
+            assert solver == campaign.spec["solver"]
+            key = pair_key(
+                scene.key,
+                SOURCES[0],
+                CELLS[1],
+                encoder=dict(spec["encoder"]),
+                solver=solver,
+                window_s=DURATION,
+            )
+            assert key == campaign.key_of(0, 1)
+            named[ppw] = (scene.key, key)
+        # Two grids: two keys of the grid, two directories of pairs, no pair in common.
+        assert named[None][0] == export.key != named[7.2][0]
+        assert named[None][1] != named[7.2][1]
+        assert a_campaign(machine, out="a").cache.directory != (
+            a_campaign(machine, out="a", ppw=7.2).cache.directory
+        )
+        assert low_grid(models, "apartment_full", BAND_FMAX, ppw=10.5)[0].key == export.key
+        assert (
+            "cartesian at 7.2 points" in low_grid(models, "apartment_full", BAND_FMAX, ppw=7.2)[1]
+        )
+        with pytest.raises(ValueError, match="unknown scheme"):
+            low_grid(models, "apartment_full", BAND_FMAX, scheme="hexagonal")
+
+    def test_the_machine_s_command_reads_the_grid_in_the_bundle_and_a_flag_overrules_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from reverberate.accel.cli import main as accel
+        from reverberate.trace import engines
+        from reverberate.trace import run as run_module
+
+        made: list[dict[str, Any]] = []
+
+        class Engine:
+            def __init__(self, bundle: Path, out: Path, **given: Any) -> None:
+                made.append(given)
+
+        ran: list[Any] = []
+        monkeypatch.setattr(engines, "BatchedPairs", Engine)
+        monkeypatch.setattr(run_module, "run_trace", lambda b, o, **kw: ran.append(kw["engine"]))
+        bundle = tmp_path / "b"
+        bundle.mkdir()
+        low = {"engine": "lowband", "scheme": "cartesian", "ppw": 7.2}
+        (bundle / "campaign.json").write_text(
+            json.dumps({"kind": "scene-trace", "trace": {"low": low}})
+        )
+        arguments = ["campaign", "--bundle", str(bundle), "--out", str(tmp_path / "o"), "--cpu"]
+        # A run resumed without its flags is still the run that was bundled.
+        assert accel(arguments) == 0
+        assert (made[-1]["scheme"], made[-1]["ppw"]) == ("cartesian", 7.2)
+        assert accel([*arguments, "--low-ppw", "9"]) == 0 and made[-1]["ppw"] == 9.0
+        assert accel([*arguments, "--low-engine", "pffdtd"]) == 0 and ran[-1] is None
+        # The validated grid is what a bundle that names none gets.
+        low["ppw"] = None
+        (bundle / "campaign.json").write_text(
+            json.dumps({"kind": "scene-trace", "trace": {"low": low}})
+        )
+        assert accel(arguments) == 0 and made[-1]["ppw"] is None
+
+
+class TestTheClockOfALine:
+    """A field is on its mirror's clock, the pair cache on the geometric one."""
+
+    LEAD_S = 512 / 48000.0
+
+    def pulses(self, rate: float, samples: int, delay_s: float) -> np.ndarray:
+        """Two cells of 64 channels: a few smooth pulses under 1 kHz, ``delay_s`` late."""
+        rng = np.random.default_rng(11)
+        time_s = np.arange(samples) / rate - delay_s
+        out = np.zeros((2, 64, samples))
+        for cell in range(2):
+            for at in (0.012, 0.031, 0.078, 0.150):
+                gains = rng.standard_normal(64)
+                tone = 2.0 * np.pi * rng.uniform(150.0, 600.0)
+                shape = np.exp(-0.5 * ((time_s - at) / 0.0015) ** 2) * np.cos(tone * (time_s - at))
+                out[cell] += gains[:, None] * shape[None, :]
+        return out
+
+    def test_pairs_delayed_by_the_field_s_lead_are_a_verdict_and_undelayed_they_are_not(
+        self, tmp_path: Path
+    ) -> None:
+        from reverberate.accel.pairs import PairCache
+        from reverberate.audio import Atmosphere
+        from reverberate.spatial.lowband import to_stored, with_air
+        from reverberate.wave.lowband.harness import stored_of_cache
+
+        # The field: at 48 kHz, its air taken when the sound left and its lead a whole 512
+        # samples after. The cache: the same sound at 4 kHz, without either.
+        left = self.pulses(48000.0, 57600, 0.0)
+        field = np.zeros_like(left)
+        for cell in range(2):
+            aired = np.asarray(with_air(left[cell], 48000.0, Atmosphere()), dtype=float)
+            field[cell, :, 512:] = aired[:, :-512]
+        reference = np.stack([np.asarray(to_stored(cell, 48000.0), dtype=float) for cell in field])
+        cache = PairCache(tmp_path / "pairs", "grid")
+        for cell, response in enumerate(self.pulses(4000.0, 4800, 0.0)):
+            cache.write(f"k{cell}", response.astype(np.float32), {})
+        centres = np.zeros((2, 3))
+
+        def worst(lead_s: float) -> float:
+            candidate = np.stack(
+                [stored_of_cache(cache, f"k{cell}", lead_s=lead_s) for cell in range(2)]
+            )
+            table = compare_responses(
+                reference, candidate, reference_centres=[(0.0, centres)], candidate_centres=centres
+            )
+            return float(table["worst_band"]["error_db"])
+
+        # On one clock the two agree far under the bar of -30 dB; 10.67 ms apart they do not
+        # agree at all, which is what the command printed against the three band line.
+        assert worst(self.LEAD_S) < -40.0
+        assert worst(0.0) > -6.0
+
+    def test_the_lead_is_the_line_s_own_or_given_and_never_guessed(self, tmp_path: Path) -> None:
+        from reverberate.wave.lowband.cli import line_lead_s
+        from reverberate.wave.lowband.harness import extract_line, field_lead_s
+
+        assert field_lead_s({"lead_s": 0.0107}) == 0.0107
+        told = json.dumps({"mirror": {"alignment": {"lead_s": 0.0106744, "gain": 0.0144}}})
+        assert field_lead_s({"provenance_json": told}) == 0.0106744
+        assert field_lead_s({"provenance_json": told.encode()}) == 0.0106744
+        assert field_lead_s({"provenance_json": "{}"}) is None and field_lead_s({}) is None
+        plan = {
+            "points": [[0.0, 1.7, 0.0]],
+            "bands": {"low": {"centres": [[0, 0, 0]]}, "mid": {"centres": [[0, 0, 0]]}},
+        }
+        (tmp_path / "plan.json").write_text(json.dumps(plan))
+        for name, attributes in (("said", {"provenance_json": told}), ("silent", {})):
+            with h5py.File(tmp_path / f"{name}.h5", "w") as handle:
+                handle.create_dataset("ir", data=np.zeros((1, 64, 480), dtype=np.float32))
+                handle.create_dataset("point_index", data=np.array([0]))
+                handle.create_dataset("positions", data=np.zeros((1, 3)))
+                handle.attrs["sample_rate_hz"] = 48000.0
+                handle.attrs["source_position"] = np.zeros(3)
+                for key, value in attributes.items():
+                    handle.attrs[key] = value
+            record = extract_line(
+                tmp_path / f"{name}.h5", tmp_path / "plan.json", tmp_path / f"{name}.npz"
+            )
+            assert record["lead_s"] == (0.0106744 if name == "said" else None)
+        assert line_lead_s(tmp_path / "said.npz", None) == 0.0106744
+        assert line_lead_s(tmp_path / "said.npz", 0.02) == 0.02
+        assert line_lead_s(tmp_path / "silent.npz", 0.0107) == 0.0107
+        with pytest.raises(SystemExit, match="not on one clock"):
+            line_lead_s(tmp_path / "silent.npz", None)
+        # A line written before the lead was kept is refused the same way.
+        np.savez(tmp_path / "old.npz", stored=np.zeros(1))
+        with pytest.raises(SystemExit, match="--lead-s"):
+            line_lead_s(tmp_path / "old.npz", None)

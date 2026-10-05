@@ -165,6 +165,9 @@ def finish(home: Path, record: dict[str, Any], *, publish_pairs: bool = False) -
             "installed": len(installed["installed"]),
             "published": len(installed["published"]),
         }
+        if installed["damaged"]:
+            # Cut in their transfer: left out of the cache, and solved again by the next run.
+            found["pairs_damaged"] = len(installed["damaged"])
     pack = pulled / "pack.h5"
     if pack.is_file():
         try:

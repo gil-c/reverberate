@@ -1063,3 +1063,166 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     with read_pack(home / "pulled" / "pack.h5") as pack:
         assert {r["billed_rate_usd_per_hour"] for r in pack.header.provenance["cost"]} == {0.4}
     assert any("cost at 1.74 USD/h" in line for line in said)
+
+
+# --------------------------------------------------------------------------
+# what a second machine does not do again
+# --------------------------------------------------------------------------
+
+
+def test_a_host_that_dies_loses_its_last_pairs_and_the_next_machine_solves_those_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two machines, one recipe: what came home from the first is carried to the second."""
+    from reverberate.trace.bundle import carry_pairs
+
+    monkeypatch.setenv("REVERBERATE_DATA", str(tmp_path / "data"))
+    recipe = moving_recipe()
+    first, first_pairs, plan = traced(tmp_path / "a", recipe)
+    first.assign(first_pairs.place())
+    first.solve()
+    solved = list(first_pairs.solved)
+    assert len(solved) == plan.pairs > 3
+    # The host dies. Home is what the last homecoming brought: every pair but the last
+    # three, two of which never left and one of which was cut in its transfer.
+    home = tmp_path / "home"
+    shutil.copytree(tmp_path / "a" / "out" / "pairs", home / "pulled" / "pairs")
+    arrived = PairCache(home / "pulled" / "pairs", "free-field")
+    lost = [first_pairs.key_of(*pair) for pair in solved[-3:]]
+    for key in lost[:2]:
+        arrived.path(key).unlink()
+    arrived.path(lost[2]).write_bytes(arrived.path(lost[2]).read_bytes()[:200])
+    found = finish(home, {"outcome": "instance vanished", "instance": 7})
+    assert found["pairs"] == {"installed": len(solved) - 3, "published": 0}
+    assert found["pairs_damaged"] == 1 and found["pack"] is None
+    # The second machine's bundle carries them under the keys its engine asks for ...
+    second, second_pairs, _ = traced(tmp_path / "b", recipe)
+    keys = [
+        second_pairs.key_of(position, cell)
+        for position, cells in enumerate(plan.heard_at)
+        for cell in cells
+    ]
+    carried = carry_pairs(
+        tmp_path / "b" / "bundle" / "pairs_cache", PairCache.local("free-field"), keys
+    )
+    assert carried == len(solved) - 3
+    # ... and it solves the three that were lost, and no pair twice.
+    second.assign(second_pairs.place())
+    second.solve()
+    assert sorted(second_pairs.solved) == sorted(solved[-3:])
+    assert second.report["low_pairs"]["carried"] == len(solved) - 3
+    assert not set(second_pairs.solved) & set(solved[:-3])
+    for pair in solved:
+        key = second_pairs.key_of(*pair)
+        assert np.array_equal(second_pairs.cache.read(key), first_pairs.cache.read(key))
+
+
+def test_the_low_band_is_written_a_pair_at_a_time_and_the_file_is_the_same(
+    moving: dict[str, Any], tmp_path: Path
+) -> None:
+    import h5py
+
+    from reverberate.render import pack as pack_module
+    from reverberate.trace.run import PairRows
+
+    # In the pack: each row is the pair of its key, through the air and the masks.
+    held = assets()
+    cache = PairCache(moving["tmp"] / "out" / "pairs", "free-field")
+    rows = 0
+    with read_pack(moving["pack"]) as pack:
+        atmosphere = pack.air.atmosphere
+        for source in pack.sources.values():
+            assert source.low is not None
+            ir = source.low.ir
+            assert ir.dtype == np.float32 and ir.chunks is None
+            for row, key in enumerate(source.low.pair_key):
+                want = pair_low(
+                    cache.read(key.decode()),
+                    pack.crossover,
+                    atmosphere,
+                    sound_speed_m_s=held.settings.sound_speed_m_s,
+                    lead_s=held.pack_lead_s,
+                    unit_at_1m=FIELD_UNIT_AT_1M,
+                )[0]
+                assert np.array_equal(ir[row], np.asarray(want, dtype=np.float32))
+                rows += 1
+    assert rows > 0
+    # The file: a table handed over a row at a time is, byte for byte, the table handed whole.
+    table = np.random.default_rng(5).standard_normal((7, 64, 48)).astype(np.float32)
+    asked: list[int] = []
+
+    def row_of(index: int) -> np.ndarray:
+        asked.append(index)
+        return np.asarray(table[index])
+
+    class Low:
+        def __init__(self, ir: Any) -> None:
+            self.ir = ir
+
+    spec = {"ir": pack_module._LOW["ir"]}
+    for name, value in (("whole", table), ("rows", PairRows((7, 64, 48), row_of))):
+        with h5py.File(tmp_path / f"{name}.h5", "w") as handle:
+            pack_module._write_group(handle.create_group("low"), spec, Low(value))
+    assert (tmp_path / "whole.h5").read_bytes() == (tmp_path / "rows.h5").read_bytes()
+    assert asked == list(range(7)), "each row asked once, in order: one pair is all that is held"
+    with pytest.raises(ValueError, match="a row of"):
+        PairRows((7, 64, 48), lambda index: table[index, :3])[0]
+
+
+def test_another_low_grid_reuses_the_sources_early_tables_and_differs_by_one_key_alone(
+    tmp_path: Path,
+) -> None:
+    """Two traces of one recipe whose arrays stand on other nodes, as on two grids."""
+    from reverberate.trace.bundle import carry_early
+
+    recipe = moving_recipe()
+    plan = make_plan(recipe, assets().triangles)
+    there: list[np.ndarray | None] = [cell + OFF_THE_CELL for cell in plan.all_cells]
+    elsewhere: list[np.ndarray | None] = [
+        cell + np.array([0.011, 0.0, 0.002]) for cell in plan.all_cells
+    ]
+    first, _, _ = traced(tmp_path / "a", recipe, rays=16, centres=there)
+    first.check_mode = "read"
+    first.run()
+    assert all("cached" not in record for record in first.report["paths"].values())
+    second, _, _ = traced(tmp_path / "b", recipe, rays=16, centres=elsewhere)
+    second.check_mode = "read"
+    assert carry_early(tmp_path / "b" / "bundle" / "early_cache", tmp_path / "a" / "out") == 3
+    second.run()
+    paths = second.report["paths"]
+    # The sources' tables are the first run's; the pairs at rest stand on other centres.
+    assert paths["voice"] == paths["tap"] == {"cached": True}
+    assert "cached" not in paths["_pairs"]
+    with (
+        read_pack(tmp_path / "a" / "out" / "pack.h5") as a,
+        read_pack(tmp_path / "b" / "out" / "pack.h5") as b,
+    ):
+        for name in a.sources:
+            assert np.array_equal(a.sources[name].early.delay_s, b.sources[name].early.delay_s)
+        assert not np.array_equal(a.cells.position, b.cells.position)
+    with pytest.raises(SystemExit, match="holds no early table"):
+        carry_early(tmp_path / "c", tmp_path / "nowhere")
+    # A recipe of this dwelling's assets, traced on another low grid: that key alone may differ.
+    held = assets()
+    tree = recipe.to_dict()
+    tree["assets"] = found_assets(recipe, held, voxel_low_key="the validated grid")
+    ours = Recipe.from_dict(tree)
+    build_bundle(tmp_path / "d" / "bundle", ours, held, make_plan(ours, held.triangles))
+    spec_file = tmp_path / "d" / "bundle" / "campaign.json"
+    spec = json.loads(spec_file.read_text())
+    assert spec["trace"]["allowed_mismatch"] == [] and spec["trace"]["low"]["engine"] == "lowband"
+
+    def refused(allowed: list[str]) -> list[str] | str:
+        spec["trace"]["allowed_mismatch"] = allowed
+        spec_file.write_text(json.dumps(spec))
+        pairs = FreeFieldPairs(plan.tracks.positions, plan.all_cells, tmp_path / "d" / "out")
+        trace = Trace(tmp_path / "d" / "bundle", tmp_path / "d" / "out", engine=pairs, gpu=False)
+        trace.journal.quiet = True
+        try:
+            return trace.check_assets()
+        except RuntimeError as error:
+            return str(error)
+
+    assert "voxel_low_key" in str(refused([]))
+    assert refused(["voxel_low_key"]) == ["voxel_low_key"]
+    assert "voxel_low_key" in str(refused(["calibration_key"]))
