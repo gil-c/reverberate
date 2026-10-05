@@ -58,7 +58,9 @@ from reverberate.mirror.moving import (
 )
 from reverberate.mirror.occupancy import (
     CLEAR_CELLS,
+    GROW_CELLS,
     MIN_DETOUR_M,
+    SAMPLES_PER_EDGE,
     DiffractionSettings,
     Occupancy,
     _clear,
@@ -68,6 +70,7 @@ from reverberate.mirror.occupancy import (
     maekawa_db,
     occupancy_of,
 )
+from reverberate.mirror.shared import Store, name_of
 
 __all__ = ["OnsetField", "onset_field", "onset_rows"]
 
@@ -90,11 +93,20 @@ class OnsetField:
     edges: Edges
     settings: DiffractionSettings
     sound_speed_m_s: float
-    _roots: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict, repr=False)
+    #: A field is kept as its predecessors alone: a cell is reached when it has one.
+    _roots: dict[int, np.ndarray] = field(default_factory=dict, repr=False)
     solved: int = 0
+    #: Fields found in the store instead of solved.
+    read: int = 0
+    #: What names the field, and where its distance fields are kept between processes.
+    key: str = ""
+    store: Store | None = None
 
-    def root(self, start: int) -> tuple[np.ndarray, np.ndarray]:
-        """Dijkstra's distances and predecessors from cell ``start``."""
+    def root(self, start: int) -> np.ndarray:
+        """Dijkstra's predecessors from cell ``start``: negative where the cell is not reached.
+
+        The start itself has none either, and is reached.
+        """
         found = self._roots.get(start)
         if found is None:
             self.solve([start])
@@ -104,24 +116,67 @@ class OnsetField:
     def solve(self, starts: Any) -> None:
         """The fields of ``starts`` that are not held, :data:`ROOTS_PER_CALL` to a call.
 
-        A field is the same whichever call solved it: each start is its own
-        search. The last :data:`ROOTS_KEPT` are kept, those just asked for
-        among them.
+        A field is the same whichever call solved it, and whichever process:
+        each start is its own search, and with a store a field another
+        process solved is mapped and not solved again. The last
+        :data:`ROOTS_KEPT` are kept, those just asked for among them.
         """
         wanted = list(dict.fromkeys(int(s) for s in starts))
         missing = [s for s in wanted if s not in self._roots]
-        for first in range(0, len(missing), ROOTS_PER_CALL):
-            share = missing[first : first + ROOTS_PER_CALL]
-            distance, predecessor = dijkstra(
-                self.graph, directed=False, indices=share, return_predecessors=True
-            )
-            for row, start in enumerate(share):
-                self._roots[start] = (np.asarray(distance[row]), np.asarray(predecessor[row]))
-            self.solved += len(share)
+        store = self.store
+        names = {start: name_of("distance field 1", self.key, start) for start in missing}
+        claims: dict[int, Any] = {}
+        theirs: list[int] = []
+        if store is not None:
+            for start in list(missing):
+                if self._read(start, names[start]):
+                    missing.remove(start)
+                    continue
+                claims[start] = store.claim("fields", names[start])
+                if claims[start] is None:
+                    # Another process is solving this field now: read when it has.
+                    theirs.append(start)
+                    missing.remove(start)
+                elif self._read(start, names[start]):
+                    claims.pop(start).close()
+                    missing.remove(start)
+        try:
+            for first in range(0, len(missing), ROOTS_PER_CALL):
+                self._search(missing[first : first + ROOTS_PER_CALL], names)
+        finally:
+            for claim in claims.values():
+                if claim is not None:
+                    claim.close()
+        for start in theirs:
+            assert store is not None
+            store.claim("fields", names[start], wait=True).close()
+            if not self._read(start, names[start]):
+                # The process that was solving it is gone: solved here.
+                self._search([start], names)
         for start in wanted:
             self._roots[start] = self._roots.pop(start)
         while len(self._roots) > max(ROOTS_KEPT, len(wanted)):
             self._roots.pop(next(iter(self._roots)))
+
+    def _read(self, start: int, name: str) -> bool:
+        """The field of ``start`` from the store, when it is there."""
+        kept = None if self.store is None else self.store.load("fields", name)
+        if kept is None:
+            return False
+        self._roots[start] = kept["predecessor"]
+        self.read += 1
+        return True
+
+    def _search(self, share: list[int], names: dict[int, str]) -> None:
+        """One call of Dijkstra for the starts of ``share``, each field kept and stored."""
+        _, predecessor = dijkstra(
+            self.graph, directed=False, indices=share, return_predecessors=True
+        )
+        for row, start in enumerate(share):
+            self._roots[start] = np.asarray(predecessor[row])
+            if self.store is not None:
+                self.store.save("fields", names[start], {"predecessor": self._roots[start]})
+        self.solved += len(share)
 
 
 def onset_field(
@@ -130,6 +185,7 @@ def onset_field(
     *,
     sound_speed_m_s: float,
     settings: DiffractionSettings | None = None,
+    store: Store | None = None,
 ) -> OnsetField:
     """The scene's occupancy, graph and edges.
 
@@ -138,20 +194,62 @@ def onset_field(
     frees them round its source and its points, so that a mouth or a head
     close to a surface is not walled in by the grid. Give the whole
     recipe's positions and every trace of it reads one field.
+
+    With a ``store`` the first process that asks makes the field and the
+    others map it, and so with each distance field solved on it.
     """
     settings = settings or DiffractionSettings()
     clear = np.atleast_2d(np.asarray(clear, dtype=float))
-    lo = np.minimum(clear.min(axis=0), catalogue.bmin) - 0.3
-    hi = np.maximum(clear.max(axis=0), catalogue.bmax) + 0.3
-    occupancy = occupancy_of(catalogue, lo, hi, settings)
-    _clear(occupancy, clear, CLEAR_CELLS)
+    key = name_of(
+        "onset field 1",
+        catalogue.key,
+        settings.record(),
+        [GROW_CELLS, SAMPLES_PER_EDGE, CLEAR_CELLS],
+        clear,
+    )
+
+    def build() -> dict[str, np.ndarray]:
+        lo = np.minimum(clear.min(axis=0), catalogue.bmin) - 0.3
+        hi = np.maximum(clear.max(axis=0), catalogue.bmax) + 0.3
+        occupancy = occupancy_of(catalogue, lo, hi, settings)
+        _clear(occupancy, clear, CLEAR_CELLS)
+        graph = _graph(occupancy)
+        edges = diffracting_edges(catalogue)
+        return {
+            "blocked": occupancy.blocked,
+            "origin": occupancy.origin,
+            "cell_m": np.asarray(occupancy.cell_m),
+            "graph_data": graph.data,
+            "graph_indices": graph.indices,
+            "graph_indptr": graph.indptr,
+            **{f"edges_{name}": getattr(edges, name) for name in _EDGE_FIELDS},
+        }
+
+    made = build() if store is None else store.make("onsets", key, build)[0]
+    occupancy = Occupancy(
+        np.asarray(made["blocked"]), np.asarray(made["origin"]), float(made["cell_m"])
+    )
     return OnsetField(
         occupancy=occupancy,
-        graph=_graph(occupancy),
-        edges=diffracting_edges(catalogue),
+        graph=csr_matrix(
+            (made["graph_data"], made["graph_indices"], made["graph_indptr"]),
+            shape=(occupancy.blocked.size, occupancy.blocked.size),
+        ),
+        edges=Edges(
+            a=np.asarray(made["edges_a"]),
+            b=np.asarray(made["edges_b"]),
+            label=np.asarray(made["edges_label"]),
+            facet=np.asarray(made["edges_facet"]),
+            length_m=np.asarray(made["edges_length_m"]),
+        ),
         settings=settings,
         sound_speed_m_s=float(sound_speed_m_s),
+        key=key,
+        store=store,
     )
+
+
+_EDGE_FIELDS = ("a", "b", "label", "facet", "length_m")
 
 
 @dataclass
@@ -191,9 +289,9 @@ def _geodesic(
     bands = np.asarray(OCTAVE_BANDS, dtype=float)
     c = held.sound_speed_m_s
     start = int(occupancy.flat(occupancy.cell_of(source))[0])
-    distance, predecessor = held.root(start)
+    predecessor = held.root(start)
     node = int(occupancy.flat(occupancy.cell_of(receiver))[0])
-    if not np.isfinite(distance[node]):
+    if node != start and predecessor[node] < 0:
         return None
     nodes = [node]
     while nodes[-1] != start and predecessor[nodes[-1]] >= 0:

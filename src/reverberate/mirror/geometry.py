@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -170,9 +171,9 @@ class DerivedScene:
     bmin: np.ndarray = field(default_factory=lambda: np.zeros(3))
     bmax: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
-    @property
+    @cached_property
     def key(self) -> str:
-        """A digest of the arrays and the rules: the derived scene's identity."""
+        """A digest of the arrays and the rules: the derived scene's identity. Read once."""
         digest = hashlib.sha256()
         for array in (
             self.reflector_vertices,
