@@ -475,8 +475,14 @@ def histogram_on_devices(
     devices: Devices | None = None,
     grid: UniformGrid | None = None,
     say: Any = None,
+    held: dict[int, DeviceScene] | None = None,
 ) -> Histogram:
-    """The histogram of every receiver, rays split over the devices."""
+    """The histogram of every receiver, rays split over the devices.
+
+    ``held`` keeps each card's upload from one source to the next: the rays
+    read the scene and its grid, which do not depend on the source, and a
+    caller with many sources hands the same dictionary every time.
+    """
     settings = settings or RaySettings()
     devices = devices or Devices.detect()
     receivers = np.atleast_2d(np.asarray(receivers, dtype=float))
@@ -501,9 +507,13 @@ def histogram_on_devices(
                 np.rint(h.moments * HISTOGRAM_SCALE).astype(np.int64),
                 h.hits,
             )
-        held = upload(scene, tree, device=card, grid=grid)
+        on_card = None if held is None else held.get(card)
+        if on_card is None:
+            on_card = upload(scene, tree, device=card, grid=grid)
+            if held is not None:
+                held[card] = on_card
         return histogram_on_device(
-            scene, source, receivers, settings, held, ray_start=first, ray_count=count, say=say
+            scene, source, receivers, settings, on_card, ray_start=first, ray_count=count, say=say
         )
 
     parts = devices.map(work, devices.split(settings.rays))

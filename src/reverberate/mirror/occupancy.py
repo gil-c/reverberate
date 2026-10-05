@@ -198,16 +198,56 @@ def _detours(corners: list[np.ndarray]) -> list[float]:
     return out
 
 
+#: Ends tried at once by :func:`_pull`, from the far end of the chain.
+PULL_BLOCK = 32
+
+
+def _sees_many(occupancy: Occupancy, a: np.ndarray, ends: np.ndarray) -> np.ndarray:
+    """:meth:`Occupancy.sees` from ``a`` to each row of ``ends``, in one pass.
+
+    The samples are that method's own, to the bit: as many per segment, at
+    the parameters ``numpy.linspace`` gives, through the same expressions.
+    A segment whose length is within rounding of a change in its sample
+    count is handed to the method itself.
+    """
+    ends = np.atleast_2d(np.asarray(ends, dtype=float))
+    spacing = 0.4 * occupancy.cell_m
+    gap = ends - a[None, :]
+    ratio = np.sqrt(gap[:, 0] * gap[:, 0] + gap[:, 1] * gap[:, 1] + gap[:, 2] * gap[:, 2]) / spacing
+    unsure = np.abs(ratio - np.rint(ratio)) <= 1e-9 * np.maximum(ratio, 1.0)
+    steps = np.maximum(2, np.ceil(ratio).astype(np.int64) + 1)
+    first = np.concatenate([[0], np.cumsum(steps)])
+    owner = np.repeat(np.arange(steps.size), steps)
+    t = (np.arange(first[-1]) - first[owner]) * (1.0 / (steps - 1))[owner]
+    t[first[1:] - 1] = 1.0
+    t = t[:, None]
+    cells = occupancy.cell_of(a[None, :] * (1.0 - t) + ends[owner] * t)
+    hit = occupancy.blocked[cells[:, 0], cells[:, 1], cells[:, 2]]
+    seen = np.add.reduceat(hit.astype(np.int64), first[:-1]) == 0
+    for k in np.flatnonzero(unsure):
+        seen[k] = occupancy.sees(a, ends[k])
+    return np.asarray(seen, dtype=bool)
+
+
 def _pull(occupancy: Occupancy, chain: np.ndarray) -> list[np.ndarray]:
-    """The chain of points from receiver to source, pulled tight: the corners kept."""
+    """The chain of points from receiver to source, pulled tight: the corners kept.
+
+    From each corner, the farthest point of the chain it sees is the next;
+    the points are tried :data:`PULL_BLOCK` at a time from the far end.
+    """
     corners = [chain[0]]
     at = 0
     last = len(chain) - 1
     while at < last:
-        anchor = chain[at]
-        step = last
-        while step > at + 1 and not occupancy.sees(anchor, chain[step]):
-            step -= 1
+        step = at + 1
+        high = last
+        while high > at + 1:
+            low = max(at + 2, high - PULL_BLOCK + 1)
+            seen = np.flatnonzero(_sees_many(occupancy, chain[at], chain[low : high + 1]))
+            if seen.size:
+                step = low + int(seen[-1])
+                break
+            high = low - 1
         corners.append(chain[step])
         at = step
     return corners

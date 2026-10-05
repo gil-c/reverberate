@@ -53,6 +53,7 @@ __all__ = [
     "first_arrival_s",
     "mirror_omni",
     "pair_low",
+    "pair_omni",
     "pair_seam_db",
     "step_levels",
 ]
@@ -82,6 +83,27 @@ def pair_low(
         float(onset),
         np.asarray(to_numpy(aired[0]), dtype=float),
     )
+
+
+def pair_omni(
+    cached_omni: Any,
+    atmosphere: Atmosphere,
+    *,
+    sound_speed_m_s: float,
+    xp: Any = None,
+) -> tuple[float, np.ndarray]:
+    """``low/onset_s`` of a pair and what its seam is read on, from channel 0 alone.
+
+    :func:`pair_low`'s second and third answers without its first. The air
+    is applied a channel at a time, so channel 0 of the response
+    (``[1, 4800]``) gives them to the bit, and the levelling does not pay
+    for the 63 channels it does not read.
+    """
+    from reverberate.compute import to_numpy
+
+    aired = with_air(cached_omni, LOW_RATE_HZ, atmosphere, sound_speed_m_s=sound_speed_m_s, xp=xp)
+    onset = onset_s(aired[0], LOW_RATE_HZ, xp=xp)
+    return float(onset), np.asarray(to_numpy(aired[0]), dtype=float)
 
 
 def first_arrival_s(early: EarlyTable, row: int) -> float:
