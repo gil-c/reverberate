@@ -165,6 +165,40 @@ Nothing of the queue itself failed on cards: four contexts in four
 processes, the kernels compiled by each worker at the first run, a worker's
 core at 76 per cent while its card works.
 
+### The clock's check, and what a far pair's onset is
+
+Two windows of far sources stopped at the end of the levelling here, and
+the two whole scenes of the same day did after all their solves: "the low
+band and the mirror are not on one clock", on the median of what the pairs'
+loudest sample trails their direct sound by. The clock was right. Pairs at
+2.6 to 3.4 m trail by 10.64 to 10.66 ms, the lead; pairs at 4 to 9 m by
+15.5 to 18.8 ms, falling evenly with the distance (18.5 ms at 4.4 m, 15.5
+at 8.7), some by 28 to 30.
+
+**The wave's direct sound is there at those pairs, at its time and at its
+level, and it is not the loudest thing in the response.** Read in the pair
+cache, channel 0, the peak within 3 ms after the straight line's time,
+times the distance: 0.0012 at every near pair (22 of them, 2.6 to 3.4 m),
+and 0.0012 in the median at the far ones (129 pairs at 4.4 to 9.7 m; 0.0010
+to 0.0019), with nothing before it (0.0001). The response's own peak comes
+5 to 8 ms after the line at those pairs, sometimes 17 to 20, and is 1.5
+times the direct sound (the direct sound is 0.67 of it in the median, 0.53
+at the least). So the mirror and the grid agree that the path is open; the
+low band's loudest sample at a far pair is a later arrival.
+
+The check now reads the first decile of the trails, where the direct sound
+is the loudest, and the report keeps the median and the spread by distance
+(`level.trail_s_at_the_first_decile`, `trail_s_by_distance`). **A window
+with no near pair at all is still stopped**: the 5 s window of three far
+voices here has its first decile at 15.53 ms, every one of its 129 direct
+pairs being at 4.4 m or more. The reading that would hold for any scene is
+the one measured above, the response's peak within a millisecond or two of
+where the mirror puts the direct sound, and not its loudest sample; it is
+proposed and not built. **What the check leaves open is not the check's**: `low/onset_s` of a pair is its loudest
+sample, and at a far pair the pack therefore anchors the join of the two
+bands 5 to 20 ms after the direct sound. Whether that is heard is for a
+listening of far sources to say; it was so before this lot.
+
 ### The pack across machines
 
 The same bundle gives one pack on 1, 2 and 4 cards and on 1 to 32 workers

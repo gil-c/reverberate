@@ -367,6 +367,40 @@ def test_the_scaling_is_each_counts_own_run_and_says_whether_the_packs_are_one(
     assert reference["digest"] in capsys.readouterr().out
 
 
+def test_the_clock_is_read_where_the_direct_sound_is_the_loudest(tmp_path: Path) -> None:
+    """Far pairs whose loudest sample is a later arrival do not stop a scene; a wrong clock does."""
+    trace, _, _ = quick(tmp_path)
+    lead, c = trace.assets.pack_lead_s, trace.assets.settings.sound_speed_m_s
+
+    def pair(distance_m: float, late_s: float) -> dict[str, Any]:
+        first = distance_m / c
+        return {
+            "seam_db": 0.0,
+            "end_db": -60.0,
+            "direct": True,
+            "first_s": first,
+            "onset_s": first + lead + late_s,
+        }
+
+    # Two whole scenes of hssd_0076, 2026-10-05: pairs under 4 m on the lead, pairs at 4 to
+    # 12 m 6 to 14 ms after it, a median 2.5 ms off; both were stopped after their solves.
+    scene = [pair(2.5 + 0.1 * k, 0.0) for k in range(5)] + [
+        pair(4.5 + 0.2 * k, 0.006 + 0.0004 * k) for k in range(20)
+    ]
+    trace.pair_key = [f"{k:064d}" for k in range(len(scene))]
+    trace._levels_report(dict(zip(trace.pair_key, scene, strict=True)), made=len(scene))
+    said = trace.report["level"]
+    assert abs(said["trail_s_at_the_first_decile"] - lead) < 1e-6
+    assert said["trail_s_of_pairs_with_a_direct_path"]["median"] - lead > 0.005
+    assert said["trail_s_by_distance"]["2 to 4 m"]["pairs"] == 5
+    assert said["trail_s_by_distance"]["4 to 8 m"]["median"] - lead > 0.005
+    assert "over 8 m" in said["trail_s_by_distance"]
+    # Every pair off the lead, the near ones too: the two bands are not on one clock.
+    wrong = [pair(2.5 + 0.1 * k, 0.004) for k in range(25)]
+    with pytest.raises(RuntimeError, match="at the first decile"):
+        trace._levels_report(dict(zip(trace.pair_key, wrong, strict=True)), made=0)
+
+
 def test_a_run_predicted_over_its_hours_stops_before_its_work(tmp_path: Path) -> None:
     trace, pairs, _ = quick(tmp_path)
     trace.max_hours = 1e-9

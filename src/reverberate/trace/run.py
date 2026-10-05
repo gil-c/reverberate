@@ -1273,7 +1273,22 @@ class Trace:
     def _levels_report(self, known: dict[str, dict[str, Any]], made: int) -> None:
         self.levels = [known[key] for key in self.pair_key]
         seams = np.array([r["seam_db"] for r in self.levels], dtype=float)
-        trails = np.array([r["onset_s"] - r["first_s"] for r in self.levels if r["direct"]])
+        direct = [r for r in self.levels if r["direct"]]
+        trails = np.array([r["onset_s"] - r["first_s"] for r in direct], dtype=float)
+        away = np.array([r["first_s"] for r in direct]) * self.assets.settings.sound_speed_m_s
+        # The clock is read where the direct sound is the loudest. A far pair's loudest
+        # sample is often a later arrival: at 4 to 9 m in hssd_0076 the direct sound is
+        # there, at its time and at its level, and something 5 to 8 ms after it is half as
+        # loud again. The median of a scene of far sources is then not the lead, and two
+        # whole scenes were stopped by it after all their solves (2026-10-05). The first
+        # decile is the pairs whose loudest sample is their direct sound.
+        early = float(np.percentile(trails, 10)) if trails.size else self.assets.pack_lead_s
+        by_distance: dict[str, Any] = {}
+        for low, high in ((0.0, 2.0), (2.0, 4.0), (4.0, 8.0), (8.0, float("inf"))):
+            held = trails[(away >= low) & (away < high)]
+            if held.size:
+                name = f"{low:g} to {high:g} m" if np.isfinite(high) else f"over {low:g} m"
+                by_distance[name] = {"pairs": int(held.size), **(_spread(held, 6) or {})}
         self.report["level"] = {
             "pairs": len(self.levels),
             "made": made,
@@ -1281,14 +1296,18 @@ class Trace:
             "seam_db": _spread(seams),
             "end_db": _spread(np.array([r["end_db"] for r in self.levels], dtype=float), 1),
             # What a pair's loudest sample trails its direct sound by: the pack's lead and
-            # the solver's pulse. Away from the lead, the two bands are not on one clock.
+            # the solver's pulse where the direct sound is the loudest, more where a later
+            # arrival is. The median and the spread by distance say how many pairs anchor
+            # on something else than their direct sound.
             "trail_s_of_pairs_with_a_direct_path": _spread(trails, 6),
+            "trail_s_at_the_first_decile": round(early, 6),
+            "trail_s_by_distance": by_distance,
             "lead_s": self.assets.pack_lead_s,
         }
-        if trails.size and abs(float(np.median(trails)) - self.assets.pack_lead_s) > CLOCK_S:
+        if abs(early - self.assets.pack_lead_s) > CLOCK_S:
             raise RuntimeError(
                 "the low band and the mirror are not on one clock: the pairs' onsets trail their"
-                f" direct sound by {np.median(trails) * 1e3:.2f} ms in the median, lead included,"
+                f" direct sound by {early * 1e3:.2f} ms at the first decile, lead included,"
                 f" and the pack's lead is {self.assets.pack_lead_s * 1e3:.2f} ms. The pair cache"
                 " is on the geometric clock: a response in it starts when its source does"
             )
