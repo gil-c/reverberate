@@ -743,23 +743,47 @@ under the same weighting. Neither is interpolated between steps on its own:
 each is read at the step and enters the path's gain there (see `early`),
 and the tail's.
 
-**Along a walk `high_gain_db` may be steadied**, an option that is off
-(`reverberate.render.relevel.steadied`): within every run of audible steps
-it is then the step's seam averaged, in decibels, under a raised cosine 2 s
-either side, and a source at rest before a head at rest keeps its pair's
-seam to the bit. Each pair is levelled on its own and the seams of two
-pairs 8 cm apart are not neighbours (+0.4 dB at the first decile of the
-first whole scene's 18 219 pairs, +3.4 dB at the ninth): a step's own seam
-made everything above the crossover of a walking source, or of a source the
-head walked past, go up and down by 1.7 to 2.4 dB within half a second in
-the top tenth of such half seconds and by 5 to 8 dB within a second at the
-worst. Steadied, the same tables move by 0.3 to 0.5 dB and by 1.2 to 3.6 dB.
-The trace writes each step's own seam;
-`python -m reverberate.render relevel PACK` steadies a pack's tables **in
-place**, keeps the trace's as `level/high_gain_db_traced` (a dataset a
-reader ignores) and `--undo` puts them back. `low/seam_db` is each pair's
-own, always. Nothing is decided: the owner hears a pack both ways first
-(`docs/open-questions/first-scene-defects.md`).
+**`high_gain_db` is written one of three ways**, and a pack says which
+(`reverberate.render.relevel`; `docs/open-questions/first-scene-defects.md`,
+section 10):
+
+| `seam` | `high_gain_db` at an audible step | at the join | along a walk |
+| --- | --- | --- | --- |
+| `pair` | `20 log10(alignment_gain)` plus the step's own seam, as above | the two bands' energies meet in the crossover's octave, pair by pair | it moves with every pair: 2 to 5 dB within half a second, up to 8 within a second (the first whole scene) |
+| `smooth` | that, averaged in decibels under a raised cosine 2 s either side within every run of audible steps | within 0.9 dB at nine steps in ten | 0.3 to 0.5 dB within half a second, 1.9 at the worst |
+| `constant` | `20 log10(alignment_gain)` plus one number for the scene: the median of the pairs' seams, or the one given | each pair's own distance from that number: within 1 dB for 62 per cent of the pairs, within 2 dB for 90 | nothing moves |
+
+Each pair is levelled on its own and the seams of two pairs 8 cm apart are
+not neighbours (+0.4 dB at the first decile of the first whole scene's
+18 219 pairs, +3.4 dB at the ninth). What a seam holds beside one constant
+is the ratio of the two solvers' interference patterns in one octave at
+one point, decided within 0.3 m, which is no property of the bands above;
+and the constant is one error of the mirror's scale, 2.3 to 2.7 dB, not
+the dwelling's. `pair` is what every pack before 2026-10-06 holds and what
+a trace writes unless told (`--seam`); a source at rest before a head at
+rest has the same scalar under `pair` and `smooth`, to the bit.
+
+- **Where it is said.** A pack written another way than `pair` says so in
+  its provenance: `seam`, an object with `seam` (the way), `seconds`
+  (`smooth`) or `constant_db` (`constant`), and `relevelled: true` when the
+  table was rewritten after the trace. A pack without it is `pair`.
+- **Rewritten in place.** `python -m reverberate.render relevel PACK --seam
+  smooth|constant [--seconds S] [--constant-db DB]` writes the tables of a
+  traced pack **in place**, keeps the trace's as
+  `level/high_gain_db_traced` (a dataset a reader ignores) with the way on
+  the `level` group's attributes (`seam`, `steadied_s` or
+  `seam_constant_db`), and `--undo`, or `--seam pair`, puts them back to
+  the bit and removes all of it. `--dry-run` writes nothing and says what
+  the table would do. `low/seam_db` is each pair's own, always.
+- **A level a band is not in a pack.** A fourth way, `tapered`, is the
+  step's own seam in the bank's bands to 1 kHz, the scene's constant from
+  4 kHz, and half way between them in decibels at 2 kHz: `[step, band]`
+  over `bank_bands_hz`. The engine takes such a table, or a scalar one, in
+  place of a source's `high_gain_db` (`Engine(high_gain_db={source:
+  table})`), the early part by its bands and the late part a group of
+  bands at a time; a scalar table given so is the pack with that table
+  written in it, to the bit, and a render without one is the pack's.
+  `level/high_gain_db` stays `[step]`.
 
 **The anchor of a pair** (`reverberate.trace.level.pair_anchor_s`) is its
 own direct sound: the first peak of channel 0, with its air and before its
@@ -947,6 +971,7 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
 | `low_seconds` | present only when the low band was solved for fewer seconds than `low_samples` hold (`--low-seconds`): every `low/ir` is then faded to nothing over the 20 ms before that time and silent after it |
 | `rays` | present only when a tail site cast another number of rays than 100 000 (`--rays`) |
+| `seam` | present only when `level/high_gain_db` is written another way than each step's own seam (`--seam`, or `relevel`): `{"seam": "smooth", "seconds": 2.0}` or `{"seam": "constant", "constant_db": 1.903}`, with `"relevelled": true` when the table was rewritten after the trace (see `level`) |
 | `low_levers` | present only when the pack holds `low/compact`: the levers it was written with, as `low/compact`'s own `levers_json` |
 | `pair_cache` | present only when the pair cache the responses were read from was kept compact: its levers, `bins,int16` |
 | `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |

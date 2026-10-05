@@ -261,3 +261,30 @@ run's `mirror/metrics_c/S1.json` and the report to the owner.
   of those whose median band met 5 per cent, 17 per cent had a band more
   than 10 per cent out, the worst at 27. A listener walking the storey
   hears that band. The worst band stays.
+- **The alignment's gain is 2.2 to 2.7 dB low, and the seam was paying for
+  it** (found 2026-10-05 on the first whole scene, lot L18;
+  `docs/open-questions/first-scene-defects.md`, section 10).
+  `align_to_reference` makes two energies equal, the reference's direct
+  pulse and the mirror's, each read in 0.5 ms. The mirror's pulse is a
+  minimum phase filter and is whole in that window (-0.13 dB); the wave
+  solver's is band limited, rings both ways, and is not (-2.2 dB: 13 per
+  cent of it before the window and 11 after, on the 40 points of 0076
+  nearest S1). So the mirror's direct sound stands under the wave's by the
+  same amount in every band: -2.3, -2.3, -2.7 and -2.6 dB in the octaves
+  from 500 Hz to 4 kHz on the 12 nearest points, 2.65 dB from 500 Hz to
+  4 kHz in the median of the 40 (quartiles 2.60 and 2.70), where the wave
+  field's is within 0.3 dB of `1 / d`. The hybrid's seam, a point's own,
+  put it back (2.3 dB in the field's median) with the point's own
+  interference pattern on top (0.9 to 4.1 dB from the first to the last
+  decile), which is why the field was right at rest and a scene breathes
+  along a walk. **The gain should be read in the band**: both pulses under
+  one window that holds both, 3 ms either side of each one's arrival on
+  points under 1 m, the ratio of their mean power from 500 Hz to 4 kHz,
+  the median over the points: 0.0195 on 0076 where the alignment gave
+  0.0144. And it needs no reference: the signature has unit energy over
+  24 kHz, 2.4 dB over its band, and a signature of unit gain in its band
+  with a pack's gain of one is the same scale within 0.2 dB, for every
+  dwelling. Not changed here: the fields of 0076 and the calibration's
+  judgement were made with the gain as it is, and a pack takes the
+  correction as its constant (`relevel --seam constant --constant-db
+  2.65`).
