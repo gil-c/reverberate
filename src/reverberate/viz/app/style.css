@@ -364,6 +364,10 @@ input[type=range].slide::-moz-range-thumb {
   border-radius: 3px; background: var(--src); color: #1a1104;
 }
 .tl-note.bad { color: var(--bad, #f07a6a); }
+.tl-clip:not(:empty) {
+  font: 11px var(--mono); text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 6px;
+  border-radius: 3px; background: var(--bad, #f07a6a); color: #1a0704; white-space: nowrap;
+}
 
 .generator select { margin: 0; }
 .gen-seed { grid-template-columns: 52px minmax(0, 1fr) 30px; }

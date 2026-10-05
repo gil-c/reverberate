@@ -221,6 +221,14 @@ histograms, pack), under that limit on this machine and over it on one
 with less memory. If the first whole trace shows it again, the rows go to
 the file a pair at a time and the array is not held.
 
+**Done before the first whole trace, without waiting to see it again**
+(lot PF): `trace.run.PairRows` hands the pack's writer one pair when it
+asks, and the writer copies a table that is not an array a row at a time.
+One pair, 1.2 MB, is all that is held, where a source's rows were 5.6 GB
+for 4586 pairs. The file is the same byte for byte
+(`tests/test_trace.py`). Whether it removes the 164 ms a pair is for the
+first whole trace to say: the reading above was not proven.
+
 ## The command for the whole scene
 
 ```
@@ -240,3 +248,9 @@ batched solver unless `--low-engine pffdtd` is given. `--dry-run` prints
 each stage with the card its constant was measured on; the totals of this
 appendix are at 0.174 USD an hour and were printed with PFFDTD's price for
 the solves, which is not this lot's to state.
+
+Since lot PF the machine is not named by `--gpu` and `--hours`: the offers
+are priced for the plan and the lowest predicted total within `--max-hours`
+is rented, with the watchdog taken from the prediction. The commands as
+they are now, and the table of cards the prediction rests on, are section 7
+of `docs/runbook-rented-machines.md`.

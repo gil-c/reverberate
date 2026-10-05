@@ -9,6 +9,7 @@
 <bundle>/trace/positions.npy the source positions, as the laptop read them in the recipe
 <bundle>/trace/mirror/      the mirror's scene, calibration, signature and alignment
 <bundle>/pairs_cache/       pairs this machine already holds, so that they are not solved again
+<bundle>/early_cache/       early tables of an earlier run of the recipe (``reuse_from``)
 ```
 
 ``campaign.json`` carries what :func:`reverberate.gpu.onebox.campaign_need`
@@ -35,7 +36,7 @@ from reverberate.trace.assets import MirrorAssets
 from reverberate.trace.plan import Plan, estimate
 from reverberate.trace.run import KIND
 
-__all__ = ["build_bundle", "code_version", "export_digest"]
+__all__ = ["build_bundle", "carry_early", "carry_pairs", "code_version", "export_digest"]
 
 
 def code_version(repo: Path) -> str:
@@ -62,6 +63,43 @@ def export_digest(models: Path) -> str:
     return digest.hexdigest()
 
 
+def carry_pairs(carried_root: Path, local: Any, keys: list[str]) -> int:
+    """The pairs of ``keys`` this machine's cache holds, into the bundle; how many it carries.
+
+    ``local`` is the cache of the grid the machine will solve on, and the
+    keys are the machine's own (grid, positions, encoder, solver, window),
+    so what is carried is found there and not solved again.
+    """
+    from reverberate.accel.pairs import PairCache
+
+    carried = PairCache(Path(carried_root), local.voxel_low_key)
+    records = local.records()
+    for name in keys:
+        if local.has(name) and not carried.has(name):
+            record = {k: v for k, v in records.get(name, {}).items() if k != "key"}
+            carried.path(name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local.path(name), carried.path(name))
+            with (carried.directory / "index.jsonl").open("a") as handle:
+                handle.write(json.dumps({"key": name, **record}, sort_keys=True) + "\n")
+    return len(carried.records())
+
+
+def carry_early(carried: Path, home: Path) -> int:
+    """The early tables an earlier run brought home, into the bundle; how many.
+
+    ``home`` is that run's home, or the directory of its tables. A table
+    is used by the machine only if its digest is the new run's.
+    """
+    found = next((d for d in (home / "pulled" / "early", home / "early", home) if d.is_dir()), None)
+    tables = sorted(found.glob("*.npz")) if found is not None else []
+    if not tables:
+        raise SystemExit(f"{home} holds no early table: was the run fetched with --fetch-early?")
+    Path(carried).mkdir(parents=True, exist_ok=True)
+    for table in tables:
+        shutil.copy2(table, Path(carried) / table.name)
+    return len(tables)
+
+
 def build_bundle(
     bundle: Path,
     recipe: Recipe,
@@ -77,13 +115,35 @@ def build_bundle(
     with_cache: bool = True,
     check: str | None = None,
     low_engine: str = "lowband",
+    low_scheme: str = "cartesian",
+    low_ppw: float | None = None,
+    reuse_from: Path | None = None,
 ) -> dict[str, Any]:
-    """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``."""
+    """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``.
+
+    ``low_engine``, ``low_scheme`` and ``low_ppw`` say what solves the low
+    band and on which grid; the machine's command reads them in
+    ``trace.low``, and the pairs carried are named as that engine on that
+    grid will ask for them. A grid other than the bundle's is another key:
+    its pairs never meet the validated grid's, in this machine's cache or
+    in the store, and the recipe's ``voxel_low_key`` is then allowed to
+    differ, that key alone.
+
+    ``reuse_from`` is the home of an earlier run of the recipe: the early
+    tables it brought home are carried (``early_cache``), and a table whose
+    sources, heads and scene are this run's is not traced again.
+    """
     bundle = Path(bundle)
     held = bundle / "trace"
     held.mkdir(parents=True, exist_ok=True)
     save_recipe(recipe, held / "recipe.json")
-    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, check=check, low_engine=low_engine)
+    priced = estimate(
+        plan,
+        rate_usd_per_hour=rate_usd_per_hour,
+        check=check,
+        low_engine=low_engine,
+        low_ppw=low_ppw if low_engine == "lowband" else None,
+    )
     plan.save(held)
     (held / "plan.json").write_text(
         json.dumps({**plan.record, "estimate": priced}, indent=1, sort_keys=True)
@@ -114,29 +174,55 @@ def build_bundle(
             campaign[name] = pairs[name]
         for name in ("models", "model_json", "materials"):
             campaign[name] = str(Path("pairs") / pairs[name])
+        # The grid and the solver's name as the machine's engine will key its pairs.
+        key, solver = str(pairs["bands"]["low"]["cache_key"]), str(pairs["solver"])
+        if low_engine == "lowband":
+            from reverberate.wave.lowband.pairs import low_grid
+
+            scene, solver = low_grid(
+                bundle / "pairs" / str(pairs["models"]),
+                str(pairs["storey_scene"]),
+                float(pairs["bands"]["low"]["fmax_hz"]),
+                scheme=low_scheme,
+                ppw=low_ppw,
+                bundle_ppw=float(pairs["ppw"]),
+            )
+            key = str(scene.key)
+        elif low_scheme != "cartesian" or low_ppw is not None:
+            raise ValueError("another grid than the bundle's is the batched solver's alone")
+        low = {
+            "engine": low_engine,
+            "scheme": low_scheme,
+            "ppw": low_ppw,
+            "voxel_low_key": key,
+            "solver": solver,
+            "bundle_grid": key == str(pairs["bands"]["low"]["cache_key"]),
+        }
         if with_cache:
-            key = str(pairs["bands"]["low"]["cache_key"])
-            local = PairCache.local(key)
-            carried = PairCache(bundle / "pairs_cache", key)
-            records = local.records()
-            for position, cells in enumerate(plan.heard_at):
-                for cell in cells:
-                    name = pair_key(
+            campaign["pairs_carried"] = carry_pairs(
+                bundle / "pairs_cache",
+                PairCache.local(key),
+                [
+                    pair_key(
                         key,
                         plan.tracks.positions[position],
                         plan.all_cells[cell],
                         encoder=dict(pairs["encoder"]),
-                        solver=str(pairs["solver"]),
+                        solver=solver,
                         window_s=float(pairs["bands"]["low"]["duration_s"]),
                     )
-                    if local.has(name) and not carried.has(name):
-                        record = {k: v for k, v in records.get(name, {}).items() if k != "key"}
-                        carried.path(name).parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(local.path(name), carried.path(name))
-                        with (carried.directory / "index.jsonl").open("a") as handle:
-                            handle.write(json.dumps({"key": name, **record}, sort_keys=True) + "\n")
-            campaign["pairs_carried"] = len(carried.records())
+                    for position, cells in enumerate(plan.heard_at)
+                    for cell in cells
+                ],
+            )
+    else:
+        low = {"engine": low_engine, "scheme": low_scheme, "ppw": low_ppw}
+    if reuse_from is not None:
+        campaign["early_carried"] = carry_early(bundle / "early_cache", Path(reuse_from))
     campaign["trace"] = {
+        "low": low,
+        # The one key that differs by intent when the low band is on another grid.
+        "allowed_mismatch": [] if low.get("bundle_grid", True) else ["voxel_low_key"],
         "profile": plan.profile.record(),
         "crossover": (crossover or Crossover()).record(),
         "allow_asset_mismatch": bool(allow_asset_mismatch),

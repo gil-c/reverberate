@@ -48,6 +48,14 @@ def main(argv: list[str] | None = None) -> int:
         help="only this: a source that stands on the field's own, the head on a lattice point, "
         "against the field there, a third octave at a time",
     )
+    sound.add_argument(
+        "--against",
+        type=Path,
+        metavar="B.h5",
+        help="only this: another pack of the same recipe. The same window of both, two ears "
+        "of each at one gain (listen/A_*.wav, listen/B_*.wav), and B less A a third octave "
+        "at a time, early and late (ab.md)",
+    )
     sound.add_argument("--probe-seconds", type=float, default=5.0, help="of each steady probe")
     sound.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     args = parser.parse_args(argv)
@@ -77,6 +85,22 @@ def main(argv: list[str] | None = None) -> int:
                 reference.run(
                     pack, found["reference"], args.out, sources=args.sources, workers=args.workers
                 )
+            return 0
+        if args.against is not None:
+            from reverberate.render.check import against
+
+            against.run(
+                args.pack,
+                args.against,
+                args.out,
+                recipe_path=args.recipe,
+                clips_root=found["clips_root"],
+                manifest=found["manifest"],
+                window_s=None if args.window is None else (args.window[0], args.window[1]),
+                sources=args.sources,
+                measured_head=found["measured_head"],
+                settings=CheckSettings(probe_seconds=args.probe_seconds, workers=args.workers),
+            )
             return 0
         document = run(
             args.pack,

@@ -577,3 +577,148 @@ def test_a_placeholder_is_played_from_the_manifest_s_speaker_and_says_so(tmp_pat
     voice = fed("voice_02")
     np.testing.assert_allclose(voice[[1000, 3000, 8000, 13000]], [0.03, 0.04, 0.03, 0.04], 1e-6)
     np.testing.assert_allclose(fed("noise_water")[1000:20000], 0.05, 1e-6)
+
+
+# --------------------------------------------------------------------------
+# the level of the files, and two packs side by side
+# --------------------------------------------------------------------------
+
+
+def test_a_file_past_full_scale_is_clipped_and_counted_not_passed_in_silence(
+    tmp_path: Path,
+) -> None:
+    from reverberate.render.check.report import _write_wavs, write_ears
+
+    # The checker's default is the page's: 12 dB under the pack's scale, 98 dB SPL at full scale.
+    assert CheckSettings().page_gain == measure.PAGE_DEFAULT_GAIN == pytest.approx(0.2512, abs=1e-4)
+    assert measure.FULL_SCALE_SPL_DB - measure.PAGE_DEFAULT_LEVEL_DB == 98.0
+    assert (
+        "-12 dB" in LIMITS["binaural_peak"].reason and "98 dB SPL" in LIMITS["binaural_peak"].reason
+    )
+    ears = np.zeros((2, 4800))
+    ears[0, 100:103] = [0.5, 1.5, -2.0]
+    ears[1, 200] = 0.9
+    assert write_ears(tmp_path / "loud.wav", ears, FS, 1.0) == 2
+    held, _ = soundfile.read(str(tmp_path / "loud.wav"))
+    assert np.abs(held).max() == pytest.approx(1.0, abs=1e-6)
+    assert write_ears(tmp_path / "quiet.wav", ears, FS, measure.PAGE_DEFAULT_GAIN) == 0
+    held, _ = soundfile.read(str(tmp_path / "quiet.wav"))
+    assert held[102, 0] == pytest.approx(-2.0 * measure.PAGE_DEFAULT_GAIN, abs=1e-6)
+    # The set of a mix: which files were clipped is said, by name.
+    clipped: dict[str, int] = {}
+    mix = {"mix_ears": ears, "ears": {"s1": ears, "s2": 0.2 * ears}}
+    files = _write_wavs(tmp_path, mix, FS, 1.0, clipped)
+    assert set(files) == {"mix", "s1", "s2"} and clipped == {"mix": 2, "s1": 2}
+
+
+@pytest.fixture
+def two_packs(walking: dict[str, Any], tmp_path: Path) -> dict[str, Any]:
+    """The walk as two packs of one recipe, the second's early part twice as loud."""
+    hum = measure.pink_noise(96000, FS, seed=4) * 10.0 ** (-6.0 / 20.0)
+    (tmp_path / "made" / "noise").mkdir(parents=True)
+    soundfile.write(str(tmp_path / "made" / "noise" / "hum.wav"), hum, 48000, subtype="FLOAT")
+    recipe = json.dumps(walking["recipe"]).encode()
+    header = replace(walking["pack"].header, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    a = replace(walking["pack"], recipe=recipe, header=header)
+    b = seeded(a, gain=np.asarray(a.sources["s1"].early.gain) * 2.0)
+    write_pack(tmp_path / "A.h5", a)
+    write_pack(tmp_path / "B.h5", b)
+    arguments = [
+        "--clips",
+        str(tmp_path),
+        "--manifest",
+        str(tmp_path / "none.json"),
+        "--measured-head",
+        str(tmp_path / "none.sofa"),
+        "--workers",
+        "1",
+        "--window",
+        "0",
+        "2.5",
+    ]
+    return {"a": tmp_path / "A.h5", "b": tmp_path / "B.h5", "arguments": arguments, "pack": a}
+
+
+def test_two_packs_of_one_recipe_are_written_at_one_gain_and_differ_as_they_were_made_to(
+    two_packs: dict[str, Any], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "ab"
+    code = main(
+        [
+            "check",
+            str(two_packs["a"]),
+            "--against",
+            str(two_packs["b"]),
+            "--out",
+            str(out),
+            *two_packs["arguments"],
+        ]
+    )
+    assert code == 0
+    document = json.loads((out / "ab.json").read_text())
+    assert document["sources"] == ["s1"] and document["window_s"] == [0.0, 2.5]
+    assert document["one_gain_for_both"] is True and document["clipped_samples"] == {}
+    assert document["gain_db"] == pytest.approx(-12.0) and document["full_scale_spl_db"] == 98.0
+    # The same window, the same clips, the same head: two files of each, of one length ...
+    files = document["files"]
+    assert {"A_mix", "B_mix", "A_s1", "B_s1"} <= set(files)
+    heard_a, rate = soundfile.read(files["A_mix"])
+    heard_b, _ = soundfile.read(files["B_mix"])
+    assert rate == 48000 and heard_a.shape == heard_b.shape == (int(2.5 * 48000), 2)
+    # ... at one gain. B was made twice as loud and is twice as loud in its file: nothing
+    # was normalised, to the 24 bits of the files.
+    assert np.abs(heard_a).max() > 0
+    assert np.abs(heard_b - 2.0 * heard_a).max() < 4.0 / 2**23
+    before = document["mix_before_gain"]
+    assert before["B"]["peak_db"] - before["A"]["peak_db"] == pytest.approx(6.02, abs=0.01)
+    assert 20 * np.log10(np.abs(heard_a).max()) == pytest.approx(
+        before["A"]["peak_db"] - 12.0, abs=0.01
+    )
+    # A faint window is also written louder, by one figure for both packs.
+    louder = sorted(name for name in files if "_plus" in name)
+    assert louder and {name.split("_plus")[1] for name in louder} == {louder[0].split("_plus")[1]}
+    assert {name.split("_")[0] for name in louder} == {"A", "B"}
+    # The difference, B less A, a third octave at a time: 6.02 dB wherever there is sound.
+    found = document["difference_b_less_a_db"]["s1"]
+    assert len(document["third_octaves_hz"]) == len(found["clips_db"]) == 23
+    clips = [v for v in found["clips_db"] if v is not None]
+    early = [v for v in found["impulse"]["early_db"] if v is not None]
+    assert len(clips) > 15 and len(early) > 15
+    assert clips == pytest.approx([6.02] * len(clips), abs=0.02)
+    assert early == pytest.approx([6.02] * len(early), abs=0.02)
+    assert found["clips_level_db"] == pytest.approx(6.02, abs=0.01)
+    # A free field has no room: nothing late in either pack, so no band to differ in.
+    assert all(v is None for v in found["impulse"]["late_db"])
+    assert found["impulse"]["arrival_s"]["a"] == found["impulse"]["arrival_s"]["b"]
+    worst = found["worst_abs_db"]
+    assert worst["early"]["over_the_crossover"] == pytest.approx(6.02, abs=0.02)
+    assert worst["clips"]["under_the_crossover"] == pytest.approx(6.02, abs=0.02)
+    text = (out / "ab.md").read_text()
+    assert "Nothing is normalised" in text and "| early |" in text and "+6.0" in text
+    said = capsys.readouterr().out
+    assert "A_mix" in said and "B_mix" in said and "ab.md" in said
+
+
+def test_two_packs_of_two_recipes_or_two_windows_are_refused(
+    two_packs: dict[str, Any], tmp_path: Path
+) -> None:
+    from reverberate.render.check import against
+
+    pack = two_packs["pack"]
+    other = replace(pack, header=replace(pack.header, recipe_sha256="cd" * 32))
+    with pytest.raises(ValueError):
+        # A pack is refused by its own writer when its recipe is not the one it names.
+        write_pack(tmp_path / "C.h5", other)
+    recipe = json.dumps({"sources": [], "note": "another"}).encode()
+    header = replace(pack.header, recipe_sha256=hashlib.sha256(recipe).hexdigest())
+    write_pack(tmp_path / "C.h5", replace(pack, recipe=recipe, header=header))
+    with pytest.raises(SystemExit, match="not of one recipe"):
+        against.run(two_packs["a"], tmp_path / "C.h5", tmp_path / "out", say=lambda text: None)
+    with pytest.raises(SystemExit, match="no source in common"):
+        against.run(
+            two_packs["a"],
+            two_packs["b"],
+            tmp_path / "out",
+            sources=["nobody"],
+            say=lambda text: None,
+        )

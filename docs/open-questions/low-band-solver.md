@@ -100,8 +100,15 @@ every band, because the two are not on one clock: a field carries its lead
 and the pair cache is on the geometric clock. Channel 0 of three cells
 correlates best 43 samples at 4 kHz later, 10.75 ms, the lead of that field,
 at 0.84 to 0.87, with levels within 5 %: two grids' agreement, as above.
-`compare --line` does not delay the pairs and its table is not a verdict;
-the pairs of the present engine were the reference.
+`compare --line` did not delay the pairs and its table was not a verdict;
+the pairs of the present engine were the reference. Since lot PF it delays
+them by the field's lead, by the trace's own rule (the air on the geometric
+clock, `spatial.lowband.delayed`, then the masks): the lead is kept in
+`line.npz` where the field states it, or given as `--lead-s`, and without
+either the command refuses. On a synthetic field (pulses under 600 Hz, the
+air and a lead of 512 samples in it) the worst third octave reads -52.5 dB
+with the lead and +4.1 dB without. It has not been run again on the line
+of hssd_0076.
 
 **Speed, one RTX 3080, the bundle's grid** (47.4 M reached nodes of 63.3 M,
 2.69 M lossy nodes, 32 769 steps):

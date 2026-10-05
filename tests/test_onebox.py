@@ -569,7 +569,9 @@ class TestRunEndToEnd:
             say=lambda m: None,
         )
         assert record["outcome"] == "done" and record["destroyed"] is True
-        assert record["avoided"] == [41, 42]
+        # Those given and the hosts known bad, which no flag is needed for.
+        assert record["avoided"] == sorted({41, 42, *vast.KNOWN_BAD_HOSTS})
+        assert 35928 in vast.KNOWN_BAD_HOSTS
         assert record["instance"] == 7 and record["offer"] == 99
         assert calls.count("launch") == 2, "relaunched once after the stall"
         assert calls.index("kill") < calls.index("launch", calls.index("launch") + 1)

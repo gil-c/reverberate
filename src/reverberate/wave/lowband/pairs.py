@@ -78,6 +78,47 @@ PAIR_S = 0.31
 ONCE_S = 95.0
 REACHED_NODES_AT_1500 = 47_371_003
 STEPS_AT_1500 = 32_769
+#: The grid those were measured on, and how a solve goes with the points per wavelength of
+#: another Cartesian grid: the same card took 36 s a source position at 7.2 points against
+#: 110 s at 10.5, a power of 2.96. Fewer nodes and fewer steps would give 4; the boundary's
+#: share does not thin as the air does.
+MEASURED_PPW = 10.5
+PPW_EXPONENT = 2.96
+#: The measured card's memory as an offer states it (GiB), and the cells whose records one
+#: solve held on it: the realistic recipe's 1646 positions took 1763 solves there.
+MEASURED_CARD_GIB = 20.0
+CELLS_A_SOLVE_MEASURED = 57
+#: Bytes of record a cell takes on the measured grid: 984 nodes, 4 bytes a step.
+CELL_RECORD_BYTES_AT_1500 = 984 * 4.0 * STEPS_AT_1500
+
+
+def cells_a_solve(card_gib: float, *, ppw: float | None = None, fmax_hz: float = 1500.0) -> int:
+    """The cells one solve can be read at on a card of ``card_gib``; 0 when it holds none.
+
+    The batch's share of the card (:data:`MEMORY_SHARE`) less what the
+    grid, one source and the fit take, over a cell's records. What they
+    take is not counted from the grid here: it is the one figure that
+    makes this give the 57 cells measured on a 20 GiB card, 9.8 GB, scaled
+    as the nodes of another grid. A cell's array has the same number of
+    nodes on every grid (its radius is twelve steps) and its records go as
+    the steps.
+    """
+    points = MEASURED_PPW if ppw is None else float(ppw)
+    grid = (points / MEASURED_PPW) * (fmax_hz / 1500.0)
+    record = CELL_RECORD_BYTES_AT_1500 * grid
+    share = MEMORY_SHARE * MEASURED_CARD_GIB * 2.0**30
+    taken = (share - CELLS_A_SOLVE_MEASURED * CELL_RECORD_BYTES_AT_1500) * grid**3
+    return int(max(0.0, MEMORY_SHARE * float(card_gib) * 2.0**30 - taken) // record)
+
+
+def solves_needed(
+    cells_a_position: list[int], card_gib: float, *, ppw: float | None = None
+) -> int | None:
+    """Solves for positions heard at these many cells each; ``None`` on a card too small."""
+    held = cells_a_solve(card_gib, ppw=ppw)
+    if held < 1:
+        return None
+    return int(sum(-(-int(count) // held) for count in cells_a_position if count > 0))
 
 
 def estimate(
@@ -88,6 +129,8 @@ def estimate(
     duration_s: float = 1.2,
     rate_usd_per_hour: float = MEASURED_RATE_USD_PER_HOUR,
     cards: int = 1,
+    ppw: float | None = None,
+    speed: float = 1.0,
 ) -> dict[str, Any]:
     """Seconds and USD of ``sources`` solves and ``pairs`` responses on the batched solver.
 
@@ -96,25 +139,36 @@ def estimate(
     card's. A solve goes as the fourth power of ``fmax`` and as the window;
     ``cards`` of the measured kind each run their own batches. The keys are
     those of :func:`reverberate.accel.pairs.estimate`.
+
+    ``sources`` is the number of solves: a source position heard at more
+    cells than a card holds records for is solved more than once, which
+    the caller counts. ``ppw`` prices another Cartesian grid than the
+    measured one by :data:`PPW_EXPONENT`; ``speed`` is the card's
+    throughput over the measured card's.
     """
     scale = fmax_hz / 1500.0
-    solve_s = SOLVE_S_AT_1500 * scale**4 * duration_s / 1.2
-    seconds = ONCE_S + (sources * solve_s + pairs * PAIR_S) / max(1, cards)
+    points = MEASURED_PPW if ppw is None else float(ppw)
+    grid = (points / MEASURED_PPW) ** PPW_EXPONENT
+    solve_s = SOLVE_S_AT_1500 * scale**4 * duration_s / 1.2 * grid / speed
+    pair_s = PAIR_S / speed
+    seconds = ONCE_S + (sources * solve_s + pairs * pair_s) / max(1, cards)
     per_second = rate_usd_per_hour / 3600.0
     return {
         "fmax_hz": fmax_hz,
-        "grid_nodes": REACHED_NODES_AT_1500 * scale**3,
-        "steps": STEPS_AT_1500 * scale * duration_s / 1.2,
+        "ppw": points,
+        "grid_nodes": REACHED_NODES_AT_1500 * scale**3 * (points / MEASURED_PPW) ** 3,
+        "steps": STEPS_AT_1500 * scale * duration_s / 1.2 * points / MEASURED_PPW,
+        "solves": int(sources),
         "stencil_s_per_source": round(solve_s, 2),
-        "per_cell_s": {"filters_and_fit_s": PAIR_S},
-        "cell_s": PAIR_S,
+        "per_cell_s": {"filters_and_fit_s": round(pair_s, 4)},
+        "cell_s": round(pair_s, 4),
         "prepare_s": ONCE_S,
         "seconds": round(seconds, 1),
         "hours": round(seconds / 3600.0, 3),
         "billed_rate_usd_per_hour": rate_usd_per_hour,
         "usd": round(seconds * per_second, 2),
         "usd_per_source": round(solve_s / max(1, cards) * per_second, 5),
-        "usd_per_pair": round(PAIR_S / max(1, cards) * per_second, 6),
+        "usd_per_pair": round(pair_s / max(1, cards) * per_second, 6),
         "cache_gb": round(pairs * 64 * duration_s * LOW_RATE_HZ * 4 / 1e9, 2),
         "measured_on": MEASURED_ON,
         "cards": cards,
@@ -139,6 +193,38 @@ def cores_lent() -> int:
 def solver_name(scheme: Scheme, ppw: float) -> str:
     """What a pair's key and a pack's provenance say solved it."""
     return f"{SOLVER} {scheme.name} at {ppw:g} points per wavelength"
+
+
+def low_grid(
+    models: Path,
+    storey_scene: str,
+    fmax_hz: float,
+    *,
+    scheme: str = CARTESIAN.name,
+    ppw: float | None = None,
+    bundle_ppw: float = 10.5,
+) -> tuple[Any, str]:
+    """The grid's spec and the solver's name, as a campaign of these options keys its pairs.
+
+    Read on the laptop as on the machine, from the export alone: a bundle
+    carries the pairs a machine will ask for only if it names them as that
+    machine will. Left alone, the bundle's Cartesian grid at ``bundle_ppw``;
+    another scheme or other points per wavelength is another spec, whose
+    ``key`` is another grid's.
+    """
+    from reverberate.experiments.run import scene_spec
+    from reverberate.wave.remote_voxelise import grid_shape_of
+    from reverberate.wave.voxelise import nh_for
+
+    if scheme not in SCHEMES:
+        raise ValueError(f"unknown scheme {scheme!r}, expected one of {sorted(SCHEMES)}")
+    held = SCHEMES[scheme]
+    points = float(ppw) if ppw is not None else held.ppw
+    scene, _, _ = scene_spec(models, storey_scene, float(fmax_hz))
+    if held.fcc or points != float(bundle_ppw):
+        shape = grid_shape_of(scene.model_json, float(fmax_hz), points)
+        scene = replace(scene, ppw=points, fcc=held.fcc, nh=nh_for(shape))
+    return scene, solver_name(held, points)
 
 
 def node_indices(positions: np.ndarray, grid: Grid) -> np.ndarray:
@@ -228,16 +314,15 @@ class LowbandPairs(PairsCampaign):
 
     def scene_spec(self) -> Any:
         """The grid's spec: the bundle's, with this campaign's scheme and points per wavelength."""
-        from reverberate.experiments.run import scene_spec
-        from reverberate.wave.remote_voxelise import grid_shape_of
-        from reverberate.wave.voxelise import nh_for
-
-        fmax = float(self.spec["bands"]["low"]["fmax_hz"])
-        scene, _, _ = scene_spec(self.models, self.spec["storey_scene"], fmax)
-        if self.bundle_grid:
-            return scene
-        shape = grid_shape_of(scene.model_json, fmax, self.grid_ppw)
-        return replace(scene, ppw=self.grid_ppw, fcc=self.grid_scheme.fcc, nh=nh_for(shape))
+        scene, _ = low_grid(
+            self.models,
+            str(self.spec["storey_scene"]),
+            float(self.spec["bands"]["low"]["fmax_hz"]),
+            scheme=self.scheme,
+            ppw=self.grid_ppw,
+            bundle_ppw=float(self.spec["ppw"]),
+        )
+        return scene
 
     def voxelise(self) -> dict[str, Any]:
         """The campaign's own for the bundle's grid; any other is made under its own key."""

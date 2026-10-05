@@ -155,17 +155,8 @@ def finish(home: Path, record: dict[str, Any], *, publish_pairs: bool = False) -
             fetch_s=float(record.get("fetch_s", 0.0)),
             billed_s=float(hours) * 3600.0,
         )
-    pack = pulled / "pack.h5"
-    if pack.is_file():
-        if found["cost"]:
-            stamp_cost(pack, found["cost"])
-        with read_pack(pack) as held:
-            found["pack"] = {
-                "path": str(pack),
-                "bytes": pack.stat().st_size,
-                "steps": held.header.steps,
-                "sources": list(held.sources),
-            }
+    # The pairs first, and whatever the rest is worth: after a run that did not end they
+    # are what came home, and the next run of the recipe carries them.
     if (pulled / "pairs").is_dir():
         from reverberate.accel.pairs import install_pairs
 
@@ -174,6 +165,25 @@ def finish(home: Path, record: dict[str, Any], *, publish_pairs: bool = False) -
             "installed": len(installed["installed"]),
             "published": len(installed["published"]),
         }
+        if installed["damaged"]:
+            # Cut in their transfer: left out of the cache, and solved again by the next run.
+            found["pairs_damaged"] = len(installed["damaged"])
+    pack = pulled / "pack.h5"
+    if pack.is_file():
+        try:
+            if found["cost"]:
+                stamp_cost(pack, found["cost"])
+            with read_pack(pack) as held:
+                found["pack"] = {
+                    "path": str(pack),
+                    "bytes": pack.stat().st_size,
+                    "steps": held.header.steps,
+                    "sources": list(held.sources),
+                }
+        except Exception as error:  # noqa: BLE001 - a transfer that was cut leaves part of a file
+            if record.get("outcome") == "done" and not record.get("fetch_error"):
+                raise
+            found["pack_unreadable"] = repr(error)[:300]
     found["render"] = report.get("render")
     found["usd"] = round(sum(float(r["usd"]) for r in found["cost"]), 4)
     (Path(home) / "cost.json").write_text(json.dumps(found, indent=1))
@@ -193,8 +203,17 @@ def launch(
     dry_run: bool = False,
     allow_asset_mismatch: bool = False,
     yes: bool = False,
-    hours: float = 8.0,
+    hours: float | None = None,
     max_dph: float = 3.0,
+    gpus: int = 1,
+    max_hours: float | None = None,
+    plan_offers: bool = False,
+    low_scheme: str = "cartesian",
+    low_ppw: float | None = None,
+    reuse_from: Path | None = None,
+    fetch_early: bool = False,
+    destroy_failed: bool = False,
+    sync_s: float | None = None,
     gpu: str = "",
     avoid: Collection[int] = (),
     instance: int | None = None,
@@ -215,7 +234,22 @@ def launch(
     air and their masks, which is what a trace of another crossover or
     another scene of the dwelling would not solve again. ``None`` brings it
     for the whole scene and leaves it for a smoke run; publishing needs it
-    home.
+    home. When it is brought, it is brought while the run lasts, every
+    ``sync_s``, and installed in this machine's cache whatever the outcome:
+    a host that dies takes its last minutes and no more, and the next run
+    of the recipe carries what came home and solves the rest.
+
+    The machine is chosen by what this plan is predicted to cost on each
+    offer (:mod:`reverberate.trace.machines`), the lowest USD within
+    ``max_hours`` of wall time, among hosts of ``gpus`` cards or more; the
+    watchdog's ``hours`` is taken from the prediction unless given.
+    ``plan_offers`` builds the bundle, says the offers and their
+    predictions, and rents nothing.
+
+    ``low_scheme`` and ``low_ppw`` put the low band on another grid, whose
+    pairs have their own keys; such a run has its own ``home``.
+    ``reuse_from`` is the home of an earlier run of the recipe, whose early
+    tables (brought home with ``fetch_early``) are not traced again.
     """
     home = Path(home)
     plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=patch_centre_xz)
@@ -228,6 +262,7 @@ def launch(
         fetch_pairs=brought,
         check=check,
         low_engine=low_engine,
+        low_ppw=low_ppw if low_engine == "lowband" else None,
     )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
@@ -247,6 +282,17 @@ def launch(
         raise SystemExit("a rental needs the storey's export: --models-from or --hssd-root")
     repo = repo or Path(__file__).resolve().parents[3]
     bundle = home / "bundle"
+    asked = {"engine": low_engine, "scheme": low_scheme, "ppw": low_ppw}
+    earlier = bundle / "campaign.json"
+    if earlier.is_file():
+        # Two grids' runs in one home would leave one's pack beside the other's pairs.
+        held = dict(json.loads(earlier.read_text()).get("trace", {})).get("low")
+        was = None if held is None else {name: held.get(name) for name in asked}
+        if was is not None and was != asked:
+            raise SystemExit(
+                f"{home} is the home of a run whose low band is {was}, not {asked}:"
+                " another grid or engine has its own home"
+            )
     campaign = build_bundle(
         bundle,
         recipe,
@@ -259,6 +305,9 @@ def launch(
         repo=repo,
         check=check,
         low_engine=low_engine,
+        low_scheme=low_scheme,
+        low_ppw=low_ppw,
+        reuse_from=reuse_from,
     )
     found = found_assets(
         recipe,
@@ -273,12 +322,24 @@ def launch(
             + ", ".join(wrong)
             + f"\nthis trace finds {json.dumps(found)}"
         )
-    say(f"bundle: {bundle}  grid {campaign['bands']['low']['cache_key']}")
+    low = dict(campaign["trace"]["low"])
+    say(
+        f"bundle: {bundle}  grid {campaign['bands']['low']['cache_key']}"
+        + ("" if low.get("bundle_grid", True) else f"; the low band on {low['voxel_low_key']}")
+        + f"; {campaign.get('pairs_carried', 0)} pair(s) carried from this machine's cache"
+        + (f", {campaign['early_carried']} early table(s)" if "early_carried" in campaign else "")
+    )
     from reverberate.gpu import onebox
+    from reverberate.trace.machines import predictor
 
     leave = () if brought else ("pairs",)
     if leave:
         say("the pair cache stays on the machine and goes with it: --fetch-pairs brings it home")
+    # The machine's command reads the engine and the grid in the bundle; said again here
+    # so that the command line of the run shows them.
+    flags = f"--low-engine {low_engine}"
+    if low_engine == "lowband" and (low_scheme != "cartesian" or low_ppw is not None):
+        flags += f" --low-scheme {low_scheme}" + (f" --low-ppw {low_ppw:g}" if low_ppw else "")
     record = onebox.run(
         bundle,
         home,
@@ -290,17 +351,56 @@ def launch(
         devices=devices,
         fetch_cache=fetch_grid,
         gpu=gpu,
-        # The machine's command solves the pairs with PFFDTD unless told otherwise.
-        campaign_args=f"--low-engine {low_engine} {campaign_args}".strip(),
+        campaign_args=f"{flags} {campaign_args}".strip(),
         avoid=avoid,
         leave=leave,
+        also=("early",) if fetch_early else (),
         say=say,
+        gpus=gpus,
+        max_hours=max_hours,
+        # The offers are priced for the pairs still to solve: what is carried is not paid.
+        predict=predictor(
+            _unsolved(plan.record, int(campaign.get("pairs_carried", 0))),
+            fetch_pairs=brought,
+            check=check,
+            low_engine=low_engine,
+            low_ppw=low_ppw,
+        )
+        if low_engine == "lowband"
+        else None,
+        sync=("pairs",) if brought else (),
+        **({} if sync_s is None else {"sync_s": sync_s}),
+        plan_only=plan_offers,
+        destroy_failed=destroy_failed,
     )
     result["onebox"] = record
-    if "outcome" not in record:
+    if "instance" not in record and "outcome" not in record:
         return result
+    # Whatever the outcome: what came home is installed, so the next run carries it.
     result["home"] = finish(home, record, publish_pairs=publish_pairs)
     say(f"home: {json.dumps(result['home'])}")
-    if record.get("outcome") != "done":
-        say(f"the instance {record.get('instance')} was KEPT: outcome {record.get('outcome')}")
+    if record.get("left_alive"):
+        say(str(record["left_alive"]))
     return result
+
+
+def _unsolved(record: dict[str, Any], carried: int) -> dict[str, Any]:
+    """A plan's record with the pairs the bundle carries taken off its low band.
+
+    Which positions the carried pairs belong to is not looked up: every
+    position's cells are thinned in the pairs' proportion, which is exact
+    when nothing or everything is carried and counts too many solves
+    between, the side a watchdog's cap should err on.
+    """
+    pairs = int(record["pairs"])
+    if carried <= 0 or pairs <= 0:
+        return record
+    left = max(0.0, 1.0 - carried / pairs)
+    counts = [round(int(c) * left) for c in record.get("cells_a_position", [])]
+    kept = [c for c in counts if c > 0]
+    return {
+        **record,
+        "pairs": max(0, pairs - carried),
+        "source_positions": len(kept) if kept else round(int(record["source_positions"]) * left),
+        "cells_a_position": kept,
+    }

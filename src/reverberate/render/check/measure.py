@@ -15,6 +15,8 @@ from reverberate.metrics import energy_decay_curve, octave_filter
 
 __all__ = [
     "FULL_SCALE_SPL_DB",
+    "PAGE_DEFAULT_GAIN",
+    "PAGE_DEFAULT_LEVEL_DB",
     "THIRD_OCTAVES_HZ",
     "Sidebands",
     "a_weighted",
@@ -38,6 +40,14 @@ __all__ = [
 
 #: What 0 dB re full scale stands for, at 1 m: ``docs/formats/clip-library.md``.
 FULL_SCALE_SPL_DB = 86.0
+#: The level the audit page plays at unless told, dB, and so the level of the files written
+#: for listening: ``DEFAULT_LEVEL_DB`` of ``viz/app/scene/sound-plan.js``, the same number.
+#: A pack is physical, a voice at 1 m about 60 dB SPL; at 0 dB three of a scene's fourteen
+#: sources peaked at -3.8 dB re full scale in the two ears and fourteen pass it. At -12 dB
+#: the output's full scale stands for 98 dB SPL: the levels between sources are the
+#: scene's own, and the listener makes up the 12 dB on the volume knob.
+PAGE_DEFAULT_LEVEL_DB = -12.0
+PAGE_DEFAULT_GAIN = float(10.0 ** (PAGE_DEFAULT_LEVEL_DB / 20.0))
 #: Third octave centres the spectra are read on, base two from 1 kHz.
 THIRD_OCTAVES_HZ = tuple(float(1000.0 * 2.0 ** (k / 3.0)) for k in range(-10, 13))
 #: The third octaves round the crossover, and the three either side they are read against.

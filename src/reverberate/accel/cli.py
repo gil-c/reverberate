@@ -46,10 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--low-engine",
         choices=("pffdtd", "lowband"),
-        default="pffdtd",
-        help="low band pairs: PFFDTD a source position, or the batched solver",
+        default=None,
+        help="low band pairs: PFFDTD a source position, or the batched solver; left out, what"
+        " a trace's bundle says (trace.low), and PFFDTD otherwise",
     )
-    p.add_argument("--low-scheme", choices=("cartesian", "fcc"), default="cartesian")
+    p.add_argument("--low-scheme", choices=("cartesian", "fcc"), default=None)
     p.add_argument("--low-ppw", type=float, default=None, help="points per wavelength of the grid")
     p.add_argument("--low-batch", type=int, default=None, help="sources a launch, at most")
 
@@ -119,7 +120,17 @@ def main(argv: list[str] | None = None) -> int:
 
         # A bundle says what it is; one that cannot be read is the campaign's to refuse.
         spec_file = args.bundle / "campaign.json"
-        kind = json.loads(spec_file.read_text()).get("kind") if spec_file.is_file() else None
+        spec = json.loads(spec_file.read_text()) if spec_file.is_file() else {}
+        kind = spec.get("kind")
+        # A trace's bundle says what solves its low band and on which grid; a flag overrules
+        # it. A run resumed without its flags is then still the run that was bundled.
+        told = dict(dict(spec.get("trace") or {}).get("low") or {})
+        if args.low_engine is None:
+            args.low_engine = str(told.get("engine") or "pffdtd")
+        if args.low_scheme is None:
+            args.low_scheme = str(told.get("scheme") or "cartesian")
+        if args.low_ppw is None and told.get("ppw") is not None:
+            args.low_ppw = float(told["ppw"])
         if kind == "scene-trace":
             # A recipe's pack (:mod:`reverberate.trace`): the pairs, then the mirror, then the file.
             from reverberate.trace.run import run_trace

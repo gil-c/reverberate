@@ -126,3 +126,47 @@ def test_an_arrival_is_drawn_where_its_sound_came_from(out: Any) -> None:
     assert spans["seconds"] == [[0, 1.5], [2.5, 3.2]]
     assert spans["common"] == [[2, 4], [6, 7]] and spans["none"] == []
     assert spans["meter"] == [0, 0, 0.5, 1, 0]
+
+
+def test_the_default_level_keeps_a_whole_scene_under_full_scale(out: Any) -> None:
+    from reverberate.render.check import measure
+
+    level = out["level"]
+    # One number on the page and in the files the checker writes for listening.
+    assert level["default"] == measure.PAGE_DEFAULT_LEVEL_DB == -12
+    assert level["fullScaleSpl"] == measure.FULL_SCALE_SPL_DB
+    assert level["gains"][0] == pytest.approx(measure.PAGE_DEFAULT_GAIN)
+    # The control is kept, from -60 to +20 dB; what is not a number is the default.
+    assert level["range"] == [-60, 20]
+    assert level["gains"][1] == 1 and level["gains"][2] == level["gains"][3] == level["gains"][0]
+    assert level["gains"][4] == pytest.approx(10) and level["gains"][5] == pytest.approx(0.001)
+    # Three of fourteen sources peaked at -3.8 dB at 0 dB. Fourteen, their powers added,
+    # are 2.9 dB past full scale there and 9.1 dB under it at the default.
+    whole = level["wholeSceneAtDefault"]
+    assert whole["clipping"] is False and whole["events"] == 0
+    assert whole["peakDb"] == pytest.approx(-9.11, abs=0.01)
+    assert level["headroomDb"] == pytest.approx(9.11, abs=0.01)
+
+
+def test_an_output_past_full_scale_is_said_and_nothing_is_limited(out: Any) -> None:
+    level = out["level"]
+    # The largest sample of the two ears since the audio thread last said.
+    assert level["peak"] == 0.75 and level["peakHeld"] == pytest.approx(0.9)
+    # At 0 dB the same scene passes full scale: said at once, with by how much ...
+    assert level["atZero"]["clipping"] is True and level["atZero"]["events"] == 1
+    assert level["atZero"]["overDb"] == pytest.approx(2.89, abs=0.01)
+    # ... for three seconds after the last excursion, and no longer.
+    assert level["heldAfter"] is True and level["released"]["clipping"] is False
+    assert level["released"]["events"] == 1  # what happened stays counted
+    # An excursion is counted once however long it lasts; the worst is kept.
+    assert level["events"] == 3 and level["worstDb"] == pytest.approx(6.02, abs=0.01)
+    # A new level forgets the old one's; exactly full scale is not past it.
+    assert level["afterReset"] == {"clipping": False, "events": 0, "peakDb": None, "overDb": 0}
+    assert level["atFullScale"] is False
+    # The page says, and does not limit: no compressor or shaper stands in the output.
+    source = (APP / "scene" / "sound.js").read_text()
+    assert "createDynamicsCompressor" not in source and "createWaveShaper" not in source
+    assert "node.connect(gain).connect(context.destination)" in source
+    assert "value: DEFAULT_LEVEL_DB" in source and "clip.report(message.peak" in source
+    worklet = (APP / "scene" / "sound.worklet.js").read_text()
+    assert "peak: this.peak" in worklet and "peakOf(output[0]" in worklet

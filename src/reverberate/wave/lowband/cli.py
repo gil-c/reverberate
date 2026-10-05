@@ -8,8 +8,9 @@ python -m reverberate.wave.lowband verify --out O [--pffdtd DIR] [--cpu]
 python -m reverberate.wave.lowband line --field S1.h5 --plan plan.json --out DIR [--every N]
     on the laptop: a field's low side in the stored form, and the positions of a pairs bundle
 python -m reverberate.wave.lowband compare --bundle B --out O [--scheme S] [--ppw P]
-        (--reference O_REF [--pffdtd DIR] | --line DIR/line.npz) [--rate USD_PER_H]
-    the pairs of the bundle on the batched solver, then their error against the reference
+        (--reference O_REF [--pffdtd DIR] | --line DIR/line.npz [--lead-s S]) [--rate USD_PER_H]
+    the pairs of the bundle on the batched solver, then their error against the reference;
+    against a field's line the pairs are delayed by the field's lead, as a trace delays them
 python -m reverberate.wave.lowband between --reference O_A --candidate O_B
     two campaigns' pair caches against each other, pairs matched by their positions
 python -m reverberate.wave.lowband cost --bundle B --out O [--scheme S] [--ppw P]
@@ -75,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--reference", type=Path, default=None, help="a campaign's directory")
             p.add_argument("--line", type=Path, default=None, help="line.npz of the line command")
             p.add_argument("--batch", type=int, default=None)
+            p.add_argument(
+                "--lead-s",
+                type=float,
+                default=None,
+                help="with --line: the lead the field was written with, where the line does"
+                " not hold it",
+            )
         else:
             p.add_argument("--batches", default="1,2,4,8,16,32,64")
             p.add_argument("--steps", type=int, default=400)
@@ -148,6 +156,25 @@ def _numbers(args: argparse.Namespace) -> int:
     return 0
 
 
+def line_lead_s(line: Path, given: float | None) -> float:
+    """The lead the pairs are delayed by against a field's line: the one given, or the line's.
+
+    A field is on its mirror's clock and the pair cache on the geometric
+    one. Without the lead the two are 10.75 ms apart on hssd_0076 and the
+    table reads 0 dB at every band: it is refused rather than printed.
+    """
+    with np.load(line) as held:
+        kept = float(held["lead_s"]) if "lead_s" in held.files else float("nan")
+    if given is not None:
+        return float(given)
+    if np.isfinite(kept):
+        return kept
+    raise SystemExit(
+        "the line does not hold its field's lead: give it as --lead-s (the field's provenance"
+        " has it), or the pairs and the field are not on one clock and the table is no verdict"
+    )
+
+
 def _compare(args: argparse.Namespace) -> int:
     from reverberate.accel.pairs import PairsCampaign
     from reverberate.wave.lowband.harness import compare_responses, format_table, stored_of_cache
@@ -159,8 +186,9 @@ def _compare(args: argparse.Namespace) -> int:
     source = 0
     cells = [c for c in campaign.heard_at[source] if campaign.designs[c] is not None]
     records = campaign.cache.records()
+    lead = line_lead_s(args.line, args.lead_s) if args.line is not None else 0.0
     candidate = np.stack(
-        [stored_of_cache(campaign.cache, campaign.key_of(source, c)) for c in cells]
+        [stored_of_cache(campaign.cache, campaign.key_of(source, c), lead_s=lead) for c in cells]
     )
     centres = np.asarray(
         [records[campaign.key_of(source, c)]["centre_m"] for c in cells], dtype=float
@@ -203,12 +231,15 @@ def _compare(args: argparse.Namespace) -> int:
     )
     table["candidate"] = str(campaign.spec["solver"])
     table["reference"] = named
+    table["lead_s"] = lead
     table["grid"] = getattr(campaign, "problem_record", {})
     table["solves"] = report.get("solves")
     if args.rate is not None:
         table["ledger"] = campaign.ledger(args.rate)
     (args.out / "compare.json").write_text(json.dumps(table, indent=1))
     print(f"{table['candidate']} against {named}")
+    if args.line is not None:
+        print(f"the pairs delayed by the field's lead, {lead * 1e3:.3f} ms, as a trace delays them")
     print(format_table(table))
     if "ledger" in table:
         print(json.dumps(table["ledger"], indent=1))

@@ -145,6 +145,84 @@ export function commonRanges(lists) {
   return common;
 }
 
+// --- the level the page plays at, and whether it clips ---------------------------
+
+/** The level control's default, dB, and its two ends.
+ *
+ * A pack is physical: a sample of 1 is 86 dB SPL, a voice at 1 m about 60.
+ * At 0 dB three of a scene's fourteen sources already peaked at -3.8 dB re
+ * full scale in the two ears, and fourteen pass it. At -12 dB the page's
+ * full scale stands for 98 dB SPL: the scene keeps its own levels, 12 dB
+ * lower in the file, and the listener makes that up on the volume knob.
+ * `render/check/measure.py` holds the same number for the files it writes.
+ */
+export const FULL_SCALE_SPL_DB = 86;
+export const DEFAULT_LEVEL_DB = -12;
+export const LEVEL_RANGE_DB = [-60, 20];
+
+/** The control's value as a gain; what is not a number is the default. */
+export function levelGain(db) {
+  const value = Number(db);
+  const [low, high] = LEVEL_RANGE_DB;
+  const held = db === "" || db === null || !Number.isFinite(value) ? DEFAULT_LEVEL_DB : Math.min(high, Math.max(low, value));
+  return 10 ** (held / 20);
+}
+
+/** The largest sample of two ears' blocks, or `held` if that is larger. */
+export function peakOf(left, right, held = 0) {
+  let peak = held;
+  for (let i = 0; i < left.length; i += 1) {
+    const a = Math.abs(left[i]);
+    const b = Math.abs(right[i]);
+    if (a > peak) peak = a;
+    if (b > peak) peak = b;
+  }
+  return peak;
+}
+
+/** Whether what leaves the page passes full scale, said for `hold` seconds after it did.
+ *
+ * `report` takes the largest sample the audio thread made since it last
+ * said, before the level control, the control's gain, and the time. Nothing
+ * here changes the sound: an output past full scale is clipped by the
+ * browser, and the page says so rather than limiting what the owner hears.
+ */
+export function createClipMeter({ hold = 3 } = {}) {
+  let until = -Infinity;
+  let worst = 0; // the largest output since the last reset, linear
+  let events = 0;
+  let over = false;
+  return {
+    report(peak, gain, now) {
+      const out = Math.abs(peak) * gain;
+      if (!Number.isFinite(out)) return;
+      worst = Math.max(worst, out);
+      if (out > 1) {
+        if (!over) events += 1;
+        over = true;
+        until = now + hold;
+      } else {
+        over = false;
+      }
+    },
+    /** What the page shows at `now`. `overDb` is how far past full scale the worst was. */
+    state(now) {
+      return {
+        clipping: now < until,
+        events,
+        peakDb: worst > 0 ? 20 * Math.log10(worst) : -Infinity,
+        overDb: worst > 1 ? 20 * Math.log10(worst) : 0,
+      };
+    },
+    reset() {
+      until = -Infinity;
+      worst = 0;
+      events = 0;
+      over = false;
+    },
+  };
+}
+
 /** A level in dB as a meter's fill, 0 to 1, over `range` dB under `top`. */
 export function meterFill(db, top, range = 50) {
   if (db === null || db === undefined || !Number.isFinite(db)) return 0;

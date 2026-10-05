@@ -3,9 +3,11 @@
  * No input; one stereo output, the two ears. Chunks of the engine's order 7
  * frames and the head's filters arrive as messages, their buffers
  * transferred, never copied. It answers with what the page's clock needs:
- * how many samples of the scene have sounded, and when.
+ * how many samples of the scene have sounded, and when; and with the largest
+ * sample it made since it last said, which the page holds against full scale.
  */
 import { BLOCK, QUANTUM, createStreamDecoder } from "./sound-decode.js";
+import { peakOf } from "./sound-plan.js";
 
 class SceneStream extends AudioWorkletProcessor {
   constructor(options) {
@@ -13,6 +15,7 @@ class SceneStream extends AudioWorkletProcessor {
     const { channels } = options.processorOptions;
     this.core = createStreamDecoder({ channels });
     this.quanta = 0;
+    this.peak = 0;
     this.was = "";
     this.broken = false;
     this.port.onmessage = (event) => {
@@ -38,7 +41,8 @@ class SceneStream extends AudioWorkletProcessor {
     const now = `${state.running}${state.waiting}${state.starved}${state.ended}`;
     if (!force && now === this.was && this.quanta % (BLOCK / QUANTUM) !== 0) return;
     this.was = now;
-    this.port.postMessage({ type: "state", ...state, at: currentTime });
+    this.port.postMessage({ type: "state", ...state, at: currentTime, peak: this.peak });
+    this.peak = 0;
     const spent = this.core.takeSpent();
     for (const filter of spent) {
       this.port.postMessage({ type: "spent", re: filter.re, im: filter.im }, [filter.re.buffer, filter.im.buffer]);
@@ -54,6 +58,7 @@ class SceneStream extends AudioWorkletProcessor {
       return true;
     }
     this.core.process(output[0], output[1] || output[0]);
+    this.peak = peakOf(output[0], output[1] || output[0], this.peak);
     this.quanta += 1;
     this.say(false);
     return true;

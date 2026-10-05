@@ -22,6 +22,22 @@ Two campaigns cost five to ten times their compute to idle cards, transfers
 on the card's clock and boxes rented after the solves. Here there is one
 rental, the transfers are the bundle up (a few hundred megabytes) and the
 field down, and the card is released the moment the field is verified home.
+
+**A rental never ends unaccounted for.** A host that cannot be provisioned
+(its connection dropped three times on 2026-10-05, and one host refused
+every connection) is destroyed, verified, avoided, and the next offer is
+taken. After the launch, a failure of the driver itself destroys the
+instance and verifies it; where the instance is left on purpose (a campaign
+that failed twice, kept for inspection; a finished run whose fetch failed),
+the last line names it, says why, and what it bills until its watchdog.
+
+**The machine is chosen by what the run will cost, not by its hourly
+price**, when the caller can say (``predict``): each offer's wall hours and
+USD for this run, the lowest USD within ``max_hours`` taken, and the
+watchdog's cap set from the prediction with a margin, since it can never be
+extended once the machine is rented. What can be brought home while the
+campaign runs (``sync``) is, every few minutes, so that a host that dies
+takes only its last minutes with it.
 """
 
 from __future__ import annotations
@@ -29,7 +45,8 @@ from __future__ import annotations
 import json
 import shlex
 import time
-from collections.abc import Collection
+import traceback
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,22 +58,27 @@ from reverberate.accel.bundle import HOME_ITEMS
 from reverberate.accel.lattice import sim_constants
 from reverberate.accel.solve import OUTPUT_SAMPLE_BYTES_PATCHED
 from reverberate.gpu import vast
-from reverberate.wave.remote import run_on
+from reverberate.wave.remote import one_at_a_time, run_on
 from reverberate.wave.remote_voxelise import grid_shape_of, provision, rsync
 from reverberate.wave.voxelise import cache_root
 
 __all__ = [
     "MachineNeed",
+    "Priced",
     "Watch",
     "campaign_need",
+    "cap_hours",
     "cards_in_use",
     "choose_offers",
     "fetch",
     "monitor_once",
     "occupied_cards",
+    "price_offers",
     "provision_machine",
     "rent",
     "run",
+    "search_offers",
+    "sync_home",
     "watch",
 ]
 
@@ -93,13 +115,18 @@ SELFCHECK_PATTERNS = ("*.json", "*.log")
 FETCH_AS_IS = ("pack.h5", "pairs")
 
 
-def fetch_items(present: list[str], leave: Collection[str] = ()) -> list[str]:
+def fetch_items(
+    present: list[str], leave: Collection[str] = (), also: Collection[str] = ()
+) -> list[str]:
     """The entries of the run directory worth the transfer, among those present.
 
     ``leave`` names entries that stay on the machine: a trace's pair cache
     is as large as its pack, and the pack holds every response a render reads.
+    ``also`` names entries brought besides: a trace's early tables, which a
+    second trace of the recipe does not make again.
     """
-    return [item for item in FETCH_ITEMS if item in present and item not in leave]
+    wanted = (*FETCH_ITEMS, *(item for item in also if item not in FETCH_ITEMS))
+    return [item for item in wanted if item in present and item not in leave]
 
 
 def missing_grids(keys: list[str], local_cache: Path) -> list[str]:
@@ -117,6 +144,25 @@ ACCEL_PYTHON = "/root/accel-venv/bin/python"
 
 #: How often the laptop looks.
 POLL_S = 300.0
+#: How often what ``sync`` names is brought home while the campaign runs, and how long one
+#: such transfer may take before the watcher looks again; what did not come is resumed.
+SYNC_S = 600.0
+SYNC_TIMEOUT_S = 600.0
+#: Files a campaign is still writing: they appear whole under their own name.
+PARTIAL_PATTERNS = ("*.partial.npy", "*.partial.h5", "*.partial.npz")
+#: Hosts tried, at most, when provisioning fails on one after the other.
+PROVISION_HOSTS = 4
+#: The watchdog's cap from a predicted run: the prediction times a factor, and half an
+#: hour. A cap can never be extended once the machine is rented: too small destroys the
+#: run, too large only bounds what a forgotten machine can bill. The factor is larger
+#: where the prediction rests on a card nobody measured.
+CAP_FACTOR_MEASURED = 1.5
+CAP_FACTOR_ESTIMATED = 2.0
+CAP_MARGIN_H = 0.5
+#: The cap when nobody predicts.
+DEFAULT_HOURS = 8.0
+#: The offers shown, and handed to the renter, best first.
+OFFERS_SHOWN = 6
 
 #: A stage's status that has not moved for this long is a stall.
 STALL_S = {
@@ -184,17 +230,20 @@ def choose_offers(
     min_cores: int = 8,
     gpu: str = "",
     avoid: Collection[int] = (),
+    min_gpus: int = 1,
 ) -> list[Any]:
     """Offers whose cards together hold the grid, cheapest first, sized by the whole host.
 
     ``gpu`` restricts the card's name to those containing it (``A100``).
     ``avoid`` drops the offers named there, by their own id or their host's.
+    ``min_gpus`` is the fewest cards a host may have.
     """
     avoided = set(avoid)
     good = [
         o
         for o in offers
         if not vast.offer_ids(o) & avoided
+        and o.num_gpus >= min_gpus
         and o.num_gpus * o.gpu_ram_gb >= need.vram_gb
         and (not gpu or gpu.lower() in o.gpu_name.lower())
         and o.ram_gb >= min_ram_gb
@@ -211,6 +260,73 @@ def choose_offers(
         return (o.dph_total * (0.85 if whole else 1.0), -o.reliability)
 
     return sorted(good, key=rank)
+
+
+@dataclass(frozen=True)
+class Priced:
+    """An offer with what the caller predicts the run costs on it."""
+
+    offer: Any
+    hours: float
+    usd: float
+    #: Whether every constant of the prediction was measured on this kind of card.
+    measured: bool = True
+    note: str = ""
+
+    def line(self) -> str:
+        return (
+            f"{self.hours:6.2f} h  {self.usd:6.2f} USD"
+            f"  {'measured ' if self.measured else 'ESTIMATED'}  {self.offer.describe()}"
+            f"{('  [' + self.note + ']') if self.note else ''}"
+        )
+
+
+def cap_hours(priced: Priced) -> float:
+    """The watchdog's cap for a predicted run, in hours: see :data:`CAP_FACTOR_MEASURED`."""
+    factor = CAP_FACTOR_MEASURED if priced.measured else CAP_FACTOR_ESTIMATED
+    return round(priced.hours * factor + CAP_MARGIN_H, 2)
+
+
+def price_offers(
+    offers: list[Any],
+    predict: Callable[[Any], dict[str, Any] | None],
+    *,
+    max_hours: float | None = None,
+    say: Any = None,
+) -> list[Priced]:
+    """The offers by what the run is predicted to cost on each, the lowest USD first.
+
+    ``predict(offer)`` answers ``hours`` and ``usd``, with ``measured`` and
+    a ``note`` if it likes, or ``None`` for a card it cannot price or the
+    run does not fit. Offers over ``max_hours`` of wall time are dropped;
+    what was dropped, and why, is said.
+    """
+    say = say or (lambda message: None)
+    priced: list[Priced] = []
+    unpriced = slow = 0
+    for offer in offers:
+        told = predict(offer)
+        if told is None:
+            unpriced += 1
+            continue
+        found = Priced(
+            offer=offer,
+            hours=float(told["hours"]),
+            usd=float(told["usd"]),
+            measured=bool(told.get("measured", True)),
+            note=str(told.get("note", "")),
+        )
+        if max_hours is not None and found.hours > max_hours:
+            slow += 1
+            continue
+        priced.append(found)
+    if unpriced:
+        say(
+            f"  {unpriced} offer(s) left out: a card the prediction has no figure for, or too small"
+        )
+    if slow:
+        say(f"  {slow} offer(s) left out: predicted over the {max_hours:g} h of wall time allowed")
+    return sorted(priced, key=lambda p: (p.usd, p.hours, -p.offer.reliability))
 
 
 @dataclass
@@ -337,11 +453,19 @@ def _launch_command(
     subshell so the ssh session has nothing left to wait for: without the
     subshell the session hung until the harness killed it, and the job died
     with it.
+
+    **Launched twice, it runs once.** The launcher writes its process id,
+    which the campaign keeps, and a launch first ends the campaign that id
+    names: a launch whose connection dropped after it started is tried
+    again, and a run resumed on its machine may find its campaign alive.
+    Two campaigns on one card halve each other and write the same files.
     """
     devices_line = f"export CUDA_VISIBLE_DEVICES={shlex.quote(devices)}\n" if devices else ""
+    pid = f"{REMOTE_ROOT}/campaign.pid"
     script = (
         "#!/bin/bash\n"
         f"cd {REMOTE_ROOT}\n"
+        f"echo $$ > {pid}\n"
         f"export PYTHONPATH={REMOTE_SRC}/src REVERBERATE_DATA={REMOTE_DATA}"
         " OMP_NUM_THREADS=4 PYTHONWARNINGS=ignore\n"
         f"{devices_line}"
@@ -349,6 +473,8 @@ def _launch_command(
         f" --pffdtd {pffdtd}{(' ' + extra) if extra else ''} > {out}/driver.log 2>&1\n"
     )
     return (
+        f'if [ -f {pid} ] && kill -0 "$(cat {pid})" 2>/dev/null; then'
+        f' kill "$(cat {pid})"; sleep 5; fi; '
         f"mkdir -p {out} && rm -f {out}/campaign.done {out}/campaign.failed && "
         f"cat > {REMOTE_ROOT}/launch.sh <<'REVERBERATE_EOF'\n{script}REVERBERATE_EOF\n"
         f"chmod +x {REMOTE_ROOT}/launch.sh && cd {REMOTE_ROOT} && "
@@ -389,28 +515,16 @@ def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT
     return None
 
 
-def rent(
-    client: Any,
-    identity: Any,
-    need: MachineNeed,
-    *,
-    hours: float,
-    max_dph: float,
-    min_ram_gb: float,
-    gpu: str,
-    say: Any,
-    avoid: set[int] | None = None,
-) -> tuple[Any, int, Any]:
-    """The cheapest host that holds the campaign: the machine, its id and the offer taken.
+#: The card counts a search asks for; an offer is one count of a host's cards.
+CARD_COUNTS = (1, 2, 3, 4, 6, 8)
 
-    Offers named in ``avoid``, by their own id or their host's, are not
-    rented. A host whose cards are not empty when ssh answers is destroyed and
-    the next offer tried; it and any host that stayed silent are added to
-    ``avoid``, which the caller keeps.
-    """
-    avoid = set() if avoid is None else avoid
+
+def search_offers(client: Any, need: MachineNeed, *, min_gpus: int = 1) -> list[Any]:
+    """Every offer that could hold the campaign, asked a card count at a time. Read only."""
     offers: list[Any] = []
-    for count in (1, 2, 4):
+    for count in CARD_COUNTS:
+        if count < min_gpus:
+            continue
         offers += client.search(
             vast.search_query(
                 gpu_name="",
@@ -423,12 +537,150 @@ def rent(
             ),
             limit=400,
         )
-    good = choose_offers(offers, need, max_dph=max_dph, min_ram_gb=min_ram_gb, gpu=gpu, avoid=avoid)
+    return offers
+
+
+@dataclass
+class RentalPlan:
+    """The offers to try, best first, the watchdog's cap, and why."""
+
+    offers: list[Any]
+    hours: float
+    priced: list[Priced] = field(default_factory=list)
+
+    def record(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "offer": int(p.offer.id),
+                "hours": round(p.hours, 3),
+                "usd": round(p.usd, 3),
+                "measured": p.measured,
+                "note": p.note,
+            }
+            for p in self.priced
+        ]
+
+
+def plan_rental(
+    client: Any,
+    need: MachineNeed,
+    *,
+    hours: float | None,
+    max_dph: float,
+    min_ram_gb: float,
+    gpu: str,
+    say: Any,
+    avoid: Collection[int] = (),
+    min_gpus: int = 1,
+    predict: Callable[[Any], dict[str, Any] | None] | None = None,
+    max_hours: float | None = None,
+) -> RentalPlan:
+    """Search, choose, and say the choice and its reasons; nothing is rented.
+
+    Without ``predict`` the cheapest hour that fits is first, as before.
+    With it, each offer is priced for this run and the lowest predicted
+    USD within ``max_hours`` is first; the table is said before anything
+    is rented. ``hours`` is the watchdog's cap; ``None`` takes it from the
+    prediction (:func:`cap_hours`), the largest among the offers that may
+    be tried, since the cap is set before it is known which one answers.
+    """
+    offers = search_offers(client, need, min_gpus=min_gpus)
+    good = choose_offers(
+        offers,
+        need,
+        max_dph=max_dph,
+        min_ram_gb=min_ram_gb,
+        gpu=gpu,
+        avoid=avoid,
+        min_gpus=min_gpus,
+    )
     if not good:
-        raise SystemExit(f"no offer under {max_dph} USD/h fits: {need.describe()}")
-    for offer in good[:6]:
-        say("  " + offer.describe())
-    say(f"  cap {hours:g} h -> at most {vast.estimate_cost_usd(good[0].dph_total, hours):.2f} USD")
+        raise SystemExit(
+            f"no offer under {max_dph} USD/h"
+            f"{f' with {min_gpus} card(s) or more' if min_gpus > 1 else ''} fits: {need.describe()}"
+        )
+    if predict is None:
+        cap = DEFAULT_HOURS if hours is None else float(hours)
+        for offer in good[:OFFERS_SHOWN]:
+            say("  " + offer.describe())
+        say(f"  chosen by hourly price: no prediction of this run was given; cap {cap:g} h")
+        say(f"  cap {cap:g} h -> at most {vast.estimate_cost_usd(good[0].dph_total, cap):.2f} USD")
+        return RentalPlan(offers=list(good), hours=cap)
+    priced = price_offers(good, predict, max_hours=max_hours, say=say)
+    if not priced:
+        raise SystemExit(
+            f"no offer is predicted to end within {max_hours} h of wall time"
+            if max_hours is not None
+            else "no offer could be priced for this run"
+        )
+    shown = priced[:OFFERS_SHOWN]
+    say("  predicted for this run, the lowest total first (wall hours, USD, offer):")
+    for found in shown:
+        say("  " + found.line())
+    first = shown[0]
+    by_hour = min(shown, key=lambda p: p.offer.dph_total)
+    reason = (
+        f"  chosen: offer {first.offer.id}, {first.hours:.2f} h and {first.usd:.2f} USD predicted"
+    )
+    if by_hour is not first:
+        reason += (
+            f"; the cheapest hour shown ({by_hour.offer.id}, {by_hour.offer.dph_total:.3f} USD/h)"
+            f" would take {by_hour.hours:.2f} h and {by_hour.usd:.2f} USD"
+        )
+    say(reason)
+    if hours is None:
+        cap = max(cap_hours(found) for found in shown)
+        say(
+            f"  watchdog: {cap:g} h, the prediction times {CAP_FACTOR_MEASURED:g}"
+            f" ({CAP_FACTOR_ESTIMATED:g} for a card not measured) and {CAP_MARGIN_H:g} h, the"
+            f" largest of the offers shown; at most"
+            f" {vast.estimate_cost_usd(first.offer.dph_total, cap):.2f} USD on the first"
+        )
+    else:
+        cap = float(hours)
+        say(f"  watchdog: {cap:g} h as given, against {first.hours:.2f} h predicted")
+        if cap < first.hours:
+            say("  THE CAP GIVEN IS UNDER THE PREDICTION: the watchdog would destroy the run")
+    return RentalPlan(offers=[p.offer for p in shown], hours=cap, priced=shown)
+
+
+def rent(
+    client: Any,
+    identity: Any,
+    need: MachineNeed,
+    *,
+    hours: float | None,
+    max_dph: float,
+    min_ram_gb: float,
+    gpu: str,
+    say: Any,
+    avoid: set[int] | None = None,
+    plan: RentalPlan | None = None,
+    remaining_usd: float = 0.0,
+) -> tuple[Any, int, Any]:
+    """The best host that holds the campaign: the machine, its id and the offer taken.
+
+    Offers named in ``avoid``, by their own id or their host's, are not
+    rented. A host whose cards are not empty when ssh answers is destroyed and
+    the next offer tried; it and any host that stayed silent are added to
+    ``avoid``, which the caller keeps. ``plan`` is :func:`plan_rental`'s,
+    made here when not given.
+    """
+    avoid = set() if avoid is None else avoid
+    if plan is None:
+        plan = plan_rental(
+            client,
+            need,
+            hours=hours,
+            max_dph=max_dph,
+            min_ram_gb=min_ram_gb,
+            gpu=gpu,
+            say=say,
+            avoid=avoid,
+        )
+    good = [offer for offer in plan.offers if not vast.offer_ids(offer) & avoid]
+    if not good:
+        raise SystemExit("every offer of the plan is on a host to avoid")
     # ``rent_one`` removes every offer it tries from the list, so the one it
     # kept is the last it removed, and the list is empty when that was the last.
     ranked = list(good)
@@ -436,9 +688,10 @@ def rent(
         client,
         identity,
         good,
-        hours=hours,
+        hours=plan.hours,
         disk_gb=need.disk_gb,
         image=IMAGE,
+        remaining_usd=remaining_usd,
         avoid=avoid,
         refuse=lambda machine: occupied_cards(machine, say),
         say=say,
@@ -460,7 +713,13 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
         "/root/",
         download=False,
     )
-    run_on(machine, "bash /root/provision_accel.sh 2>&1 | tail -6", what="provision", timeout=3600)
+    run_on(
+        machine,
+        # Idempotent, and behind a lock: a dropped connection tries it again.
+        one_at_a_time("bash /root/provision_accel.sh") + " 2>&1 | tail -6",
+        what="provision",
+        timeout=3600,
+    )
     rsync(machine, [str(repo / "src"), str(repo / "scripts")], REMOTE_SRC + "/", download=False)
     provision_s = round(time.time() - t0, 1)
     say(f"provisioned in {provision_s / 60:.1f} min")
@@ -469,6 +728,43 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
     push_s = round(time.time() - t0, 1)
     say(f"bundle pushed in {push_s / 60:.1f} min")
     return {"provision_s": provision_s, "push_s": push_s}
+
+
+def sync_home(
+    machine: Any,
+    home: Path,
+    items: Collection[str],
+    say: Any,
+    *,
+    timeout: float | None = SYNC_TIMEOUT_S,
+) -> bool:
+    """What is new of ``items`` in the run directory, into ``home/pulled``; whether it came.
+
+    Incremental and resumed: a file already home is not sent again, and a
+    transfer cut by ``timeout`` or by the connection leaves what arrived.
+    Files the campaign is still writing are left. Never raises: the
+    campaign matters more than its copy, and the next look tries again.
+    """
+    if not items:
+        return True
+    pulled = Path(home) / "pulled"
+    pulled.mkdir(parents=True, exist_ok=True)
+    try:
+        rsync(
+            machine,
+            [f"{REMOTE_OUT}/{item}" for item in items],
+            str(pulled) + "/",
+            download=True,
+            compress=False,
+            exclude=PARTIAL_PATTERNS,
+            attempts=1,
+            timeout=timeout,
+        )
+    except Exception as error:  # noqa: BLE001 - a copy that failed is tried again
+        if "No such file" not in str(error):
+            say(f"  homecoming of {', '.join(items)} not complete: {str(error)[:160]}")
+        return False
+    return True
 
 
 def watch(
@@ -482,37 +778,58 @@ def watch(
     record: dict[str, Any],
     home: Path,
     say: Any,
+    sync: Collection[str] = (),
+    sync_s: float = SYNC_S,
 ) -> str:
     """Look every ``poll_s`` until the campaign ends; the outcome, and the watches in ``record``.
 
     A failed or stalled campaign is relaunched once from its state on disk;
-    the second time it is the outcome.
+    the second time it is the outcome. Every ``sync_s`` what ``sync`` names
+    is brought home (:func:`sync_home`). A look that cannot be taken (the
+    API or the laptop's own line failing) is said and taken again: only
+    the deadline, the campaign's end or the instance's ends the watch.
     """
     watches: list[Watch] = []
     relaunched = 0
+    synced = time.time()
     while True:
-        look = monitor_once(client, instance, machine, previous=watches[-1] if watches else None)
-        watches.append(look)
-        record["watches"].append(look.line())
-        say(look.line())
-        (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
-        if not look.instance_alive:
-            return "instance vanished"
-        if look.done:
-            return "done"
-        if look.failed or look.stalled:
-            say(f"campaign {'failed' if look.failed else 'stalled'}: {look.log_tail[-400:]}")
-            if relaunched >= 1:
-                return "failed"
-            relaunched += 1
-            say("relaunching once from its state on disk")
-            # The bracket keeps pkill from matching the shell that runs it.
-            run_on(machine, "pkill -f '[r]everberate.accel campaign'; true", what="kill")
-            time.sleep(10)
-            launch()
+        try:
+            look = monitor_once(
+                client, instance, machine, previous=watches[-1] if watches else None
+            )
+        except Exception as error:  # noqa: BLE001 - a look that failed is not the campaign's end
+            say(f"look failed ({str(error)[:160]}); looking again")
+            look = None
+        if look is not None:
+            watches.append(look)
+            record["watches"].append(look.line())
+            say(look.line())
+            (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
+            if not look.instance_alive:
+                return "instance vanished"
+            if look.done:
+                return "done"
+            if look.failed or look.stalled:
+                say(f"campaign {'failed' if look.failed else 'stalled'}: {look.log_tail[-400:]}")
+                if relaunched >= 1:
+                    return "failed"
+                relaunched += 1
+                say("relaunching once from its state on disk")
+                try:
+                    # The bracket keeps pkill from matching the shell that runs it.
+                    run_on(machine, "pkill -f '[r]everberate.accel campaign'; true", what="kill")
+                    time.sleep(10)
+                    launch()
+                except Exception as error:  # noqa: BLE001 - said; the next look judges
+                    say(f"relaunch failed ({str(error)[:160]})")
+                    relaunched -= 1
         if time.time() > deadline - 1200:
             say("within 20 minutes of the rental's deadline; fetching what exists")
             return "deadline"
+        if sync and time.time() - synced >= sync_s:
+            came = sync_home(machine, home, sync, say)
+            synced = time.time()
+            record["synced"] = {"at": synced, "complete": came, "items": list(sync)}
         time.sleep(poll_s)
 
 
@@ -524,6 +841,7 @@ def fetch(
     fetch_cache: bool,
     say: Any,
     leave: Collection[str] = (),
+    also: Collection[str] = (),
 ) -> Path:
     """What the laptop keeps, into ``home/pulled``, and the grids it lacks into ``home/cache``.
 
@@ -534,7 +852,7 @@ def fetch(
     pulled = home / "pulled"
     pulled.mkdir(exist_ok=True)
     listing = run_on(machine, f"ls -1 {REMOTE_OUT}", what="list run", timeout=90).split()
-    items = fetch_items(listing, leave)
+    items = fetch_items(listing, leave, also)
     left = [item for item in leave if item in listing]
     if left:
         say(f"left on the machine: {', '.join(left)}")
@@ -549,6 +867,7 @@ def fetch(
             str(pulled) + "/",
             download=True,
             compress=False,
+            exclude=PARTIAL_PATTERNS,
         )
     if "selfcheck" in listing:
         (pulled / "selfcheck").mkdir(exist_ok=True)
@@ -581,11 +900,53 @@ def fetch(
     return pulled
 
 
+def still_rented(
+    client: Any, instance: int, why: str, *, deadline: float | None, say: Any, resume: str = ""
+) -> str:
+    """The last line of a run that leaves its instance alive: which, why, and what it bills."""
+    rate = None
+    try:
+        found = client.instance(instance)
+        rate = None if found is None else float(found.dph_total)
+    except Exception:  # noqa: BLE001 - the line is said whatever the API answers
+        pass
+    bill = ""
+    if rate is not None:
+        bill = f" It bills {rate:.3f} USD/h"
+        if deadline is not None:
+            left = max(deadline - time.time(), 0.0) / 3600.0
+            bill += (
+                f" until its watchdog at {time.strftime('%H:%M', time.localtime(deadline))}:"
+                f" {left * rate:.2f} USD more at most"
+            )
+        bill += "."
+    line = (
+        f"INSTANCE {instance} IS STILL RENTED: {why}.{bill}"
+        f" Resume with --instance {instance}{(' ' + resume) if resume else ''}, or destroy it."
+    )
+    say(line)
+    return line
+
+
+def release(client: Any, instance: int, record: dict[str, Any], say: Any) -> bool:
+    """Destroy the instance, verify it, and record its bill; whether it is verified gone."""
+    try:
+        found = client.instance(instance)
+    except Exception:  # noqa: BLE001 - the bill is worth a note, not the teardown
+        found = None
+    record["hours_billed"] = round(found.uptime_hours(), 3) if found else None
+    record["cost_usd"] = round(found.uptime_hours() * found.dph_total, 3) if found else None
+    gone = bool(vast.teardown(client, instance))
+    record["destroyed"] = gone
+    say(f"instance {instance} destroyed={gone}, cost about {record['cost_usd']} USD")
+    return gone
+
+
 def run(
     bundle: Path,
     home: Path,
     *,
-    hours: float,
+    hours: float | None = None,
     max_dph: float,
     yes: bool,
     repo: Path,
@@ -598,56 +959,152 @@ def run(
     campaign_args: str = "",
     avoid: Collection[int] = (),
     leave: Collection[str] = (),
+    also: Collection[str] = (),
     say: Any = print,
+    gpus: int = 1,
+    max_hours: float | None = None,
+    predict: Callable[[Any], dict[str, Any] | None] | None = None,
+    sync: Collection[str] = (),
+    sync_s: float = SYNC_S,
+    plan_only: bool = False,
+    destroy_failed: bool = False,
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
 
-    ``leave`` names entries of the run directory that are not fetched.
+    ``leave`` names entries of the run directory that are not fetched,
+    ``also`` entries fetched besides those a campaign always brings home;
+    ``sync`` those brought home every ``sync_s`` while the campaign runs.
+
+    ``gpus`` is the fewest cards of the host. ``predict`` prices the run on
+    an offer (:func:`price_offers`): the lowest predicted USD within
+    ``max_hours`` of wall time is rented, and ``hours``, the watchdog's
+    cap, is taken from the prediction when left out. ``plan_only`` says
+    the offers and their predictions and rents nothing.
 
     ``instance`` resumes on a machine already rented (the campaign resumes
-    from its state on disk). ``avoid`` names offers and machines not to rent;
+    from its state on disk). ``avoid`` names offers and machines not to rent,
+    to which :data:`reverberate.gpu.vast.KNOWN_BAD_HOSTS` are added;
     the record's ``avoided`` is that list and the hosts this run refused,
     ready to be given to the next. Returns the record written to
     ``home/onebox.json``.
+
+    **How a rental ends.** ``outcome`` is ``done`` (fetched, destroyed,
+    verified), ``deadline`` (what exists fetched, destroyed), ``instance
+    vanished``, ``failed`` (a campaign that failed twice: fetched, and kept
+    for inspection unless ``destroy_failed``) or ``error`` (the driver
+    itself failed: what ``sync`` names brought home once more, destroyed,
+    verified). An instance left alive is named in the last line said, with
+    why and what it bills (:func:`still_rented`), and in ``left_alive``.
     """
     bundle, home, repo = Path(bundle), Path(home), Path(repo)
     home.mkdir(parents=True, exist_ok=True)
     record: dict[str, Any] = {"bundle": str(bundle), "started": time.time(), "watches": []}
     need = campaign_need(bundle)
     say(f"need: {need.describe()}")
+    if instance is None and not yes and not plan_only:
+        say("nothing rented: pass --yes")
+        return record
     auth.inject(["VASTAI_API_KEY"])
     client = vast.VastClient(timeout=60)
     identity = vast.account_identity(client)
     started = time.time()
+    deadline: float | None = None
+
+    def save() -> None:
+        (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
+
     if instance is None:
-        if not yes:
-            say("nothing rented: pass --yes")
-            return record
-        avoided = set(avoid)
-        try:
-            machine, instance, offer = rent(
-                client,
-                identity,
-                need,
-                hours=hours,
-                max_dph=max_dph,
-                min_ram_gb=min_ram_gb,
-                gpu=gpu,
-                say=say,
-                avoid=avoided,
+        avoided = vast.hosts_to_avoid(avoid)
+        known = sorted(set(vast.KNOWN_BAD_HOSTS) - {int(i) for i in avoid})
+        if known:
+            say(
+                "hosts known bad, never rented: "
+                + "; ".join(f"{i} ({vast.KNOWN_BAD_HOSTS[i][0]})" for i in known)
             )
+        machine = None
+        try:
+            for _ in range(PROVISION_HOSTS):
+                plan = plan_rental(
+                    client,
+                    need,
+                    hours=hours,
+                    max_dph=max_dph,
+                    min_ram_gb=min_ram_gb,
+                    gpu=gpu,
+                    say=say,
+                    avoid=avoided,
+                    min_gpus=gpus,
+                    predict=predict,
+                    max_hours=max_hours,
+                )
+                record["offers"] = plan.record()
+                record["cap_hours"] = plan.hours
+                if plan_only:
+                    say("offers planned: nothing rented")
+                    return record
+                machine, instance, offer = rent(
+                    client,
+                    identity,
+                    need,
+                    hours=plan.hours,
+                    max_dph=max_dph,
+                    min_ram_gb=min_ram_gb,
+                    gpu=gpu,
+                    say=say,
+                    avoid=avoided,
+                    plan=plan,
+                    remaining_usd=plan.priced[0].usd if plan.priced else 0.0,
+                )
+                started = time.time()
+                deadline = started + plan.hours * 3600.0
+                record["instance"] = instance
+                record["offer"] = offer.id
+                record["avoided"] = sorted(avoided)
+                save()
+                try:
+                    record.update(provision_machine(machine, repo, bundle, say))
+                    break
+                except BaseException as error:
+                    # A host that cannot be provisioned is not waited for: three rentals
+                    # sat idle to their watchdogs on a connection that had dropped.
+                    say(
+                        f"provisioning of {instance} failed ({str(error)[:300]});"
+                        " destroying it and taking the next offer"
+                    )
+                    avoided |= vast.offer_ids(offer)
+                    gone = bool(vast.teardown(client, instance))
+                    record.setdefault("abandoned", []).append(
+                        {"instance": instance, "offer": offer.id, "destroyed": gone}
+                    )
+                    if not gone:
+                        record["left_alive"] = still_rented(
+                            client,
+                            instance,
+                            "its provisioning failed and its destruction is not verified",
+                            deadline=deadline,
+                            say=say,
+                        )
+                        raise SystemExit(record["left_alive"]) from error
+                    record.pop("instance", None)
+                    record.pop("offer", None)
+                    machine, instance = None, None
+                    if not isinstance(error, Exception):
+                        raise
+            if machine is None or instance is None:
+                raise SystemExit(
+                    f"no host could be provisioned in {PROVISION_HOSTS} rentals;"
+                    " each was destroyed and verified"
+                )
         finally:
             # Kept even when no offer produced a machine: the next run needs it most then.
             record["avoided"] = sorted(avoided)
-            (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
-        record["instance"] = instance
-        record["offer"] = offer.id
-        (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
-        record.update(provision_machine(machine, repo, bundle, say))
+            save()
     else:
         machine = vast.wait_for_ssh(client, instance, identity)
         record["instance"] = instance
         rsync(machine, [str(repo / "src")], REMOTE_SRC + "/", download=False)
+        if hours is not None:
+            deadline = started + hours * 3600.0
 
     def launch() -> None:
         started_text = run_on(
@@ -657,33 +1114,82 @@ def run(
         )
         say(f"campaign launched ({started_text.strip()[-40:]})")
 
-    launch()
-    record["outcome"] = watch(
-        client,
-        instance,
-        machine,
-        launch,
-        deadline=started + hours * 3600.0,
-        poll_s=poll_s,
-        record=record,
-        home=home,
-        say=say,
-    )
+    try:
+        launch()
+        record["outcome"] = watch(
+            client,
+            instance,
+            machine,
+            launch,
+            deadline=deadline if deadline is not None else started + DEFAULT_HOURS * 3600.0,
+            poll_s=poll_s,
+            record=record,
+            home=home,
+            say=say,
+            sync=sync,
+            sync_s=sync_s,
+        )
+    except BaseException as error:
+        record["outcome"] = "error"
+        record["error"] = repr(error)[:2000]
+        record["traceback"] = traceback.format_exc()[-6000:]
+        say(f"the driver failed after the rental: {error!r}"[:600])
+        if isinstance(error, Exception):
+            # What can be saved is, once; then the machine is not left to its watchdog.
+            sync_home(machine, home, sync, say)
+            if not release(client, instance, record, say):
+                record["left_alive"] = still_rented(
+                    client,
+                    instance,
+                    "the driver failed and the destruction is not verified",
+                    deadline=deadline,
+                    say=say,
+                )
+            record["total_s"] = round(time.time() - started, 1)
+            save()
+            return record
+        # Interrupted by a person: the campaign runs on, detached, and is theirs to end.
+        record["left_alive"] = still_rented(
+            client, instance, "the driver was interrupted", deadline=deadline, say=say
+        )
+        save()
+        raise
+    outcome = str(record["outcome"])
+    fetched = True
     t0 = time.time()
-    pulled = fetch(machine, bundle, home, fetch_cache=fetch_cache, say=say, leave=leave)
+    if outcome != "instance vanished":
+        try:
+            pulled = fetch(
+                machine, bundle, home, fetch_cache=fetch_cache, say=say, leave=leave, also=also
+            )
+            say(f"fetched in {(time.time() - t0) / 60:.1f} min -> {pulled}")
+        except Exception as error:  # noqa: BLE001 - said, and the instance accounted for below
+            fetched = False
+            record["fetch_error"] = repr(error)[:2000]
+            say(f"the fetch failed: {error!r}"[:600])
     record["fetch_s"] = round(time.time() - t0, 1)
-    say(f"fetched in {(time.time() - t0) / 60:.1f} min -> {pulled}")
-    if record["outcome"] == "done":
-        found = client.instance(instance)
-        record["hours_billed"] = round(found.uptime_hours(), 3) if found else None
-        record["cost_usd"] = round(found.uptime_hours() * found.dph_total, 3) if found else None
-        gone = vast.teardown(client, instance)
-        record["destroyed"] = gone
-        say(f"instance {instance} destroyed={gone}, cost about {record['cost_usd']} USD")
-    else:
-        say(f"instance {instance} KEPT for inspection; outcome {record['outcome']}")
+    if outcome == "done" and not fetched:
+        record["left_alive"] = still_rented(
+            client,
+            instance,
+            "the campaign is done and its fetch failed; what it made is on the machine",
+            deadline=deadline,
+            say=say,
+        )
+    elif outcome == "failed" and not destroy_failed:
+        record["left_alive"] = still_rented(
+            client,
+            instance,
+            "the campaign failed twice and is kept for inspection",
+            deadline=deadline,
+            say=say,
+        )
+    elif not release(client, instance, record, say):
+        record["left_alive"] = still_rented(
+            client, instance, "its destruction is not verified", deadline=deadline, say=say
+        )
     record["total_s"] = round(time.time() - started, 1)
-    (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
+    save()
     return record
 
 
@@ -693,8 +1199,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--home", type=Path, required=True, help="where the run comes home")
-    parser.add_argument("--hours", type=float, default=8.0)
+    parser.add_argument(
+        "--hours",
+        type=float,
+        default=None,
+        help=f"the watchdog's cap; {DEFAULT_HOURS:g} unless said",
+    )
     parser.add_argument("--max-dph", type=float, default=3.0)
+    parser.add_argument("--gpus", type=int, default=1, help="the fewest cards of the host")
     parser.add_argument("--instance", type=int, default=None)
     parser.add_argument("--devices", default=None)
     parser.add_argument("--poll", type=float, default=POLL_S)
@@ -714,10 +1226,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--campaign-args", default="", help="extra flags for the campaign, e.g. a flow test's bands"
     )
+    parser.add_argument(
+        "--sync", nargs="*", default=[], help="entries of the run brought home as it runs"
+    )
+    parser.add_argument("--plan-offers", action="store_true", help="the offers; nothing rented")
+    parser.add_argument(
+        "--destroy-failed", action="store_true", help="a campaign that failed twice is not kept"
+    )
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[3])
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
-    run(
+    record = run(
         args.bundle,
         args.home,
         hours=args.hours,
@@ -732,8 +1251,12 @@ def main(argv: list[str] | None = None) -> int:
         gpu=args.gpu,
         campaign_args=args.campaign_args,
         avoid=args.avoid,
+        gpus=args.gpus,
+        sync=args.sync,
+        plan_only=args.plan_offers,
+        destroy_failed=args.destroy_failed,
     )
-    return 0
+    return 0 if record.get("outcome", "done") == "done" else 1
 
 
 if __name__ == "__main__":
