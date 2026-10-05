@@ -16,9 +16,17 @@ levelling is written as three numbers the engine applies:
 - ``low/onset_s`` of a pair (:func:`pair_low`): the loudest sample of that
   wave response's channel 0, read at 48 kHz;
 - ``level/high_gain_db`` and ``level/onset_s`` of a step
-  (:func:`step_levels`): the alignment's gain and the step's pairs' seams,
-  and the step's first arrival plus what its pairs' onsets trail their own
-  first arrival by, both weighted as the engine weighs the pairs.
+  (:func:`step_levels`): the mirror's gain in the pack, which is one, and
+  the step's pairs' seams, and the step's first arrival plus what its
+  pairs' onsets trail their own first arrival by, both weighted as the
+  engine weighs the pairs.
+
+The mirror a pair is read against is the pack's own
+(:class:`reverberate.trace.assets.Normalisation`): a unit pulse for a
+signature and no fitted gain, so a seam is how far the wave response
+stands over a mirror whose direct sound is ``1 / d``; and it is read where
+both bands are whole (``low_limit_hz``), not over an octave whose top the
+solve has band limited.
 
 At rest, the source on a solved position and the head on a cell, a step
 reads one pair with weight one and the three are ``blend``'s own.

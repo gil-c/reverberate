@@ -5,6 +5,15 @@ colours what it carries; its direct sound is therefore not flat, while the
 mirror renders every path as a flat pulse. The mirror is given the
 reference's direct spectrum as a short minimum phase filter, convolved into
 every response. It is a property of the source, not of the room.
+
+**Of a static field, not of a scene pack** (2026-10-05). The reference's
+direct spectrum is also the band limit of the grid it was solved on:
+-1.8 dB at 8 kHz, -3.3 at 12 kHz and -5.0 at 16 kHz re 1 kHz for a field
+solved to 8 kHz. A field of the mirror, written to be compared with that
+reference, takes it; a pack is physical and renders a band the wave field
+does not hold, so it carries a unit pulse
+(:meth:`reverberate.trace.assets.MirrorAssets.pack_signature`,
+``docs/open-questions/chain-audit.md``, D2).
 """
 
 from __future__ import annotations

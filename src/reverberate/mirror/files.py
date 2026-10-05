@@ -144,6 +144,18 @@ def align_to_reference(
     ``mirror_direct_energy`` maps a point to the mirror's direct energy at
     gain one and no lead (:func:`reverberate.mirror.direct.direct_energy`);
     the reference's is read the same way on the same points.
+
+    **The gain is not a scale, and a scene pack does not take it**
+    (``docs/open-questions/chain-audit.md``, D1). Both energies are read
+    inside :data:`reverberate.mirror.direct.DIRECT_WINDOW_S`, 0.5 ms, and
+    the two pulses are not one pulse: a wave field's direct sound is spread
+    by its grid and holds 5 to 6 dB of a unit pulse's energy outside that
+    window, the mirror's signature holds all of its own inside. The gain is
+    2.4 dB low at every frequency on hssd_0076. A static field of the
+    mirror is still written with it, to be reproduced as it was validated;
+    a pack's mirror has a gain of one
+    (:attr:`reverberate.trace.assets.MirrorAssets.pack_gain`). The lead is
+    a clock and is right.
     """
     leads = []
     ratios = []
