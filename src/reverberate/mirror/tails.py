@@ -451,7 +451,8 @@ def histograms(
                 stats=stats,
             )
             cache.put([keys[k] for k in absent], traced)
-            found = cache.site(keys, counted=False)
+            # With no cell there is nothing to keep, and the empty histogram is the answer.
+            found = cache.site(keys, counted=False) if keys else traced
             if found is None:
                 raise RuntimeError("a histogram just traced is not in its cache")
         out.append(found)
