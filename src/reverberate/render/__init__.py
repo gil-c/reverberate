@@ -15,6 +15,8 @@ one generator whose bits are the same on both.
 
 - :mod:`.pack`: the format's types, writer, reader and invariants, and the
   synthetic free field. The trace stage writes through it.
+- :mod:`.compact`: a pack's low band responses in fewer bytes, an option of the
+  writer, and the command that rewrites a pack so.
 - :mod:`.engine`: :class:`~.engine.Engine`, stems, mixes and streams of blocks.
 - :mod:`.early`: every arrival a moving delay line into the listener's basis.
 - :mod:`.delay`: the delay line's interpolator and its measured error.
@@ -29,7 +31,8 @@ one generator whose bits are the same on both.
 
 ``python -m reverberate.render benchmark`` measures the cost on this
 machine; ``interpolator`` prints the delay line's error; ``validate`` checks
-a pack; ``check`` measures a pack's sound and writes files to hear.
+a pack; ``compact`` rewrites one with its low band in fewer bytes; ``check``
+measures a pack's sound and writes files to hear.
 """
 
 from __future__ import annotations

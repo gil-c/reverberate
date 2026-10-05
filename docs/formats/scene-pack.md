@@ -482,6 +482,68 @@ serve does not fail the scene**: it reads the nearest cell alone, mode 2,
 and is counted in the provenance (`fallback_steps`); a mouth nearer the head
 than an array's radius is the case.
 
+**`compact`: the same responses in fewer bytes.** An option of the writer
+(`PackWriter(low_levers=...)`, `reverberate.render.compact.Levers`), off
+unless asked for, and of `python -m reverberate.render compact IN OUT
+--levers ...`, which rewrites a pack that exists so that one trace is heard
+both ways. A pack written with it has, **in place of `ir`**, the group
+`low/compact`, and nothing else of the pack changes. A reader that knows the
+group presents it as `ir` is presented, a row decoded when it is asked for
+(`reverberate.render.compact.CompactIr`); a reader that does not finds no
+`ir` and stops. Without the option a pack is written as it always was, byte
+for byte.
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `data` | float32 or int16 | `[value]` | every pair's bins, end to end |
+| `offset` | int64 | `[pair + 1]` | where each pair's values start in `data` |
+| `samples` | int32 | `[pair, degree]` | the length each degree's transform was taken at; 0 for a degree that is not kept |
+| `scale` | float32 | `[pair, channel, block]` | with int16 only: what one step of a value is worth in each block of `block_hz` |
+
+and the attributes `format` (`bins/1`), `levers_json`, `top_hz` (the top of
+the crossover's ramp), `first_hz` (`[degree]`), `reach_m` and `block_hz`.
+
+Degree `n` of a pair, with `N = samples[pair, n]`, holds for each of its
+`2n + 1` channels in turn the bins `floor(first_hz[n] N / rate)` to
+`min(ceil(top_hz N / rate), N / 2 - 1)` of the real transform of length `N`,
+real part then imaginary; the degrees follow one another from 0. With int16
+a value of bin `k` is multiplied by
+`scale[pair, channel, floor(k rate / (N block_hz))]`. The response is the
+inverse transform at `N` and zeros from there to `low_samples`; where
+`N < low_samples` it is brought back under `top_hz` on the transform of
+`low_samples`, so invariant 9 holds of what a reader is given.
+
+Four levers, the last three of which are levers of the first
+(`docs/open-questions/low-band-compact.md` has what each was measured to
+cost, on 150 pairs of the first scene and on the dense line; the factors
+are of 600 pairs):
+
+- `bins`: the transform's bins up to the ramp's top in place of the
+  samples. The response itself, to its float32: 1.41 times fewer bytes.
+- `int16`: those bins in 16 bits, one scale for each channel and each
+  100 Hz: 2.80 times with the bins. What it adds is 78 dB under the
+  response in the worst third octave of the worst pair, and 17 dB under
+  the response's own decay at its worst moment.
+- `decay=DB`: each degree ends where what it gives within reach
+  (`reach_m`, 0.30 m: a channel weighed by
+  `sqrt(2n + 1) (k R)^n / (2n + 1)!!`, and by one where that is over one)
+  has fallen `DB` under the pressure's loudest 10 ms, faded over 20 ms; its
+  transform is taken at that length, a multiple of 50 ms. At 60 dB the
+  degrees 0 to 7 end at 0.75, 0.65, 0.55, 0.50, 0.50, 0.45, 0.43 and
+  0.40 s in the median pair, and the pressure is whole in one pair of 26:
+  7.06 times with the two above. What is cut is 42 dB under the response in
+  the worst third octave of the worst pair (49 dB at the ninth decile), all
+  of it in the response's tail.
+- `degree=DB`: degree `n` is kept from the frequency where
+  `(2n + 1) ((k R)^n / (2n + 1)!!)^2`, a bound on its share of a plane
+  wave's energy `R = reach_m` from the cell, is `DB` under the whole,
+  through a raised cosine 100 Hz wide under it; a degree that would enter
+  under 100 Hz is whole. At 50 dB the degrees 0 to 3 are whole and the
+  degrees 4 to 7 enter at 182, 288, 404 and 525 Hz: 8.01 times with the
+  three above. **The channels of a degree under its frequency are gone from
+  the engine's output too**, which the three other levers do not do; what a
+  head within reach hears of them is under the level asked for.
+
 ### `tail`: what the late part is made from
 
 The histograms of the mirror's rays, deduplicated:
@@ -897,6 +959,10 @@ histograms a source.
 | `tail` | 286 kB a histogram | 69 MB | 0.96 GB |
 | **the pack** | | | **about 8 GB** |
 
+The first scene measured: 16 887 pairs, 20.7 GB of `low/ir` in a pack of
+24 GB. Written with `low/compact` (`bins,int16,decay=60`) the same pairs
+are 2.9 GB.
+
 The rendered order 7 signal of the same scene is 14.7 GB. The pack is
 `low/ir`: pairs times 1.23 MB, and the number of pairs is the number of
 (source position, cell) couples the scene passes through while the source is
@@ -926,7 +992,9 @@ trace of L5 and what it is expected to cost are in
 7. Rows of a step are sorted by `path_id`, without repeats.
 8. Every weight is in `[0, 1]`.
 9. `ir` is zero above 1414 Hz to rounding, and every channel of it is on one
-   scale: no per channel or per pair normalisation was applied.
+   scale: no per channel or per pair normalisation was applied. A pack that
+   holds `low/compact` is read as its `ir`, of which this holds too: the
+   scales of its 16 bits are taken back when a row is decoded.
 10. Nothing in the pack depends on the head's orientation or on any clip.
 11. `low/ir` and everything the engine lays from `early` and `tail` are on
     one clock: a pair with a direct path has its `low/onset_s` at
