@@ -142,15 +142,15 @@ def outside_air(
             )
             before = int(np.count_nonzero(marks))
             marks |= mark
-            # The rows that go on past the wall's node: an opening, a node of area a row.
-            opening = int(np.count_nonzero(chosen & (end > wall + 1)))
+            # The rows that go on past the wall's node: an opening's, and the ring's own
+            # where it turns a corner of the dwelling.
+            past = int(np.count_nonzero(chosen & (end > wall + 1)))
             faces.append(
                 {
                     **found,
                     "ring": True,
                     "nodes": int(np.count_nonzero(marks)) - before,
-                    "opening_rows": opening,
-                    "opening_m2": round(opening * step_m**2, 3),
+                    "rows_past_the_wall": past,
                 }
             )
     count = int(np.count_nonzero(outside))
@@ -169,11 +169,15 @@ def without(
 
     A node of air that reads a node of ``outside`` becomes a boundary node
     that reads its other neighbours, its surface the links cut; a boundary
-    node that read one no longer does, and keeps its material. With
-    ``closure`` ``"open"`` the new nodes carry :data:`OPEN_BRANCHES`, a
-    material added after the entry's own; with ``"rigid"`` none. The cut is
-    made from both sides: a node of ``outside`` no longer reads the
-    dwelling either, so nothing reaches it and it is not stepped.
+    node that read one, on the opening's edge, no longer does. With
+    ``closure`` ``"rigid"`` the new nodes carry nothing and the edge keeps
+    its wall's material. With ``"open"`` both carry
+    :data:`OPEN_BRANCHES`, a material added after the entry's own, over
+    the faces cut: an edge node has one material, and its wall's own loss
+    there is let go. The cut is made from both sides: a node of ``outside``
+    no longer reads the dwelling either, so nothing reaches it and it is not
+    stepped. The record's ``closing_m2`` is the area of the cut, a link a
+    node's face.
     """
     if closure not in CLOSURES:
         raise ValueError(f"an opening is closed as one of {CLOSURES}, not {closure!r}")
@@ -197,41 +201,46 @@ def without(
         ] = source
         cut |= (beside != outside).astype(np.uint16) << np.uint16(j)
     cut_flat = cut.reshape(-1)
-    inside_cut = cut_flat.copy()
-    inside_cut[outside.reshape(-1)] = 0
     bn = np.asarray(arrays.bn_ixyz, dtype=np.int64)
     is_boundary = np.zeros(arrays.points, dtype=bool)
     is_boundary[bn] = True
-    adj = np.array(arrays.adj_bn, dtype=bool, copy=True)
-    held = cut_flat[bn]
-    for j in range(len(neighbours)):
-        adj[:, j] &= (held >> np.uint16(j)) & np.uint16(1) == 0
+    count = len(neighbours)
+    before = np.asarray(arrays.adj_bn, dtype=bool)
+    held = np.stack([(cut_flat[bn] >> np.uint16(j)) & np.uint16(1) == 1 for j in range(count)], 1)
+    # The links a boundary node read and no longer reads: the opening's own edge, where the
+    # node already stood against a wall.
+    lost = before & held
+    adj = before & ~held
     fresh = np.flatnonzero((cut_flat > 0) & ~is_boundary)
-    fresh_cut = cut_flat[fresh]
-    fresh_adj = np.stack(
-        [(fresh_cut >> np.uint16(j)) & np.uint16(1) == 0 for j in range(len(neighbours))], axis=1
+    fresh_lost = np.stack(
+        [(cut_flat[fresh] >> np.uint16(j)) & np.uint16(1) == 1 for j in range(count)], axis=1
     )
+    in_dwelling = ~outside.reshape(-1)
     materials = list(arrays.materials)
+    material = np.asarray(arrays.mat_bn, dtype=np.int8).copy()
+    saf = np.asarray(arrays.saf_bn, dtype=np.float64).copy()
     fresh_material = np.full(fresh.size, -1, dtype=np.int8)
-    closing = ~outside.reshape(-1)[fresh]
+    closing = in_dwelling[fresh]
+    edge = in_dwelling[bn] & lost.any(axis=1)
     if closure == "open":
         fresh_material[closing] = len(materials)
+        # A node of the opening's edge has one material: the opening's, over the faces cut.
+        material[edge] = len(materials)
+        saf[edge] = lost[edge].sum(axis=1)
         materials.append(OPEN_BRANCHES.copy())
     index = np.concatenate([bn, fresh])
     order = np.argsort(index, kind="stable")
     cut_arrays = replace(
         arrays,
         bn_ixyz=index[order],
-        adj_bn=np.concatenate([adj, fresh_adj])[order],
-        mat_bn=np.concatenate([np.asarray(arrays.mat_bn, dtype=np.int8), fresh_material])[order],
-        saf_bn=np.concatenate(
-            [np.asarray(arrays.saf_bn, dtype=np.float64), (~fresh_adj).sum(axis=1).astype(float)]
-        )[order],
+        adj_bn=np.concatenate([adj, ~fresh_lost])[order],
+        mat_bn=np.concatenate([material, fresh_material])[order],
+        saf_bn=np.concatenate([saf, fresh_lost.sum(axis=1).astype(np.float64)])[order],
         materials=materials,
     )
+    faces = int(fresh_lost[closing].sum()) + int(lost[edge].sum())
     return cut_arrays, {
         "closure": closure,
-        "closing_nodes": int(np.count_nonzero(closing)),
-        "closing_m2": round(float((~fresh_adj[closing]).sum()) * arrays.h**2, 3),
-        "walls_cut": int(np.count_nonzero(inside_cut[bn])),
+        "closing_nodes": int(np.count_nonzero(closing)) + int(np.count_nonzero(edge)),
+        "closing_m2": round(faces * arrays.h**2, 3),
     }

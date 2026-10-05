@@ -52,7 +52,7 @@ from reverberate.wave.comms import engine_indices, interp_weights, nearest_node
 from reverberate.wave.lowband.box import box_arrays, write_entry
 from reverberate.wave.lowband.problem import build_problem, load_problem, read_entry
 from reverberate.wave.lowband.scheme import CARTESIAN, FCC, Scheme, numbers
-from reverberate.wave.lowband.solver import drive_for, solve, steps_for
+from reverberate.wave.lowband.solver import drive_for, solve, step_bytes, steps_for
 
 __all__ = [
     "THIRD_OCTAVES_HZ",
@@ -186,6 +186,16 @@ def verify(
         if xp is not np:
             on_card = xp.asnumpy(solve(cut, drive_for(cut, grid, sources, receivers, duration), xp))
             record["card_equals_numpy"] = bool(np.array_equal(on_card, on_host))
+            # ... and the kernel that updates the branches apart, kept for the measurement.
+            apart = xp.asnumpy(
+                solve(
+                    cut,
+                    drive_for(cut, grid, sources, receivers, duration),
+                    xp,
+                    boundary="apart",
+                )
+            )
+            record["boundary_apart_equals_numpy"] = bool(np.array_equal(apart, on_host))
             record["card_max_difference_over_peak"] = float(
                 np.abs(on_card - on_host).max() / np.abs(on_host).max()
             )
@@ -605,8 +615,20 @@ def cost_table(
     encoder: Any = None,
     offsets: np.ndarray | None = None,
     say: Any = print,
+    boundary: str = "stencil",
+    walls: Any = None,
+    outside: str | None = None,
+    card: str = "",
+    probe_s: float = 0.0,
 ) -> dict[str, Any]:
     """Node updates a second and what a source position and a pair cost, per batch size.
+
+    ``boundary``, ``walls`` and ``outside`` are the campaign's options of
+    those names; the table says the bytes a step moves under them
+    (:func:`reverberate.wave.lowband.solver.step_bytes`) and each row the
+    memory the card moved a second, so that a remedy is read as bytes and
+    as seconds on the same card. ``probe_s`` seconds of
+    :func:`reverberate.wave.lowband.pairs.probe` are run first.
 
     ``measured_steps`` steps are timed and the solve's full length is scaled
     from them; the stepping does not depend on the step. ``rate_usd_per_hour``
@@ -620,9 +642,10 @@ def cost_table(
     sources = np.asarray(sources, dtype=float).reshape(-1, 3)
     seeds = np.concatenate([engine_indices(interp_weights(s, grid)[1], grid) for s in sources])
     t0 = time.time()
-    problem = load_problem(entry_dir, seeds)
+    problem = load_problem(entry_dir, seeds, walls=walls, outside=outside)
     prepare_s = time.time() - t0
     steps = steps_for(duration_s, grid.Ts)
+    moved = step_bytes(problem, boundary)
     rows = np.concatenate(cell_nodes) if cell_nodes else np.zeros(0, dtype=np.int64)
     table: dict[str, Any] = {
         "grid": {
@@ -634,11 +657,18 @@ def cost_table(
             "sample_rate_hz": 1.0 / grid.Ts,
             "prepare_s": round(prepare_s, 2),
         },
+        "boundary": boundary,
+        "bytes_a_step": moved,
         "billed_rate_usd_per_hour": rate_usd_per_hour,
         "cards": cards,
         "batches": [],
     }
     per_second = rate_usd_per_hour / 3600.0 / max(1, cards)
+    if probe_s > 0:
+        from reverberate.wave.lowband.pairs import probe
+
+        table["probe"] = probe(problem, xp, seconds=probe_s, boundary=boundary, card=card)
+        say(f"probe: {json.dumps(table['probe'])}")
     for batch in batches:
         chosen = sources[np.arange(batch) % sources.shape[0]]
         timing: dict[str, Any] = {}
@@ -646,8 +676,13 @@ def cost_table(
             drive = drive_for(problem, grid, chosen, [rows] * batch, measured_steps * grid.Ts)
             # Once to compile and to warm the card, then the timed run.
             if xp is not np:
-                solve(problem, drive_for(problem, grid, chosen[:1], [rows], 8 * grid.Ts), xp)
-            solve(problem, drive, xp, timing=timing)
+                solve(
+                    problem,
+                    drive_for(problem, grid, chosen[:1], [rows], 8 * grid.Ts),
+                    xp,
+                    boundary=boundary,
+                )
+            solve(problem, drive, xp, timing=timing, boundary=boundary)
         except Exception as error:  # noqa: BLE001 - a batch too large for the card is a row
             table["batches"].append({"batch": batch, "error": repr(error)[:200]})
             say(f"batch {batch}: {error!r}"[:200])
@@ -656,6 +691,7 @@ def cost_table(
         row = {
             "batch": batch,
             "updates_per_s": timing["updates_per_s"],
+            "gb_per_s": timing["updates_per_s"] / problem.updated * moved["step"] / 1e9,
             "box_updates_per_s": timing["updates_per_s"] * problem.box_nodes / problem.updated,
             "card_s_per_source": seconds_a_source,
             "machine_s_per_source": seconds_a_source / max(1, cards),
