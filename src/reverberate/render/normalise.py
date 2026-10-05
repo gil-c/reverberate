@@ -184,6 +184,10 @@ def _restore(f: Any) -> None:
         for table in ("high_gain_db", TRACED):
             if table in held:
                 source["level"][table][...] = held[table][...]
+            elif table in source["level"]:
+                # A scalar steadied since (``render relevel``) kept a copy on the scale
+                # that is being left: the scalar put back is the trace's own already.
+                del source["level"][table]
     del f[KEPT]
 
 
