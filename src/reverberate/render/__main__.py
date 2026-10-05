@@ -44,14 +44,41 @@ def main(argv: list[str] | None = None) -> int:
     sealed.add_argument("key", type=Path, help="blind/key.sealed of a check of several packs")
     level = commands.add_parser(
         "relevel",
-        help="steady a pack's levelling scalar along what moves, IN PLACE; the trace's own "
+        help="write a pack's level above the crossover another way, IN PLACE; the trace's own "
         "table is kept in the pack and --undo puts it back",
     )
     level.add_argument("pack", type=Path)
     level.add_argument(
-        "--seconds", type=float, default=2.0, help="averaged over this long either side"
+        "--seam",
+        choices=("pair", "smooth", "constant", "tapered"),
+        default="smooth",
+        help="pair: each step its pairs' own seam, the trace's table; smooth: that, averaged"
+        " over --seconds either side; constant: one number for the scene; tapered: the pair's"
+        " own at the crossover fading to the constant above it, a level a band that only the"
+        " engine takes: measured and never written",
+    )
+    level.add_argument(
+        "--seconds", type=float, default=2.0, help="smooth: averaged over this long either side"
+    )
+    level.add_argument(
+        "--constant-db",
+        type=float,
+        default=None,
+        help="constant and tapered: the number; left out, the median of the pack's pairs' seams",
+    )
+    level.add_argument(
+        "--taper",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("FULL_HZ", "NONE_HZ"),
+        help="tapered: the pair's own seam up to the first, the constant from the second"
+        " (1000 4000)",
     )
     level.add_argument("--undo", action="store_true", help="put the trace's table back")
+    level.add_argument(
+        "--dry-run", action="store_true", help="write nothing: say what the table would do"
+    )
     sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
     sound.add_argument("pack", type=Path)
     sound.add_argument(
@@ -111,9 +138,18 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(compact_pack(args.pack, args.out, Levers.parse(args.levers), say=print)))
     elif args.command == "relevel":
-        from reverberate.render.relevel import relevel_pack
+        from reverberate.render.relevel import TAPER_HZ, relevel_pack
 
-        print(json.dumps(relevel_pack(args.pack, seconds=args.seconds, undo=args.undo), indent=1))
+        said = relevel_pack(
+            args.pack,
+            seam=args.seam,
+            seconds=args.seconds,
+            constant_db=args.constant_db,
+            taper_hz=TAPER_HZ if args.taper is None else (args.taper[0], args.taper[1]),
+            undo=args.undo,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(said, indent=1))
     elif args.command == "unseal":
         from reverberate.render.check.many import unseal
 

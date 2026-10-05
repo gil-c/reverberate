@@ -29,7 +29,11 @@ from scipy.signal import butter, fftconvolve, firwin, kaiserord, sosfilt
 
 from reverberate.mirror.hybrid import Crossover
 
-__all__ = ["ClipLoader", "DryTrack", "band_filter", "mask_kernel"]
+__all__ = ["ClipLoader", "DryTrack", "band_filter", "group_kernels", "mask_kernel"]
+
+#: The filters that share a signal among groups of bands: their length, and their grid.
+GROUP_TAPS = 2047
+GROUP_GRID = 8192
 
 #: How long the low cut is let ring after a clip, in seconds: -140 dB by then.
 RING_S = 1.0
@@ -245,6 +249,41 @@ def mask_kernel(crossover: Crossover, rate: float, power: bool) -> np.ndarray:
     kernel *= np.hanning(MASK_TAPS + 2)[1:-1]
     kernel.setflags(write=False)
     return kernel
+
+
+def group_kernels(
+    rate: float, bank_hz: tuple[int, ...], groups: tuple[tuple[int, ...], ...]
+) -> list[np.ndarray]:
+    """Zero phase filters that share a signal among groups of the bank's bands, adding to it.
+
+    ``groups`` names every band of ``bank_hz`` once. A band holds its own
+    centre whole and, between two centres, what is left of a straight line
+    in octaves from the one to the other; a group's filter is its bands'
+    shares, of :data:`GROUP_TAPS` taps. The last is the signal less the
+    others, so that the filters add to the signal exactly: a late part
+    rendered a group at a time with one gain is the late part rendered
+    whole. What a level a band needs of a part that has one gain
+    (:class:`reverberate.render.engine.SourceRenderer`).
+    """
+    named = sorted(band for group in groups for band in group)
+    if named != list(range(len(bank_hz))):
+        raise ValueError("the groups name every band of the bank once")
+    grid = int(round(GROUP_GRID * rate / 48000.0))
+    freqs = np.fft.rfftfreq(grid, 1.0 / rate)
+    octaves = np.log2(np.maximum(freqs, 1e-9))
+    centres = np.log2(np.asarray(bank_hz, dtype=float))
+    half = GROUP_TAPS // 2
+    window = np.hanning(GROUP_TAPS + 2)[1:-1]
+    whole = np.zeros(GROUP_TAPS)
+    whole[half] = 1.0
+    kernels: list[np.ndarray] = []
+    for group in groups[:-1]:
+        owned = np.zeros(len(bank_hz))
+        owned[list(group)] = 1.0
+        response = np.fft.irfft(np.interp(octaves, centres, owned), n=grid)
+        kernels.append(np.concatenate([response[-half:], response[: half + 1]]) * window)
+    kernels.append(whole - np.sum(kernels, axis=0) if kernels else whole)
+    return kernels
 
 
 @lru_cache(maxsize=8)
