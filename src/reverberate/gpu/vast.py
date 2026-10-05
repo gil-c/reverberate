@@ -137,6 +137,10 @@ class Offer:
     #: per count of its cards, so a host to avoid is named by this and not by
     #: ``id``. 0 when the API does not say.
     machine_id: int = 0
+    #: Ports open on the host's router (``direct_port_count``), which is what
+    #: a direct connection needs: 0 is a host reached through the proxy alone.
+    #: Of 248 hosts under 0.25 USD/h on 2026-10-05, one had none.
+    direct_ports: int = 0
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Offer:
@@ -158,6 +162,7 @@ class Offer:
             inet_up_mbps=float(raw.get("inet_up", 0.0) or 0.0),
             storage_usd_gb_month=float(raw.get("storage_cost", 0.0) or 0.0),
             machine_id=int(raw.get("machine_id") or 0),
+            direct_ports=int(raw.get("direct_port_count") or 0),
         )
 
     def billed_dph(self, disk_gb: float) -> float:
@@ -244,9 +249,10 @@ class Rental:
 #: How an instance is asked for (``runtype`` of the request that creates it). With the
 #: first, Vast maps the container's port 22 to a port of the host's own address, beside
 #: the proxy's: ``ssh -p <HostPort> root@<public_ipaddr>``. The words are Vast's own
-#: command line's for ``--ssh --direct`` (``ssh_direc``, without the t), and **no run of
-#: this project has created an instance with them yet**: :meth:`VastClient.create` asks
-#: again with the second where the first is refused.
+#: command line's for ``--ssh --direct`` (``ssh_direc``, without the t). Two hosts
+#: created so on 2026-10-05 (W47, ``docs/open-questions/direct-connection.md``) mapped
+#: the port, answered on it, and kept the proxy beside it; :meth:`VastClient.create`
+#: asks again with the second where the first is refused.
 RUNTYPE_DIRECT = "ssh_direc ssh_proxy"
 RUNTYPE_PROXY = "ssh"
 
@@ -562,8 +568,13 @@ class VastClient:
         disk_gb: int = 60,
         onstart_cmd: str = "touch /root/.onstart_done; sleep infinity",
         direct: bool = True,
+        ports: Sequence[int] = (),
     ) -> int:
         """Rent ``offer_id`` and return the new instance id.
+
+        ``ports`` are ports of the instance to map on the host beside ssh
+        (Docker's ``-p``, which Vast takes as a key of ``env``): the record
+        then names the host's port under ``ports["<port>/tcp"]``.
 
         ``direct`` asks for the instance's port 22 on the host's own
         address as well as through the proxy (:data:`RUNTYPE_DIRECT`): a
@@ -572,13 +583,15 @@ class VastClient:
         malformed (HTTP 400) is made again as it always was, and
         ``direct_refused`` says so; any other refusal is the offer's.
         """
-        body = {
+        body: dict[str, Any] = {
             "client_id": "me",
             "image": image,
             "disk": disk_gb,
             "runtype": RUNTYPE_DIRECT if direct else RUNTYPE_PROXY,
             "onstart": onstart_cmd,
         }
+        if ports:
+            body["env"] = {f"-p {int(port)}:{int(port)}": "1" for port in ports}
         try:
             payload = self.request("PUT", f"/asks/{offer_id}/", body)
         except VastError as error:
@@ -651,8 +664,12 @@ def rent(
     image: str,
     disk_gb: int = 60,
     ceiling_usd: float = SPEND_CEILING_USD,
+    ports: Sequence[int] = (),
 ) -> Rental:
     """Rent ``offer`` for at most ``hours``, with teardown already scheduled.
+
+    ``ports`` are ports of the instance to map on the host beside ssh
+    (:meth:`VastClient.create`).
 
     Refuses a rental with no deadline, and refuses one that would take the
     project past ``ceiling_usd``. The watchdog is armed immediately after the
@@ -668,7 +685,10 @@ def rent(
             f"rental would take project spend to {already + budget:.2f} USD, "
             f"past the {ceiling_usd:.0f} USD ceiling (already {already:.2f})"
         )
-    instance_id = client.create(offer.id, image=image, disk_gb=disk_gb)
+    if ports:
+        instance_id = client.create(offer.id, image=image, disk_gb=disk_gb, ports=tuple(ports))
+    else:
+        instance_id = client.create(offer.id, image=image, disk_gb=disk_gb)
     deadline = time.time() + hours * 3600.0
     try:
         pid = arm_hard_stop(instance_id, deadline)
@@ -718,7 +738,11 @@ def account_identity(client: VastClient) -> Path:
 
 
 def wait_for_ssh(
-    client: VastClient, instance_id: int, identity: Path, timeout: float = 900.0
+    client: VastClient,
+    instance_id: int,
+    identity: Path,
+    timeout: float = 900.0,
+    pin: bool = True,
 ) -> Machine:
     """Block until the instance answers a command, not merely until it exists.
 
@@ -726,6 +750,13 @@ def wait_for_ssh(
     create and then reverts to ``loading``, which cost three premature
     teardowns before it was believed; it supplies the host and the port and
     nothing else.
+
+    The machine returned goes through the proxy. Where the instance has an
+    address of its own, its host keys are pinned to it before it is handed
+    back (:func:`reverberate.gpu.direct.upgrade`), and
+    :meth:`~reverberate.wave.remote.Machine.directly` then checks them; an
+    address whose keys could not be pinned is dropped. ``pin`` false leaves
+    the machine as the API described it.
     """
     from reverberate.wave.remote import Machine, _run
 
@@ -745,9 +776,17 @@ def wait_for_ssh(
             )
             try:
                 _run(machine.ssh_command("true"), what="ssh probe", timeout=30)
-                return machine
             except Exception:  # noqa: BLE001 - not up yet is the common case
                 pass
+            else:
+                if not pin:
+                    return machine
+                # Its own address is believed only with the keys the machine holds,
+                # read through the proxy that just answered: pinned, or not used.
+                from reverberate.gpu import direct
+
+                pinned: Machine = direct.upgrade(machine, instance_id, client=client)
+                return pinned
         time.sleep(15)
     raise TimeoutError(f"instance {instance_id} never answered on ssh")
 
@@ -758,6 +797,11 @@ def teardown(client: VastClient, instance_id: int) -> bool:
     hours = found.uptime_hours() if found else 0.0
     cost = estimate_cost_usd(found.dph_total, hours) if found else 0.0
     gone = client.destroy_and_verify(instance_id)
+    if gone:
+        # Its address goes back to the host; the keys pinned to it go with it.
+        from reverberate.gpu import hostkeys
+
+        hostkeys.forget(instance_id)
     append_ledger(
         {
             "event": "teardown",

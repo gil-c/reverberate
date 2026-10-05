@@ -657,11 +657,19 @@ chunks of 284). `gpu.homecoming` is built on that:
   `ports["22/tcp"][0]["HostPort"]`, the transfers probe that address once
   and use it where it answers, and every command still goes through the
   proxy. A request Vast refuses as malformed is made again as it was
-  (`runtype` `ssh`), and the log says so.
+  (`runtype` `ssh`), and the log says so. **The address is believed by
+  the machine's own host keys**, read on it through the proxy when it
+  first answers and pinned to the address in a file of the instance's
+  own (`gpu.direct`, `gpu.hostkeys`); an address whose keys could not be
+  pinned is dropped, and a key that does not match is refused and said.
 
-**Not yet seen on a machine**, and the first run's to verify: that an
-instance created so reports its port and answers on it; what a chunked
-fetch brings on four kept connections through the proxy and directly;
+**Seen on two machines** (France and North Carolina, 2026-10-05,
+`docs/open-questions/direct-connection.md`): an instance created so
+reports its port, answers on it, and keeps the proxy beside it; four
+streams brought 41 to 45 MB/s directly against 12 through the proxy from
+France, and 21 against 14 from North Carolina, on measurements of some
+hundred megabytes. **Not yet seen on a machine**, and the first run's to
+verify: what a chunked fetch of gigabytes brings on four kept connections;
 that the compact pair cache is written and read by a whole trace. The
 tests answer from a directory. Until the direct way is measured the offers
 are priced through the proxy; `--line direct` prices them by the laptop's

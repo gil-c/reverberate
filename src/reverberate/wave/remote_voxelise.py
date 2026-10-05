@@ -115,10 +115,11 @@ def rsync(
     ``--partial`` is the one that matters: a broken transfer leaves what
     arrived, and the retry resumes against it rather than starting over.
     """
-    identity = ["-i", str(machine.identity)] if machine.identity else []
-    shell = " ".join(
-        ["ssh", "-p", str(machine.port), "-o", "StrictHostKeyChecking=accept-new", *identity]
-    )
+    # The machine's route says its own shell: the proxy's as it always was, or
+    # the direct one against its pinned host keys (reverberate.gpu.direct).
+    from reverberate.gpu.direct import rsync_shell
+
+    shell = rsync_shell(machine)
     remote = f"{machine.user}@{machine.host}"
     argv = ["rsync", "-az" if compress else "-a", "--partial", "--timeout=120", "-e", shell]
     for pattern in exclude:
