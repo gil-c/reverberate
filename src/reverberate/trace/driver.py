@@ -74,7 +74,7 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
     rate = priced["billed_rate_usd_per_hour"]
     lines.append(f"cost at {rate:g} USD/h, machine-seconds and USD by stage:")
     for name, seconds in priced["seconds"].items():
-        where = priced.get("measured_on", {}).get(name)
+        where = priced.get("measured_on_by_stage", {}).get(name)
         kind = f"measured on {where}" if where else "PROJECTED, no machine has run it"
         lines.append(f"  {name:<14} {seconds:>9.1f} s  {priced['usd'][name]:>7.3f} USD  ({kind})")
     lines.append(
@@ -206,6 +206,7 @@ def launch(
     check: str | None = None,
     repo: Path | None = None,
     say: Any = print,
+    low_engine: str = "lowband",
 ) -> dict[str, Any]:
     """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
 
@@ -221,7 +222,13 @@ def launch(
     brought = (
         plan.profile.seconds is None if fetch_pairs is None else bool(fetch_pairs)
     ) or publish_pairs
-    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, fetch_pairs=brought, check=check)
+    priced = estimate(
+        plan,
+        rate_usd_per_hour=rate_usd_per_hour,
+        fetch_pairs=brought,
+        check=check,
+        low_engine=low_engine,
+    )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
     if dry_run:
@@ -251,6 +258,7 @@ def launch(
         rate_usd_per_hour=rate_usd_per_hour,
         repo=repo,
         check=check,
+        low_engine=low_engine,
     )
     found = found_assets(
         recipe,
@@ -282,7 +290,8 @@ def launch(
         devices=devices,
         fetch_cache=fetch_grid,
         gpu=gpu,
-        campaign_args=campaign_args,
+        # The machine's command solves the pairs with PFFDTD unless told otherwise.
+        campaign_args=f"--low-engine {low_engine} {campaign_args}".strip(),
         avoid=avoid,
         leave=leave,
         say=say,

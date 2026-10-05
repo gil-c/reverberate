@@ -175,10 +175,14 @@ def prepare(
     scene = apply_parameters(catalogue, settings.parameters)
     images = image_scene(catalogue, settings.parameters)
     ism = replace(settings.ism, sound_speed_m_s=settings.sound_speed_m_s)
-    normals, offsets, furniture, both = _facet_arrays(scene)
+    normals, offsets, furniture, both = _facet_arrays(scene, ism.coincident_facets)
     count = normals.shape[0]
     centres, radii = _facet_spheres(scene)
-    front = _in_front(scene, normals, offsets) if count else np.zeros((0, 0), dtype=bool)
+    front = (
+        _in_front(scene, normals, offsets, ism.coincident_facets)
+        if count
+        else np.zeros((0, 0), dtype=bool)
+    )
     frame, shape, base, bucket_offsets, bucket_members = facet_buckets(scene)
     grid = occluder_grid(scene, moving.occluder_cell_m)
     rectangle = np.zeros((count, 10))

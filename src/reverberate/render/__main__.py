@@ -1,4 +1,4 @@
-"""``python -m reverberate.render``: render a pack to a signal, or time the engine."""
+"""``python -m reverberate.render``: time the engine, validate a pack, check a scene's sound."""
 
 from __future__ import annotations
 
@@ -26,6 +26,30 @@ def main(argv: list[str] | None = None) -> int:
     check = commands.add_parser("validate", help="check a pack against the format")
     check.add_argument("pack", type=Path)
     check.add_argument("--deep", action="store_true", help="read every low band response")
+    sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
+    sound.add_argument("pack", type=Path)
+    sound.add_argument(
+        "--recipe", type=Path, help="a recipe to read the clips from, not the pack's"
+    )
+    sound.add_argument(
+        "--clips", type=Path, help="the clip libraries; <data root>/clips unless said"
+    )
+    sound.add_argument("--manifest", type=Path, help="the library a placeholder is stood in from")
+    sound.add_argument(
+        "--out", type=Path, default=Path("sound-check"), help="where the report goes"
+    )
+    sound.add_argument("--window", type=float, nargs=2, metavar=("START", "STOP"), help="seconds")
+    sound.add_argument("--sources", nargs="+", help="the sources checked; all of them unless said")
+    sound.add_argument("--measured-head", type=Path, help="the SOFA head the page decodes with")
+    sound.add_argument("--reference", type=Path, help="the validated hybrid field of the dwelling")
+    sound.add_argument(
+        "--reference-point",
+        action="store_true",
+        help="only this: a source that stands on the field's own, the head on a lattice point, "
+        "against the field there, a third octave at a time",
+    )
+    sound.add_argument("--probe-seconds", type=float, default=5.0, help="of each steady probe")
+    sound.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     args = parser.parse_args(argv)
     if args.command == "benchmark":
         from reverberate.render.benchmark import measure, scaling, table
@@ -39,6 +63,34 @@ def main(argv: list[str] | None = None) -> int:
         print(table(report, before))
         if args.save:
             args.save.write_text(json.dumps(report, indent=2))
+    elif args.command == "check":
+        from reverberate.render.check.report import defaults, exit_code, run
+        from reverberate.render.check.run import CheckSettings
+
+        found = defaults(args.clips, args.manifest, args.measured_head, args.reference)
+        if args.reference_point:
+            from reverberate.render.check import reference
+            from reverberate.render.pack import read_pack
+
+            assert found["reference"] is not None
+            with read_pack(args.pack) as pack:
+                reference.run(
+                    pack, found["reference"], args.out, sources=args.sources, workers=args.workers
+                )
+            return 0
+        document = run(
+            args.pack,
+            args.out,
+            recipe_path=args.recipe,
+            window_s=None if args.window is None else (args.window[0], args.window[1]),
+            sources=args.sources,
+            settings=CheckSettings(probe_seconds=args.probe_seconds, workers=args.workers),
+            clips_root=found["clips_root"],
+            manifest=found["manifest"],
+            measured_head=found["measured_head"],
+            reference=found["reference"],
+        )
+        return exit_code(document)
     elif args.command == "interpolator":
         from reverberate.render.delay import worst_error
 

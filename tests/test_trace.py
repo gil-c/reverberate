@@ -43,7 +43,14 @@ from reverberate.scenes import (
     placeholder_assets,
     recipe_sha256,
 )
-from reverberate.spatial.lowband import LOW_RATE_HZ, from_stored, pair_key, with_air
+from reverberate.spatial.lowband import (
+    FIELD_UNIT_AT_1M,
+    LOW_RATE_HZ,
+    delayed,
+    from_stored,
+    pair_key,
+    with_air,
+)
 from reverberate.spatial.translate import (
     MODE_EXACT,
     MODE_FUSED,
@@ -56,6 +63,7 @@ from reverberate.trace.bundle import build_bundle
 from reverberate.trace.cli import main
 from reverberate.trace.driver import cost_records, describe, finish, launch, stamp_cost
 from reverberate.trace.engines import CardPairs, FreeFieldPairs
+from reverberate.trace.level import pair_low
 from reverberate.trace.plan import (
     ORIGIN_DENSE,
     ORIGIN_HEAD,
@@ -76,7 +84,11 @@ CLIP = {"library": "ears", "name": "p001/sentences_01_regular", "sha256": DIGEST
 
 
 def assets(rays: int = 120) -> MirrorAssets:
-    """The walled box as a dwelling's mirror: a signature, a lead of 4 ms, a gain of a half."""
+    """The walled box as a dwelling's mirror: a signature, a lead of 4 ms, a gain of 0.02.
+
+    The gain is the mirror's on the field's scale, under the field's unit
+    (0.026) as that of hssd_0076 is (0.0144).
+    """
     return MirrorAssets(
         catalogue=walled_box(),
         settings=MirrorSettings(
@@ -84,7 +96,7 @@ def assets(rays: int = 120) -> MirrorAssets:
         ),
         signature=np.array([1.0, 0.35, -0.12, 0.04]),
         lead_s=0.0040073,
-        gain=0.5,
+        gain=0.02,
     )
 
 
@@ -218,13 +230,12 @@ def traced(
     held = assets(rays)
     plan = make_plan(recipe, held.triangles)
     build_bundle(tmp / "bundle", recipe, held, plan, allow_asset_mismatch=True)
+    # The cache form: on the geometric clock and on the field's scale.
     pairs = FreeFieldPairs(
         plan.tracks.positions,
         plan.all_cells,
         tmp / "out",
-        lead_s=held.pack_lead_s,
-        gain=held.gain,
-        **engine,
+        **{"gain": FIELD_UNIT_AT_1M, **engine},
     )
     trace = Trace(
         bundle=tmp / "bundle",
@@ -450,6 +461,12 @@ def test_a_resumed_trace_recomputes_nothing_that_is_cached(moving: dict[str, Any
     assert report["rays"]["histograms_traced"] == 0 and report["rays"]["histograms_read"] > 0
     assert report["level"]["made"] == 0 and report["level"]["read"] == report["pairs"]["scene"]
     assert set(report["timings_s"]) >= {"assign", "paths", "rays", "level", "write", "check"}
+    # The noise behind the wall has a diffracted onset and no direct path: its pairs are not
+    # read for the clock, whose pairs trail their direct sound by the lead.
+    records = [json.loads(line) for line in (out / "level.jsonl").read_text().splitlines()]
+    assert {record["direct"] for record in records} == {True, False}
+    trail = report["level"]["trail_s_of_pairs_with_a_direct_path"]
+    assert abs(trail["worst"] - report["level"]["lead_s"]) < 0.25e-3
     status = json.loads((out / "status.json").read_text())
     assert status["stage"] == "done"
 
@@ -463,7 +480,9 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
         assert (h.profile, h.steps, h.has_low, h.has_tail) == ("trace", 11, True, True)
         assert h.recipe_sha256 == plan.recipe_sha256 and sorted(pack.sources) == ["tap", "voice"]
         assert pack.mirror.lead_s == pytest.approx(192 / 48000)
-        assert pack.mirror.alignment_gain == 0.5 and pack.air.enabled
+        # A pack is physical: the mirror's gain is the alignment's over the field's unit.
+        assert pack.mirror.alignment_gain == pytest.approx(0.02 / FIELD_UNIT_AT_1M)
+        assert pack.air.enabled
         provenance = dict(h.provenance)
         assert provenance["cost"] == [] and provenance["solver"].startswith("free-field")
         assert provenance["low_pairs"]["cached"] == report["pairs"]["scene"]
@@ -491,7 +510,7 @@ def test_the_trace_writes_a_pack_the_reader_accepts_and_the_engine_renders(
             assert one.any()
             np.testing.assert_allclose(
                 source.level.high_gain_db[one],
-                20.0 * np.log10(0.5) + low.seam_db[low.pair[one, 0, 0]],
+                20.0 * np.log10(0.02 / FIELD_UNIT_AT_1M) + low.seam_db[low.pair[one, 0, 0]],
                 atol=1e-5,
             )
             assert np.all(source.level.onset_s > pack.mirror.lead_s)
@@ -566,8 +585,10 @@ def test_at_rest_the_pack_rendered_is_the_hybrid_of_the_present_pipeline(tmp_pat
         return np.asarray(out * held.gain)
 
     high, high_early = aligned(whole.signals), aligned(early_only.signals)
+    # The wave response as a field holds it: the pair of the cache, the lead later.
     cached = pairs.cache.read(pairs.key_of(0, 0))
-    wave = from_stored(with_air(cached, LOW_RATE_HZ, Atmosphere(), sound_speed_m_s=c), FS)
+    aired = with_air(cached, LOW_RATE_HZ, Atmosphere(), sound_speed_m_s=c)
+    wave = from_stored(delayed(aired, LOW_RATE_HZ, held.pack_lead_s), FS)
     crossover = Crossover()
     joined, record = blend(wave[:9], high, FS, crossover)
     # The hybrid taken apart by its own masks and window: its three parts add back to it.
@@ -603,10 +624,18 @@ def test_at_rest_the_pack_rendered_is_the_hybrid_of_the_present_pipeline(tmp_pat
         assert float(source.low.onset_s[0]) == onset
         np.testing.assert_allclose(source.level.onset_s, onset, atol=1e-12)
         np.testing.assert_allclose(
-            source.level.high_gain_db, 20.0 * np.log10(held.gain) + seam, atol=1e-4
+            source.level.high_gain_db, 20.0 * np.log10(held.pack_gain) + seam, atol=1e-4
         )
+        # The lead is in the response: the direct sound is its loudest sample, the lead after
+        # its geometric time.
+        straight = float(np.linalg.norm(station_m - cell)) / c
+        assert onset == pytest.approx(straight + held.pack_lead_s, abs=2 / FS)
+        # The pack is physical: over the crossover the direct sound is 1 / d of a unit source
+        # (the seam aside), under it the pair over the field's unit.
         engine = Engine(pack, {"voice": click}, settings=RenderSettings(directivity=False))
-        got = {name: engine.stem("voice", parts=(name,))[:, start:] for name in want}
+        got = {
+            name: engine.stem("voice", parts=(name,))[:, start:] * FIELD_UNIT_AT_1M for name in want
+        }
     got["early"], got["tail"] = got["early"][:9], got["tail"][:9]
     count = click.size - start
 
@@ -640,6 +669,57 @@ def test_at_rest_the_pack_rendered_is_the_hybrid_of_the_present_pipeline(tmp_pat
     assert np.abs(level).max() < 1.0, level
 
 
+def test_pairs_on_another_clock_than_the_mirror_stop_the_trace(tmp_path: Path) -> None:
+    """The first real pack: its pairs 10.67 ms before its mirror, and a line in the log."""
+    held = assets()
+    # The seeded fault: pairs that already carry the lead, as a field's low band does.
+    trace, _, _ = traced(tmp_path, resting_recipe(), lead_s=held.pack_lead_s)
+    with pytest.raises(RuntimeError, match="not on one clock"):
+        trace.run()
+    assert (tmp_path / "out" / "campaign.failed").is_file()
+    assert not (tmp_path / "out" / "pack.h5").exists()
+
+
+def test_a_pair_stored_without_its_lead_rings_round_to_its_end() -> None:
+    """A source 0.8 m away: its masks ring before 2.3 ms, which a transform brings to the end."""
+    source, cell = np.array([[0.6, 1.7, 0.8]]), np.array([[1.4, 1.7, 0.8]])
+    pairs = FreeFieldPairs(source, cell, Path("unused"), gain=FIELD_UNIT_AT_1M)
+    cached = pairs.response(0, 0)
+    keywords: dict[str, Any] = {"sound_speed_m_s": C}
+
+    def end_db(lead_s: float) -> float:
+        stored, _, _ = pair_low(cached, Crossover(), Atmosphere(), lead_s=lead_s, **keywords)
+        return float(10.0 * np.log10(np.sum(stored[0, -400:] ** 2) / np.sum(stored[0] ** 2)))
+
+    # The last 100 ms of a response that has no room in it. Measured -44 dB without the lead
+    # (on the nearest pair of the first real pack the level rose by 31 dB there) and -64 dB
+    # with it.
+    assert end_db(0.0) > -50.0
+    assert end_db(512 / FS) < -60.0
+    # On the pack's clock and scale: the onset the lead later, a unit source 1 / d at 0.8 m.
+    stored, onset, aired = pair_low(
+        cached, Crossover(), Atmosphere(), lead_s=512 / FS, unit_at_1m=FIELD_UNIT_AT_1M, **keywords
+    )
+    assert onset == pytest.approx(0.8 / C + 512 / FS, abs=1 / FS)
+    # The seam is read on the pair on the pack's clock: silent while the lead lasts, but for
+    # the ring of a delay that is not a whole sample (2e-3 of the peak, at the Nyquist
+    # frequency, which the masks remove).
+    assert aired.shape == (4800,) and np.abs(aired[:40]).max() < 1e-2 * np.abs(aired).max()
+    # An impulse of one through the low pressure mask peaks at ``unit``: the pack holds it over d.
+    low_mask = Crossover().masks(57600, FS, power=False)[0]
+    unit = float(np.max(np.abs(np.fft.irfft(low_mask, n=57600))))
+    # Less what the engine's own high pass from 80 to 160 Hz takes of it: 12 per cent.
+    assert float(np.abs(from_stored(stored[:1])).max()) == pytest.approx(
+        0.88 * unit / 0.8, rel=0.03
+    )
+    # The seeded fault: left on the field's scale, the same response is 31.6 dB under it.
+    raw, _, _ = pair_low(cached, Crossover(), Atmosphere(), lead_s=512 / FS, **keywords)
+    assert float(np.abs(raw).max() / np.abs(stored).max()) == pytest.approx(
+        FIELD_UNIT_AT_1M, rel=1e-6
+    )
+    assert 20.0 * np.log10(FIELD_UNIT_AT_1M) == pytest.approx(-31.6, abs=0.05)
+
+
 # --------------------------------------------------------------------------
 # the driver and the command line
 # --------------------------------------------------------------------------
@@ -670,7 +750,10 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert main([*arguments, "--mirror", str(tmp_path / "mirror"), "--patch", "1.2", "1.3"]) == 0
     campaign = json.loads((tmp_path / "b" / "campaign.json").read_text())
     assert campaign["kind"] == "scene-trace" and campaign["trace"]["profile"]["patch"]
-    assert campaign["estimate"]["billed_rate_usd_per_hour"] == 1.74
+    # Priced for the batched low band solver, at the rate of the card it was measured on.
+    assert campaign["estimate"]["billed_rate_usd_per_hour"] == 0.136
+    assert campaign["estimate"]["low_engine"] == "lowband"
+    assert campaign["estimate"]["measured_on"] == "1 x RTX 3080 20 GB"
     assert not (tmp_path / "b" / "pairs").exists()
     assert sorted(p.name for p in (tmp_path / "b" / "trace").iterdir()) == [
         "mirror",
@@ -931,8 +1014,11 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)
-    # Home: the pack is read, and its cost is the rental's bill at the rental's rate.
-    assert result["home"]["pack"]["steps"] == 11 and result["home"]["usd"] == pytest.approx(0.1)
+    # Home: the pack is read, and its cost is the rental's bill at the rental's rate, to the
+    # rounding of its records: each is written to 0.0001 USD, and how the bill splits between
+    # them is how long each stage took on the machine that ran this test.
+    assert result["home"]["pack"]["steps"] == 11
+    assert result["home"]["usd"] == pytest.approx(0.1, abs=5e-4)
     with read_pack(home / "pulled" / "pack.h5") as pack:
         assert {r["billed_rate_usd_per_hour"] for r in pack.header.provenance["cost"]} == {0.4}
     assert any("cost at 1.74 USD/h" in line for line in said)

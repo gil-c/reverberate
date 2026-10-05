@@ -151,9 +151,12 @@ def test_the_levelling_reads_channel_0_and_gets_the_whole_responses_answers() ->
     cached = (rng.standard_normal((64, 4800)) * decay).astype(np.float32)
     cached[:, :40] = 0.0
     atmosphere = Atmosphere()
-    _, onset, aired = pair_low(cached, Crossover(), atmosphere, sound_speed_m_s=343.2)
-    onset_0, aired_0 = pair_omni(cached[:1], atmosphere, sound_speed_m_s=343.2)
-    assert onset_0 == onset and np.array_equal(aired_0, aired)
+    for lead_s in (0.0, 0.0106744):
+        _, onset, aired = pair_low(
+            cached, Crossover(), atmosphere, sound_speed_m_s=343.2, lead_s=lead_s, unit_at_1m=0.08
+        )
+        onset_0, aired_0 = pair_omni(cached[:1], atmosphere, sound_speed_m_s=343.2, lead_s=lead_s)
+        assert onset_0 == onset and np.array_equal(aired_0, aired)
 
 
 def test_the_low_cut_is_read_once_a_transform() -> None:
@@ -332,8 +335,8 @@ def test_the_estimate_names_the_card_of_each_constant_and_what_is_still_projecte
     # Every stage is either measured, with its card, or projected: never unsaid.
     assert set(priced["measured"]) | set(priced["projected"]) == set(seconds)
     assert not set(priced["measured"]) & set(priced["projected"])
-    assert all(priced["measured_on"][name] for name in priced["measured"])
-    assert priced["measured_on"]["rays"] == MEASURED_ON["rays"]
+    assert all(priced["measured_on_by_stage"][name] for name in priced["measured"])
+    assert priced["measured_on_by_stage"]["rays"] == MEASURED_ON["rays"]
     assert priced["total_s"] == pytest.approx(sum(seconds.values()), abs=1.0)
     assert priced["usd"]["rays"] == pytest.approx(seconds["rays"] / 3600.0 * 0.174, abs=1e-3)
     # The pairs brought home are a line of their own, and leaving them takes it off the total.

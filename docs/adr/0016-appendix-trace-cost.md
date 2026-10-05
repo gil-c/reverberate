@@ -235,5 +235,8 @@ python -m reverberate.trace rent --recipe R.json --home H $M $X \
 ```
 
 The whole scene checks by reading and brings its pair cache home; `--check
-full` and `--no-fetch-pairs` say otherwise. `--dry-run` prints each stage
-with the card its constant was measured on.
+full` and `--no-fetch-pairs` say otherwise. The low band is solved by the
+batched solver unless `--low-engine pffdtd` is given. `--dry-run` prints
+each stage with the card its constant was measured on; the totals of this
+appendix are at 0.174 USD an hour and were printed with PFFDTD's price for
+the solves, which is not this lot's to state.

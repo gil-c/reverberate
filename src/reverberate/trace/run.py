@@ -48,7 +48,13 @@ from reverberate.audio import Atmosphere
 from reverberate.compute import Devices, device_report, to_numpy, usable_cores, xp_for
 from reverberate.metrics import band_centres
 from reverberate.mirror.hybrid import Crossover
-from reverberate.mirror.moving import EarlyTable, MovingSettings, prepare, trace_early
+from reverberate.mirror.moving import (
+    KIND_DIRECT,
+    EarlyTable,
+    MovingSettings,
+    prepare,
+    trace_early,
+)
 from reverberate.mirror.moving_onset import onset_field
 from reverberate.mirror.tails import TailCache, TailTable, tail_table
 from reverberate.render.pack import (
@@ -68,7 +74,7 @@ from reverberate.render.pack import (
     tail_seed,
 )
 from reverberate.scenes import canonical_bytes, load_recipe
-from reverberate.spatial.lowband import LOW_RATE_HZ
+from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
 from reverberate.trace.assets import MirrorAssets, directivity_models, found_assets, mismatched
 from reverberate.trace.engines import CardPairs, PairsEngine
@@ -98,6 +104,9 @@ KIND = "scene-trace"
 CARD_PAIRS_PER_VALIDATION = 3_000_000
 #: The engine's two array modules must agree to this share of the peak (V4).
 RENDER_TOLERANCE = 1e-6
+#: The pairs' onsets must trail their direct sound by the pack's lead to this, s: half a
+#: period of the crossover's 1 kHz, beyond which the two bands cancel at the join.
+CLOCK_S = 0.5e-3
 #: Seconds of the pack the check renders, the sources it renders (those heard longest in
 #: those seconds), and the block it renders them in. The host's render is the cost: six
 #: seconds of one core a second of a moving source on the first card box, whose check of
@@ -502,6 +511,7 @@ class Trace:
             self.engine.cache.read(self.pair_key[j])[:1],
             atmosphere,
             sound_speed_m_s=settings.sound_speed_m_s,
+            lead_s=self.assets.pack_lead_s,
         )
         mirror = mirror_omni(
             self.pair_early,
@@ -516,7 +526,8 @@ class Trace:
             "seam_db": pair_seam_db(aired, mirror, self.crossover),
             "onset_s": onset,
             "first_s": first_arrival_s(self.pair_early, j),
-            "direct": bool(np.any(self.pair_early.order[self.pair_early.rows(j)] == 0)),
+            # A diffracted onset has no reflection either: the direct path is a kind, not an order.
+            "direct": bool(np.any(self.pair_early.kind[self.pair_early.rows(j)] == KIND_DIRECT)),
             # The engine convolves a response as it stands: one that rings up to its
             # last 50 ms was cut, or wrapped, by whatever made it.
             "end_db": _end_db(aired),
@@ -530,7 +541,10 @@ class Trace:
         ledger = self.out / "level.jsonl"
         known: dict[str, dict[str, Any]] = {}
         identity = _digest(
-            self.crossover.record(), self.recipe.atmosphere.to_dict(), settings.record()
+            self.crossover.record(),
+            self.recipe.atmosphere.to_dict(),
+            settings.record(),
+            {"lead_s": self.assets.pack_lead_s},
         )
         if ledger.is_file():
             for line in ledger.read_text().splitlines():
@@ -585,17 +599,17 @@ class Trace:
             "read": len(self.levels) - made,
             "seam_db": _spread(seams),
             "end_db": _spread(np.array([r["end_db"] for r in self.levels], dtype=float), 1),
-            # What a pair's loudest sample trails its direct sound by: the wave field's
-            # lead and the solver's pulse. Far from the alignment's lead, the clocks differ.
+            # What a pair's loudest sample trails its direct sound by: the pack's lead and
+            # the solver's pulse. Away from the lead, the two bands are not on one clock.
             "trail_s_of_pairs_with_a_direct_path": _spread(trails, 6),
             "lead_s": self.assets.pack_lead_s,
         }
-        if trails.size and abs(float(np.median(trails)) - self.assets.pack_lead_s) > 2e-3:
-            self.journal.say(
-                "level: the pairs' onsets trail their direct sound by"
-                f" {np.median(trails) * 1e3:.2f} ms in the median and the alignment's lead is"
-                f" {self.assets.pack_lead_s * 1e3:.2f} ms: the low band and the mirror are not"
-                " on one clock"
+        if trails.size and abs(float(np.median(trails)) - self.assets.pack_lead_s) > CLOCK_S:
+            raise RuntimeError(
+                "the low band and the mirror are not on one clock: the pairs' onsets trail their"
+                f" direct sound by {np.median(trails) * 1e3:.2f} ms in the median, lead included,"
+                f" and the pack's lead is {self.assets.pack_lead_s * 1e3:.2f} ms. The pair cache"
+                " is on the geometric clock: a response in it starts when its source does"
             )
 
     def write(self) -> Path:
@@ -669,7 +683,7 @@ class Trace:
             mirror=Mirror(
                 signature=np.asarray(self.assets.signature, dtype=float),
                 lead_s=self.assets.pack_lead_s,
-                alignment_gain=self.assets.gain,
+                alignment_gain=self.assets.pack_gain,
                 lowcut_hz=40.0,
                 lowcut_order=8,
                 tail_from_s=settings.render.tail_from_s,
@@ -707,6 +721,8 @@ class Trace:
                         self.crossover,
                         atmosphere,
                         sound_speed_m_s=settings.sound_speed_m_s,
+                        lead_s=self.assets.pack_lead_s,
+                        unit_at_1m=FIELD_UNIT_AT_1M,
                         xp=self.xp,
                     )[0]
                 self._spent("write", "low_ir", t0)
@@ -721,7 +737,7 @@ class Trace:
                     seam_db_of=seam[mine],
                     trail_s_of=trail[mine],
                     early=self.early[name],
-                    alignment_gain=self.assets.gain,
+                    alignment_gain=self.assets.pack_gain,
                 )
                 source = recipe.source(name)
                 writer.add_source(

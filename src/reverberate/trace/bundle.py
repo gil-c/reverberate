@@ -76,13 +76,14 @@ def build_bundle(
     repo: Path | None = None,
     with_cache: bool = True,
     check: str | None = None,
+    low_engine: str = "lowband",
 ) -> dict[str, Any]:
     """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``."""
     bundle = Path(bundle)
     held = bundle / "trace"
     held.mkdir(parents=True, exist_ok=True)
     save_recipe(recipe, held / "recipe.json")
-    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, check=check)
+    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, check=check, low_engine=low_engine)
     plan.save(held)
     (held / "plan.json").write_text(
         json.dumps({**plan.record, "estimate": priced}, indent=1, sort_keys=True)

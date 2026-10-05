@@ -8,9 +8,11 @@ import pytest
 from reverberate.audio import Atmosphere
 from reverberate.mirror.hybrid import Crossover, blend
 from reverberate.spatial.lowband import (
+    FIELD_UNIT_AT_1M,
     LOW_RATE_HZ,
     LOW_SAMPLES,
     decimate,
+    delayed,
     from_stored,
     low_side,
     onset_s,
@@ -144,6 +146,40 @@ class TestThePairKey:
             self.key(solver="engine/2"),
         }
         assert len(keys) == 4
+
+
+class TestTheLead:
+    """A pair on the geometric clock is brought to the pack's, the mirror's lead later."""
+
+    def test_a_whole_number_of_samples_is_a_shift_and_nothing_wraps(self) -> None:
+        response = decimate(band_limited(a_response(), 1500.0), RATE).astype(float)
+        late = delayed(response, LOW_RATE_HZ, 16 / LOW_RATE_HZ)
+        assert late.shape == response.shape
+        peak = np.abs(response).max()
+        assert np.abs(late[:, 16:-16] - response[:, :-32]).max() < 1e-9 * peak
+        # What a circular shift would bring back to the start is the response's end.
+        assert np.abs(late[:, :16]).max() < 1e-9 * peak
+        assert np.abs(response[:, -16:]).max() > 1e-4 * peak
+        # The new end is not a cut: the last 4 ms fall to zero.
+        assert np.all(late[:, -1] == 0.0)
+        assert np.all(np.abs(late[:, -16:]) <= np.abs(response[:, -32:-16]) + 1e-12)
+        assert np.array_equal(delayed(response, LOW_RATE_HZ, 0.0), response)
+        with pytest.raises(ValueError, match="never advanced"):
+            delayed(response, LOW_RATE_HZ, -0.001)
+
+    def test_the_lead_of_hssd_0076_is_not_a_whole_sample_at_4_khz_and_is_exact(self) -> None:
+        lead = 512 / RATE  # 42.67 samples at 4 kHz
+        response = band_limited(a_response(), 1500.0)
+        late = delayed(decimate(response, RATE), LOW_RATE_HZ, lead)
+        want = np.zeros_like(response)
+        want[:, 512:] = response[:, :-512]
+        # Measured -68 dB: the response is not periodic, and its two ends ring a little.
+        assert relative_db(from_stored(late)[:, 600:-600], want[:, 600:-600]) < -60.0
+        assert onset_s(late[0], LOW_RATE_HZ) == pytest.approx(onset_s(response[0], RATE) + lead)
+
+    def test_the_field_s_unit_is_the_free_space_of_one_grid_step_at_8_khz(self) -> None:
+        # 0.0258 to 0.0264 measured on the validated field of hssd_0076, 0.3 to 0.7 m from S1.
+        assert pytest.approx(0.02625, abs=1e-5) == FIELD_UNIT_AT_1M
 
 
 def test_a_low_only_solve_reaches_past_the_ramp_s_top() -> None:

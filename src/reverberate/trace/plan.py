@@ -925,23 +925,36 @@ def estimate(
     rate_usd_per_hour: float,
     fetch_pairs: bool = True,
     check: str | None = None,
+    low_engine: str = "lowband",
 ) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
 
-    The low band is :func:`reverberate.accel.pairs.estimate`, measured on
-    2 x A100. Every other stage is a count of the plan times a constant of
-    this module, measured on the machine :data:`MEASURED_ON` names
-    (``docs/adr/0016-appendix-trace-cost.md``); ``measured_on`` repeats it, and ``projected``
-    lists the stages no machine has run. A card of another kind moves the
-    rays most: their kernel is double precision, which a consumer card
-    computes many times slower than its single.
+    The low band is priced by the engine that solves it: the batched solver
+    (:func:`reverberate.wave.lowband.pairs.estimate`, measured on one RTX
+    3080) or, with ``low_engine`` ``pffdtd``, PFFDTD a source position
+    (:func:`reverberate.accel.pairs.estimate`, measured on 2 x A100). The
+    rate is the caller's and is right only for the card the terms were
+    measured on, which the result names stage by stage.
+
+    Every other stage is a count of the plan times a constant of this
+    module, measured on the machine :data:`MEASURED_ON` names
+    (``docs/adr/0016-appendix-trace-cost.md``); ``measured_on_by_stage`` repeats it,
+    and ``projected`` lists the stages no machine has run. A card of
+    another kind moves the rays most: their kernel is double precision,
+    which a consumer card computes many times slower than its single.
 
     ``fetch_pairs`` prices the pair cache's way home, which is as long as
     the pack's; ``check`` is ``full`` or ``read``, a smoke run's default
     being the first and the whole scene's the second. A plan's record is
     enough.
     """
-    from reverberate.accel.pairs import estimate as pairs_estimate
+    from reverberate.accel import pairs as present
+    from reverberate.wave.lowband import pairs as batched
+
+    engines: dict[str, Any] = {"lowband": batched.estimate, "pffdtd": present.estimate}
+    if low_engine not in engines:
+        raise ValueError(f"unknown low band engine {low_engine!r}")
+    pairs_estimate = engines[low_engine]
 
     record = plan.record if isinstance(plan, Plan) else plan
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
@@ -983,7 +996,13 @@ def estimate(
         "pairs_fetched": bool(fetch_pairs),
         "check": check,
         "low": low,
+        "low_engine": low_engine,
         "measured": measured,
         "projected": [name for name in seconds if name not in MEASURED_ON],
-        "measured_on": {name: MEASURED_ON[name] for name in measured},
+        # The low band's card, as its engine names it; then every measured stage's.
+        "measured_on": str(low.get("measured_on", "2 x A100")),
+        "measured_on_by_stage": {
+            **{name: MEASURED_ON[name] for name in measured},
+            "low": str(low.get("measured_on", MEASURED_ON["low"])),
+        },
     }

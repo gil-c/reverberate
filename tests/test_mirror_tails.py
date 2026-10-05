@@ -140,6 +140,27 @@ def test_the_table_is_the_pack_s_and_a_step_is_a_sum_in_energy() -> None:
     packed = table.pack()
     assert packed["energy"].dtype == packed["moments"].dtype == np.float32
     assert packed["hist"].dtype == np.int32 and packed["scale"].dtype == np.float64
+    # A source no cell sees, a voice behind the wall of the only cells: its tail is not
+    # silent. The scale does not depend on the distance beyond the sphere, so it is known.
+    behind = tail_table(
+        ms,
+        SETTINGS,
+        STATION[None, :],
+        CELLS[2:3],
+        sites,
+        CELLS[2:],
+        cache=cache,
+        devices=Devices.host(1),
+    )
+    beyond = 4.0 / 0.3**2 * band_pulse_energy(48000.0)
+    assert np.all(behind.scale > 0.0)
+    np.testing.assert_allclose(behind.scale, np.broadcast_to(beyond, behind.scale.shape))
+    # It is what a cell in view has from one radius away on: here 1.2 m.
+    far = np.array([[1.0, 1.2, 2.0]])
+    in_view = tail_table(
+        ms, SETTINGS, STATION[None, :], far, sites, far, cache=cache, devices=Devices.host(1)
+    )
+    np.testing.assert_allclose(in_view.scale[0], beyond)
 
 
 def test_the_interpolation_error_is_a_level_per_band() -> None:
