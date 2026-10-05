@@ -28,14 +28,16 @@ export function createMinimap(svg, { onMove, onSelectSource, onSelectActor = () 
   let origin = [0, 0];
   let rooms = [];
   const layerRooms = el("g");
+  const layerUnder = el("g", { class: "underlay" });
   const layerScene = el("g", { class: "scene-plan" });
   const layerPoints = el("g");
   const layerSources = el("g");
   const layerActors = el("g", { class: "actors" });
   const wedge = el("path", { class: "wedge" });
   const ear = el("circle", { class: "ear", r: 4.5 });
-  svg.append(layerRooms, layerScene, layerPoints, layerSources, layerActors, wedge, ear);
+  svg.append(layerRooms, layerUnder, layerScene, layerPoints, layerSources, layerActors, wedge, ear);
   let scene = null;
+  let underlay = null;
   const actors = new Map();
   const names = new Map();
   const shapes = new Map();
@@ -95,6 +97,18 @@ export function createMinimap(svg, { onMove, onSelectSource, onSelectActor = () 
     );
   }
 
+  function drawUnderlay() {
+    layerUnder.replaceChildren();
+    if (!underlay) return;
+    const [x, y] = toSvg(underlay.x0, underlay.z0);
+    const [x1, y1] = toSvg(underlay.x1, underlay.z1);
+    const image = el("image", { x, y, width: x1 - x, height: y1 - y, preserveAspectRatio: "none", opacity: 0.9 });
+    image.setAttribute("href", underlay.url);
+    image.style.imageRendering = "pixelated";
+    image.style.pointerEvents = "none";
+    layerUnder.append(image);
+  }
+
   function drawScene() {
     layerScene.replaceChildren();
     if (!scene) return;
@@ -125,6 +139,12 @@ export function createMinimap(svg, { onMove, onSelectSource, onSelectActor = () 
     setScene(next) {
       scene = next;
       drawScene();
+    },
+    /** A picture laid on the plan between two corners of the scene, `{ url, x0, z0, x1, z1 }`,
+     *  its first row at `z0`; null takes it away. A slice of the wave solver's grid. */
+    setUnderlay(next) {
+      underlay = next;
+      drawUnderlay();
     },
     showScene(on) {
       layerScene.style.display = on ? "" : "none";
@@ -206,6 +226,7 @@ export function createMinimap(svg, { onMove, onSelectSource, onSelectActor = () 
       }
       drawPoints();
       drawScene();
+      drawUnderlay();
     },
 
     setSources(sources, selected) {

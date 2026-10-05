@@ -24,6 +24,13 @@ named with ``--pack``, is rendered by the signal engine in worker processes,
 its stems kept under ``<data root>/cache/audit_stems`` unless
 ``--audit-cache`` says otherwise, and streamed to the page at order 7.
 
+And it shows a pack's geometry as the computation used it, under
+``/api/computed/`` (:mod:`reverberate.viz.computed_api`): the wave solver's
+grid, the arrays and the sources on their nodes, the mirror's facets, a
+sample of the rays. ``--grid`` and ``--mirror`` offer a grid or a mirror's
+scene that is not beside its pack; what is derived is kept under
+``<data root>/cache/computed`` unless ``--computed-cache`` says otherwise.
+
 Run it: ``python src/reverberate/viz/serve_room.py``, or the run button on
 this file. Everything it needs is in ``walk.toml``
 (:mod:`reverberate.viz.walk_config`); any command line argument overrides the
@@ -60,6 +67,8 @@ from reverberate.viz.audit_api import PREFIX as AUDIT_PREFIX
 from reverberate.viz.audit_api import AuditService, Binary
 from reverberate.viz.audit_dry import DrySources
 from reverberate.viz.audit_stems import StemService
+from reverberate.viz.computed_api import PREFIX as COMPUTED_PREFIX
+from reverberate.viz.computed_api import ComputedService
 from reverberate.viz.decoders import export_decoders
 from reverberate.viz.scene_api import MAX_BODY_BYTES, PREFIX, SceneError, SceneService
 from reverberate.viz.scene_cache import (
@@ -160,6 +169,9 @@ class SiteBuilder:
         audit_cache: Path | None = None,
         audit_workers: int | None = None,
         clips: Path | None = None,
+        grids: Sequence[Path] = (),
+        mirrors: Sequence[Path] = (),
+        computed_cache: Path | None = None,
     ) -> None:
         self.hssd_root = hssd_root
         self.target = target
@@ -182,6 +194,14 @@ class SiteBuilder:
             packs=[p for p in packs if p.is_file()],
         )
         print(f"packs: {len(self.audit.packs())} found; stems in {stems.cache_root}")
+        # What a pack was computed on: nothing is read until the page asks.
+        self.computed = ComputedService(
+            self.audit,
+            computed_cache or data_root() / "cache" / "computed",
+            grids=grids,
+            mirrors=mirrors,
+            vox_cache=data_root() / "cache" / "vox",
+        )
         self.rebuild = rebuild
         self.lead = lead
         self._lock = threading.Lock()
@@ -315,13 +335,15 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
             url = urlsplit(self.path)
             parts = url.path.strip("/").split("/")
             scene, audit = parts[:2] == PREFIX.split("/"), parts[:2] == AUDIT_PREFIX.split("/")
-            if not scene and not audit:
+            computed = parts[:2] == COMPUTED_PREFIX.split("/")
+            if not scene and not audit and not computed:
                 return False
             scenes: SceneService | None = getattr(builder, "scenes", None)
             sound: AuditService | None = getattr(builder, "audit", None)
+            used: ComputedService | None = getattr(builder, "computed", None)
             status, answer = 200, None
             try:
-                if (scenes if scene else sound) is None:
+                if (scenes if scene else used if computed else sound) is None:
                     raise SceneError(404, "this server has no scene view")
                 body = None
                 if method == "POST":
@@ -335,6 +357,9 @@ def _handler_for(builder: SiteBuilder) -> type[http.server.SimpleHTTPRequestHand
                 if scene:
                     assert scenes is not None
                     answer = scenes.handle(method, parts[2:], body)
+                elif computed:
+                    assert used is not None
+                    answer = used.handle(method, parts[2:], dict(parse_qsl(url.query)))
                 else:
                     assert sound is not None
                     answer = sound.handle(method, parts[2:], dict(parse_qsl(url.query)), body)
@@ -487,6 +512,23 @@ def main(argv: list[str] | None = None) -> int:
         "--audit-workers", type=int, default=None, help="processes that render stems"
     )
     parser.add_argument("--clips", type=Path, default=None, help="default: <data root>/clips")
+    parser.add_argument(
+        "--grid",
+        type=Path,
+        action="append",
+        default=[],
+        help="a voxel cache entry or an as_computed.npz to offer beside the packs' own grids",
+    )
+    parser.add_argument(
+        "--mirror",
+        type=Path,
+        action="append",
+        default=[],
+        help="a mirror's scene directory, for a pack whose bundle is not beside it",
+    )
+    parser.add_argument(
+        "--computed-cache", type=Path, default=None, help="default: <data root>/cache/computed"
+    )
     parser.add_argument("--build-only", type=Path, default=None, help="write the site and exit")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
@@ -535,6 +577,9 @@ def main(argv: list[str] | None = None) -> int:
             audit_cache=arguments.audit_cache,
             audit_workers=arguments.audit_workers,
             clips=arguments.clips,
+            grids=arguments.grid,
+            mirrors=arguments.mirror,
+            computed_cache=arguments.computed_cache,
         )
         if scene:
             builder.ensure(scene)

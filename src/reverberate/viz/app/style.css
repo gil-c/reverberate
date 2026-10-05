@@ -402,3 +402,10 @@ input[type=range].slide::-moz-range-thumb {
   background: #0e1217; border: 1px solid var(--line); border-radius: 4px; padding: 8px;
 }
 [hidden] { display: none !important; }
+
+/* What a pack was computed on (scene/computed.js): long labels, and notes that keep their lines. */
+.computed .field { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 22px; }
+.computed .field.switch { grid-template-columns: minmax(0, 1fr) auto 0; }
+.computed .note { white-space: pre-wrap; overflow-wrap: anywhere; }
+.computed .note.bad { color: #ff8a70; }
+.computed canvas.plot { width: 100%; height: auto; }
