@@ -21,9 +21,9 @@ whole scene:
   6 100 s for the engine as it was: **5.5 times less work**, and the
   whole scene in 18 minutes on one core where it took 100;
 - **the mix, as it was timed** (six processes, the laptop shared with
-  other agents' jobs at a load of 5 to 10): **14 minutes**, 837 s, against
-  3 h 26 min for the same scene's stems on the same shared laptop:
-  **15 times less**;
+  other agents' jobs): **11 minutes**, 656 s, at a load of 2 to 5, and 14
+  minutes, 837 s, at a load of 5 to 10, against 3 h 26 min for the same
+  scene's stems on the same shared laptop: **15 to 19 times less**;
 - **the audit's stems**, the same way: 17 to 30 minutes at the rates
   measured, against 3 h 26 min.
 
@@ -184,28 +184,38 @@ taken as it is written; the file removed afterwards.
 | what | processes | wall | processor | a process holds | load of the machine |
 | --- | --- | --- | --- | --- | --- |
 | the mix, 0 to 1200 s (8 361 source-seconds) | 6 | **837 s** (1.4 times real time) | 4 065 s | 5.1 GB at most | 5.3 before, 6.6 after; 10 during |
+| the same, again, with less held a process | 6 | **656 s** (1.8 times real time) | 3 471 s | 4.6 GB at most | 2.4 before, 4.8 after |
 | the mix, 280 to 340 s, at rest (362 source-seconds) | 4 | 20 s (3.0 times real time) | 57 s | 4.7 GB | 1.9 before, 2.3 after |
 | the mix, 300 to 360 s, at rest, one process, warm | 1 | 42 s (1.4 times real time) | 42 s | | 15 |
 | the mix, 290 to 310 s, at rest, one process, warm | 1 | 8.8 s (2.3 times real time) | 8.8 s | | 2 to 3 |
 | the mix, 1084 to 1096 s, walking, one process, warm | 1 | 28.7 s (0.42 times real time) | 28.7 s | | 2 to 3 |
 | the audit's stems, 90 s of its service from 280 s | 6 | 16.6 s of stem a second: the scene in 17 min at that rate | | 3.4 GB | 6 to 10 |
 
-The same bytes whatever the processes: the window of a minute has one
-SHA-256 with four processes and with eight, and the tests hold two
-processes to one engine. The 837 s were measured once, on a laptop that
-other agents' jobs loaded to 5 to 10 throughout (a photo analysis daemon
-at 180 per cent of a core besides): the processor time, 4 065 s, is 3.7
-times the 1 100 s one fast core needs alone, which is the slow cores and
-the sharing and not the engine. On a quiet laptop the same render is
-expected, not measured, at 4 to 5 minutes: 1 100 s over the five and a
-half fast cores the machine is worth.
+The same bytes whatever the processes and whenever: the two whole renders
+have one SHA-256, the window of a minute has one with four processes and
+with eight, and the tests hold two processes to one engine. Neither whole
+render had the laptop to itself (other agents' jobs, and a photo analysis
+daemon at 180 per cent of a core during the first). The processor time,
+3 471 and 4 065 s, is 3.2 to 3.7 times the 1 100 s one fast core needs
+alone: that is the measure of what the processes cost one another, and it
+is the first thing that bounds the render. Measured apart, the same ten
+seconds rendered by six processes at once take each 2.8 times what one
+takes alone (the tail 3.3 times): six processes give 2.1 times one. A
+quiet laptop was not available and no figure is claimed for one.
 
 ## What bounds it, and what would close it
 
-**The count of fast cores.** 1 100 s of a fast core is 2 minutes only on
-nine of them. The laptop is worth five and a half when it is quiet. This
-alone is a factor of two between the quiet laptop and the target, and no
-ordering of the mathematics moves it.
+**The count of fast cores, and what processes cost one another.** 1 100 s
+of a fast core is 2 minutes only on nine of them. The laptop has four, and
+six slow ones that take 4.5 times as long on a transform (measured: 12.4
+against 56 ms for the tail's 45 transforms of 153 600 points); and six
+processes side by side gave 2.1 times one, not six: the parts move 27 MB
+arrays through transforms that no longer fit a core's cache when six run,
+and each process still holds 4.6 GB. This is a factor of four to five
+between what was measured and the target, and it is the first thing to
+work on: fewer, larger things held (the tail's spectra, a source's tables
+of arrivals), buffers kept and not allocated a run, and threads in one
+process in place of processes.
 
 **The walk.** While the listener walks, a scene-second costs 2.3 s of a
 fast core against 0.45 at rest: the walk is 246 s of the scene and half of
