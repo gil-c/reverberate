@@ -26,6 +26,9 @@ lattice out in turn, :mod:`.line_gaps` reads the error against the spacing on
 a line solved every 2 cm, :mod:`.translation_failures` looks at where the
 translation fails round 500 Hz, and :mod:`.line_channels` reads all 64
 channels on that line between the centres the arrays really stood at.
+:mod:`.rail_interpolation` reads the same line the other way round, as a
+source moving past a fixed listener, and measures how far apart its solved
+positions may be under each way of reading between them.
 
 Usage::
 
@@ -36,6 +39,8 @@ Usage::
     python -m reverberate.experiments.w44_interpolation failures --field ... --out ...
     python -m reverberate.experiments.w44_interpolation line-channels --field ... --out ... \\
         --plan <the line campaign's plan.json> --scene <mirror/scene.npz>
+    python -m reverberate.experiments.w44_interpolation rail --field ... --out ... \\
+        --plan <the line campaign's plan.json>
 """
 
 from reverberate.spatial.translate import fusion_weights, translation_weights

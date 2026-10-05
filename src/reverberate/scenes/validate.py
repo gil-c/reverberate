@@ -68,8 +68,12 @@ SOURCE_CLEARANCE_M = 0.40
 #: Rule 10: the temperature the low band is solved at.
 LOW_BAND_TEMPERATURE_C = 20.0
 
-#: Rule 4.
+#: Rule 4: the pitch a rail has unless another is asked for, and the pitches it may have.
+#: Two positions half a wavelength apart hold a frequency: 0.20 m is 850 Hz, under the
+#: crossover, and nothing wider is of use.
 RAIL_PITCH_M = 0.08
+RAIL_PITCH_MIN_M = 0.04
+RAIL_PITCH_MAX_M = 0.20
 
 #: Slack on comparisons of numbers that were rounded to their step.
 _EPS = 1e-6
@@ -250,8 +254,16 @@ def _rails(recipe: Recipe, floor: Floor | None) -> list[Violation]:
         if rail.id in seen:
             bad(f"rail id {rail.id!r} is used twice")
         seen.add(rail.id)
-        if rail.pitch_m != RAIL_PITCH_M:
-            bad(f"rail {rail.id} has pitch_m {rail.pitch_m}, expected {RAIL_PITCH_M}")
+        if not RAIL_PITCH_MIN_M - _EPS <= rail.pitch_m <= RAIL_PITCH_MAX_M + _EPS:
+            bad(
+                f"rail {rail.id} has pitch_m {rail.pitch_m}, outside "
+                f"{RAIL_PITCH_MIN_M} to {RAIL_PITCH_MAX_M}"
+            )
+        elif rail.pitch_m != recipe.rails[0].pitch_m:
+            bad(
+                f"rail {rail.id} has pitch_m {rail.pitch_m}, and the recipe's first rail "
+                f"{recipe.rails[0].pitch_m}"
+            )
         if rail.a not in known or rail.b not in known or rail.a == rail.b:
             bad(f"rail {rail.id} does not join two stations ({rail.a!r}, {rail.b!r})")
             continue

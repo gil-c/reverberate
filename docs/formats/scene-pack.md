@@ -323,6 +323,18 @@ and per step:
 | `cell` | int32 | `[step, 2]` | rows of `/cells`, slot 0 the nearer |
 | `mode` | uint8 | `[step]` | `0` inaudible, `1` exact, `2` translated from one cell, `3` fused from two |
 
+and, only in a pack traced to read more than two source positions a step
+(`--rail-positions`), all three or none:
+
+| dataset | dtype | shape | meaning |
+| --- | --- | --- | --- |
+| `slot_pair` | int32 | `[step, slot, 2]` | rows of `ir`: every source position the step reads, by cell slot; `-1` for a slot not read |
+| `slot_weight` | float32 | `[step, slot, knot]` | each slot's weight at each frequency of `slot_knots_hz` |
+| `slot_knots_hz` | float64 | `[knot]` | the frequencies the weights are given at, from 0, evenly spaced (every 50 Hz to 1500 Hz) |
+
+`slot_pair` and `slot_weight` are stored deflated: most steps are at rest
+and hold one row and a weight of one.
+
 **What `ir` is, and its scale.** The pair's response in the dwelling's
 cache, which holds it at 4 kHz before its masks and its air, on the
 geometric clock and on the field's scale: given its air on that clock,
@@ -360,6 +372,30 @@ between them. The engine crossfades the two responses' outputs with those
 weights. That is averaging two waveforms, which this project measured to
 hold 1 kHz only when the two are 8 cm apart; it is why rails are solved
 every 8 cm.
+
+**More than two source positions.** Where `slot_pair` is there, a step on a
+rail reads `slot` solved positions: the two either side of the source
+first, which are `pair[k]`, then the others nearest it along the rail, on
+one side only past an end. The response at the source is
+
+`H(f) = sum_s w_s(f) H_s(f)`,
+
+`w_s(f)` being `slot_weight[k, s]` read in a straight line between its
+knots and held past the last. The weights are those of a field band
+limited to `2 pi f / c` in space
+(`spatial.rail.band_limited_weights`): they change with frequency, they
+are not confined to `[0, 1]` and they need not add to one. A weight that
+changes with frequency is a filter without delay, as long before an
+arrival as after it; with knots 50 Hz apart it is over within 64 ms either
+side, which the engine's transform of a step makes room for. At rest, and
+on a solved position, slot 0 is read alone and its weight is one at every
+knot. `pair` and `position_weight` stay what they are without these
+tables, the linear reading of the two nearest positions:
+`level/high_gain_db` is weighted by them, and a reader that knows nothing
+of the slots renders that. A rail read this way is solved at its corners
+and in equal gaps between them (`trace.plan.read_arcs`), not at the
+recipe's samples. What this holds, against the spacing, is
+measured in `docs/open-questions/rail-interpolation.md`.
 
 **Listener side.** `mode` says how the field at the cell becomes the field
 at the head:
@@ -402,7 +438,8 @@ head on its cell is then the cell itself.
 **Between two steps** the engine renders the low band in frames one step
 long, four to a step (centred every 12.5 ms), under a square root Hann
 window at analysis and at synthesis, so the frames add to one. A frame
-takes the `pair`, the `position_weight`, the `cell` and the `mode` of **the
+takes the `pair`, the `position_weight` (or the `slot_pair` and the
+`slot_weight`), the `cell` and the `mode` of **the
 step nearest its centre**, and the listener's offsets `d_j` **at its
 centre**, `l(t)` being linear between steps. The passage from one step's
 responses to the next is therefore the frames' own overlap, a raised cosine
@@ -900,6 +937,11 @@ trace of L5 and what it is expected to cost are in
     masks are computed on the card when the trace has one, and agree with
     the host's within 1e-6 of the response's peak (2.2e-13 measured), which
     a full check verifies on eight pairs.
+13. Where `low/slot_pair` is there: `slot_pair[k, :2, :]` is `pair[k]`;
+    `slot_pair[k, s, b]` was solved at `cell[k, b]`, and is valid at cell
+    slot 1 exactly where slot `s` is read and `mode` is 3; `slot_weight` is
+    finite, zero where its slot is not read, and one at every knot where a
+    step reads one position. Invariant 8 does not hold for `slot_weight`.
 
 ## The synthetic profile
 

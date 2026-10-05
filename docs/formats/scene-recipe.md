@@ -174,7 +174,7 @@ a station form the graph sources travel on.
 | `id` | string | unique |
 | `a`, `b` | string | the station at each end |
 | `points` | array of `[x, z]` | the polyline, first point at `a`, last at `b`, at least two |
-| `pitch_m` | float | `0.08`: the spacing of the positions the low band is solved at |
+| `pitch_m` | float | the spacing of the positions the low band is solved at: `0.08` unless the generator is asked for another, the same on every rail, `0.04` to `0.20` |
 
 A rail is walked standing: every point of it is at
 `y = floor_y_m + heights.standing_m`, and it ends above a seat, not on it.
@@ -182,7 +182,10 @@ A rail is walked standing: every point of it is at
 `j = 0 .. floor(L / pitch_m)`, and at `b` itself; they are a function of the
 recipe and nothing else, so the low band cache can be keyed on them
 (`kinematics.rail_samples`). When the last multiple of the pitch falls on `b`
-to a micrometre, `b` is not repeated.
+to a micrometre, `b` is not repeated. A trace that reads more than two
+positions a step (`--rail-positions`) solves a rail elsewhere: at every
+corner, and in equal gaps of the pitch at most between two corners
+(`trace.plan.read_arcs`, `docs/open-questions/rail-interpolation.md`).
 
 Every seat has an implicit vertical rail between its seated and its standing
 position, sampled at the same pitch from the seated end, on which a source
@@ -358,7 +361,10 @@ meant here.
 4. **Rails.** Unique ids. Both ends are stations, and the first and last
    points are their `x, z`. Every segment of the polyline lies on the free
    floor, except its last 0.60 m towards a seat, at whichever end the seat
-   is. `pitch_m` is `0.08`.
+   is. `pitch_m` is the same on every rail and lies in `0.04` to `0.20`.
+   `0.08` is what two positions read linearly need; a wider pitch is for a
+   trace that reads more of them (`python -m reverberate.trace ...
+   --rail-positions 8`, `docs/open-questions/rail-interpolation.md`).
 5. **Sources on the graph.** A `dwell` is the first segment or follows one
    that ends at its station, and is never at a `waypoint`. A `travel` goes
    from one end of its rail to the other, leaves from where the source is,

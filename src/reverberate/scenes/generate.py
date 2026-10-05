@@ -639,7 +639,13 @@ class _Scene:
                 seed=self.seed,
                 duration_s=self.duration,
                 stations=tuple(s for s in self.layout.stations if s.id in used[0]),
-                rails=tuple(r for r in self.layout.rails if r.id in used[1]),
+                # The layout's rails at the pitch asked for: where a source walks is the
+                # same at every pitch, and only the positions it is solved at change.
+                rails=tuple(
+                    replace(r, pitch_m=self.p.rail_pitch_m)
+                    for r in self.layout.rails
+                    if r.id in used[1]
+                ),
                 sources=tuple(sources),
                 listener=Listener(tuple(frames)),
                 generator=GeneratorRecord(GENERATOR_NAME, GENERATOR_VERSION, record),

@@ -40,13 +40,15 @@ from reverberate.scenes import (
     audible_steps,
     listener_state,
     low_band_source_positions,
+    rail_arc_lengths,
     rail_samples,
     recipe_sha256,
     seat_rail_heights,
     source_state,
 )
-from reverberate.scenes.recipe import Rise, Travel
+from reverberate.scenes.recipe import Rail, Rise, Travel
 from reverberate.spatial.lowband import solve_fmax_hz
+from reverberate.spatial.rail import band_limited_weights, knots_hz, nearest_samples
 from reverberate.spatial.translate import (
     EXACT_UNDER_M,
     FUSE_WITHIN_M,
@@ -64,6 +66,7 @@ __all__ = [
     "ARRAY_RADIUS_M",
     "DENSE_PITCH_M",
     "PATH_PITCH_M",
+    "RAIL_POSITIONS",
     "Assignment",
     "CellSet",
     "Patch",
@@ -78,6 +81,7 @@ __all__ = [
     "make_plan",
     "pairs_of",
     "patch_cells",
+    "read_arcs",
     "tail_cells",
     "tail_sites_of",
     "tracks_of",
@@ -93,6 +97,9 @@ MERGE_M = 0.03
 ARRAY_RADIUS_M = 0.26
 #: A source slot's weight under this is no weight.
 WEIGHT_FLOOR = 1e-9
+#: The solved positions a source on a rail reads unless more are asked for: the two round
+#: it, weighted linearly. More are read by ``spatial.rail.band_limited_weights``.
+RAIL_POSITIONS = 2
 
 #: ``/cells/kind`` of the format.
 KIND_SEAT, KIND_ADDED = 1, 2
@@ -165,18 +172,29 @@ class Profile:
     #: the scene at ``start_s + k step_s``: a pack to exercise the stages on a
     #: stretch where something moves, not one to play the recipe's clips with.
     start_s: float = 0.0
+    #: The solved positions a source on a rail reads: two, weighted linearly,
+    #: or more, weighted per frequency (``docs/open-questions/rail-interpolation.md``).
+    rail_positions: int = RAIL_POSITIONS
+
+    def __post_init__(self) -> None:
+        if not 2 <= int(self.rail_positions) <= 16:
+            raise ValueError(f"a source reads 2 to 16 positions, not {self.rail_positions}")
 
     @property
     def smoke(self) -> bool:
         return self.seconds is not None or self.sources is not None
 
     def record(self) -> dict[str, Any]:
-        return {
+        record: dict[str, Any] = {
             "seconds": self.seconds,
             "sources": self.sources,
             "patch": self.patch,
             "start_s": self.start_s,
         }
+        # Named only when it is not the first rule's, whose records it leaves as they were.
+        if self.rail_positions != RAIL_POSITIONS:
+            record["rail_positions"] = int(self.rail_positions)
+        return record
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Profile:
@@ -185,6 +203,7 @@ class Profile:
             record.get("sources"),
             bool(record.get("patch", False)),
             float(record.get("start_s", 0.0)),
+            int(record.get("rail_positions", RAIL_POSITIONS)),
         )
 
 
@@ -209,6 +228,17 @@ class SourceTrack:
     moving: np.ndarray
     #: ``[step]``: index into the recipe's segments of the source.
     segment: np.ndarray
+    #: ``[step, position]``: every solved position a step reads, the two of
+    #: :attr:`slot` first, and ``[step, position, knot]``, their weights at the
+    #: frequencies of :attr:`Tracks.rail_knots_hz`. ``None`` under the first
+    #: rule, where :attr:`slot` and :attr:`weight` say it all.
+    rail_slot: np.ndarray | None = None
+    rail_weight: np.ndarray | None = None
+
+    def read(self, step: int) -> np.ndarray:
+        """The rows of :attr:`Tracks.positions` the step reads, ``-1`` for a slot not read."""
+        table = self.slot if self.rail_slot is None else self.rail_slot
+        return np.asarray(table[step])
 
 
 @dataclass(frozen=True)
@@ -224,6 +254,8 @@ class Tracks:
     sources: dict[str, SourceTrack]
     #: ``[position, 3]``: the source positions the low band is solved from, in whole millimetres.
     positions: np.ndarray
+    #: The frequencies the sources' ``rail_weight`` are held at, in Hz.
+    rail_knots_hz: np.ndarray | None = None
 
     @property
     def steps(self) -> int:
@@ -238,8 +270,14 @@ def _millimetres(points: np.ndarray) -> np.ndarray:
     return np.asarray(np.rint(np.asarray(points, dtype=float) * 1000.0), dtype=np.int64)
 
 
-def _slots(recipe: Recipe, source_id: str, times: np.ndarray) -> tuple[Any, np.ndarray, Any, Any]:
-    """The source's state, its two solved positions at every step, the weight, whether it moves."""
+def _slots(
+    recipe: Recipe, source_id: str, times: np.ndarray, count: int = RAIL_POSITIONS
+) -> tuple[Any, np.ndarray, Any, Any, np.ndarray | None, np.ndarray | None]:
+    """The source's state, its two solved positions at every step, the weight, whether it moves.
+
+    With a ``count`` over two, also the ``count`` positions round it and
+    which of them are positions (:func:`_rail_reading`); ``None`` otherwise.
+    """
     source = recipe.source(source_id)
     state = source_state(recipe, source_id, times)
     floor = recipe.dwelling.floor_y_m
@@ -271,11 +309,100 @@ def _slots(recipe: Recipe, source_id: str, times: np.ndarray) -> tuple[Any, np.n
             moving[here] = True
         else:
             weight[here] = 0.0
+    nodes = held = None
+    if count > RAIL_POSITIONS:
+        nodes, held = _rail_reading(recipe, source_id, state, slots, weight, count)
     # A source on a solved position reads it alone, from slot 0.
     on_second = weight >= 1.0 - WEIGHT_FLOOR
     slots[on_second, 0] = slots[on_second, 1]
     weight[on_second | (weight <= WEIGHT_FLOOR)] = 0.0
-    return state, slots, weight, moving
+    return state, slots, weight, moving, nodes, held
+
+
+def _even(lengths: np.ndarray, pitch_m: float) -> np.ndarray:
+    """Arc lengths that cut each leg of a path into equal gaps of ``pitch_m`` at most."""
+    arcs = [np.zeros(1)]
+    start = 0.0
+    for length in np.asarray(lengths, dtype=float):
+        gaps = max(int(np.ceil(length / pitch_m - 1e-9)), 1)
+        arcs.append(start + length * np.arange(1, gaps + 1) / gaps)
+        start += float(length)
+    return np.concatenate(arcs)
+
+
+def read_arcs(rail: Rail) -> np.ndarray:
+    """Arc lengths of a rail's solved positions when more than two are read at a step.
+
+    Every corner is one, and each straight leg between two corners is cut
+    into equal gaps of the rail's pitch at most. Two things the samples of
+    :func:`reverberate.scenes.rail_arc_lengths` do not give: between two
+    positions either side of a corner the source is on neither's line, and
+    the weights of ``spatial.rail`` hold the field there no better than a
+    straight chord does; and a last sample a centimetre short of the rail's
+    end makes two positions that say the same thing, whose weights then
+    grow to tell them apart.
+    """
+    points = np.asarray(rail.points, dtype=float)
+    return _even(np.linalg.norm(np.diff(points, axis=0), axis=1), rail.pitch_m)
+
+
+def _rail_reading(
+    recipe: Recipe, source_id: str, state: Any, slots: np.ndarray, weight: np.ndarray, count: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """The ``count`` solved positions round a source at every step: ``[step, count, 3]``, valid.
+
+    The positions of the rail it travels (:func:`read_arcs`), or of the
+    seat's vertical rail it rises on, cut the same way, nearest it along the
+    rail: the two round it first, which replace ``slots`` and ``weight`` of
+    those steps. A rail of fewer than ``count`` positions gives what it
+    has. At rest nothing is valid: the station is read alone.
+    """
+    source = recipe.source(source_id)
+    floor = recipe.dwelling.floor_y_m
+    standing = floor + recipe.heights.standing_m
+    rungs = seat_rail_heights(recipe)
+    pitch = recipe.rails[0].pitch_m if recipe.rails else float(rungs[1] - rungs[0])
+    steps = state.position.shape[0]
+    nodes = np.zeros((steps, count, 3))
+    held = np.zeros((steps, count), dtype=bool)
+    for number, segment in enumerate(source.segments):
+        here = state.segment == number
+        if not here.any() or not isinstance(segment, Travel | Rise):
+            continue
+        first, second, share = state.sample_a[here], state.sample_b[here], state.weight[here]
+        if isinstance(segment, Travel):
+            rail = recipe.rail(segment.rail)
+            sampled = rail_arc_lengths(rail)
+            arcs = read_arcs(rail)
+            points = np.asarray(rail.points, dtype=float)
+            walked = np.concatenate(
+                [[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))]
+            )
+            # A corner is read at its own place, not at one a rounding short of it.
+            every = np.stack(
+                [
+                    np.interp(arcs, walked, points[:, 0]),
+                    np.full(arcs.size, standing),
+                    np.interp(arcs, walked, points[:, 1]),
+                ],
+                axis=1,
+            )
+        else:
+            x, z = recipe.station(segment.station).xz
+            sampled = rungs - rungs[0]
+            arcs = _even(sampled[-1:], pitch)
+            every = np.stack(
+                [np.full(arcs.size, x), floor + rungs[0] + arcs, np.full(arcs.size, z)], axis=1
+            )
+        at = sampled[first] * (1.0 - share) + sampled[second] * share
+        lower = np.clip(np.searchsorted(arcs, at, side="right") - 1, 0, arcs.size - 2)
+        span = arcs[lower + 1] - arcs[lower]
+        chosen = nearest_samples(arcs, at, count, lower=lower)
+        held[here] = chosen >= 0
+        nodes[here] = every[np.maximum(chosen, 0)]
+        slots[here] = nodes[here][:, :2]
+        weight[here] = np.clip((at - arcs[lower]) / span, 0.0, 1.0)
+    return nodes, held
 
 
 def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
@@ -299,12 +426,19 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
     head = listener_state(recipe, times)
     orientation = np.stack([head.yaw_deg, head.pitch_deg, head.roll_deg], axis=1)
     found: list[tuple[str, Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    count = int(profile.rail_positions)
+    # More than two positions: which, per source, and whether each is one.
+    rails: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for source in recipe.sources:
         audible = audible_steps(recipe, source.id)[first : first + steps]
         if profile.smoke and not audible.any():
             continue
-        state, slots, weight, moving = _slots(recipe, source.id, times)
+        state, slots, weight, moving, nodes, held = _slots(recipe, source.id, times, count)
         found.append((source.id, state, slots, weight, moving, audible))
+        if nodes is not None and held is not None:
+            # A source on a solved position, or at rest, reads it alone.
+            held &= (audible & (weight > 0.0))[:, None]
+            rails[source.id] = (nodes, held)
     if profile.sources is not None:
         # A smoke run is there to exercise every stage: the sources heard on the move first.
         ranked = sorted(found, key=lambda item: not bool((item[4] & item[5]).any()))
@@ -314,12 +448,14 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
         np.concatenate([slots[audible, 0], slots[audible & (weight > 0.0), 1]])
         for _, _, slots, weight, _, audible in found
     ]
+    read += [rails[name][0][rails[name][1]] for name, *_ in found if name in rails]
     millimetres = (
         np.unique(_millimetres(np.concatenate(read)), axis=0)
         if read and sum(len(r) for r in read)
         else np.zeros((0, 3), dtype=np.int64)
     )
     row_of = {tuple(int(v) for v in key): row for row, key in enumerate(millimetres)}
+    knots = knots_hz(solve_fmax_hz()) if count > RAIL_POSITIONS else None
     sources: dict[str, SourceTrack] = {}
     for name, state, slots, weight, moving, audible in found:
         slot = np.full((steps, 2), -1, dtype=np.int32)
@@ -328,6 +464,24 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
             slot[step, 0] = row_of[tuple(int(v) for v in keys[step, 0])]
             if weight[step] > 0.0:
                 slot[step, 1] = row_of[tuple(int(v) for v in keys[step, 1])]
+        rail_slot = rail_weight = None
+        if knots is not None:
+            nodes, held = rails[name]
+            rail_slot = np.full((steps, count), -1, dtype=np.int32)
+            rail_slot[:, 0] = slot[:, 0]
+            rail_weight = np.zeros((steps, count, knots.size), dtype=np.float32)
+            rail_weight[audible, 0, :] = 1.0
+            between = np.flatnonzero(held[:, 0])
+            if between.size:
+                rail_keys = _millimetres(nodes[between])
+                for row, step in enumerate(between):
+                    for position in np.flatnonzero(held[step]):
+                        rail_slot[step, position] = row_of[
+                            tuple(int(v) for v in rail_keys[row, position])
+                        ]
+                rail_weight[between] = band_limited_weights(
+                    nodes[between], state.position[between], knots, valid=held[between]
+                )
         sources[name] = SourceTrack(
             id=name,
             position=state.position,
@@ -337,6 +491,8 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
             weight=np.where(audible, weight, 0.0),
             moving=moving,
             segment=np.asarray(state.segment),
+            rail_slot=rail_slot,
+            rail_weight=rail_weight,
         )
     return Tracks(
         duration_s=duration,
@@ -345,6 +501,7 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
         orientation=orientation,
         sources=sources,
         positions=millimetres.astype(float) / 1000.0,
+        rail_knots_hz=knots,
     )
 
 
@@ -499,7 +656,7 @@ def pairs_of(tracks: Tracks, low: dict[str, Assignment]) -> list[list[int]]:
     for name, track in tracks.sources.items():
         chosen = low[name]
         for step in np.flatnonzero(track.audible):
-            for position in track.slot[step]:
+            for position in track.read(int(step)):
                 if position >= 0:
                     heard[int(position)].update(int(c) for c in chosen.cell[step] if c >= 0)
     return [sorted(cells) for cells in heard]

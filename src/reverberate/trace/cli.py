@@ -71,6 +71,14 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         help="add the dense validation patch; its centre x z, or nothing for the nearest a surface",
     )
     p.add_argument(
+        "--rail-positions",
+        type=int,
+        default=2,
+        metavar="N",
+        help="the solved positions a source on a rail reads: 2, weighted linearly (the "
+        "default), or more, weighted per frequency, which a pitch over 0.08 m needs",
+    )
+    p.add_argument(
         "--low-engine",
         choices=("lowband", "pffdtd"),
         default="lowband",
@@ -239,7 +247,7 @@ def _profile(args: argparse.Namespace, recipe: Any) -> tuple[Any, tuple[float, f
             raise SystemExit("--patch takes the centre's x and z, or nothing")
         centre = (float(args.patch[0]), float(args.patch[1]))
     if args.smoke is None:
-        return Profile(patch=args.patch is not None), centre
+        return Profile(patch=args.patch is not None, rail_positions=args.rail_positions), centre
     start = (
         busiest_window(recipe, args.smoke, args.smoke_sources)
         if args.smoke_start == "auto"
@@ -251,6 +259,7 @@ def _profile(args: argparse.Namespace, recipe: Any) -> tuple[Any, tuple[float, f
             sources=args.smoke_sources,
             patch=args.patch is not None,
             start_s=start,
+            rail_positions=args.rail_positions,
         ),
         centre,
     )
