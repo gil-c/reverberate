@@ -299,6 +299,7 @@ def _machine_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--cpu", action="store_true", help="numpy, even with a card")
     p.add_argument("--solvers", type=int, default=None)
     p.add_argument("--free-field", action="store_true", help="no solve: a monopole in free air")
+    p.add_argument("--low-batch", type=int, default=None, help="sources a launch, at most")
 
 
 def _engine_told(args: argparse.Namespace) -> dict[str, Any]:
@@ -316,6 +317,7 @@ def _engine_told(args: argparse.Namespace) -> dict[str, Any]:
         "scheme": low.get("scheme"),
         "ppw": low.get("ppw"),
         "solvers": args.solvers,
+        "batch": getattr(args, "low_batch", None),
     }
 
 

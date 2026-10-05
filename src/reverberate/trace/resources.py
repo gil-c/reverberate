@@ -31,7 +31,12 @@ from typing import Any
 
 import numpy as np
 
-from reverberate.compute import cuda_available, usable_cores
+from reverberate.compute import (
+    card_free_bytes,
+    card_limit_bytes,
+    cuda_available,
+    usable_cores,
+)
 from reverberate.trace.pool import WorkerSpec
 
 __all__ = [
@@ -63,8 +68,9 @@ REFERENCE: dict[str, Any] = {
     "level_pair_s": 0.076,
     "row_pair_s": 0.014,
     #: The solver on the grid to 1500 Hz against the same card's box of free air: the
-    #: boundary and its branches. Not measured yet on a card: phase two's first figure.
-    "solve_over_box": None,
+    #: boundary and its branches. Measured on 4 x RTX 3090 (instance 54299322, 2026-10-05):
+    #: 1.72e10 node updates a second a card in launches of 8 against 3.74e10 on the box.
+    "solve_over_box": 0.46,
 }
 
 
@@ -145,6 +151,12 @@ class Machine:
                 kept = {int(v) for v in told.split(",") if v.strip().isdigit()}
                 if kept:
                     cards = [card for card in cards if card.index in kept]
+        limit = card_limit_bytes()
+        if limit is not None:
+            # A smaller card stood in for: every card is counted as holding that much.
+            cards = [
+                replace(card, free_bytes=min(card.free_bytes or limit, limit)) for card in cards
+            ]
         if gpu and not cards:
             raise RuntimeError("a card was asked for and this machine shows none")
         return cls(tuple(cards), usable_cores(), host_memory_gb() * 1e9)
@@ -259,7 +271,7 @@ def measure(card: int | None, xp: Any, seconds: float = 1.0) -> dict[str, Any]:
         record.update(
             {
                 "name": name.decode() if isinstance(name, bytes) else str(name),
-                "free_bytes": float(free),
+                "free_bytes": card_free_bytes(xp),
                 "total_bytes": float(total),
             }
         )
@@ -268,7 +280,7 @@ def measure(card: int | None, xp: Any, seconds: float = 1.0) -> dict[str, Any]:
         record["transform_s"] = transform_seconds(xp)
         if xp is not np:
             xp.get_default_memory_pool().free_all_blocks()
-            record["free_bytes"] = float(xp.cuda.Device().mem_info[0])
+            record["free_bytes"] = card_free_bytes(xp)
     return record
 
 

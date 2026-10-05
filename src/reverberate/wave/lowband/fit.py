@@ -355,7 +355,9 @@ class CellEncoder:
         if self.xp is np:
             return 4
         self.xp.get_default_memory_pool().free_all_blocks()
-        free, _ = self.xp.cuda.Device().mem_info
+        from reverberate.compute import card_free_bytes
+
+        free = card_free_bytes(self.xp)
         # Two copies of the records in double precision at the widest point, and the
         # fit's spectra after them: three complex arrays of a cell's transform.
         filters = 2.0 * 8.0 * nodes * steps

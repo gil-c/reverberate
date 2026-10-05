@@ -766,6 +766,10 @@ KNOWN_BAD_HOSTS: dict[int, tuple[str, str]] = {
         "ssh3.vast.ai port 13832 refused every connection after the instance answered"
         " once: the rental was lost in its provisioning",
     ),
+    152135: (
+        "2026-10-05",
+        "CUDA cannot be initialised (cuInit 999), nvidia-smi lists the cards",
+    ),
 }
 
 

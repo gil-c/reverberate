@@ -128,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "campaign":
+        if not args.cpu:
+            # A paid machine without its cards is stopped, not run on its host's cores.
+            from reverberate.compute import require_cards
+
+            require_cards()
         from reverberate.accel.campaign import run_campaign
         from reverberate.accel.pairs import KIND, run_pairs
 

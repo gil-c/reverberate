@@ -479,7 +479,9 @@ class LowbandPairs(PairsCampaign):
             from reverberate.accel.solve import host_memory_gb
 
             return 0.25 * host_memory_gb() * 1e9
-        free, _ = xp.cuda.Device().mem_info
+        from reverberate.compute import card_free_bytes
+
+        free = card_free_bytes(xp)
         return float(free)
 
     def release(self, xp: Any) -> None:
@@ -664,7 +666,10 @@ class LowbandPairs(PairsCampaign):
         found: list[dict[str, Any]] = []
         current: list[Item] = []
         rows = 0
-        items = sorted(self.items(wanted, rows_limit), key=lambda i: (-i.rows, i.source))
+        # In the positions' order: the pairs of neighbouring positions come home together,
+        # and what waits for a block of them (the levelling, the pack's rows) starts while
+        # the cards still solve. The records are on the host: a launch need not be of a size.
+        items = sorted(self.items(wanted, rows_limit), key=lambda i: i.source)
         for item in [*items, None]:
             full = item is None or len(current) >= at_once or rows + item.rows > rows_limit
             if current and full:

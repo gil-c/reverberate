@@ -93,8 +93,14 @@ VRAM_FIXED_GB = 2.13
 #: card reports a few MiB, a desktop session some hundreds; another tenant's
 #: job reports gigabytes.
 CARD_USED_LIMIT_MIB = 1024.0
-#: One line a card: memory in use, memory in total, in MiB.
-CARD_QUERY = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+#: One line a card: memory in use, memory in total, in MiB; then whether CUDA starts at
+#: all on the host, ``cuInit`` and the driver's answer, 0 when it does. ``nvidia-smi`` lists
+#: the cards of a host whose ``/dev/nvidia-uvm`` cannot be opened: machine 152135 answered
+#: 999 on 2026-10-05, and a campaign there would have had no card.
+CARD_QUERY = (
+    "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+    " && python3 -c \"import ctypes; print('cuInit', ctypes.CDLL('libcuda.so.1').cuInit(0))\""
+)
 
 #: Where the campaign lives on the machine.
 REMOTE_ROOT = "/root/campaign"
@@ -492,11 +498,22 @@ def cards_in_use(text: str) -> list[tuple[float, float]]:
     """Memory in use and in total on each card, in MiB, from :data:`CARD_QUERY`'s answer."""
     cards = []
     for line in text.splitlines():
-        if not line.strip():
+        if not line.strip() or line.startswith("cuInit"):
             continue
         used, total = (float(value) for value in line.split(","))
         cards.append((used, total))
     return cards
+
+
+def cuda_refused(text: str) -> str | None:
+    """Why CUDA does not start on the host, from :data:`CARD_QUERY`; ``None`` when it does."""
+    for line in text.splitlines():
+        if line.startswith("cuInit") and line.split()[-1] != "0":
+            return (
+                f"CUDA cannot be initialised on this host ({line.strip()}): nvidia-smi lists"
+                " its cards and no program can open them"
+            )
+    return None
 
 
 def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT_MIB) -> str | None:
@@ -506,11 +523,15 @@ def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT
     answer the query is refused like one whose cards are held.
     """
     try:
-        cards = cards_in_use(run_on(machine, CARD_QUERY, what="cards", timeout=90))
+        answer = run_on(machine, CARD_QUERY, what="cards", timeout=90)
+        cards = cards_in_use(answer)
     except Exception as error:  # noqa: BLE001 - a host that cannot be asked is not used
         return f"the cards did not answer: {str(error)[:120]}"
     if not cards:
         return "the host reports no card"
+    dead = cuda_refused(answer)
+    if dead:
+        return dead
     say(
         "card memory in use before anything runs: "
         + ", ".join(f"{used:.0f} of {total:.0f} MiB" for used, total in cards)

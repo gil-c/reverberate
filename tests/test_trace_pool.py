@@ -171,7 +171,7 @@ def test_the_prediction_goes_as_the_cards_and_the_cores_it_is_given() -> None:
     assert one["seconds"]["solve"] == pytest.approx(8 * eight["seconds"]["solve"], rel=1e-3)
     assert eight["hours"] < one["hours"] / 7.0, "the host's stages hide under the solves"
     assert eight["usd"] == pytest.approx(eight["hours"] * 1.38, abs=0.01)
-    assert not eight["calibrated"], "until a card says what the grid costs against the box"
+    assert eight["calibrated"], "the grid against the box, as a card measured it"
     # With no card the host's cores bound it, and twice the cores is half the time.
     few = predict(
         {**counts, "node_updates": 0.0, "pairs": 0}, Machine.fake((), cores=4), host_workers=4
@@ -180,6 +180,35 @@ def test_the_prediction_goes_as_the_cards_and_the_cores_it_is_given() -> None:
         {**counts, "node_updates": 0.0, "pairs": 0}, Machine.fake((), cores=8), host_workers=8
     )
     assert few["seconds"]["host"] == pytest.approx(2 * more["seconds"]["host"], abs=0.2)
+
+
+def test_a_machine_whose_cards_cannot_be_opened_stops_and_is_not_rented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reverberate import compute
+    from reverberate.accel.cli import main as campaign
+    from reverberate.gpu import onebox, vast
+
+    # On the machine: no card is an error at once, and numpy is what --cpu asks for.
+    monkeypatch.setenv(compute.NO_GPU_ENV, "1")
+    with pytest.raises(RuntimeError, match="--cpu"):
+        compute.require_cards()
+    with pytest.raises(RuntimeError, match="--cpu"):
+        campaign(["campaign", "--bundle", str(tmp_path), "--out", str(tmp_path / "o")])
+    assert not (tmp_path / "o").exists(), "stopped before anything was made"
+    # From the laptop: nvidia-smi lists the cards of a host where CUDA does not start.
+    listed = "3, 16384\n3, 16384\n"
+    monkeypatch.setattr(onebox, "run_on", lambda *a, **k: listed + "cuInit 999\n")
+    reason = onebox.occupied_cards(object(), lambda m: None)
+    assert reason is not None and "cuInit 999" in reason
+    monkeypatch.setattr(onebox, "run_on", lambda *a, **k: listed + "cuInit 0\n")
+    assert onebox.occupied_cards(object(), lambda m: None) is None
+    assert "cuInit" in onebox.CARD_QUERY and 152135 in vast.KNOWN_BAD_HOSTS
+    # A smaller card stood in for: what is counted free is under the limit.
+    monkeypatch.setenv(compute.CARD_LIMIT_ENV, "6")
+    assert compute.card_limit_bytes() == 6e9
+    monkeypatch.delenv(compute.CARD_LIMIT_ENV)
+    assert compute.card_limit_bytes() is None
 
 
 # --------------------------------------------------------------------------

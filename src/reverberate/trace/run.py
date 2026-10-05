@@ -61,7 +61,14 @@ import numpy as np
 
 from reverberate.accel.pairs import PairCache
 from reverberate.audio import Atmosphere
-from reverberate.compute import Devices, device_report, to_numpy, usable_cores, xp_for
+from reverberate.compute import (
+    Devices,
+    card_free_bytes,
+    device_report,
+    to_numpy,
+    usable_cores,
+    xp_for,
+)
 from reverberate.metrics import band_centres
 from reverberate.mirror.hybrid import Crossover
 from reverberate.mirror.moving import (
@@ -1654,7 +1661,7 @@ class Trace:
         self.xp.get_default_memory_pool().free_all_blocks()
         # With what the engine keeps there for the run: a launch's bytes count it too.
         kept = getattr(self.engine, "kept_bytes", None)
-        return float(self.xp.cuda.Device().mem_info[0]) + (float(kept()) if kept else 0.0)
+        return card_free_bytes(self.xp) + (float(kept()) if kept else 0.0)
 
     def _restored(self) -> None:
         """In a worker's process: the cell rule again, from the centres the run wrote."""
