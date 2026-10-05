@@ -21,6 +21,8 @@ __all__ = [
     "direct_arrival",
     "direct_energy",
     "measure_signature",
+    "signature_level_db",
+    "unit_signature",
 ]
 
 #: The direct sound is looked for in this band, Hz.
@@ -121,6 +123,26 @@ def measure_signature(
         },
     }
     return filt, record
+
+
+def signature_level_db(signature: np.ndarray, band_hz: tuple[float, float], rate: float) -> float:
+    """A signature's level over ``band_hz``, in dB: its mean power there, on a grid of 10 Hz.
+
+    Over the band the two solvers share, 707 to 1414 Hz, each frequency
+    with one weight, as a seam read the mirror: what a seam took the
+    signature for.
+    """
+    grid = int(round(rate / 10.0))
+    freqs = np.fft.rfftfreq(grid, 1.0 / rate)
+    band = (freqs >= band_hz[0]) & (freqs <= band_hz[1])
+    power = np.abs(np.fft.rfft(np.asarray(signature, dtype=float), grid)[band]) ** 2
+    return float(10.0 * np.log10(np.mean(power)))
+
+
+def unit_signature(signature: np.ndarray, band_hz: tuple[float, float], rate: float) -> np.ndarray:
+    """``signature`` at 0 dB over ``band_hz``: its colour without its level."""
+    taps = np.asarray(signature, dtype=float)
+    return np.asarray(taps / 10.0 ** (signature_level_db(taps, band_hz, rate) / 20.0))
 
 
 def apply_signature(signals: Any, taps: np.ndarray, xp: Any = np) -> Any:

@@ -2,12 +2,33 @@
 
 A model is a table ``gain_db [band, angle]`` on the mirror's seven octave
 bands and on the angles 0 to 180 degrees by 5, a figure of revolution about
-the facing direction ``(cos yaw, 0, -sin yaw)``, **normalised to unit mean
-power over the sphere in every band** (``docs/formats/scene-pack.md``): a
-directional source radiates what the omnidirectional one does, so the tail
-and the band under the crossover, which stay omnidirectional, keep their
-level. :func:`directivity_gain` is what the signal engine multiplies a
-path's band gains by.
+the facing direction ``(cos yaw, 0, -sin yaw)``. :func:`directivity_gain` is
+what the signal engine multiplies a path's band gains by.
+
+**A table is normalised on its axis** (:data:`NORMALISED`, ``"axis"``): 0 dB
+at 0 degrees in every band, and an attenuation everywhere else. A clip is
+recorded in front of its talker, so its level is the axis's
+(``docs/formats/clip-library.md``): a voice that faces the listener is its
+clip, at every frequency. What the source then radiates over the sphere is
+under the omnidirectional source's by the band's directivity index
+(:func:`radiated_db`: -1.0 dB at 125 Hz, -3.0 dB at 1 kHz, -6.2 dB at 8 kHz
+for ``voice_v1``), and the late part, which is omnidirectional, is rendered
+that much lower (:func:`reverberate.render.normalise.radiating`). The band
+under the crossover is solved for an omnidirectional source and takes
+nothing of this: ``docs/formats/scene-pack.md`` says what that leaves at the
+crossover.
+
+Until 2026-10-05 a table was normalised to **unit mean power** over the
+sphere (``"mean"``): the source radiated what the omnidirectional one does,
+and its axis stood 1.0 dB (125 Hz) to 6.2 dB (8 kHz) over its clip, with a
+step of 3.0 dB at the crossover for a talker who faces the listener
+(``docs/open-questions/chain-audit.md``, D3). It stays selectable, and a
+pack says which its tables are (the attribute ``normalised`` of
+``/directivity/<model>``; a pack that says nothing holds ``"mean"``).
+
+A model's **digest**, the recipe's asset key, is that of its unit mean power
+table whichever way it is normalised: it names the pattern, and a recipe
+drawn before the change names the same one.
 
 ``voice_v1``
 ------------
@@ -16,7 +37,7 @@ The pattern of each band is
 
     ``gain_db(angle) = -back_db * (1 - cos(angle)) / 2``
 
-before normalisation: level on the axis, ``back_db`` lower straight behind,
+level on the axis, ``back_db`` lower straight behind,
 half of it at the side. ``back_db`` per octave band is :data:`VOICE_V1_BACK_DB`,
 round figures for the front to back difference of conversational speech, of
 the order reported by
@@ -50,6 +71,8 @@ from reverberate.acoustics import OCTAVE_BANDS
 
 __all__ = [
     "ANGLES_DEG",
+    "NORMALISATIONS",
+    "NORMALISED",
     "VOICE_V1_BACK_DB",
     "Directivity",
     "directivity_gain",
@@ -57,6 +80,7 @@ __all__ = [
     "mean_power",
     "model",
     "omni",
+    "radiated_db",
     "voice_v1",
 ]
 
@@ -65,6 +89,12 @@ ANGLES_DEG = np.arange(0.0, 180.0 + 1e-9, 5.0)
 
 #: ``voice_v1``: how far under the axis the level is straight behind, dB, per octave band.
 VOICE_V1_BACK_DB = (2.0, 3.0, 5.0, 7.0, 10.0, 14.0, 18.0)
+
+#: What a table may be level with: its axis (0 dB ahead), or the omnidirectional
+#: source's power (unit mean power over the sphere).
+NORMALISATIONS = ("axis", "mean")
+#: What a model is normalised on unless told: a clip is its talker's axis.
+NORMALISED = "axis"
 
 #: Angles the mean power is summed on, per degree of the table's step.
 _FINE = 50
@@ -79,17 +109,32 @@ class Directivity:
     gain_db: np.ndarray
     angles_deg: np.ndarray
     bands_hz: tuple[int, ...] = tuple(OCTAVE_BANDS)
+    #: What the table is level with, one of :data:`NORMALISATIONS`; a pack's table
+    #: that does not say is ``"mean"``, as every table was.
+    normalised: str = "mean"
+    #: The digest of the pattern's unit mean power table, where the model was made
+    #: from a pattern (:func:`model`); empty for a table read as it stands.
+    pattern_digest: str = ""
 
     @property
     def digest(self) -> str:
-        """The SHA-256 of ``gain_db`` as the pack stores it: the recipe's asset key."""
+        """The recipe's asset key: the SHA-256 of the pattern's unit mean power table.
+
+        As a pack stored that table, in single precision. It names the
+        pattern and not the level it is given, so both normalisations of a
+        model have one key; a table that was not made from a pattern has
+        the digest of its own values.
+        """
+        if self.pattern_digest:
+            return self.pattern_digest
         return hashlib.sha256(np.ascontiguousarray(self.gain_db, dtype="<f4").tobytes()).hexdigest()
 
     def pack(self) -> dict[str, Any]:
-        """The group's dataset and attribute, in the pack's types."""
+        """The group's dataset and attributes, in the pack's types."""
         return {
             "gain_db": np.ascontiguousarray(self.gain_db, dtype=np.float32),
             "angles_deg": np.asarray(self.angles_deg, dtype=np.float64),
+            "normalised": self.normalised,
         }
 
 
@@ -120,31 +165,60 @@ def mean_power(gain_db: np.ndarray, angles_deg: np.ndarray = ANGLES_DEG) -> np.n
     return np.asarray(share @ power, dtype=float)
 
 
-def model(name: str, gain_db: np.ndarray, angles_deg: np.ndarray = ANGLES_DEG) -> Directivity:
-    """A model from a pattern in dB of any level: normalised to unit mean power per band."""
+def radiated_db(gain_db: np.ndarray, angles_deg: np.ndarray = ANGLES_DEG) -> np.ndarray:
+    """Per band, what the table radiates over the sphere against an omnidirectional source, dB.
+
+    Zero for a table of unit mean power; for one that is level with its
+    axis, the band's directivity index with a minus sign.
+    """
+    return np.asarray(10.0 * np.log10(mean_power(gain_db, angles_deg)), dtype=float)
+
+
+def model(
+    name: str,
+    gain_db: np.ndarray,
+    angles_deg: np.ndarray = ANGLES_DEG,
+    *,
+    normalised: str = NORMALISED,
+) -> Directivity:
+    """A model from a pattern in dB of any level, normalised per band as ``normalised`` says.
+
+    ``"axis"``: 0 dB at the first angle, the facing direction. ``"mean"``:
+    unit mean power over the sphere.
+    """
+    if normalised not in NORMALISATIONS:
+        raise ValueError(f"a table is normalised on one of {NORMALISATIONS}, not {normalised!r}")
     gain_db = np.asarray(gain_db, dtype=float)
     if gain_db.shape != (len(OCTAVE_BANDS), angles_deg.size):
         raise ValueError(
             f"a pattern is [{len(OCTAVE_BANDS)}, {angles_deg.size}], not {gain_db.shape}"
         )
     level = 10.0 * np.log10(mean_power(gain_db, angles_deg))
-    normalised = gain_db - level[:, None]
-    normalised.setflags(write=False)
-    return Directivity(name=name, gain_db=normalised, angles_deg=np.asarray(angles_deg))
+    mean = gain_db - level[:, None]
+    digest = hashlib.sha256(np.ascontiguousarray(mean, dtype="<f4").tobytes()).hexdigest()
+    table = mean if normalised == "mean" else gain_db - gain_db[:, :1]
+    table.setflags(write=False)
+    return Directivity(
+        name=name,
+        gain_db=table,
+        angles_deg=np.asarray(angles_deg),
+        normalised=normalised,
+        pattern_digest=digest,
+    )
 
 
-def omni() -> Directivity:
-    """The source that radiates alike in every direction: zeros."""
+def omni(normalised: str = NORMALISED) -> Directivity:
+    """The source that radiates alike in every direction: zeros, whatever they are level with."""
     zeros = np.zeros((len(OCTAVE_BANDS), ANGLES_DEG.size))
     zeros.setflags(write=False)
-    return Directivity(name="omni", gain_db=zeros, angles_deg=ANGLES_DEG)
+    return Directivity(name="omni", gain_db=zeros, angles_deg=ANGLES_DEG, normalised=normalised)
 
 
-def voice_v1() -> Directivity:
+def voice_v1(normalised: str = NORMALISED) -> Directivity:
     """A talker's mouth, by the parametric fit of the module's docstring."""
     back = np.asarray(VOICE_V1_BACK_DB, dtype=float)[:, None]
     shape = 0.5 * (1.0 - np.cos(np.radians(ANGLES_DEG)))[None, :]
-    return model("voice_v1", -back * shape)
+    return model("voice_v1", -back * shape, normalised=normalised)
 
 
 def facing(yaw_deg: np.ndarray | float) -> np.ndarray:

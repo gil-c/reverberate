@@ -561,6 +561,9 @@ class PackWriter:
             sub = group.create_group(model)
             sub.create_dataset("gain_db", data=np.asarray(pattern.gain_db, dtype="<f4"))
             sub.attrs["angles_deg"] = np.asarray(pattern.angles_deg, dtype=float)
+            # What the table is level with (``mirror.directivity``); a pack without the
+            # word holds tables of unit mean power.
+            sub.attrs["normalised"] = pattern.normalised
         f.create_group("sources")
 
     def add_source(self, source: Source) -> None:
@@ -729,6 +732,9 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 gain_db=np.asarray(group["gain_db"][...]),
                 angles_deg=np.asarray(group.attrs["angles_deg"], float),
                 bands_hz=header.bands_hz,
+                normalised=(
+                    _text(group.attrs["normalised"]) if "normalised" in group.attrs else "mean"
+                ),
             )
             for model, group in f["directivity"].items()
         }
@@ -1124,8 +1130,10 @@ def _check_tail(
 # the synthetic profile
 # --------------------------------------------------------------------------
 
-#: Under this the synthetic low band is faded out: see :func:`synthetic_free_field`.
-SYNTHETIC_HIGHPASS_HZ = (80.0, 160.0)
+#: Where the synthetic low band starts: where a solve's does, the fit's low cut
+#: (:data:`reverberate.spatial.lowband.LOWCUT_HZ`, order 8), whole from 50 Hz. It was a
+#: raised cosine from 80 to 160 Hz until 2026-10-05, an octave over a solve.
+SYNTHETIC_LOWCUT = (40.0, 8)
 
 
 def synthetic_recipe(duration_s: float, source_ids: Iterable[str]) -> bytes:
@@ -1146,14 +1154,15 @@ def monopole_low_response(
     header: Header,
     crossover: Crossover,
     *,
-    highpass_hz: tuple[float, float] = SYNTHETIC_HIGHPASS_HZ,
+    lowcut: tuple[float, int] = SYNTHETIC_LOWCUT,
 ) -> np.ndarray:
     """A free field monopole seen from a point, as the low band holds it: ``[channel, sample]``.
 
     ``offset_scene`` is the source seen from the point. The interior
     expansion of ``e^{-ikR} / R`` divided by ``i^n`` per degree, through the
     crossover's low pressure mask (a single arrival lies wholly in the onset
-    window) and a raised cosine high pass between ``highpass_hz``. On the
+    window) and the low cut of a solve's fit, ``lowcut`` (Hz and order,
+    :func:`reverberate.spatial.lowband.lowcut_response`). On the
     scale of ``low/ir``: the samples of the 48 kHz response, which
     :func:`reverberate.spatial.lowband.from_stored` gives back.
     """
@@ -1163,8 +1172,9 @@ def monopole_low_response(
     samples, rate = header.low_samples, header.low_sample_rate_hz
     freqs = np.fft.rfftfreq(samples, 1.0 / rate)
     spectrum = np.zeros((freqs.size, header.channels), dtype=complex)
-    lo, hi = highpass_hz
-    keep = freqs > lo
+    from reverberate.spatial.lowband import lowcut_response
+
+    keep = freqs > 0.0
     k = 2.0 * np.pi * freqs[keep] / header.sound_speed_m_s
     source = scene_to_ambisonic(np.asarray(offset_scene, dtype=float)[None, :])[0]
     spectrum[keep] = (
@@ -1173,8 +1183,7 @@ def monopole_low_response(
         * monopole_coefficients(source, k, header.order)
         / (1j ** degrees_of(header.order))[None, :]
     )
-    ramp = np.clip((freqs - lo) / (hi - lo), 0.0, 1.0)
-    spectrum *= (0.5 - 0.5 * np.cos(np.pi * ramp))[:, None]
+    spectrum *= lowcut_response(freqs, lowcut[0], lowcut[1])[:, None]
     # The masks are those of the 48 kHz transform, read at the bins the low rate keeps.
     low_mask, _ = crossover.masks(samples, rate, power=False)
     spectrum *= low_mask[:, None]

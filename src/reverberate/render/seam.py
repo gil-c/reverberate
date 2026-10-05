@@ -15,20 +15,36 @@ it made everything above 1 kHz of a source that walked, or that the head
 walked past, go up and down by 2 to 5 dB within half a second
 (``docs/open-questions/first-scene-defects.md``).
 
-The owner's ruling (2026-10-05): the constant is one number for the scene
-(:data:`SEAM_CONSTANT_DB`), and the pair's own part is **tapered**: whole
-in the crossover's band, a share of it in the bands above, none from
-4 kHz up (:data:`TAPER`). In decibels, for a step and a band of the bank::
+The owner's ruling (2026-10-05): the constant is **one number, once for
+all**, not a dwelling's and not a position's (:data:`SEAM_CONSTANT_DB`),
+and the pair's own part is **tapered**: whole in the crossover's band, a
+share of it in the bands above, none from 4 kHz up (:data:`TAPER`). In
+decibels, for a step and a band of the bank::
 
     K = 20 log10(alignment_gain) + constant_db
-    level[step, band] = K + taper[band] * (high_gain_db[step] - K)
+    M = 20 log10(alignment_gain) + the median of the pack's pairs' seams
+    level[step, band] = K + taper[band] * (high_gain_db[step] - M)
 
-A share of one is ``high_gain_db[step]`` itself, to the bit, and a share
-of zero is ``K``. The table is ``level/band_gain_db``, ``[step, bank]``,
-beside the scalar, which is never rewritten: a pack holds both, and
+``K`` is where the bands above the crossover stand, and what is tapered
+is how far a step's pairs stand **from the scene's median**: the part of
+a seam that is the scene's own is not a level. The table is
+``level/band_gain_db``, ``[step, bank]``, beside the scalar, which is
+never rewritten: a pack holds both, and
 :attr:`reverberate.render.engine.RenderSettings.seam` says which the
 engine applies, ``tapered`` (the table where the pack holds one) or
 ``broadband`` (the scalar, as every render before it, to the bit).
+
+**The constant is zero.** The audit of 2026-10-05 found the 1.9 dB
+(``docs/open-questions/chain-audit.md``): the mirror's measured alignment
+put it 2.4 dB under ``1 / d``, and the seam read 1.1 dB of the wave
+side's band limit as a level. A pack that is normalised
+(:mod:`reverberate.render.normalise`, or born so) has an alignment gain of
+one and a mirror whose direct sound is ``1 / d``, so ``K`` is 0 dB
+absolute with a constant of 0 dB, in every dwelling. A pack that is not
+normalised has no number that is right for it but its own seams': it is
+given their median, ``K = M``, a share of one is then
+``high_gain_db[step]`` to the bit, and that is every table made before
+the normalisation.
 
 **No pair is solved again.** The trace writes the table; a pack traced
 before it is given one **in place** by :func:`taper_pack`, ``python -m
@@ -87,14 +103,15 @@ MODES = ("tapered", "broadband")
 #: holds for every band above, the first for those under. 1 kHz whole, 2 kHz half (in
 #: decibels), 4 kHz and over none.
 TAPER = (1.0, 0.5, 0.0)
-#: THE normalisation between the two bands, in decibels over the alignment's gain: the
-#: one number a scene's seams stand round. ``None`` is what the data give, the median
-#: of the pack's pairs' seams (:func:`scene_constant_db`). The calibration that finds
-#: the mirror's error of scale sets this, or gives it (``--constant-db``).
-SEAM_CONSTANT_DB: float | None = None
+#: THE normalisation between the two bands, in decibels over the alignment's gain, once
+#: for all: the value at which the mirror's direct sound is ``1 / d`` in a normalised
+#: pack, whose alignment gain is one. Zero: the mirror renders a unit source as ``1 / d``
+#: and the wave band is ``1 / d`` (both within 0.1 dB), and nothing was left to fit.
+SEAM_CONSTANT_DB: float = 0.0
 #: Where a pack's constant came from, as its provenance says it.
 GIVEN = "given"
 MEDIAN = "the median of the pairs' seams"
+FIXED = "reverberate.render.seam.SEAM_CONSTANT_DB, once for all"
 #: The dataset of a source's ``level`` group.
 BAND_TABLE = "band_gain_db"
 #: The table the tapered join is made from where ``relevel`` rewrote the scalar.
@@ -134,35 +151,50 @@ def scene_constant_db(seams_db: Iterable[np.ndarray]) -> float:
 
 
 def band_levels(
-    high_gain_db: np.ndarray, audible: np.ndarray, level_db: float, shares: np.ndarray
+    high_gain_db: np.ndarray,
+    audible: np.ndarray,
+    level_db: float,
+    shares: np.ndarray,
+    centre_db: float | None = None,
 ) -> np.ndarray:
     """``level/band_gain_db`` of one source: ``[step, bank]`` float32.
 
     ``high_gain_db`` is the trace's scalar, ``level_db`` the alignment's
-    gain plus the scene's constant, ``shares`` one per band
-    (:func:`taper_of`). A share of one is the scalar to the bit, a share
-    of zero ``level_db``; a step that is not audible keeps the scalar.
+    gain plus the constant, ``shares`` one per band (:func:`taper_of`),
+    and ``centre_db`` the alignment's gain plus the median of the scene's
+    seams: what a step's own part is counted from. A share of zero is
+    ``level_db``; a step that is not audible keeps the scalar. Where the
+    centre is the level, or is not given, a share of one is the scalar to
+    the bit.
     """
     traced = np.asarray(high_gain_db, dtype=np.float32)
     heard = np.asarray(audible, dtype=bool)
     made = np.repeat(traced[:, None], len(shares), axis=1)
-    own = traced[heard].astype(np.float64) - float(level_db)
+    centre = float(level_db) if centre_db is None else float(centre_db)
+    own = traced[heard].astype(np.float64) - centre
     for band, share in enumerate(np.asarray(shares, dtype=float)):
-        if share == 1.0:
+        if share == 1.0 and centre == float(level_db):
             continue
         made[heard, band] = np.float32(level_db) if share == 0.0 else level_db + share * own
     return made
 
 
 def seam_record(
-    bank_hz: Iterable[float], shares: np.ndarray, base_db: float, constant_db: float, constant: str
+    bank_hz: Iterable[float],
+    shares: np.ndarray,
+    base_db: float,
+    constant_db: float,
+    constant: str,
+    median_db: float | None = None,
 ) -> dict[str, Any]:
     """What a pack's provenance says of its level a band, under ``seam``.
 
     ``constant`` says where the number came from; ``level_db`` is what a
     band whose share is zero is multiplied by, the alignment's gain plus
-    the constant.
+    the constant; ``median_db`` is the median of the pairs' seams, which a
+    step's own part is counted from (the constant itself where not given).
     """
+    median = float(constant_db) if median_db is None else float(median_db)
     return {
         "mode": "tapered",
         "bank_hz": [int(v) for v in bank_hz],
@@ -170,6 +202,7 @@ def seam_record(
         "constant_db": round(float(constant_db), 4),
         "constant": constant,
         "level_db": round(float(base_db) + float(constant_db), 4),
+        "median_db": round(median, 4),
     }
 
 
@@ -326,14 +359,17 @@ def taper_pack(
     path: Path,
     *,
     taper: Sequence[float] = TAPER,
-    constant_db: float | None = SEAM_CONSTANT_DB,
+    constant_db: float | None = None,
     undo: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Give the pack at ``path`` its level a band, ``level/band_gain_db``, in place.
 
-    ``constant_db`` is the scene's one number; left out, the median of the
-    pack's pairs' seams. The scalar the trace wrote is read and never
+    ``constant_db`` is the one number the bands above the crossover stand
+    at, over the alignment's gain. Left out: :data:`SEAM_CONSTANT_DB` for a
+    pack whose provenance says it is on the physical scale
+    (``normalisation``), and the median of the pack's pairs' seams for one
+    that is not. The scalar the trace wrote is read and never
     written. ``undo`` removes the table and what the provenance says of
     it; ``dry_run`` writes nothing. Returns, per source and per band of
     the bank from the crossover up, how far the level moved within half a
@@ -358,12 +394,14 @@ def taper_pack(
         cutoff = float(f["crossover"].attrs["cutoff_hz"])
         shares = taper_of(bank, cutoff, taper)
         base_db = 20.0 * float(np.log10(float(f["mirror"].attrs["alignment_gain"])))
-        given = constant_db is not None
-        constant = (
-            float(constant_db)
-            if constant_db is not None
-            else scene_constant_db(g["low"]["seam_db"][...] for g in sources.values() if "low" in g)
-        )
+        median = scene_constant_db(g["low"]["seam_db"][...] for g in sources.values() if "low" in g)
+        physical = dict(provenance.get("normalisation") or {}).get("alignment") == "physical"
+        if constant_db is not None:
+            constant, said_of = float(constant_db), GIVEN
+        elif physical:
+            constant, said_of = SEAM_CONSTANT_DB, FIXED
+        else:
+            constant, said_of = median, MEDIAN
         level_db = base_db + constant
         within = int(round(0.5 / float(f.attrs["step_s"])))
         first = int(np.argmin(np.abs(np.log2(np.asarray(bank, dtype=float) / cutoff))))
@@ -372,7 +410,7 @@ def taper_pack(
             level = group["level"]
             audible = np.asarray(group["audible"][...], dtype=bool)
             traced = np.asarray(level[TRACED][...] if TRACED in level else level["high_gain_db"])
-            made = band_levels(traced, audible, level_db, shares)
+            made = band_levels(traced, audible, level_db, shares, base_db + median)
             if not dry_run:
                 if BAND_TABLE in level:
                     del level[BAND_TABLE]
@@ -384,7 +422,7 @@ def taper_pack(
                     for band in range(first, len(bank))
                 },
             }
-        record = seam_record(bank, shares, base_db, constant, GIVEN if given else MEDIAN)
+        record = seam_record(bank, shares, base_db, constant, said_of, median)
         if not dry_run:
             provenance["seam"] = record
             f.attrs["provenance_json"] = json.dumps(provenance, sort_keys=True)
