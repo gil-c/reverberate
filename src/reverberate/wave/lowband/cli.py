@@ -95,7 +95,112 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("counts", help="forward, reciprocal and mixed solve counts")
     p.add_argument("--heard", type=Path, required=True)
     p.add_argument("--channels", type=int, default=64)
+
+    p = sub.add_parser(
+        "slabs", help="one solve cut over several cards, and records kept on the host"
+    )
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--cards", default=None, help="the cards, one a slab, as 0,1")
+    p.add_argument("--slabs", type=int, default=None, help="slabs; left out, one a card (or 2)")
+    p.add_argument("--shape", type=int, nargs=3, default=None, metavar="N", help="the box")
+    p.add_argument("--steps", type=int, default=400)
+    p.add_argument("--batch", type=int, default=2, help="sources of the launch")
+    p.add_argument("--rows", type=int, default=4000, help="nodes a source is read at")
+    p.add_argument("--through-host", action="store_true", help="planes cross by the host")
+    p.add_argument("--cpu", action="store_true")
     return parser
+
+
+def _slabs(args: argparse.Namespace) -> int:
+    """A lossy room solved whole and in slabs: the same bits, and what the cut costs.
+
+    On cards the room is 16 million nodes unless told (the solve on one
+    card, its records on the card and on the host, then the grid over the
+    cards); on ``numpy`` a small one, which is the proof and not a
+    measurement.
+    """
+    import time
+
+    from reverberate.compute import xp_for
+    from reverberate.wave.comms import engine_indices, nearest_node
+    from reverberate.wave.lowband.box import box_arrays
+    from reverberate.wave.lowband.problem import build_problem
+    from reverberate.wave.lowband.scheme import CARTESIAN
+    from reverberate.wave.lowband.slabs import solve_slabbed
+    from reverberate.wave.lowband.solver import drive_for, solve
+
+    xp = xp_for(False if args.cpu else None)
+    nx, ny, nz = args.shape if args.shape else ((330, 250, 210) if xp is not np else (40, 34, 30))
+    shape = (int(nx), int(ny), int(nz))
+    room = ((4, 4, 4), (shape[0] - 5, shape[1] - 5, shape[2] - 5))
+    arrays, grid = box_arrays(CARTESIAN, shape, room=room, lossy=True)
+    problem = build_problem(arrays)
+    rng = np.random.default_rng(1)
+    low, high = np.array(room[0]) + 3, np.array(room[1]) - 3
+    sources = (low + rng.random((args.batch, 3)) * (high - low)) * grid.h
+    nodes = []
+    for _ in range(args.batch):
+        subs = rng.integers(low, high, size=(args.rows, 3))
+        found = [nearest_node(s * grid.h, grid)[1] for s in np.unique(subs, axis=0)]
+        nodes.append(engine_indices(np.asarray(found), grid))
+    drive = drive_for(problem, grid, sources, nodes, args.steps * grid.Ts)
+    cards = [int(v) for v in args.cards.split(",")] if args.cards else None
+    count = args.slabs or (len(cards) if cards else 2)
+    record: dict[str, Any] = {
+        "shape": list(shape),
+        "updated_nodes": problem.updated,
+        "batch": args.batch,
+        "steps": drive.steps,
+        "rows": int(drive.record_index.size),
+        "slabs": count,
+        "cards": cards,
+    }
+    runs: dict[str, Any] = {}
+    for name, where in (("records_on_device", "device"), ("records_on_host", "host")):
+        timing: dict[str, Any] = {}
+        t0 = time.time()
+        held = solve(problem, drive, xp, timing=timing, records_on=where)
+        runs[name] = np.asarray(held.get() if hasattr(held, "get") else held)
+        record[name] = {
+            "seconds": round(time.time() - t0, 3),
+            "updates_per_s": timing["updates_per_s"],
+        }
+        del held
+        if xp is not np:
+            xp.get_default_memory_pool().free_all_blocks()
+    record["host_records_equal_device_records"] = bool(
+        np.array_equal(runs["records_on_device"], runs["records_on_host"])
+    )
+    timing = {}
+    t0 = time.time()
+    cut = solve_slabbed(
+        problem,
+        drive,
+        xp,
+        slabs=count,
+        devices=cards,
+        through_host=args.through_host,
+        timing=timing,
+    )
+    whole = record["records_on_host"]["updates_per_s"]
+    record["slabbed"] = {
+        "seconds": round(time.time() - t0, 3),
+        "updates_per_s": timing["updates_per_s"],
+        "over_one_device": timing["updates_per_s"] / max(whole, 1e-9),
+        "exchange_s": round(timing["exchange_s"], 3),
+        "exchange_share": timing["exchange_s"] / max(timing["seconds"], 1e-9),
+        "exchange_bytes_a_step": timing["exchange_bytes_a_step"],
+        "exchange_ms_a_step": 1e3 * timing["exchange_s"] / drive.steps,
+        "through_host": bool(args.through_host),
+        "slabs": timing["slabs"],
+    }
+    record["slabbed_equals_whole"] = bool(np.array_equal(cut, runs["records_on_host"]))
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "slabs.json").write_text(json.dumps(record, indent=1))
+    print(json.dumps(record, indent=1))
+    return (
+        0 if record["slabbed_equals_whole"] and record["host_records_equal_device_records"] else 1
+    )
 
 
 def _campaign(args: argparse.Namespace) -> Any:
@@ -307,6 +412,8 @@ def main(argv: list[str] | None = None) -> int:
             np.save(args.out / "sources.npy", held["source"][None, :])
         print(json.dumps(record, indent=1))
         return 0
+    if args.command == "slabs":
+        return _slabs(args)
     if args.command == "compare":
         return _compare(args)
     if args.command == "cost":
