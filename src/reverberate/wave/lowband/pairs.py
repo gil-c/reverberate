@@ -44,7 +44,7 @@ from reverberate.wave.comms import Grid, engine_indices, interp_weights, load_gr
 from reverberate.wave.lowband.fit import CellEncoder, level_scale
 from reverberate.wave.lowband.problem import Problem, load_problem
 from reverberate.wave.lowband.scheme import CARTESIAN, SCHEMES, Scheme
-from reverberate.wave.lowband.solver import drive_for, solve, steps_for
+from reverberate.wave.lowband.solver import SPOOL_STEPS, drive_for, solve, steps_for
 
 __all__ = [
     "SOLVER",
@@ -66,6 +66,12 @@ SOLVER = "reverberate.wave.lowband/1"
 MEMORY_SHARE = 0.8
 #: The most sources of one launch: the boundary kernel's second grid axis.
 BATCH_LIMIT = 4096
+#: The most sources of a launch a queue hands out. A source costs the same card seconds
+#: alone or among others (3.2 ms a step a source on an RTX 3080 at eight), and what is
+#: left at a run's end for the last cards is one launch each: a short one.
+LAUNCH_SOURCES = 8
+#: Of the host's memory, what the records of the launches running at once may take.
+HOST_RECORDS_SHARE = 0.5
 
 
 #: Measured on one RTX 3080 20 GB at 0.136 USD/h, instance 54201838, 2026-10-05, on the
@@ -330,6 +336,9 @@ class LowbandPairs(PairsCampaign):
     ppw: float | None = None
     #: Sources at once, at most; ``None`` is what the card's memory holds.
     batch: int | None = None
+    #: Where a launch's records are kept (:func:`reverberate.wave.lowband.solver.solve`):
+    #: on the device, or on the host as a queue's launches keep them.
+    records_on: str = "device"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -470,7 +479,9 @@ class LowbandPairs(PairsCampaign):
             from reverberate.accel.solve import host_memory_gb
 
             return 0.25 * host_memory_gb() * 1e9
-        free, _ = xp.cuda.Device().mem_info
+        from reverberate.compute import card_free_bytes
+
+        free = card_free_bytes(xp)
         return float(free)
 
     def release(self, xp: Any) -> None:
@@ -509,14 +520,30 @@ class LowbandPairs(PairsCampaign):
     def run_batch(
         self, problem: Problem, batch: list[Item], encoder: CellEncoder, xp: Any
     ) -> dict[str, Any]:
-        """One launch: the batch solved, every cell of it encoded and cached."""
+        """One launch: the batch solved, every cell of it encoded and cached.
+
+        With the campaign's ``records_on`` ``"host"`` the card holds the
+        fields and a block of the records, and the fit is handed the records
+        back a few cells at a time: the same responses, to the bit.
+        """
+        records_on = self.records_on
         receivers = [np.concatenate([self.cell_nodes(c) for c in item.cells]) for item in batch]
         sources = np.asarray([self.sources[item.source] for item in batch], dtype=float)
         drive = drive_for(problem, self.grid, sources, receivers, self.durations_s["low"])
         timing: dict[str, Any] = {}
         t0 = time.time()
-        records = solve(problem, drive, xp, say=lambda m: self.say(f"    {m}"), timing=timing)
+        records = solve(
+            problem,
+            drive,
+            xp,
+            say=lambda m: self.say(f"    {m}"),
+            timing=timing,
+            records_on=records_on,
+        )
         solve_s = time.time() - t0
+        if records_on == "host" and xp is not np:
+            # The fields are freed with the stepper: the fit's arrays take their place.
+            xp.get_default_memory_pool().free_all_blocks()
         t0 = time.time()
         spans = [(item.source, cell) for item in batch for cell in item.cells]
         designs = [self.designs[cell] for _, cell in spans]
@@ -551,15 +578,12 @@ class LowbandPairs(PairsCampaign):
             "node_updates": timing["node_updates"],
         }
 
-    def solve(self) -> list[dict[str, Any]]:
-        """Every source position with a pair to make, in batches, on every card."""
-        wanted = [s for s in range(self.sources.shape[0]) if self.todo(s)]
-        self.say(
-            f"solve: {len(wanted)} source position(s) to solve,"
-            f" {self.sources.shape[0] - len(wanted)} wholly cached"
-        )
-        if not wanted:
-            return []
+    def wanted_sources(self) -> list[int]:
+        """The source positions with a pair still to make."""
+        return [s for s in range(self.sources.shape[0]) if self.todo(s)]
+
+    def problem_for(self, wanted: list[int]) -> Problem:
+        """The grid cut to what the sources of ``wanted`` reach, and its record."""
         seeds = np.concatenate(
             [
                 engine_indices(interp_weights(np.asarray(p, dtype=float), self.grid)[1], self.grid)
@@ -574,10 +598,200 @@ class LowbandPairs(PairsCampaign):
                 "updated_nodes": problem.updated,
                 "stored_nodes": problem.nodes,
                 "bytes_per_source": problem.bytes_per_source(),
+                "bytes_shared": problem.bytes_shared(),
                 "steps": self.steps,
                 "prepare_s": round(time.time() - t0, 1),
             }
         )
+        return problem
+
+    # ---- the solve as jobs of a queue: a launch a job, on whichever card is free ------------
+
+    def fit_bytes(self) -> float:
+        """What the fit's operator holds on a card for the campaign, bytes; an upper figure.
+
+        A matrix a fitted bin, the channels kept by an array's nodes, in
+        double precision: 1.8 GB on the grid to 1500 Hz.
+        """
+        nodes = max((d.count for d in self.designs if d is not None), default=0)
+        keep = (int(self.spec["order"]) + 1) ** 2
+        bins = 2.0 * self.fmax_hz["low"] * self.durations_s["low"]
+        return float(bins * keep * nodes * 8.0)
+
+    def launch_bytes(self, problem: Problem, batch: list[Item]) -> float:
+        """What a launch whose records go to the host holds on its card."""
+        rows = sum(item.rows for item in batch)
+        return float(
+            problem.bytes_shared()
+            + len(batch) * (problem.bytes_per_source() + 32.0 * self.steps)
+            + 4.0 * SPOOL_STEPS * rows
+            + self.fit_bytes()
+        )
+
+    def launches(self, free_bytes: list[float], host_bytes: float) -> list[dict[str, Any]]:
+        """Every launch still to make, each sized for the smallest card: what a queue hands out.
+
+        ``free_bytes`` is what each card has free; none is a machine without
+        a card. A launch's records are brought to the host while it runs
+        (:func:`reverberate.wave.lowband.solver.solve`), so a card holds the
+        grid, its sources' fields and the fit, and a launch that fits the
+        smallest card fits every card: whichever card is free takes the
+        next, and none waits for a launch of its size. A source costs the
+        same card seconds alone or among others, so a smaller launch loses
+        nothing but its start. The records of the launches that run at once
+        share :data:`HOST_RECORDS_SHARE` of the host's memory.
+
+        Each launch is ``name``, ``items`` (a source position and the cells
+        it is read at), ``bytes`` on a card and ``pairs``.
+        """
+        wanted = self.wanted_sources()
+        self.say(
+            f"solve: {len(wanted)} source position(s) to solve,"
+            f" {self.sources.shape[0] - len(wanted)} wholly cached"
+        )
+        if not wanted:
+            return []
+        problem = self.problem_for(wanted)
+        self.say(f"solve: grid cut to its sources' reach, {json.dumps(self.problem_record)}")
+        state = self.out / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "solve.json").write_text(json.dumps({"wanted": wanted}))
+        cards = max(1, len(free_bytes))
+        smallest = min(free_bytes) if free_bytes else self.free_bytes(np)
+        rows_limit = int(max(1, HOST_RECORDS_SHARE * host_bytes / cards // (4.0 * self.steps)))
+        fixed = problem.bytes_shared() + self.fit_bytes() + 4.0 * SPOOL_STEPS * rows_limit
+        per_source = problem.bytes_per_source() + 32.0 * self.steps
+        at_once = int((MEMORY_SHARE * smallest - fixed) // per_source)
+        at_once = max(1, min(LAUNCH_SOURCES, at_once, self.batch or LAUNCH_SOURCES))
+        found: list[dict[str, Any]] = []
+        current: list[Item] = []
+        rows = 0
+        # In the positions' order: the pairs of neighbouring positions come home together,
+        # and what waits for a block of them (the levelling, the pack's rows) starts while
+        # the cards still solve. The records are on the host: a launch need not be of a size.
+        items = sorted(self.items(wanted, rows_limit), key=lambda i: i.source)
+        for item in [*items, None]:
+            full = item is None or len(current) >= at_once or rows + item.rows > rows_limit
+            if current and full:
+                found.append(self.launch_of(problem, current))
+                current, rows = [], 0
+            if item is not None:
+                current.append(item)
+                rows += item.rows
+        self.say(
+            f"solve: {sum(len(f['items']) for f in found)} solve(s) in {len(found)} launch(es)"
+            f" of {at_once} at most, sized for a card with {smallest / 1e9:.1f} GB free;"
+            f" records on the host, {rows_limit} rows a launch"
+        )
+        return found
+
+    def launch_of(self, problem: Problem, batch: list[Item]) -> dict[str, Any]:
+        """A launch as a queue's job: named by what it solves, so a rerun names it again."""
+        import hashlib
+
+        items: list[tuple[int, list[int]]] = [
+            (int(item.source), [int(c) for c in item.cells]) for item in batch
+        ]
+        name = hashlib.sha256(json.dumps(items).encode()).hexdigest()[:16]
+        return {
+            "name": name,
+            "items": items,
+            "bytes": self.launch_bytes(problem, batch),
+            "updates": float(problem.updated) * len(batch) * self.steps,
+            "pairs": [(source, cell) for source, cells in items for cell in cells],
+        }
+
+    def ready(self) -> None:
+        """What a worker's launches share, made once: the arrays, the grid's cut, the fit."""
+        if getattr(self, "_ready", None) is not None:
+            return
+        if not hasattr(self, "designs"):
+            self.place()
+        wanted = json.loads((self.out / "state" / "solve.json").read_text())["wanted"]
+        problem = self.problem_for([int(s) for s in wanted])
+        encoder = self.encoder_on(self.xp)
+        design = next(d for d in self.designs if d is not None)
+        encoder.operator_for(design.positions - design.centre)
+        encoder.prepare_for(self.steps)
+        self._ready = (problem, encoder)
+
+    def run_launch(self, items: list[Any]) -> dict[str, Any]:
+        """One launch of a queue, on this process's device; ``parted`` where it does not fit.
+
+        Held against what the device has free now. A launch it does not
+        hold comes back as two that ask for less (:func:`halves`), for the
+        queue to hand out again; one source read at one cell cannot be
+        made smaller and is a ``MemoryError``.
+        """
+        self.ready()
+        problem, encoder = self._ready
+        xp = self.xp
+        # Without the pairs a first try, or another run, already wrote.
+        batch = [
+            Item(source, cells, sum(int(self.cell_nodes(c).size) for c in cells))
+            for source, cells in (
+                (
+                    int(source),
+                    tuple(int(c) for c in asked if not self.cache.has(self.key_of(int(source), c))),
+                )
+                for source, asked in items
+            )
+            if cells
+        ]
+        if not batch:
+            return {
+                "batch": 0,
+                "pairs": 0,
+                "sources": [],
+                "cells": [],
+                "rows": 0,
+                "solve_s": 0.0,
+                "encode_s": 0.0,
+                "updates_per_s": 0.0,
+                "node_updates": 0.0,
+            }
+        self.release(xp)
+        # The fit is on the device already: what is free is free beside it.
+        usable = MEMORY_SHARE * (self.free_bytes(xp) + self.fit_bytes())
+        if xp is np or self.launch_bytes(problem, batch) <= usable:
+            try:
+                self.records_on = "host"
+                return self.run_batch(problem, batch, encoder, xp)
+            except MemoryError:
+                self.release(xp)
+        parts = halves(batch, lambda cell: self.cell_nodes(cell).size)
+        if parts is None:
+            raise MemoryError("one source read at one cell is more than this device holds")
+        return {"parted": [self.launch_of(problem, part) for part in parts]}
+
+    def gathered(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The launches' records as one a source position, and ``lowband.json``."""
+        self.batches = records
+        per_source: dict[int, dict[str, Any]] = {}
+        for record in records:
+            share = 1.0 / max(1, len(record["sources"]))
+            for source, cells in zip(record["sources"], record["cells"], strict=True):
+                held = per_source.setdefault(
+                    source, {"source": source, "cells": 0, "engine_s": 0.0, "encode_s": 0.0}
+                )
+                held["cells"] += int(cells)
+                held["engine_s"] = round(held["engine_s"] + record["solve_s"] * share, 3)
+                held["encode_s"] = round(held["encode_s"] + record["encode_s"] * share, 3)
+        (self.out / "lowband.json").write_text(
+            json.dumps({"grid": getattr(self, "problem_record", {}), "batches": records}, indent=1)
+        )
+        return [per_source[s] for s in sorted(per_source)]
+
+    def solve(self) -> list[dict[str, Any]]:
+        """Every source position with a pair to make, in batches, on every card."""
+        wanted = self.wanted_sources()
+        self.say(
+            f"solve: {len(wanted)} source position(s) to solve,"
+            f" {self.sources.shape[0] - len(wanted)} wholly cached"
+        )
+        if not wanted:
+            return []
+        problem = self.problem_for(wanted)
         self.say(f"solve: grid cut to its sources' reach, {json.dumps(self.problem_record)}")
         cards = self.card_indices()
         records: list[dict[str, Any]] = []
@@ -699,22 +913,8 @@ class LowbandPairs(PairsCampaign):
             self.xp.get_default_memory_pool().free_all_blocks()
         if failures:
             raise failures[0]
-        self.batches = records
         # One record a source position, as the campaign of the present engine gives them.
-        per_source: dict[int, dict[str, Any]] = {}
-        for record in records:
-            share = 1.0 / max(1, len(record["sources"]))
-            for source, cells in zip(record["sources"], record["cells"], strict=True):
-                held = per_source.setdefault(
-                    source, {"source": source, "cells": 0, "engine_s": 0.0, "encode_s": 0.0}
-                )
-                held["cells"] += int(cells)
-                held["engine_s"] = round(held["engine_s"] + record["solve_s"] * share, 3)
-                held["encode_s"] = round(held["encode_s"] + record["encode_s"] * share, 3)
-        (self.out / "lowband.json").write_text(
-            json.dumps({"grid": self.problem_record, "batches": records}, indent=1)
-        )
-        return [per_source[s] for s in sorted(per_source)]
+        return self.gathered(records)
 
     def card_indices(self) -> list[int]:
         """The cards a worker is started on; none without one."""

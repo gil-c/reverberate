@@ -93,8 +93,14 @@ VRAM_FIXED_GB = 2.13
 #: card reports a few MiB, a desktop session some hundreds; another tenant's
 #: job reports gigabytes.
 CARD_USED_LIMIT_MIB = 1024.0
-#: One line a card: memory in use, memory in total, in MiB.
-CARD_QUERY = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+#: One line a card: memory in use, memory in total, in MiB; then whether CUDA starts at
+#: all on the host, ``cuInit`` and the driver's answer, 0 when it does. ``nvidia-smi`` lists
+#: the cards of a host whose ``/dev/nvidia-uvm`` cannot be opened: machine 152135 answered
+#: 999 on 2026-10-05, and a campaign there would have had no card.
+CARD_QUERY = (
+    "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+    " && python3 -c \"import ctypes; print('cuInit', ctypes.CDLL('libcuda.so.1').cuInit(0))\""
+)
 
 #: Where the campaign lives on the machine.
 REMOTE_ROOT = "/root/campaign"
@@ -492,11 +498,22 @@ def cards_in_use(text: str) -> list[tuple[float, float]]:
     """Memory in use and in total on each card, in MiB, from :data:`CARD_QUERY`'s answer."""
     cards = []
     for line in text.splitlines():
-        if not line.strip():
+        if not line.strip() or line.startswith("cuInit"):
             continue
         used, total = (float(value) for value in line.split(","))
         cards.append((used, total))
     return cards
+
+
+def cuda_refused(text: str) -> str | None:
+    """Why CUDA does not start on the host, from :data:`CARD_QUERY`; ``None`` when it does."""
+    for line in text.splitlines():
+        if line.startswith("cuInit") and line.split()[-1] != "0":
+            return (
+                f"CUDA cannot be initialised on this host ({line.strip()}): nvidia-smi lists"
+                " its cards and no program can open them"
+            )
+    return None
 
 
 def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT_MIB) -> str | None:
@@ -506,11 +523,15 @@ def occupied_cards(machine: Any, say: Any, *, limit_mib: float = CARD_USED_LIMIT
     answer the query is refused like one whose cards are held.
     """
     try:
-        cards = cards_in_use(run_on(machine, CARD_QUERY, what="cards", timeout=90))
+        answer = run_on(machine, CARD_QUERY, what="cards", timeout=90)
+        cards = cards_in_use(answer)
     except Exception as error:  # noqa: BLE001 - a host that cannot be asked is not used
         return f"the cards did not answer: {str(error)[:120]}"
     if not cards:
         return "the host reports no card"
+    dead = cuda_refused(answer)
+    if dead:
+        return dead
     say(
         "card memory in use before anything runs: "
         + ", ".join(f"{used:.0f} of {total:.0f} MiB" for used, total in cards)
@@ -1038,8 +1059,14 @@ def run(
     sync_s: float = SYNC_S,
     plan_only: bool = False,
     destroy_failed: bool = False,
+    cap_flag: str = "",
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``cap_flag`` names a flag of the campaign's command that is told the
+    hours the watchdog leaves it (``--max-hours`` for a trace, which
+    measures its machine and stops before its long work where it predicts
+    more).
 
     ``leave`` names entries of the run directory that are not fetched,
     ``also`` entries fetched besides those a campaign always brings home;
@@ -1177,9 +1204,15 @@ def run(
             deadline = started + hours * 3600.0
 
     def launch() -> None:
+        told = campaign_args
+        if cap_flag and deadline is not None:
+            # What is left of the watchdog, less the fetch it keeps for itself: a campaign
+            # that predicts more of its own work on the machine it finds stops at once.
+            left = (deadline - 1200.0 - time.time()) / 3600.0
+            told = f"{told} {cap_flag} {max(left, 0.0):.2f}".strip()
         started_text = run_on(
             machine,
-            _launch_command(REMOTE_BUNDLE, REMOTE_OUT, devices, "/root/pffdtd", campaign_args),
+            _launch_command(REMOTE_BUNDLE, REMOTE_OUT, devices, "/root/pffdtd", told),
             what="launch",
         )
         say(f"campaign launched ({started_text.strip()[-40:]})")

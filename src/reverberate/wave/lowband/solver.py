@@ -52,6 +52,7 @@ __all__ = [
     "CardStepper",
     "Drive",
     "NumpyStepper",
+    "SPOOL_STEPS",
     "State",
     "drive_for",
     "node_masks",
@@ -214,15 +215,30 @@ class NumpyStepper:
     def state(self) -> State:
         return State.zeros(self.problem, self.drive.batch, np)
 
-    def records(self) -> np.ndarray:
-        return np.zeros((self.drive.record_index.size, self.drive.steps), dtype=np.float32)
+    def records(self, steps: int | None = None) -> np.ndarray:
+        width = self.drive.steps if steps is None else int(steps)
+        return np.zeros((self.drive.record_index.size, width), dtype=np.float32)
 
-    def step(self, state: State, n: int, out: np.ndarray) -> None:
+    def step(self, state: State, n: int, out: np.ndarray, column: int | None = None) -> None:
+        self.read(state, n if column is None else column, out)
+        self.halo(state)
+        self.update(state)
+        self.inject(state, n)
+
+    def read(self, state: State, column: int, out: np.ndarray) -> None:
+        """The receivers, into ``column`` of ``out``."""
+        out[:, column] = state.u1[self.record_at]
+
+    def halo(self, state: State) -> None:
+        """The box's own halo: the engine's copies, in its order."""
+        u1 = state.u1
+        for dst, src in self.problem.copies:
+            u1[dst] = u1[src]
+
+    def update(self, state: State) -> None:
+        """Every node written a step: the air, the absorbing layer, the boundary."""
         p = self.problem
         u0, u1 = state.u0, state.u1
-        out[:, n] = u1[self.record_at]
-        for dst, src in p.copies:
-            u1[dst] = u1[src]
         # the air, and its absorbing layer
         previous = u0[self.air]
         partial = p.a1 * u1[self.air] - previous
@@ -263,6 +279,10 @@ class NumpyStepper:
                     state.vh[:, m] = vh0.T
                 partial[rows] = x
             u0[p.bn_index] = partial
+
+    def inject(self, state: State, n: int) -> None:
+        """The sources' sample of step ``n``, and the two fields exchanged."""
+        u0, u1 = state.u0, state.u1
         np.add.at(u0, self.inject_at, self.drive.inject_signal[:, n])
         state.u0, state.u1 = u1, u0
 
@@ -513,7 +533,7 @@ class CardStepper:
         )
         self.lossy_kernel = raw_kernel(_LOSSY_KERNEL % {"most": MAX_BRANCHES}, "lowband_lossy")
         self.copy = raw_kernel(_SMALL_KERNELS, "lowband_copy")
-        self.inject = raw_kernel(_SMALL_KERNELS, "lowband_inject")
+        self.inject_kernel = raw_kernel(_SMALL_KERNELS, "lowband_inject")
         self.record = raw_kernel(_SMALL_KERNELS, "lowband_record")
         self.mask = xp.asarray(node_masks(p).reshape(-1))
         self.lateral = xp.asarray(np.ascontiguousarray(p.lateral).reshape(-1))
@@ -542,10 +562,9 @@ class CardStepper:
     def state(self) -> State:
         return State.zeros(self.problem, self.drive.batch, self.xp)
 
-    def records(self) -> Any:
-        return self.xp.zeros(
-            (self.drive.record_index.size, self.drive.steps), dtype=self.xp.float32
-        )
+    def records(self, steps: int | None = None) -> Any:
+        width = self.drive.steps if steps is None else int(steps)
+        return self.xp.zeros((self.drive.record_index.size, width), dtype=self.xp.float32)
 
     def launch_air(self, state: State) -> None:
         p, i32, f32 = self.problem, np.int32, np.float32
@@ -589,37 +608,66 @@ class CardStepper:
         # The value just written is the one held a step before, next step.
         self.before.reverse()
 
-    def step(self, state: State, n: int, out: Any) -> None:
-        p, batch, threads = self.problem, self.drive.batch, self.THREADS
-        i32, i64 = np.int32, np.int64
-        steps = i64(self.drive.steps)
+    def step(self, state: State, n: int, out: Any, column: int | None = None) -> None:
+        self.read(state, n if column is None else column, out)
+        self.halo(state)
+        self.update(state)
+        self.inject(state, n)
+
+    def read(self, state: State, column: int, out: Any) -> None:
+        """The receivers, into ``column`` of ``out``, whose width is its own."""
+        threads, i32, i64 = self.THREADS, np.int32, np.int64
         rows = int(self.drive.record_index.size)
         if rows:
             self.record(
                 ((rows + threads - 1) // threads,),
                 (threads,),
-                (state.u1, self.record_at, out, i32(rows), steps, i64(n)),
+                (state.u1, self.record_at, out, i32(rows), i64(out.shape[1]), i64(column)),
             )
+
+    def halo(self, state: State) -> None:
+        """The box's own halo: the engine's copies, in its order."""
+        batch, threads, i32 = self.drive.batch, self.THREADS, np.int32
         for dst, src, count in self.copies:
             self.copy(
                 ((count + threads - 1) // threads, batch),
                 (threads,),
                 (state.u1, dst, src, i32(count), i32(batch)),
             )
+
+    def update(self, state: State) -> None:
+        """Every node written a step: the air with the rigid boundary, then the branches."""
+        p = self.problem
         if p.column_count:
             self.launch_air(state)
         if p.lossy:
             self.launch_lossy(state)
+
+    def inject(self, state: State, n: int) -> None:
+        """The sources' sample of step ``n``, and the two fields exchanged."""
+        threads, i32, i64 = self.THREADS, np.int32, np.int64
         injected = int(self.drive.inject_index.size)
-        self.inject(
-            ((injected + threads - 1) // threads,),
-            (threads,),
-            (state.u0, self.inject_at, self.inject_signal, i32(injected), steps, i64(n)),
-        )
+        if injected:
+            self.inject_kernel(
+                ((injected + threads - 1) // threads,),
+                (threads,),
+                (
+                    state.u0,
+                    self.inject_at,
+                    self.inject_signal,
+                    i32(injected),
+                    i64(self.drive.steps),
+                    i64(n),
+                ),
+            )
         state.u0, state.u1 = state.u1, state.u0
 
     def finish(self) -> None:
         self.xp.cuda.Stream.null.synchronize()
+
+
+#: Steps of its records a device keeps before they are brought to the host (``records_on``).
+SPOOL_STEPS = 512
 
 
 def solve(
@@ -630,19 +678,41 @@ def solve(
     say: Any = None,
     report_every_s: float = 30.0,
     timing: dict[str, Any] | None = None,
+    records_on: str = "device",
+    spool_steps: int = SPOOL_STEPS,
+    stepper: Any = None,
 ) -> Any:
-    """Every step of a batch; the records, ``[record, step]`` single precision on ``xp``.
+    """Every step of a batch; the records, ``[record, step]`` single precision.
+
+    ``records_on`` says where they are kept. ``"device"``: on ``xp``, the
+    whole of them, 4 bytes a node a step, which on the grid to 1500 Hz is
+    129 MB a cell and the larger part of what a launch holds. ``"host"``:
+    the device keeps ``spool_steps`` steps of them and hands each block to
+    the host's memory while the next is computed, so that a launch holds on
+    its card its sources' fields and that block alone. The numbers are the
+    same single precision values either way, to the bit: a block is a copy.
 
     ``timing``, when given, receives the seconds of the stepping alone and
     the node updates it made: the reached nodes written a step, times the
-    sources, times the steps.
+    sources, times the steps. ``stepper`` is the one to step with, where
+    the caller holds another than the device's own (a grid in slabs).
     """
-    stepper: Any = NumpyStepper(problem, drive) if xp is np else CardStepper(problem, drive, xp)
+    if records_on not in ("device", "host"):
+        raise ValueError(f"records are kept on the device or on the host, not {records_on!r}")
+    if stepper is None:
+        stepper = NumpyStepper(problem, drive) if xp is np else CardStepper(problem, drive, xp)
     state = stepper.state()
-    out = stepper.records()
+    spooled = records_on == "host"
+    width = max(1, min(int(spool_steps), drive.steps)) if spooled else drive.steps
+    out = stepper.records(width)
+    rows = int(drive.record_index.size)
+    held = np.zeros((rows, drive.steps), dtype=np.float32) if spooled else None
     started = last = time.time()
     for n in range(drive.steps):
-        stepper.step(state, n, out)
+        column = n % width
+        stepper.step(state, n, out, column)
+        if held is not None and (column == width - 1 or n == drive.steps - 1):
+            held[:, n - column : n + 1] = records_to_host(out[:, : column + 1])
         if say is not None and time.time() - last > report_every_s:
             last = time.time()
             say(f"step {n + 1}/{drive.steps} at {last - started:.0f} s")
@@ -657,6 +727,12 @@ def solve(
                 "updates_per_s": updates / max(seconds, 1e-9),
                 "batch": drive.batch,
                 "steps": drive.steps,
+                "records_on": records_on,
             }
         )
-    return out
+    return out if held is None else held
+
+
+def records_to_host(block: Any) -> np.ndarray:
+    """A block of records as the host holds it: the one place records leave a device."""
+    return np.asarray(block.get() if hasattr(block, "get") else block)

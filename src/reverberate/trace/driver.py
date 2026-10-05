@@ -383,6 +383,8 @@ def launch(
         **({} if sync_s is None else {"sync_s": sync_s}),
         plan_only=plan_offers,
         destroy_failed=destroy_failed,
+        # The machine's own prediction, from what it measures of itself, against the cap.
+        cap_flag="--max-hours",
     )
     result["onebox"] = record
     if "instance" not in record and "outcome" not in record:

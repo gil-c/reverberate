@@ -34,6 +34,7 @@ __all__ = [
     "cuda_available",
     "device_report",
     "raw_kernel",
+    "require_cards",
     "to_numpy",
     "usable_cores",
     "xp_for",
@@ -80,6 +81,60 @@ def usable_cores() -> int:
     if quota is not None and period is not None and quota > 0 and period > 0:
         count = min(count, int(quota // period) or 1)
     return max(1, int(count))
+
+
+#: Gigabytes of each card this process may use, where a smaller card is to be stood in for:
+#: the pool refuses what passes it, and what is said to be free is counted under it.
+CARD_LIMIT_ENV = "REVERBERATE_CARD_LIMIT_GB"
+
+
+def card_limit_bytes() -> float | None:
+    """The bytes of a card this process is allowed (:data:`CARD_LIMIT_ENV`); ``None`` for all."""
+    told = os.environ.get(CARD_LIMIT_ENV, "")
+    try:
+        return float(told) * 1e9 if told else None
+    except ValueError:
+        return None
+
+
+def card_free_bytes(xp: Any) -> float:
+    """What the present card has free for this process, under its limit where it has one."""
+    free = float(xp.cuda.Device().mem_info[0])
+    limit = card_limit_bytes()
+    if limit is None:
+        return free
+    pool = xp.get_default_memory_pool()
+    if int(pool.get_limit()) != int(limit):
+        pool.set_limit(size=int(limit))
+    return min(free, limit - float(pool.used_bytes()))
+
+
+def require_cards() -> int:
+    """The cards of this machine, opened, and a kernel launched on the first; how many.
+
+    What a campaign on a rented machine calls before anything else. A
+    machine whose cards cannot be opened is an error said at once, never
+    ``numpy`` taken in silence for hours of a paid machine: ``nvidia-smi``
+    listed four cards on a host where no program could start CUDA
+    (2026-10-05). The only path without a card is the one asked for
+    (``--cpu``).
+    """
+    if os.environ.get(NO_GPU_ENV) == "1":
+        raise RuntimeError(f"{NO_GPU_ENV}=1 hides the cards: ask for the host with --cpu")
+    try:
+        import cupy
+
+        count = int(cupy.cuda.runtime.getDeviceCount())
+        if count < 1:
+            raise RuntimeError("cupy sees no CUDA device")
+        float(cupy.arange(8, dtype=cupy.float32).sum())
+    except Exception as error:
+        raise RuntimeError(
+            "the cards of this machine cannot be opened"
+            f" ({type(error).__name__}: {str(error)[:200]}): the campaign stops here. A run"
+            " without a card is asked for with --cpu and never taken in silence"
+        ) from error
+    return count
 
 
 def cuda_available() -> bool:

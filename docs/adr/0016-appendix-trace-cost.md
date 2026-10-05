@@ -204,6 +204,15 @@ error is -70 dB of each response's peak) and is a change of the format.
    in one launch, is the next step; the tails' tables of the pairs (35 of
    the 83 ms) are host work to batch likewise.
 
+   **Taken another way (lot L13,
+   `0016-appendix-every-card-every-core.md`).** Both stages, and the
+   pack's rows, are now `numpy` jobs of one queue, a process a core, while
+   the cards solve: the early trace costs a laptop's core what it cost the
+   RTX 3090 with one core, so the card was never its bound. The units of
+   the ledger above are a card's and one process's; the queue's are in that
+   appendix, measured on a host and, in phase two, on a machine of several
+   cards.
+
 ## The write of the 300 s window, not explained to the end
 
 The 60 s window wrote its 1894 pairs in 13 s. The 300 s window took 754 s

@@ -53,6 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--low-scheme", choices=("cartesian", "fcc"), default=None)
     p.add_argument("--low-ppw", type=float, default=None, help="points per wavelength of the grid")
     p.add_argument("--low-batch", type=int, default=None, help="sources a launch, at most")
+    p.add_argument(
+        "--host-workers",
+        type=int,
+        default=None,
+        help="a trace: host processes beside the cards'; left out, the cores the cards leave;"
+        " 0, every job in the one process",
+    )
+    p.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="a trace: stop before the long work where this machine is predicted to need more",
+    )
 
     p = sub.add_parser("pairs-bundle", help="a bundle of low band pairs, on the laptop")
     p.add_argument("--out", type=Path, required=True)
@@ -115,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "campaign":
+        if not args.cpu:
+            # A paid machine without its cards is stopped, not run on its host's cores.
+            from reverberate.compute import require_cards
+
+            require_cards()
         from reverberate.accel.campaign import run_campaign
         from reverberate.accel.pairs import KIND, run_pairs
 
@@ -157,6 +175,16 @@ def main(argv: list[str] | None = None) -> int:
                 gpu=False if args.cpu else None,
                 solvers=args.solvers,
                 engine=engine,
+                # A process a card and a process a core: what a worker builds its engine from.
+                workers=args.host_workers,
+                engine_told={
+                    "kind": args.low_engine,
+                    "scheme": args.low_scheme,
+                    "ppw": args.low_ppw,
+                    "batch": args.low_batch,
+                    "solvers": args.solvers,
+                },
+                max_hours=args.max_hours,
             )
             return 0
         if kind == KIND and args.low_engine == "lowband":

@@ -41,6 +41,7 @@ the masks are left to the trace, which knows the recipe.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -574,7 +575,10 @@ class PairsCampaign(Campaign):
             # diagonal from the cell asked for: the centre a translation starts from.
             "centres": [None if d is None else [float(v) for v in d.centre] for d in designs],
         }
-        (self.out / "pairs_plan.json").write_text(json.dumps(record, indent=1))
+        # Whole or not at all: the workers of a trace each place the arrays, and say the same.
+        partial = self.out / f"pairs_plan.{os.getpid()}.partial.json"
+        partial.write_text(json.dumps(record, indent=1))
+        partial.replace(self.out / "pairs_plan.json")
         self.designs: list[ArrayDesign | None] = designs
         self.entry_path = entry.path
         self.encoder = PairEncoder(

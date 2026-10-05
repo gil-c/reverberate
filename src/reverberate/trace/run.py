@@ -1,30 +1,45 @@
 """The trace on the machine: a bundle in, ``pack.h5`` out, resumed from what is on disk.
 
-One process, the stages in order, each leaving what the next and a rerun
-look for:
+The stages, each leaving what the next and a rerun look for:
 
 1. ``voxelise``, ``plan``: the low grid and an array at every cell
    (:class:`reverberate.accel.pairs.PairsCampaign`); the centres the arrays
    really got are the pack's ``/cells``;
 2. ``assign``: the cell rule on those centres (:func:`reverberate.trace.plan.assign`),
    which names the pairs;
-3. ``solve``: the pairs not in the cache, a source position at a time;
+3. ``solve``: the pairs not in the cache, a launch of the wave solver a job;
 4. ``paths``: the batched early trace of every source over its audible
    steps, and of every pair at rest for the levelling, with the diffracted
-   onsets (``early/<source>.npz``);
+   onsets (``early/<source>.npz``), a block of steps a job;
 5. ``rays``: the histograms at the tail's sites over the tail's cells, in
-   their cache (``tails/``), and each source's table;
-6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair);
-7. ``write``: the pack, a source at a time, through
+   their cache (``tails/``), a site a job, and each source's table;
+6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), a
+   block of pairs a job;
+7. ``rows``: a pair as the pack stores it, a block of pairs a job;
+8. ``write``: the pack, a source at a time, through
    :class:`reverberate.render.pack.PackWriter`;
-8. ``check``: the pack read back, and, for a smoke run or when the bundle
+9. ``check``: the pack read back, and, for a smoke run or when the bundle
    asks (``check``: ``full``), read back whole and rendered by the signal
    engine on the host and on the card, which must agree to 1e-6 of the peak
    and say which device computed. The whole scene pays the read alone.
 
+**Stages 3 to 7 are the jobs of one queue** (:mod:`reverberate.trace.pool`,
+:meth:`Trace.work`), pulled by a process a card and a process a core that is
+left (:mod:`reverberate.trace.resources`). A job waits for the jobs whose
+files it reads and for nothing else, so the stages overlap: the cards cast
+the rays and solve while the host's cores trace the early paths, level the
+pairs whose launches are home and make their rows. What only a card does
+well (the solver, the rays) is a card's; what the interpreter bounds (the
+early trace, the levelling, the rows) is the cores', on ``numpy`` on every
+machine. A job's result is a file under the job's name and a stage's merge
+reads them in the jobs' order: **the pack is the same bytes, but for its
+date and its seconds, whatever the cards and the cores and whichever job
+failed and was made again** (:func:`pack_digest`, ``tests/test_trace_pool.py``).
+
 The stages' seconds, and the seconds of what they are made of, are in
-``trace_report.json`` (``timings_s``, ``seconds``): the cost ledger of
-``docs/adr/0016-appendix-trace-cost.md`` is read from there.
+``trace_report.json`` (``timings_s``, ``seconds``, ``pool``): the cost ledger
+of ``docs/adr/0016-appendix-trace-cost.md`` is read from there, and
+``docs/adr/0016-appendix-every-card-every-core.md`` is the queue's own.
 
 ``status.json``, ``campaign.log`` and the two markers are a campaign's, so
 :mod:`reverberate.gpu.onebox` watches a trace as it watches a field.
@@ -32,13 +47,13 @@ The stages' seconds, and the seconds of what they are made of, are in
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +61,14 @@ import numpy as np
 
 from reverberate.accel.pairs import PairCache
 from reverberate.audio import Atmosphere
-from reverberate.compute import Devices, device_report, to_numpy, usable_cores, xp_for
+from reverberate.compute import (
+    Devices,
+    card_free_bytes,
+    device_report,
+    to_numpy,
+    usable_cores,
+    xp_for,
+)
 from reverberate.metrics import band_centres
 from reverberate.mirror.hybrid import Crossover
 from reverberate.mirror.moving import (
@@ -57,7 +79,14 @@ from reverberate.mirror.moving import (
     trace_early,
 )
 from reverberate.mirror.moving_onset import onset_field
-from reverberate.mirror.tails import TailCache, TailTable, tail_table
+from reverberate.mirror.tails import (
+    TailCache,
+    TailTable,
+    shared_scene,
+    sites_read,
+    tail_key,
+    tail_table,
+)
 from reverberate.render.pack import (
     Air,
     Cells,
@@ -91,6 +120,8 @@ from reverberate.trace.level import (
 )
 from reverberate.trace.plan import (
     RAYS_MEASURED,
+    RAYS_SITE_CELL_S,
+    RAYS_SITE_S,
     Profile,
     Tracks,
     assign,
@@ -99,8 +130,20 @@ from reverberate.trace.plan import (
     tail_sites_of,
     tracks_of,
 )
+from reverberate.trace.pool import CARD, HOST, PARENT, THREAD, Job, Pool, WorkerSpec
+from reverberate.trace.resources import Machine, measure, predict
 
-__all__ = ["KIND", "Journal", "Trace", "render_check", "run_trace"]
+__all__ = [
+    "KIND",
+    "PAIRS_BLOCK",
+    "PATHS_BLOCK",
+    "Journal",
+    "Trace",
+    "make_worker",
+    "pack_digest",
+    "render_check",
+    "run_trace",
+]
 
 #: What a trace's ``campaign.json`` says it is, and the command line reads.
 KIND = "scene-trace"
@@ -124,9 +167,16 @@ CHECK_FULL = "full"
 CHECK_READ = "read"
 #: The region of the early trace is rounded outwards to this, m.
 REGION_STEP_M = 0.25
-#: Pairs levelled side by side on a card. A pair is a dozen small launches the card
-#: answers in microseconds: the host's interpreter is what a thread more buys.
-LEVEL_THREADS = 6
+#: Audible steps of one source a job of the early trace holds, and pairs a job of the
+#: levelling, of the pack's rows or of the pairs' own early table holds. They are the
+#: jobs' bounds and never the workers': the same on every machine, so that what is merged
+#: is the same whoever computed it.
+PATHS_BLOCK = 256
+PAIRS_BLOCK = 64
+#: The table of the pairs at rest among the sources' early tables.
+PAIRS_TABLE = "_pairs"
+#: Histograms a worker's process keeps in memory: a site's is tens of megabytes.
+TAILS_KEPT = 12
 
 _EARLY_FIELDS = (
     "offsets",
@@ -252,6 +302,187 @@ def _load_early(path: Path, digest: str) -> EarlyTable | None:
         )
 
 
+def _early_is(path: Path, digest: str) -> bool:
+    """Whether ``path`` holds a table of this digest, without reading the table."""
+    if not path.is_file():
+        return False
+    try:
+        with np.load(path) as held:
+            return str(held["digest"]) == digest
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def _blocks(heard: np.ndarray, size: int) -> list[tuple[int, int]]:
+    """Every step, in consecutive runs that hold ``size`` audible steps at most.
+
+    The bounds depend on the steps and on ``size`` alone: a table is cut
+    the same way on every machine, whatever computes its blocks.
+    """
+    total = int(heard.shape[0])
+    if total == 0:
+        return [(0, 0)]
+    count = np.cumsum(np.asarray(heard, dtype=np.int64))
+    edges = {0, total}
+    for filled in range(size, int(count[-1]), size):
+        edges.add(int(np.searchsorted(count, filled, side="right")))
+    cuts = sorted(edges)
+    return list(zip(cuts[:-1], cuts[1:], strict=True))
+
+
+_ROW_FIELDS = tuple(name for name in _EARLY_FIELDS if name not in ("offsets", "source", "listener"))
+
+
+def _joined(parts: list[EarlyTable], source: np.ndarray, head: np.ndarray) -> EarlyTable:
+    """A table from the tables of its consecutive blocks: the rows one after the other."""
+    offsets = [np.zeros(1, dtype=np.int64)]
+    base = 0
+    for part in parts:
+        offsets.append(np.asarray(part.offsets[1:], dtype=np.int64) + base)
+        base += int(part.offsets[-1])
+    record: dict[str, Any] = {"blocks": len(parts)}
+    for part in parts:
+        for key, value in part.record.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                record[key] = int(record.get(key, 0)) + value
+    return EarlyTable(
+        offsets=np.concatenate(offsets),
+        **{name: np.concatenate([getattr(part, name) for part in parts]) for name in _ROW_FIELDS},
+        source=np.atleast_2d(np.asarray(source, dtype=float)),
+        listener=np.atleast_2d(np.asarray(head, dtype=float)),
+        sound_speed_m_s=parts[0].sound_speed_m_s,
+        record=record,
+    )
+
+
+def _rows_of(table: EarlyTable, start: int, stop: int) -> EarlyTable:
+    """Steps ``start`` to ``stop`` of a table, as a table of their own."""
+    first, last = int(table.offsets[start]), int(table.offsets[stop])
+    return EarlyTable(
+        offsets=np.asarray(table.offsets[start : stop + 1], dtype=np.int64) - first,
+        **{name: getattr(table, name)[first:last] for name in _ROW_FIELDS},
+        source=table.source[start:stop],
+        listener=table.listener[start:stop],
+        sound_speed_m_s=table.sound_speed_m_s,
+        record={},
+    )
+
+
+def _first_channel(cache: PairCache, key: str) -> np.ndarray:
+    """Channel 0 of a pair in the cache, ``[1, sample]``: the file mapped, 19 kB of it read."""
+    path = cache.path(key)
+    if not path.is_file():
+        raise KeyError(f"no pair {key} under {cache.directory}: not in the cache after the solve")
+    return np.array(np.load(path, mmap_mode="r")[:1])
+
+
+#: What of a pack's provenance says when and on what it was made, and not what it holds.
+_VOLATILE = ("created_utc", "timings_s", "device", "cost", "low_pairs")
+
+
+def pack_digest(path: Path) -> str:
+    """A digest of everything a pack holds but when and on what it was made.
+
+    Every dataset's bytes, type and shape and every attribute, in the
+    file's own order of names; of the provenance, all but the date, the
+    seconds, the device and the count of what was solved against what was
+    found. Two runs of one bundle have one digest whatever machine, however
+    many workers and in whatever order their jobs ended, and the tests hold
+    them to it.
+    """
+    import h5py
+
+    digest = hashlib.sha256()
+
+    def attributes(held: Any) -> None:
+        for key in sorted(held.attrs):
+            value = held.attrs[key]
+            if key == "provenance_json":
+                kept = {k: v for k, v in json.loads(value).items() if k not in _VOLATILE}
+                value = json.dumps(kept, sort_keys=True)
+            digest.update(key.encode())
+            digest.update(value.encode() if isinstance(value, str) else np.asarray(value).tobytes())
+
+    def visit(name: str, held: Any) -> None:
+        digest.update(name.encode())
+        attributes(held)
+        if not isinstance(held, h5py.Dataset):
+            return
+        digest.update(f"{held.dtype}{held.shape}".encode())
+        if held.dtype.kind == "O":
+            digest.update(json.dumps([_text_of(v) for v in held[()].ravel()]).encode())
+        elif held.ndim and held.size * held.dtype.itemsize > 2**28:
+            for row in range(held.shape[0]):
+                digest.update(np.ascontiguousarray(held[row]).tobytes())
+        else:
+            digest.update(np.ascontiguousarray(held[()]).tobytes())
+
+    with h5py.File(path, "r") as handle:
+        attributes(handle)
+        handle.visititems(visit)
+    return digest.hexdigest()
+
+
+def _text_of(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+@dataclass
+class _WorkerJournal:
+    """What a worker's process says: a log of its own, and no status but the run's."""
+
+    out: Path
+    index: int
+    status: dict[str, Any] = field(default_factory=dict)
+    timings: dict[str, float] = field(default_factory=dict)
+    started: float = field(default_factory=time.time)
+
+    def say(self, message: str) -> None:
+        log = Path(self.out) / "workers" / f"{self.index}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {message}\n")
+
+    def set_status(self, **fields: Any) -> None:
+        self.status.update(fields)
+
+    def stage(self, name: str, work: Any, **status: Any) -> Any:
+        self.say(f"{name}: start")
+        return work()
+
+
+def make_worker(
+    spec: WorkerSpec,
+    *,
+    bundle: str,
+    out: str,
+    engine_told: dict[str, Any],
+    pffdtd_dir: str = "/root/pffdtd",
+) -> Trace:
+    """A worker's own trace of the run, built in its process from the files of the run.
+
+    The bundle is read again, not handed over: the page cache shares its
+    files between the workers, and nothing of the scene crosses a pipe. The
+    worker measures the device it holds (:func:`reverberate.trace.resources.
+    measure`) before it says it is ready.
+    """
+    from reverberate.trace.engines import build_engine
+
+    card = spec.card is not None
+    engine = build_engine(engine_told, Path(bundle), Path(out), gpu=card, pffdtd_dir=pffdtd_dir)
+    trace = Trace(
+        bundle=Path(bundle),
+        out=Path(out),
+        engine=engine,
+        gpu=card,
+        pffdtd_dir=Path(pffdtd_dir),
+        quiet=True,
+        worker=spec,
+    )
+    trace.measured = measure(spec.card, trace.xp, seconds=float(engine_told.get("measure_s", 1.0)))
+    return trace
+
+
 @dataclass
 class Trace:
     """One recipe's pack, made on this machine from a bundle."""
@@ -268,7 +499,22 @@ class Trace:
     quiet: bool = False
     #: :data:`CHECK_FULL` or :data:`CHECK_READ`; the bundle's, or the profile's, unless given.
     check_mode: str | None = None
-    level_threads: int | None = None
+    #: The machine as it was read; left out, this one is asked when the work starts.
+    machine: Machine | None = None
+    #: Host processes beside the cards'. ``None`` is the cores the cards leave; 0 is no
+    #: process at all, every job in this one, which is how the tests and one core run.
+    workers: int | None = 0
+    #: What a worker's process builds its own engine from (:func:`make_worker`); without
+    #: it there is no other process, whatever ``workers`` says.
+    engine_told: dict[str, Any] | None = None
+    #: In a worker's process: which worker this is.
+    worker: WorkerSpec | None = None
+    #: Failures a test asks of the queue (:mod:`reverberate.trace.pool`).
+    faults: dict[str, Any] | None = None
+    #: The run stops before its long work where it is predicted to last longer, hours.
+    max_hours: float | None = None
+    #: USD an hour of this machine, for the prediction's price; the bundle's unless given.
+    rate_usd_per_hour: float | None = None
 
     def __post_init__(self) -> None:
         self.bundle, self.out = Path(self.bundle), Path(self.out)
@@ -306,6 +552,17 @@ class Trace:
         self.journal: Any = (
             campaign if campaign is not None else Journal(self.out, quiet=self.quiet)
         )
+        if self.worker is not None:
+            # A worker says what it does in a log of its own and leaves the run's status alone.
+            self.journal = _WorkerJournal(self.out, self.worker.index)
+            if campaign is not None:
+                campaign.say = self.journal.say
+                campaign.set_status = self.journal.set_status
+        self._assigned = False
+        self._owner: dict[tuple[int, int], str] | None = None
+        self._rows_files: dict[int, Path] = {}
+        self._rows_open: tuple[int, Any] | None = None
+        self.measured: dict[str, Any] | None = None
         if self.check_mode is None:
             self.check_mode = str(
                 told.get("check")
@@ -394,9 +651,38 @@ class Trace:
             f"assign: {scene} cells ({int((~self.placed).sum())} without an array),"
             f" {len(self.pairs)} pairs, {len(refused)} step(s) the rule refused"
         )
+        assert self.engine is not None
+        self.pair_key = [self.engine.key_of(position, cell) for position, cell in self.pairs]
+        self.tail_rows = tail_cells(self.cells, self.kind)
+        self._owner = None
+        self._assigned = True
+        if self.worker is None:
+            # What a worker's process starts from: the centres, and nothing it can derive.
+            state = self.out / "state"
+            state.mkdir(parents=True, exist_ok=True)
+            partial = state / "centres.partial.json"
+            partial.write_text(
+                json.dumps([None if c is None else [float(v) for v in c] for c in centres])
+            )
+            partial.replace(state / "centres.json")
 
-    def solve(self) -> None:
-        """The pairs the bundle carried into the cache, then those still to be solved."""
+    @property
+    def owner(self) -> dict[tuple[int, int], str]:
+        """The source a pair is levelled with: the first whose steps read it."""
+        if self._owner is None:
+            found: dict[tuple[int, int], str] = {}
+            for name, track in self.tracks.sources.items():
+                chosen = self.low[name]
+                for step in np.flatnonzero(track.audible):
+                    for position in track.read(int(step)):
+                        for cell in chosen.cell[step]:
+                            if position >= 0 and cell >= 0:
+                                found.setdefault((int(position), int(cell)), name)
+            self._owner = found
+        return self._owner
+
+    def _carried_pairs(self) -> int:
+        """The pairs the bundle carried, into the cache; how many."""
         assert self.engine is not None
         carried_root = self.bundle / "pairs_cache"
         carried = 0
@@ -408,7 +694,67 @@ class Trace:
                         key, held.read(key), {k: v for k, v in record.items() if k != "key"}
                     )
                     carried += 1
+        return carried
+
+    def solve(self) -> None:
+        """The pairs the bundle carried into the cache, then those still to be solved."""
+        assert self.engine is not None
+        carried = self._carried_pairs()
         self.report["low_pairs"] = {**self.engine.solve(self.heard_at), "carried": carried}
+
+    def solve_jobs(self, machine: Machine) -> list[Job]:
+        """The solve as the queue's jobs: a launch a job where the engine plans launches.
+
+        An engine that solves in one call of its own (the present engine, a
+        source position a process) is one job in a thread, and what needs a
+        card waits for it. ``self.made_by`` is the job each pair comes from.
+        """
+        assert self.engine is not None
+        engine: Any = self.engine
+        self.made_by: dict[tuple[int, int], str] = {}
+        self.planned: dict[str, float] = {"node_updates": 0.0, "pairs": 0.0}
+        # In one process a launch at a time would leave every card but one idle: the
+        # engine's own solve, a thread a card, is then the whole of the stage, as it was
+        # before the queue (``--host-workers 0`` on a machine of several cards).
+        alone = self.pool.make is None and self.xp is not np and len(machine.cards) > 1
+        if not hasattr(engine, "launches") or alone:
+            for pair in self.pairs:
+                self.made_by[pair] = "solve/all"
+            return [Job("solve", "all", on=THREAD, work=self.solve)]
+        carried = self._carried_pairs()
+        launches = engine.launches(
+            self.heard_at,
+            free_bytes=[card.free_bytes for card in machine.cards],
+            host_bytes=machine.ram_bytes,
+        )
+        on = CARD if engine.launches_on == "card" else HOST
+        jobs = []
+        for launch in launches:
+            job = Job(
+                "solve", launch["name"], launch["payload"], on=on, bytes=launch["bytes"], priority=1
+            )
+            jobs.append(job)
+            self.planned["node_updates"] += float(launch.get("updates", 0.0))
+            for position, cell in launch["pairs"]:
+                self.made_by[(int(position), int(cell))] = job.key
+                self.planned["pairs"] += 1
+
+        def gathered() -> None:
+            records = [
+                record
+                for key, record in self.pool.done.items()
+                if key.startswith("solve/") and ("pairs" in record or "batch" in record)
+            ]
+            self.report["low_pairs"] = {
+                **engine.solved_report(records, self.heard_at),
+                "carried": carried,
+                "launches": len(records),
+            }
+
+        jobs.append(
+            Job("solve", "_report", on=PARENT, after=tuple(j.key for j in jobs), work=gathered)
+        )
+        return jobs
 
     def _spent(self, stage: str, name: str, since: float) -> None:
         held = self.seconds.setdefault(stage, {})
@@ -433,110 +779,295 @@ class Trace:
                 taken += 1
         self.journal.say(f"paths: {taken} early table(s) taken from the bundle")
 
-    def paths(self) -> None:
-        """Every source's early table, and the table of the pairs at rest."""
+    # ---- the early trace: blocks of a source's steps, on the host's cores ----------------------
+
+    def _prepared(self) -> None:
+        """The mirror as the early trace reads it, the traced region, what names a table: once.
+
+        On ``numpy``, whatever the machine holds. The early trace is bound
+        by the interpreter and not by the device (25 ms a position on a
+        laptop's core, 22 ms on an RTX 3090 with one core): it is a process
+        a core, and its tables are then the same bytes on every machine.
+        """
+        if getattr(self, "ms", None) is not None:
+            return
         settings = self.assets.settings
-        c = settings.sound_speed_m_s
-        moving = MovingSettings()
-        if self.xp is not np:
-            moving = replace(moving, pairs_per_validation=CARD_PAIRS_PER_VALIDATION)
-        tracks = self.tracks
         t0 = time.time()
-        self.ms = prepare(self.assets.catalogue, settings, moving)
+        self.ms = prepare(self.assets.catalogue, settings, MovingSettings())
         self._spent("paths", "prepare", t0)
-        every = [tracks.listener, self.cells, tracks.positions]
-        every += [track.position for track in tracks.sources.values()]
-        heads = np.concatenate([tracks.listener, self.cells])
+        heads = np.concatenate([self.tracks.listener, self.cells])
         # Half a metre round the heads, out to the next quarter metre: the arrays' centres
         # are a grid's nodes, and a region that followed them to the millimetre would give
         # every low grid its own tables of the same sources (:data:`REGION_STEP_M`).
-        region = (
+        self.region = (
             np.floor((heads.min(axis=0) - 0.5) / REGION_STEP_M) * REGION_STEP_M,
             np.ceil((heads.max(axis=0) + 0.5) / REGION_STEP_M) * REGION_STEP_M,
         )
-        identity = [self.assets.catalogue.key, settings.record(), [list(r) for r in region]]
+        self.identity = [
+            self.assets.catalogue.key,
+            settings.record(),
+            [list(r) for r in self.region],
+        ]
+        self._onset_field: Any = None
+
+    def _onsets(self) -> Any:
+        """The occupancy and its graph, when a table is to be traced and not before."""
+        if self._onset_field is None:
+            tracks = self.tracks
+            every = [tracks.listener, self.cells, tracks.positions]
+            every += [track.position for track in tracks.sources.values()]
+            t0 = time.time()
+            self._onset_field = onset_field(
+                self.assets.catalogue,
+                np.concatenate(every),
+                sound_speed_m_s=self.assets.settings.sound_speed_m_s,
+            )
+            self._spent("paths", "onset_field", t0)
+        return self._onset_field
+
+    def _table_inputs(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """A table's sources, heads and audible steps: a source's, or the pairs' at rest."""
+        tracks = self.tracks
+        if name == PAIRS_TABLE:
+            rows = np.asarray(self.pairs, dtype=np.int64).reshape(-1, 2)
+            return (
+                tracks.positions[rows[:, 0]],
+                self.cells[rows[:, 1]],
+                np.ones(rows.shape[0], dtype=bool),
+            )
+        track = tracks.sources[name]
+        return track.position, tracks.listener, np.asarray(track.audible, dtype=bool)
+
+    def _block_path(self, name: str, block: int) -> Path:
+        return self.out / "jobs" / "paths" / f"{name}.{block}.npz"
+
+    def _trace_block(self, table: str, block: int, start: int, stop: int) -> dict[str, Any]:
+        """One job of the early trace: steps ``start`` to ``stop`` of ``table``, to its file."""
+        self._prepared()
+        source, head, heard = (a[start:stop] for a in self._table_inputs(table))
+        t0 = time.time()
+        found = trace_early(
+            self.ms,
+            source,
+            head,
+            audible=heard,
+            region=self.region,
+            onsets=self._onsets(),
+            xp=np,
+        )
+        self._spent("paths", "trace", t0)
+        _save_early(
+            self._block_path(table, block), found, _digest(source, head, heard, self.identity)
+        )
+        return {"record": found.record, "fields": int(self._onsets().solved)}
+
+    def _merge_early(self, name: str, digest: str, blocks: list[tuple[int, int]]) -> None:
+        """A table from its blocks, in the blocks' order, to ``early/<name>.npz``."""
+        source, head, heard = self._table_inputs(name)
+        parts = []
+        for block, (start, stop) in enumerate(blocks):
+            part = _load_early(
+                self._block_path(name, block),
+                _digest(source[start:stop], head[start:stop], heard[start:stop], self.identity),
+            )
+            if part is None:
+                raise RuntimeError(f"block {block} of the early table of {name} is not on disk")
+            parts.append(part)
+        found = _joined(parts, source, head)
+        _save_early(self.out / "early" / f"{name}.npz", found, digest)
+        self._paths_records[name] = found.record
+        self._table_is(name, found)
+
+    def _table_is(self, name: str, table: EarlyTable) -> None:
+        if name == PAIRS_TABLE:
+            self.pair_early = table
+        else:
+            self.early[name] = table
+
+    def paths_jobs(self) -> list[Job]:
+        """Every source's early table, and the pairs' at rest, in blocks; a merge a table."""
+        self._prepared()
         self._carried_early()
         self.early: dict[str, EarlyTable] = {}
-        records: dict[str, Any] = {}
-        field_of: list[Any] = []
-
-        def onsets() -> Any:
-            # The occupancy and its graph, when a table is to be traced and not before.
-            if not field_of:
-                t0 = time.time()
-                field_of.append(
-                    onset_field(self.assets.catalogue, np.concatenate(every), sound_speed_m_s=c)
+        self._paths_records: dict[str, Any] = {}
+        jobs: list[Job] = []
+        for name in [*self.tracks.sources, PAIRS_TABLE]:
+            source, head, heard = self._table_inputs(name)
+            digest = _digest(source, head, heard, self.identity)
+            found = _load_early(self.out / "early" / f"{name}.npz", digest)
+            if found is not None:
+                self._table_is(name, found)
+                self._paths_records[name] = {"cached": True}
+                continue
+            blocks = _blocks(heard, PAIRS_BLOCK if name == PAIRS_TABLE else PATHS_BLOCK)
+            keys = []
+            for block, (start, stop) in enumerate(blocks):
+                wanted = _digest(
+                    source[start:stop], head[start:stop], heard[start:stop], self.identity
                 )
-                self._spent("paths", "onset_field", t0)
-            return field_of[0]
-
-        def table(name: str, source: np.ndarray, head: np.ndarray, audible: Any) -> EarlyTable:
-            heard = np.ones(source.shape[0], dtype=bool) if audible is None else audible
-            digest = _digest(source, head, heard, identity)
-            path = self.out / "early" / f"{name}.npz"
-            found = _load_early(path, digest)
-            if found is None:
-                held = onsets()
-                t0 = time.time()
-                found = trace_early(
-                    self.ms, source, head, audible=heard, region=region, onsets=held, xp=self.xp
+                if _early_is(self._block_path(name, block), wanted):
+                    continue
+                job = Job(
+                    "paths",
+                    f"{name}.{block}",
+                    {"table": name, "block": block, "start": start, "stop": stop},
+                    on=HOST,
+                    # A table's blocks share their sources' image trees: a worker that
+                    # grew them for one block is handed the next.
+                    group=f"paths/{name}",
                 )
-                self._spent("paths", "trace", t0)
-                _save_early(path, found, digest)
-                records[name] = found.record
-            else:
-                records[name] = {"cached": True}
-            return found
+                jobs.append(job)
+                keys.append(job.key)
+            jobs.append(
+                Job(
+                    "paths",
+                    name,
+                    on=PARENT,
+                    after=tuple(keys),
+                    work=functools.partial(self._merge_early, name, digest, blocks),
+                )
+            )
+        return jobs
 
-        for number, (name, track) in enumerate(tracks.sources.items(), start=1):
-            self.journal.set_status(source=name, job=f"{number}/{len(tracks.sources)}")
-            self.early[name] = table(name, track.position, tracks.listener, track.audible)
-        rows = np.asarray(self.pairs, dtype=np.int64).reshape(-1, 2)
-        self.journal.set_status(source="pairs at rest", job=f"{rows.shape[0]} pairs")
-        self.pair_early = table(
-            "_pairs", tracks.positions[rows[:, 0]], self.cells[rows[:, 1]], None
+    def paths(self) -> None:
+        """Every source's early table, and the table of the pairs at rest: the stage alone."""
+        self._alone(self.paths_jobs())
+        self._paths_report()
+
+    def _paths_report(self) -> None:
+        self.report["paths"] = dict(self._paths_records)
+        self.report["distance_fields"] = int(
+            sum(
+                int(record.get("fields", 0))
+                for key, record in self.pool.done.items()
+                if key.startswith("paths/")
+            )
         )
-        self.report["paths"] = records
-        self.report["distance_fields"] = int(field_of[0].solved) if field_of else 0
+
+    # ---- the rays: a site a job on a card, a source's table a job on the host ------------------
+
+    def rays_jobs(self) -> list[Job]:
+        """The histograms not in their cache, a site a job; then each source's table."""
+        self._prepared()
+        settings = self.assets.settings
+        tracks = self.tracks
+        if getattr(self, "tail_cache", None) is None:
+            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        shared = shared_scene(self.tail_cache, self.assets.catalogue, settings)
+        rays = settings.traced_rays()
+        cells = self.cells[self.tail_rows]
+        self.tail: dict[str, dict[str, np.ndarray]] = {}
+        positions: dict[str, np.ndarray] = {}
+        read_by: dict[str, list[str]] = {}
+        at_rest: dict[str, list[int]] = {}
+        for j, pair in enumerate(self.pairs):
+            at_rest.setdefault(self.owner[pair], []).append(j)
+        for name, track in tracks.sources.items():
+            sites = tail_sites_of(self.recipe, track)
+            rows = {int(r) for r in sites_read(track.position, sites, track.audible)}
+            if at_rest.get(name):
+                # The pairs' own tails, the source on its solved positions: the levelling's.
+                solved = tracks.positions[[self.pairs[j][0] for j in at_rest[name]]]
+                rows |= {int(r) for r in sites_read(solved, sites)}
+            read_by[name] = []
+            for row in sorted(rows):
+                key = tail_key(shared["key"], sites.positions[row], cells, rays)
+                positions[key] = sites.positions[row]
+                read_by[name].append(key)
+        todo = [key for key in positions if not (self.out / "tails" / f"{key}.npz").is_file()]
+        self._ray_sites = (len(positions), len(todo))
+        jobs = [
+            Job("rays", key, {"position": [float(v) for v in positions[key]]}, on=CARD)
+            for key in todo
+        ]
+        traced = {job.name: job.key for job in jobs}
+        self._ray_keys = tuple(traced.values())
+        tables = [
+            Job(
+                "tails",
+                name,
+                {"source": name},
+                on=HOST,
+                after=tuple(traced[key] for key in read_by[name] if key in traced),
+            )
+            for name in tracks.sources
+        ]
+
+        def read() -> None:
+            for name in tracks.sources:
+                with np.load(self.out / "jobs" / "tails" / f"{name}.npz") as held:
+                    self.tail[name] = {key: np.asarray(held[key]) for key in held.files}
+            self.report["rays"] = {
+                "tail_cells": int(self.tail_rows.size),
+                "histograms_traced": int(self._ray_sites[1]),
+                "histograms_read": int(self._ray_sites[0] - self._ray_sites[1]),
+            }
+
+        merge = Job("tails", "_read", on=PARENT, after=tuple(t.key for t in tables), work=read)
+        return [*jobs, *tables, merge]
+
+    def _ray_site(self, position: list[float]) -> dict[str, Any]:
+        """One job of the rays: a site's histograms over the tail's cells, into the cache."""
+        from reverberate.mirror.tails import histograms
+
+        if getattr(self, "tail_cache", None) is None:
+            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        t0 = time.time()
+        histograms(
+            self.assets.catalogue,
+            self.assets.settings,
+            np.asarray(position, dtype=float)[None, :],
+            self.cells[self.tail_rows],
+            devices=self._ray_devices(),
+            cache=self.tail_cache,
+        )
+        self._spent("rays", "sites", t0)
+        return {"traced": 1}
+
+    def _ray_devices(self) -> Devices:
+        """What one job's rays are cast on: this process's card, or one share on its host.
+
+        The histograms are counts, so their sum does not depend on how the
+        rays were shared; on the host a site is one share, which is what a
+        trace without a card always cast.
+        """
+        if self.worker is None:
+            assert self.devices is not None
+            return self.devices
+        return Devices((0,), 1) if self.xp is not np else Devices.host(1)
+
+    def _tail_job(self, source: str) -> dict[str, Any]:
+        """One job of the tables: a source's ``tail`` group in the pack's types, to its file."""
+        self._prepared()
+        if getattr(self, "tail_cache", None) is None:
+            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        track = self.tracks.sources[source]
+        t0 = time.time()
+        held = tail_table(
+            self.ms,
+            self.assets.settings,
+            track.position,
+            self.tracks.listener,
+            tail_sites_of(self.recipe, track),
+            self.cells[self.tail_rows],
+            audible=track.audible,
+            devices=self._ray_devices(),
+            cache=self.tail_cache,
+            xp=np,
+        ).pack()
+        held["hist_cell"] = self.tail_rows[held["hist_cell"]].astype(np.int32)
+        target = self.out / "jobs" / "tails" / f"{source}.npz"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(".partial.npz")
+        arrays: dict[str, Any] = dict(held)
+        np.savez(partial, **arrays)
+        partial.replace(target)
+        self._spent("rays", "tables", t0)
+        return {"histograms": int(held["energy"].shape[0])}
 
     def rays(self) -> None:
         """Each source's tail table, in the pack's types; the histograms in their cache."""
-        settings = self.assets.settings
-        tracks = self.tracks
-        self.tail_rows = tail_cells(self.cells, self.kind)
-        self.tail_cache = TailCache(self.out / "tails")
-        started = time.time()
-        self.tail: dict[str, dict[str, np.ndarray]] = {}
-        # The source a pair is levelled with: the first whose steps read it.
-        self.owner: dict[tuple[int, int], str] = {}
-        for number, (name, track) in enumerate(tracks.sources.items(), start=1):
-            self.journal.set_status(source=name, job=f"{number}/{len(tracks.sources)}")
-            held = tail_table(
-                self.ms,
-                settings,
-                track.position,
-                tracks.listener,
-                tail_sites_of(self.recipe, track),
-                self.cells[self.tail_rows],
-                audible=track.audible,
-                devices=self.devices,
-                cache=self.tail_cache,
-                xp=self.xp,
-            ).pack()
-            held["hist_cell"] = self.tail_rows[held["hist_cell"]].astype(np.int32)
-            self.tail[name] = held
-            chosen = self.low[name]
-            for step in np.flatnonzero(track.audible):
-                for position in track.read(int(step)):
-                    for cell in chosen.cell[step]:
-                        if position >= 0 and cell >= 0:
-                            self.owner.setdefault((int(position), int(cell)), name)
-        self._spent("rays", "tables", started)
-        self.report["rays"] = {
-            "tail_cells": int(self.tail_rows.size),
-            "histograms_traced": int(self.tail_cache.misses),
-            "histograms_read": int(self.tail_cache.hits),
-        }
+        self._alone(self.rays_jobs())
 
     def pair_tails(self, name: str, mine: list[int]) -> TailTable:
         """The tails of the pairs in ``mine`` at rest, as the pack gives them to ``name``'s steps.
@@ -552,19 +1083,34 @@ class Trace:
             self.cells[rows[:, 1]],
             tail_sites_of(self.recipe, self.tracks.sources[name]),
             self.cells[self.tail_rows],
-            devices=self.devices,
+            devices=self._ray_devices(),
             cache=self.tail_cache,
-            xp=self.xp,
+            xp=np,
         )
 
     def level_pair(
-        self, j: int, tails: TailTable, local: int, atmosphere: Atmosphere
+        self,
+        j: int,
+        tails: TailTable,
+        local: int,
+        atmosphere: Atmosphere,
+        early: EarlyTable | None = None,
+        row: int | None = None,
     ) -> dict[str, Any]:
-        """Pair ``j``: its seam, its onset, the mirror's first arrival, how its response ends."""
+        """Pair ``j``: its seam, its onset, the mirror's first arrival, how its response ends.
+
+        ``early`` and ``row`` are the table that holds the pair's paths and
+        its row there: a block of the pairs' table, or the whole of it. On
+        ``numpy`` on every machine: a pair is a dozen small transforms, and
+        the host's cores do them side by side, a process each.
+        """
         assert self.engine is not None
         settings = self.assets.settings
-        # The seam and the onset are read on channel 0 alone: the others wait for ``write``.
-        solved = self.engine.cache.read(self.pair_key[j])[:1]
+        early = self.pair_early if early is None else early
+        row = j if row is None else row
+        # The seam and the onset are read on channel 0 alone, and channel 0 alone is read
+        # from the file: the others wait for the pack's rows.
+        solved = np.asarray(_first_channel(self.engine.cache, self.pair_key[j]))
         onset, aired = pair_omni(
             at_pack_length(solved),
             atmosphere,
@@ -572,30 +1118,30 @@ class Trace:
             lead_s=self.assets.pack_lead_s,
         )
         mirror = mirror_omni(
-            self.pair_early,
-            j,
+            early,
+            row,
             tails,
             local,
             self.assets,
             seed=settings.seed + self.pairs[j][1],
-            xp=self.xp,
+            xp=np,
         )
         return {
             "seam_db": pair_seam_db(aired, mirror, self.crossover),
             "onset_s": onset,
-            "first_s": first_arrival_s(self.pair_early, j),
+            "first_s": first_arrival_s(early, row),
             # A diffracted onset has no reflection either: the direct path is a kind, not an order.
-            "direct": bool(np.any(self.pair_early.kind[self.pair_early.rows(j)] == KIND_DIRECT)),
+            "direct": bool(np.any(early.kind[early.rows(row)] == KIND_DIRECT)),
             # The engine convolves a response as it stands: one that rings up to its
             # last 50 ms was cut, or wrapped, by whatever made it. One solved for fewer
             # seconds than the pack keeps is read where its solve ended, before its fade.
             "end_db": _end_db(aired if solved.shape[-1] == aired.shape[-1] else solved[0]),
         }
 
-    def level(self) -> None:
-        """Every pair's seam and onset, a line each in ``level.jsonl``."""
-        assert self.engine is not None
-        atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
+    # ---- the levelling: blocks of pairs, on the host's cores ---------------------------------
+
+    def _levelled(self, read: bool = True) -> tuple[str, dict[str, dict[str, Any]]]:
+        """What names a levelling, and the pairs ``level.jsonl`` already holds under it."""
         settings = self.assets.settings
         ledger = self.out / "level.jsonl"
         known: dict[str, dict[str, Any]] = {}
@@ -605,53 +1151,144 @@ class Trace:
             settings.record(),
             {"lead_s": self.assets.pack_lead_s},
         )
-        if ledger.is_file():
+        if read and ledger.is_file():
             for line in ledger.read_text().splitlines():
                 if line.strip():
                     record = json.loads(line)
                     if record.get("identity") == identity:
                         known[str(record["key"])] = record
-        self.pair_key = [self.engine.key_of(position, cell) for position, cell in self.pairs]
-        missing = [key for key in self.pair_key if not self.engine.cache.has(key)]
-        if missing:
-            raise RuntimeError(f"{len(missing)} pair(s) are not in the cache after the solve")
-        made = 0
-        started = time.time()
+        return identity, known
+
+    def _level_path(self, block: int) -> Path:
+        return self.out / "jobs" / "level" / f"{block}.json"
+
+    def level_jobs(self, others: list[Job]) -> list[Job]:
+        """The pairs not yet levelled, a block of them a job, and the ledger's merge.
+
+        A block waits for what it reads and for nothing else: its own block
+        of the pairs' early table, the tail's sites, and the launches its
+        pairs come from. So the levelling goes on while the cards solve.
+        """
+        identity, known = self._levelled()
+        present = {job.key for job in others}
+        jobs: list[Job] = []
+        blocks = list(range(0, len(self.pairs), PAIRS_BLOCK))
+        for block, start in enumerate(blocks):
+            stop = min(start + PAIRS_BLOCK, len(self.pairs))
+            path = self._level_path(block)
+            if path.is_file():
+                # A block a run levelled and did not live to merge.
+                for record in json.loads(path.read_text()):
+                    if record.get("identity") == identity:
+                        known.setdefault(str(record["key"]), record)
+            todo = [j for j in range(start, stop) if self.pair_key[j] not in known]
+            if not todo:
+                continue
+            waits = {f"paths/{PAIRS_TABLE}.{block}", f"paths/{PAIRS_TABLE}", *self._ray_keys}
+            waits |= {self.made_by.get(self.pairs[j], "") for j in todo}
+            jobs.append(
+                Job(
+                    "level",
+                    str(block),
+                    {"block": block, "start": start, "stop": stop, "pairs": todo},
+                    on=HOST,
+                    after=tuple(sorted(waits & present)),
+                    priority=2,
+                )
+            )
+
+        levelled = list(jobs)
+
+        def merge() -> None:
+            made = 0
+            with (self.out / "level.jsonl").open("a") as handle:
+                for job in levelled:
+                    for record in json.loads(self._level_path(int(job.name)).read_text()):
+                        if str(record["key"]) in known:
+                            continue
+                        handle.write(json.dumps(record, sort_keys=True) + "\n")
+                        known[str(record["key"])] = record
+                        made += 1
+            self._levels_report(known, made)
+
+        jobs.append(Job("level", "_merge", on=PARENT, after=tuple(j.key for j in jobs), work=merge))
+        return jobs
+
+    def _level_block(self, block: int, start: int, stop: int, pairs: list[int]) -> dict[str, Any]:
+        """One job of the levelling: the pairs of ``pairs``, a record each, to the block's file."""
+        self._prepared()
+        if getattr(self, "tail_cache", None) is None:
+            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        identity, _ = self._levelled(read=False)
+        atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
+        table = self._pair_table(block, start, stop)
         # A source at a time: the tails of its pairs are a table that is not kept.
         todo: dict[str, list[int]] = {}
-        for j, key in enumerate(self.pair_key):
-            if key not in known:
-                todo.setdefault(self.owner[self.pairs[j]], []).append(j)
-        threads = self.level_threads or (LEVEL_THREADS if self.xp is not np else 1)
-        with ledger.open("a") as handle, ThreadPoolExecutor(max_workers=threads) as pool:
-            for owner, mine in todo.items():
-                t0 = time.time()
-                tails = self.pair_tails(owner, mine)
-                self._spent("level", "tails", t0)
-                t0 = time.time()
-                # A pair's record is its own whichever thread made it; the lines are
-                # written in the pairs' order.
-                levelled = pool.map(
-                    lambda item, tails=tails: self.level_pair(item[1], tails, item[0], atmosphere),
-                    list(enumerate(mine)),
-                )
-                for j, found in zip(mine, levelled, strict=True):
-                    record = {"key": self.pair_key[j], "identity": identity, **found}
-                    handle.write(json.dumps(record, sort_keys=True) + "\n")
-                    handle.flush()
-                    known[self.pair_key[j]] = record
-                    made += 1
-                    if made % 50 == 0:
-                        elapsed = time.time() - started
-                        left = len(self.pair_key) - len(known)
-                        self.journal.set_status(
-                            job=f"{len(known)}/{len(self.pair_key)}",
-                            remaining_s=round(elapsed / made * left, 1),
-                        )
-                self._spent("level", "pairs", t0)
+        for j in pairs:
+            todo.setdefault(self.owner[self.pairs[j]], []).append(j)
+        found: dict[int, dict[str, Any]] = {}
+        for owner, mine in todo.items():
+            t0 = time.time()
+            tails = self.pair_tails(owner, mine)
+            self._spent("level", "tails", t0)
+            t0 = time.time()
+            for local, j in enumerate(mine):
+                found[j] = self.level_pair(j, tails, local, atmosphere, table, j - start)
+            self._spent("level", "pairs", t0)
+        # A pair's record is its own whoever made it; the lines are in the pairs' order.
+        records = [{"key": self.pair_key[j], "identity": identity, **found[j]} for j in pairs]
+        target = self._level_path(block)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(".partial.json")
+        partial.write_text(json.dumps(records, sort_keys=True))
+        partial.replace(target)
+        return {"pairs": len(records)}
+
+    def _pair_table(self, block: int, start: int, stop: int) -> EarlyTable:
+        """The pairs' early table over one block: the block's own file, or the whole's rows."""
+        source, head, heard = (a[start:stop] for a in self._table_inputs(PAIRS_TABLE))
+        found = _load_early(
+            self._block_path(PAIRS_TABLE, block), _digest(source, head, heard, self.identity)
+        )
+        if found is not None:
+            return found
+        if getattr(self, "pair_early", None) is None:
+            whole = self._table_inputs(PAIRS_TABLE)
+            held = _load_early(
+                self.out / "early" / f"{PAIRS_TABLE}.npz", _digest(*whole, self.identity)
+            )
+            if held is None:
+                raise RuntimeError("the early table of the pairs at rest is not on disk")
+            self.pair_early = held
+        return _rows_of(self.pair_early, start, stop)
+
+    def level(self) -> None:
+        """Every pair's seam and onset, a line each in ``level.jsonl``: the stage alone."""
+        if not hasattr(self, "made_by"):
+            self.made_by = {}
+        if not hasattr(self, "_ray_keys"):
+            self._ray_keys = ()
+        self._alone(self.level_jobs([]))
+
+    def _levels_report(self, known: dict[str, dict[str, Any]], made: int) -> None:
         self.levels = [known[key] for key in self.pair_key]
         seams = np.array([r["seam_db"] for r in self.levels], dtype=float)
-        trails = np.array([r["onset_s"] - r["first_s"] for r in self.levels if r["direct"]])
+        direct = [r for r in self.levels if r["direct"]]
+        trails = np.array([r["onset_s"] - r["first_s"] for r in direct], dtype=float)
+        away = np.array([r["first_s"] for r in direct]) * self.assets.settings.sound_speed_m_s
+        # The clock is read where the direct sound is the loudest. A far pair's loudest
+        # sample is often a later arrival: at 4 to 9 m in hssd_0076 the direct sound is
+        # there, at its time and at its level, and something 5 to 8 ms after it is half as
+        # loud again. The median of a scene of far sources is then not the lead, and two
+        # whole scenes were stopped by it after all their solves (2026-10-05). The first
+        # decile is the pairs whose loudest sample is their direct sound.
+        early = float(np.percentile(trails, 10)) if trails.size else self.assets.pack_lead_s
+        by_distance: dict[str, Any] = {}
+        for low, high in ((0.0, 2.0), (2.0, 4.0), (4.0, 8.0), (8.0, float("inf"))):
+            held = trails[(away >= low) & (away < high)]
+            if held.size:
+                name = f"{low:g} to {high:g} m" if np.isfinite(high) else f"over {low:g} m"
+                by_distance[name] = {"pairs": int(held.size), **(_spread(held, 6) or {})}
         self.report["level"] = {
             "pairs": len(self.levels),
             "made": made,
@@ -659,23 +1296,80 @@ class Trace:
             "seam_db": _spread(seams),
             "end_db": _spread(np.array([r["end_db"] for r in self.levels], dtype=float), 1),
             # What a pair's loudest sample trails its direct sound by: the pack's lead and
-            # the solver's pulse. Away from the lead, the two bands are not on one clock.
+            # the solver's pulse where the direct sound is the loudest, more where a later
+            # arrival is. The median and the spread by distance say how many pairs anchor
+            # on something else than their direct sound.
             "trail_s_of_pairs_with_a_direct_path": _spread(trails, 6),
+            "trail_s_at_the_first_decile": round(early, 6),
+            "trail_s_by_distance": by_distance,
             "lead_s": self.assets.pack_lead_s,
         }
-        if trails.size and abs(float(np.median(trails)) - self.assets.pack_lead_s) > CLOCK_S:
+        if abs(early - self.assets.pack_lead_s) > CLOCK_S:
             raise RuntimeError(
                 "the low band and the mirror are not on one clock: the pairs' onsets trail their"
-                f" direct sound by {np.median(trails) * 1e3:.2f} ms in the median, lead included,"
+                f" direct sound by {early * 1e3:.2f} ms at the first decile, lead included,"
                 f" and the pack's lead is {self.assets.pack_lead_s * 1e3:.2f} ms. The pair cache"
                 " is on the geometric clock: a response in it starts when its source does"
             )
 
-    def _low_row(self, j: int, atmosphere: Atmosphere) -> np.ndarray:
-        """Pair ``j`` as the pack stores it, ``[channel, sample]`` float32."""
+    # ---- the pack's rows: blocks of pairs, on the host's cores ---------------------------------
+
+    def _rows_path(self, block: int, start: int, stop: int) -> Path:
+        """Where a block of ``low/ir`` rows waits for the pack, named by what makes them."""
+        digest = _digest(
+            self.pair_key[start:stop],
+            self.crossover.record(),
+            self.recipe.atmosphere.to_dict(),
+            {
+                "c": self.assets.settings.sound_speed_m_s,
+                "lead_s": self.assets.pack_lead_s,
+                "unit": FIELD_UNIT_AT_1M,
+            },
+        )
+        return self.out / "jobs" / "rows" / f"{block}.{digest[:16]}.npy"
+
+    def rows_jobs(self, others: list[Job]) -> list[Job]:
+        """Every pair as the pack stores it, a block a job, as soon as its launches are home.
+
+        The air and the masks of a pair's 64 channels are 45 ms of one core;
+        made while the cards solve, a process a core, they cost the run
+        nothing, and the pack's write is then a copy.
+        """
+        present = {job.key for job in others}
+        jobs = []
+        self._rows_files = {}
+        for block, start in enumerate(range(0, len(self.pairs), PAIRS_BLOCK)):
+            stop = min(start + PAIRS_BLOCK, len(self.pairs))
+            path = self._rows_path(block, start, stop)
+            self._rows_files[block] = path
+            if path.is_file():
+                continue
+            waits = {self.made_by.get(pair, "") for pair in self.pairs[start:stop]} & present
+            jobs.append(
+                Job(
+                    "rows",
+                    str(block),
+                    {"block": block, "start": start, "stop": stop},
+                    on=HOST,
+                    after=tuple(sorted(waits)),
+                    priority=3,
+                )
+            )
+        return jobs
+
+    def _rows_block(self, block: int, start: int, stop: int) -> dict[str, Any]:
+        """One job of the rows: pairs ``start`` to ``stop`` as ``low/ir`` keeps them, to a file."""
+        atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
+        rows = np.stack([self._made_row(j, atmosphere, np) for j in range(start, stop)])
+        target = self._rows_path(block, start, stop)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(f".{os.getpid()}.partial.npy")
+        np.save(partial, rows)
+        partial.replace(target)
+        return {"pairs": int(rows.shape[0])}
+
+    def _made_row(self, j: int, atmosphere: Atmosphere, xp: Any) -> np.ndarray:
         assert self.engine is not None
-        t0 = time.time()
-        # On the card when there is one: 64 channels of air and masks a pair.
         row = pair_low(
             at_pack_length(self.engine.cache.read(self.pair_key[j])),
             self.crossover,
@@ -683,10 +1377,28 @@ class Trace:
             sound_speed_m_s=self.assets.settings.sound_speed_m_s,
             lead_s=self.assets.pack_lead_s,
             unit_at_1m=FIELD_UNIT_AT_1M,
-            xp=self.xp,
+            xp=xp,
         )[0]
-        self._spent("write", "low_ir", t0)
         return np.asarray(row, dtype=np.float32)
+
+    def _low_row(self, j: int, atmosphere: Atmosphere) -> np.ndarray:
+        """Pair ``j`` as the pack stores it, ``[channel, sample]`` float32.
+
+        Read from its block's file where the queue made one, the file
+        mapped and one block open at a time; made here on ``numpy`` where
+        there is none.
+        """
+        t0 = time.time()
+        block = j // PAIRS_BLOCK
+        path = self._rows_files.get(block)
+        if path is not None and path.is_file():
+            if self._rows_open is None or self._rows_open[0] != block:
+                self._rows_open = (block, np.load(path, mmap_mode="r"))
+            row = np.asarray(self._rows_open[1][j - block * PAIRS_BLOCK], dtype=np.float32)
+        else:
+            row = self._made_row(j, atmosphere, np)
+        self._spent("write", "low_ir", t0)
+        return row
 
     def write(self) -> Path:
         """``pack.h5``, a source at a time, and of a source's ``low/ir`` a pair at a time."""
@@ -941,6 +1653,184 @@ class Trace:
                 }
         self.journal.say(f"check: render {self.report['render']}")
 
+    # ---- the queue ---------------------------------------------------------------------------
+
+    def run_job(self, stage: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """One job of the queue, in whichever process holds this trace."""
+        self._restored()
+        if stage == "solve":
+            engine: Any = self.engine
+            return dict(engine.run_launch(payload))
+        if stage == "paths":
+            return self._trace_block(**payload)
+        if stage == "rays":
+            return self._ray_site(payload["position"])
+        if stage == "tails":
+            return self._tail_job(payload["source"])
+        if stage == "level":
+            return self._level_block(**payload)
+        if stage == "rows":
+            return self._rows_block(**payload)
+        raise ValueError(f"no stage of a trace is named {stage!r}")
+
+    def free_bytes(self) -> float:
+        """What this process's card has free now; 0 without one."""
+        if self.xp is np:
+            return 0.0
+        self.xp.get_default_memory_pool().free_all_blocks()
+        # With what the engine keeps there for the run: a launch's bytes count it too.
+        kept = getattr(self.engine, "kept_bytes", None)
+        return card_free_bytes(self.xp) + (float(kept()) if kept else 0.0)
+
+    def _restored(self) -> None:
+        """In a worker's process: the cell rule again, from the centres the run wrote."""
+        if self._assigned:
+            return
+        centres = json.loads((self.out / "state" / "centres.json").read_text())
+        self.assign([None if c is None else np.asarray(c, dtype=float) for c in centres])
+
+    def _pool(self, machine: Machine) -> Pool:
+        """The queue on ``machine``: processes where a worker can be built, this one otherwise."""
+        say = self.journal.say
+        in_processes = self.engine_told is not None and self.workers != 0
+        specs = machine.workers(self.workers) if (in_processes or self.workers) else None
+        if not in_processes:
+            return Pool(specs or [WorkerSpec(0)], inline=self, say=say, faults=self.faults)
+        assert specs is not None
+        make = functools.partial(
+            make_worker,
+            bundle=str(self.bundle),
+            out=str(self.out),
+            engine_told=dict(self.engine_told or {}),
+            pffdtd_dir=str(self.pffdtd_dir),
+        )
+        return Pool(specs, make, say=say, faults=self.faults, progress=self._progress)
+
+    def _alone(self, jobs: list[Job]) -> None:
+        """A stage by itself, in this process: what a test of one stage calls."""
+        self.pool = Pool([WorkerSpec(0)], inline=self, say=self.journal.say, faults=self.faults)
+        self.pool.add(*jobs)
+        self.pool.run()
+
+    def _progress(self, said: dict[str, Any]) -> None:
+        now = time.time()
+        if now - getattr(self, "_told", 0.0) < 5.0:
+            return
+        self._told = now
+        self.journal.set_status(job=f"{said['done']}/{said['jobs']}", last=said["stage"])
+
+    def work(self) -> None:
+        """Every stage between the cell rule and the pack, as the jobs of one queue.
+
+        The workers start first and measure what they hold while this
+        process plans the launches; the prediction is said, and held
+        against ``max_hours``, before the first long job is handed out.
+        """
+        journal = self.journal
+        if self.xp is not np:
+            # What this process took of its card to voxelise goes back before it is read.
+            self.xp.get_default_memory_pool().free_all_blocks()
+        machine = self.machine or Machine.detect(
+            gpu=None if self.xp is not np else False, devices=self.card_devices
+        )
+        journal.set_status(stage="work", stage_started=time.time())
+        self.pool = self._pool(machine)
+        started = time.time()
+        try:
+            self.pool.start()
+            jobs = self.solve_jobs(machine)
+            jobs += self.paths_jobs()
+            jobs += self.rays_jobs()
+            jobs += self.level_jobs(jobs)
+            jobs += self.rows_jobs(jobs)
+            if machine.cards and any(job.on == THREAD for job in jobs):
+                # An engine that solves in one call of its own takes every card while it
+                # does: what else needs a card waits for it.
+                for job in jobs:
+                    if job.on == CARD:
+                        job.after = (*job.after, "solve/all")
+            machine = machine.measured(self.pool.said())
+            self._predicted(machine, jobs)
+            self.pool.add(*jobs)
+            self.pool.run()
+        finally:
+            self.pool.close()
+        self._paths_report()
+        account = self.pool.account()
+        self.report["machine"] = machine.record()
+        self.report["pool"] = account
+        # A line a job: which worker, when, how long. What a scaling is read from.
+        (self.out / "pool.json").write_text(
+            json.dumps({**account, "ledger": self.pool.ledger}, indent=1)
+        )
+        for stage, held in account["stages"].items():
+            name = "rays" if stage == "tails" else stage
+            journal.timings[name] = round(journal.timings.get(name, 0.0) + held["wall_s"], 1)
+            self.seconds.setdefault(name, {})[f"{stage}_work"] = held["work_s"]
+        for name in ("solve", "paths", "rays", "level"):
+            journal.timings.setdefault(name, 0.0)
+        journal.timings["work"] = round(time.time() - started, 1)
+        journal.say(
+            "work: done in "
+            f"{(time.time() - started) / 60:.1f} min; "
+            + ", ".join(
+                f"{stage} {held['jobs']} job(s) {held['work_s']:.0f} s of work in"
+                f" {held['wall_s']:.0f} s"
+                for stage, held in account["stages"].items()
+            )
+        )
+
+    def _predicted(self, machine: Machine, jobs: list[Job]) -> None:
+        """The run's wall time and price on this machine, said and held against ``max_hours``."""
+        from reverberate.wave.lowband.pairs import PAIR_S
+
+        heard = sum(int(np.count_nonzero(t.audible)) for t in self.tracks.sources.values())
+        count = {stage: sum(1 for j in jobs if j.stage == stage) for stage in ("rays", "level")}
+        counts = {
+            "node_updates": self.planned.get("node_updates", 0.0),
+            "pairs": self.planned.get("pairs", 0.0),
+            "launches": sum(1 for j in jobs if j.stage == "solve" and j.on != PARENT),
+            "pair_s": PAIR_S if self.planned.get("node_updates") else 0.0,
+            "sites": count["rays"],
+            "site_s": (RAYS_SITE_S + int(self.tail_rows.size) * RAYS_SITE_CELL_S)
+            * (self.assets.settings.rays.rays / RAYS_MEASURED),
+            "paths_jobs": heard + len(self.pairs),
+            "level_pairs": count["level"] * PAIRS_BLOCK,
+            "row_pairs": len(self.pairs),
+            "write_s": 0.010 * len(self.pairs),
+        }
+        rate = self.rate_usd_per_hour
+        if rate is None:
+            rate = dict(self.spec.get("estimate") or {}).get("billed_rate_usd_per_hour")
+        host = sum(1 for w in self.pool.workers if w.spec.card is None) or 1
+        said = predict(counts, machine, host_workers=host, rate_usd_per_hour=rate)
+        self.report["predicted"] = {"counts": counts, **said}
+        partial = self.out / "prediction.partial.json"
+        partial.write_text(json.dumps({"machine": machine.record(), **self.report["predicted"]}))
+        partial.replace(self.out / "prediction.json")
+        self.journal.say(
+            f"machine: {len(machine.cards)} card(s), {machine.cores} core(s),"
+            f" {machine.ram_bytes / 1e9:.0f} GB; {json.dumps(machine.record()['cards'])}"
+        )
+        self.journal.say(
+            f"predicted: {said['hours']:.2f} h of work on this machine"
+            + (f", {said['usd']:.2f} USD at {rate:g} USD/h" if rate is not None else "")
+            + ("" if said["calibrated"] else " (the solve's rate is the box's, not calibrated)")
+            + f"; {json.dumps(said['seconds'])}"
+        )
+        over = self.max_hours is not None and said["hours"] > float(self.max_hours)
+        if over and not said["calibrated"] and counts["node_updates"]:
+            # A rate that is not the grid's own does not stop a rented machine.
+            self.journal.say(
+                f"predicted over the {float(self.max_hours or 0.0):g} h allowed, on a rate that"
+                " is not calibrated: said, and the run goes on"
+            )
+        elif over:
+            raise RuntimeError(
+                f"the work is predicted to take {said['hours']:.2f} h on this machine, over the"
+                f" {float(self.max_hours or 0.0):g} h it is allowed: stopped before it started"
+            )
+
     # ---- the run ---------------------------------------------------------------------------
 
     def run(self) -> dict[str, Any]:
@@ -958,12 +1848,13 @@ class Trace:
             assert self.engine is not None
             centres = self.engine.place()
             journal.stage("assign", lambda: self.assign(centres))
-            self.solve()
-            journal.stage("paths", self.paths)
-            journal.stage("rays", self.rays)
-            journal.stage("level", self.level)
+            self.work()
             journal.stage("write", self.write)
             journal.stage("check", self.check)
+            # The jobs' own files are in the pack and in the caches a rerun reads (the
+            # early tables, the histograms, the ledger): not kept, and not sent home.
+            self._rows_open = None
+            shutil.rmtree(self.out / "jobs", ignore_errors=True)
             self.report.update(
                 {
                     "dwelling": self.recipe.dwelling.name,
@@ -1135,6 +2026,9 @@ def run_trace(
     solvers: int | None = None,
     engine: PairsEngine | None = None,
     check: str | None = None,
+    workers: int | None = 0,
+    engine_told: dict[str, Any] | None = None,
+    max_hours: float | None = None,
 ) -> dict[str, Any]:
     return Trace(
         bundle=bundle,
@@ -1145,4 +2039,7 @@ def run_trace(
         card_devices=devices,
         solvers=solvers,
         check_mode=check,
+        workers=workers,
+        engine_told=engine_told,
+        max_hours=max_hours,
     ).run()

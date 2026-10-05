@@ -25,7 +25,59 @@ from reverberate.spatial.field import monopole_coefficients
 from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, pair_key
 from reverberate.spatial.sh import degrees_of, scene_to_ambisonic
 
-__all__ = ["BatchedPairs", "CardPairs", "FreeFieldPairs", "PairsEngine"]
+__all__ = ["BatchedPairs", "CardPairs", "FreeFieldPairs", "PairsEngine", "build_engine"]
+
+
+def build_engine(
+    told: dict[str, Any],
+    bundle: Path,
+    out: Path,
+    *,
+    gpu: bool | None = None,
+    pffdtd_dir: Path | str = Path("/root/pffdtd"),
+) -> Any:
+    """The engine a command line asked for, from what it was told: in any process of the run.
+
+    ``told`` is a few words (``kind`` and the grid's options), so that a
+    worker's process builds the engine the run's own process built, from
+    the same files, and nothing of it crosses a pipe.
+    """
+    kind = str(told.get("kind", "pffdtd"))
+    if kind == "free-field":
+        from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
+        from reverberate.trace.assets import MirrorAssets
+
+        held = Path(bundle) / "trace"
+        with np.load(held / "plan.npz") as plan:
+            cells = np.concatenate([plan["cells"], plan["patch_cells"].reshape(-1, 3)])
+        mirror = MirrorAssets.load(held / "mirror")
+        # In the cache form: on the geometric clock and the field's scale.
+        return FreeFieldPairs(
+            np.load(held / "positions.npy"),
+            cells,
+            out,
+            sound_speed_m_s=mirror.settings.sound_speed_m_s,
+            gain=FIELD_UNIT_AT_1M,
+        )
+    if kind == "lowband":
+        return BatchedPairs(
+            Path(bundle) / "pairs",
+            out,
+            pffdtd_dir=Path(pffdtd_dir),
+            devices=told.get("devices"),
+            gpu=gpu,
+            scheme=str(told.get("scheme") or "cartesian"),
+            ppw=told.get("ppw"),
+            batch=told.get("batch"),
+        )
+    return CardPairs(
+        Path(bundle) / "pairs",
+        out,
+        pffdtd_dir=Path(pffdtd_dir),
+        devices=told.get("devices"),
+        gpu=gpu,
+        solvers=told.get("solvers"),
+    )
 
 
 class PairsEngine(Protocol):
@@ -140,6 +192,61 @@ class BatchedPairs(CardPairs):
         self.report["batches"] = self.lowband.batches
         return found
 
+    # ---- the solve as jobs of the trace's queue (:mod:`reverberate.trace.pool`) -------------
+
+    #: Where a launch runs: on a worker that holds a card.
+    launches_on = "card"
+
+    def launches(
+        self, heard_at: list[list[int]], *, free_bytes: list[float], host_bytes: float
+    ) -> list[dict[str, Any]]:
+        """Every launch still to make: ``name``, ``payload``, ``bytes`` on a card, ``pairs``."""
+        self.campaign.heard_at = [sorted(int(c) for c in cells) for cells in heard_at]
+        return [
+            {
+                "name": held["name"],
+                "payload": {"items": held["items"]},
+                "bytes": held["bytes"],
+                "updates": held["updates"],
+                "pairs": held["pairs"],
+            }
+            for held in self.lowband.launches(free_bytes, host_bytes)
+        ]
+
+    def kept_bytes(self) -> float:
+        """What this process keeps on its card for the run, once it has made a launch: the fit."""
+        if getattr(self.lowband, "_ready", None) is None:
+            return 0.0
+        return float(self.lowband.fit_bytes())
+
+    def run_launch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """One launch on this process's device; in ``parted`` where the device does not hold it."""
+        record = self.lowband.run_launch(payload["items"])
+        if "parted" in record:
+            return {
+                "parted": [
+                    {"name": p["name"], "payload": {"items": p["items"]}, "bytes": p["bytes"]}
+                    for p in record["parted"]
+                ]
+            }
+        return record
+
+    def solved_report(
+        self, records: list[dict[str, Any]], heard_at: list[list[int]]
+    ) -> dict[str, Any]:
+        """What the launches made, as :meth:`solve` says it."""
+        solves = self.lowband.gathered([r for r in records if r.get("batch")])
+        wanted = sum(len(cells) for cells in heard_at)
+        solved = sum(int(r["cells"]) for r in solves)
+        self.report["solves"] = solves
+        self.report["grid"] = getattr(self.lowband, "problem_record", {})
+        self.report["batches"] = self.lowband.batches
+        return {
+            "solved": solved,
+            "cached": wanted - solved,
+            "source_positions_solved": len(solves),
+        }
+
 
 class FreeFieldPairs:
     """A monopole in free air at every pair, in the cache form: no room, no card, no solve.
@@ -220,17 +327,46 @@ class FreeFieldPairs:
         window = (0.5 - 0.5 * np.cos(np.pi * rise)) * (0.5 - 0.5 * np.cos(np.pi * fall))
         return np.asarray(response * window[None, :], dtype=np.float32)
 
-    def solve(self, heard_at: list[list[int]]) -> dict[str, Any]:
-        solved = cached = 0
+    #: Where a launch runs: on any worker, with ``numpy``.
+    launches_on = "host"
+    #: Source positions a launch holds.
+    LAUNCH_POSITIONS = 8
+
+    def launches(self, heard_at: list[list[int]], **_: Any) -> list[dict[str, Any]]:
+        """The pairs not yet in the cache, a few source positions a launch."""
+        items: list[tuple[int, list[int]]] = []
         for position, cells in enumerate(heard_at):
+            todo = [
+                int(cell)
+                for cell in cells
+                if self.centres[cell] is not None
+                and not self.cache.has(self.key_of(position, cell))
+            ]
+            if todo:
+                items.append((position, todo))
+        return [
+            {
+                "name": f"p{block[0][0]:06d}",
+                "payload": {"items": block},
+                "bytes": 0.0,
+                "pairs": [(position, cell) for position, cells in block for cell in cells],
+            }
+            for block in (
+                items[first : first + self.LAUNCH_POSITIONS]
+                for first in range(0, len(items), self.LAUNCH_POSITIONS)
+            )
+        ]
+
+    def run_launch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        made = 0
+        for position, cells in payload["items"]:
             for cell in cells:
-                key = self.key_of(position, cell)
-                if self.cache.has(key) or self.centres[cell] is None:
-                    cached += 1
+                key = self.key_of(int(position), int(cell))
+                if self.cache.has(key):
                     continue
                 self.cache.write(
                     key,
-                    self.response(position, cell),
+                    self.response(int(position), int(cell)),
                     {
                         "source_m": [float(v) for v in self.sources[position]],
                         "cell_m": [float(v) for v in self.cells[cell]],
@@ -238,6 +374,17 @@ class FreeFieldPairs:
                         "solver": self.solver,
                     },
                 )
-                self.solved.append((position, cell))
-                solved += 1
-        return {"solved": solved, "cached": cached, "source_positions_solved": 0}
+                self.solved.append((int(position), int(cell)))
+                made += 1
+        return {"pairs": made}
+
+    def solved_report(
+        self, records: list[dict[str, Any]], heard_at: list[list[int]]
+    ) -> dict[str, Any]:
+        solved = sum(int(r.get("pairs", 0)) for r in records)
+        wanted = sum(len(cells) for cells in heard_at)
+        return {"solved": solved, "cached": wanted - solved, "source_positions_solved": 0}
+
+    def solve(self, heard_at: list[list[int]]) -> dict[str, Any]:
+        records = [self.run_launch(launch["payload"]) for launch in self.launches(heard_at)]
+        return self.solved_report(records, heard_at)

@@ -294,6 +294,22 @@ class CellEncoder:
         with self._lock:
             if key not in self.operators:
                 scheme = self.scheme
+                xp = self.xp
+                keep = (int(self.settings.order) + 1) ** 2
+                parts: list[Any] = []
+
+                def reduce(weighted: Any, normal: Any) -> None:
+                    # A chunk solved as it is made, as :meth:`FitOperator.prepare` solves
+                    # it, and the chunk let go: the same numbers, a chunk held at a time.
+                    # What is kept waits on the host: cut on the card from a block the
+                    # chunk had just freed, each part held the whole of that block, and
+                    # the operator's 1.8 GB held 3.9 GB of a card (measured, 2026-10-05).
+                    solved = xp.linalg.solve(normal, xp.transpose(weighted, (0, 2, 1)))
+                    parts.append(to_numpy(solved[:, :keep, :]))
+                    del solved
+                    if xp is not np:
+                        xp.get_default_memory_pool().free_all_blocks()
+
                 encoder = prepare_band(
                     offsets,
                     grid_step_m=self.grid_step_m,
@@ -301,14 +317,20 @@ class CellEncoder:
                     settings=self.settings,
                     samples=self.samples,
                     sample_rate_hz=LOW_RATE_HZ,
-                    xp=self.xp,
+                    xp=xp,
                     wavenumber_of=(
                         (lambda f: wavenumber(scheme, f, self.grid_step_m, self.sound_speed_m_s))
                         if scheme.fcc
                         else None
                     ),
+                    reduce=reduce,
                 )
-                self.operators[key] = FitOperator.prepare(encoder, self.xp)
+                if xp is not np:
+                    xp.get_default_memory_pool().free_all_blocks()
+                parts = [xp.ascontiguousarray(xp.asarray(part)) for part in parts]
+                self.operators[key] = FitOperator(
+                    encoder=encoder, parts=parts, bytes_on_device=int(sum(p.nbytes for p in parts))
+                )
                 self.prepare_s += encoder.prepare_s
             return self.operators[key]
 
@@ -355,7 +377,9 @@ class CellEncoder:
         if self.xp is np:
             return 4
         self.xp.get_default_memory_pool().free_all_blocks()
-        free, _ = self.xp.cuda.Device().mem_info
+        from reverberate.compute import card_free_bytes
+
+        free = card_free_bytes(self.xp)
         # Two copies of the records in double precision at the widest point, and the
         # fit's spectra after them: three complex arrays of a cell's transform.
         filters = 2.0 * 8.0 * nodes * steps
