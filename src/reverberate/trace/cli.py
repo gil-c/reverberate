@@ -32,7 +32,15 @@ python -m reverberate.trace finish --home H [--publish-pairs]      the homecomin
 python -m reverberate.trace run --bundle B --out O [--free-field] [--cpu] [--check full|read]
     the trace on this machine; ``--free-field`` replaces the solves by a monopole in free
     air, which is how the chain runs without a card, and on a card how every stage but
-    the solve is timed without paying for one
+    the solve is timed without paying for one. ``[--workers N]`` host processes beside
+    the cards' (left out: the cores the cards leave; 0: one process), ``[--max-hours H]``
+    stops before the long work where this machine is predicted to need more
+python -m reverberate.trace scaling --bundle B --out O [--workers 1,2,4,8 | --cards 1,2,4,8]
+    [--free-field] [--cpu] [--seed-from RUN [--seed tails,pairs]] [--keep]
+    the bundle run whole at each count: each stage's work and the wall against the ideal
+    line, the serial fraction, and whether every count wrote the same pack
+python -m reverberate.trace digest PACK [PACK ...]
+    what each pack holds but for its date and its seconds; fails where two differ
 
 ``--check full`` reads the pack back whole and renders a minute of it on the host and on
 the card (V4, with the proof of which device computed); ``read`` reads the pack's
@@ -248,6 +256,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--publish-pairs", action="store_true")
 
     p = sub.add_parser("run", help="the trace on this machine")
+    _machine_arguments(p)
+    p.add_argument("--check", choices=("full", "read"), default=None)
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="host processes beside the cards'; left out, the cores the cards leave; 0, no"
+        " process but this one",
+    )
+    p.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="stop before the long work where it is predicted to last longer on this machine",
+    )
+    p.add_argument("--rate", type=float, default=None, help="USD an hour, for the prediction")
+
+    p = sub.add_parser(
+        "scaling", help="each stage's wall time against the workers and the cards it is given"
+    )
+    _machine_arguments(p)
+    p.add_argument("--workers", default="1,2,4,8", help="host processes to try, as 1,2,4")
+    p.add_argument("--cards", default=None, help="cards to try, as 1,2,4,8; none on a host")
+    p.add_argument("--keep", action="store_true", help="keep each run's directory under --out")
+    p.add_argument("--seed-from", type=Path, default=None, help="an earlier run's directory")
+    p.add_argument("--seed", default="tails", help="what every run takes from it, as tails,pairs")
+
+    p = sub.add_parser(
+        "digest", help="what packs hold but for their date and seconds; fails where they differ"
+    )
+    p.add_argument("packs", type=Path, nargs="+")
+    return parser
+
+
+def _machine_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--pffdtd", type=Path, default=Path("/root/pffdtd"))
@@ -255,8 +299,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cpu", action="store_true", help="numpy, even with a card")
     p.add_argument("--solvers", type=int, default=None)
     p.add_argument("--free-field", action="store_true", help="no solve: a monopole in free air")
-    p.add_argument("--check", choices=("full", "read"), default=None)
-    return parser
+
+
+def _engine_told(args: argparse.Namespace) -> dict[str, Any]:
+    """What solves the low band on this machine, in the words a worker's process reads.
+
+    ``--free-field`` first; else what the bundle says of its engine and its
+    grid, as the machine's own command reads them.
+    """
+    if args.free_field:
+        return {"kind": "free-field"}
+    spec = json.loads((args.bundle / "campaign.json").read_text())
+    low = dict(dict(spec.get("trace") or {}).get("low") or {})
+    return {
+        "kind": str(low.get("engine") or "pffdtd"),
+        "scheme": low.get("scheme"),
+        "ppw": low.get("ppw"),
+        "solvers": args.solvers,
+    }
 
 
 def _assets(args: argparse.Namespace) -> Any:
@@ -383,39 +443,37 @@ def _variants(args: argparse.Namespace, recipe: Any, assets: Any) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "run":
+        from reverberate.trace.engines import build_engine
         from reverberate.trace.run import Trace
 
-        engine = None
-        if args.free_field:
-            import numpy as np
-
-            from reverberate.spatial.lowband import FIELD_UNIT_AT_1M
-            from reverberate.trace.assets import MirrorAssets
-            from reverberate.trace.engines import FreeFieldPairs
-
-            held = args.bundle / "trace"
-            with np.load(held / "plan.npz") as plan:
-                cells = np.concatenate([plan["cells"], plan["patch_cells"].reshape(-1, 3)])
-            mirror = MirrorAssets.load(held / "mirror")
-            # In the cache form: on the geometric clock and the field's scale.
-            engine = FreeFieldPairs(
-                np.load(held / "positions.npy"),
-                cells,
-                args.out,
-                sound_speed_m_s=mirror.settings.sound_speed_m_s,
-                gain=FIELD_UNIT_AT_1M,
-            )
+        told = _engine_told(args)
+        gpu = False if args.cpu else None
         Trace(
             bundle=args.bundle,
             out=args.out,
-            engine=engine,
-            gpu=False if args.cpu else None,
+            engine=build_engine(told, args.bundle, args.out, gpu=gpu, pffdtd_dir=args.pffdtd),
+            gpu=gpu,
             pffdtd_dir=args.pffdtd,
             card_devices=args.devices,
             solvers=args.solvers,
             check_mode=args.check,
+            workers=args.workers,
+            engine_told=told,
+            max_hours=args.max_hours,
+            rate_usd_per_hour=args.rate,
         ).run()
         return 0
+    if args.command == "scaling":
+        from reverberate.trace.scaling import main as scaling
+
+        return scaling(args, _engine_told(args))
+    if args.command == "digest":
+        from reverberate.trace.run import pack_digest
+
+        found = [pack_digest(path) for path in args.packs]
+        for path, digest in zip(args.packs, found, strict=True):
+            print(f"{digest}  {path}")
+        return 0 if len(set(found)) == 1 else 1
     if args.command == "finish":
         from reverberate.trace.driver import finish
 

@@ -19,6 +19,16 @@ and not the batched solver; the others are the ratio of the cards' memory
 bandwidths, which the two measured ratios show to be a poor guide (see the
 table). A prediction on an estimated card says so, and its watchdog is
 given a larger margin.
+
+**The table chooses an offer and nothing else.** Once on the machine the
+trace reads its cards and measures them (:mod:`reverberate.trace.resources`),
+says its own prediction before its long work and is told the hours the
+watchdog leaves it (``--max-hours``). This module still prices the stages
+as one process ran them (the early trace, the levelling and the write one
+after the other on one card and one core) and adds solves for the records
+a card's memory does not hold: both are the trace of before the queue
+(``docs/adr/0016-appendix-every-card-every-core.md``), kept until a machine
+of several cards has measured the queue's own figures.
 """
 
 from __future__ import annotations

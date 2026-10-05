@@ -46,6 +46,8 @@ __all__ = [
     "cell_weights",
     "histograms",
     "interpolation_error_db",
+    "shared_scene",
+    "sites_read",
     "source_weights",
     "tail_key",
     "tail_scale",
@@ -216,12 +218,25 @@ class TailCache:
     """Histograms by :func:`tail_key`: a directory of ``<key>.npz``, or memory alone."""
 
     directory: Path | None = None
+    #: The histograms held in memory at most, the last read kept; ``None`` is every one.
+    #: A process among several that each read the whole scene's sites holds a few.
+    keep: int | None = None
 
     def __post_init__(self) -> None:
         self._held: dict[str, Histogram] = {}
         self._shared: dict[str, Any] = {}
         self.hits = 0
         self.misses = 0
+
+    def _hold(self, key: str, histogram: Histogram) -> None:
+        self._held.pop(key, None)
+        self._held[key] = histogram
+        if self.keep is not None and self.directory is not None:
+            while len(self._held) > max(1, self.keep):
+                self._held.pop(next(iter(self._held)))
+
+    def path(self, key: str) -> Path | None:
+        return None if self.directory is None else Path(self.directory) / f"{key}.npz"
 
     def get(self, key: str) -> Histogram | None:
         found = self._held.get(key)
@@ -238,19 +253,22 @@ class TailCache:
                         order=int(arrays["order"]),
                         rays=int(arrays["rays"]),
                     )
-                self._held[key] = found
         if found is None:
             self.misses += 1
         else:
+            self._hold(key, found)
             self.hits += 1
         return found
 
     def put(self, key: str, histogram: Histogram) -> None:
-        self._held[key] = histogram
+        self._hold(key, histogram)
         if self.directory is not None:
             Path(self.directory).mkdir(parents=True, exist_ok=True)
+            # Whole or not at all: another process may be reading the directory.
+            target = Path(self.directory) / f"{key}.npz"
+            partial = target.with_suffix(".partial.npz")
             np.savez(
-                Path(self.directory) / f"{key}.npz",
+                partial,
                 energy=histogram.energy,
                 moments=histogram.moments,
                 hits=histogram.hits,
@@ -259,6 +277,50 @@ class TailCache:
                 order=histogram.order,
                 rays=histogram.rays,
             )
+            partial.replace(target)
+
+
+def shared_scene(
+    cache: TailCache, catalogue: DerivedScene, settings: MirrorSettings
+) -> dict[str, Any]:
+    """What every call on one scene shares, kept in ``cache``: read once, whoever asks.
+
+    The scene with the calibration's materials, its key (a digest of every
+    triangle), the occluders' grid once a histogram is traced, and each
+    card's upload.
+    """
+    rays = settings.traced_rays()
+    shared = cache._shared
+    if (
+        shared.get("catalogue") is not catalogue
+        or shared.get("parameters") != settings.parameters.key
+        or shared.get("cell_m") != rays.cell_m
+    ):
+        scene = apply_parameters(catalogue, settings.parameters)
+        shared = {
+            "catalogue": catalogue,
+            "parameters": settings.parameters.key,
+            "cell_m": rays.cell_m,
+            "scene": scene,
+            "key": scene.key,
+            "grid": None,
+            "uploads": {},
+        }
+        cache._shared = shared
+    return shared
+
+
+def sites_read(
+    source: np.ndarray, sites: TailSites, audible: np.ndarray | None = None
+) -> np.ndarray:
+    """The rows of ``sites`` a source's audible steps read: those :func:`tail_table` traces."""
+    source = np.atleast_2d(np.asarray(source, dtype=float))
+    heard = np.ones(source.shape[0], dtype=bool) if audible is None else np.asarray(audible, bool)
+    if not bool(heard.any()):
+        return np.zeros(0, dtype=np.int64)
+    slots, weight = source_weights(source[heard], sites)
+    slots[weight <= 0.0, 1] = -1
+    return np.asarray(np.unique(slots[slots >= 0]), dtype=np.int64)
 
 
 def histograms(
@@ -282,25 +344,7 @@ def histograms(
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
     cache = cache if cache is not None else TailCache()
     rays = settings.traced_rays()
-    # What every call on this scene shares: the scene with its materials, its key
-    # (a digest of every triangle), the occluders' grid and each card's upload.
-    shared = cache._shared
-    if (
-        shared.get("catalogue") is not catalogue
-        or shared.get("parameters") != settings.parameters.key
-        or shared.get("cell_m") != rays.cell_m
-    ):
-        scene = apply_parameters(catalogue, settings.parameters)
-        shared = {
-            "catalogue": catalogue,
-            "parameters": settings.parameters.key,
-            "cell_m": rays.cell_m,
-            "scene": scene,
-            "key": scene.key,
-            "grid": None,
-            "uploads": {},
-        }
-        cache._shared = shared
+    shared = shared_scene(cache, catalogue, settings)
     scene = shared["scene"]
     out = []
     for position in positions:

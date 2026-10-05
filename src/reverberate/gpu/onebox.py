@@ -1038,8 +1038,14 @@ def run(
     sync_s: float = SYNC_S,
     plan_only: bool = False,
     destroy_failed: bool = False,
+    cap_flag: str = "",
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``cap_flag`` names a flag of the campaign's command that is told the
+    hours the watchdog leaves it (``--max-hours`` for a trace, which
+    measures its machine and stops before its long work where it predicts
+    more).
 
     ``leave`` names entries of the run directory that are not fetched,
     ``also`` entries fetched besides those a campaign always brings home;
@@ -1177,9 +1183,15 @@ def run(
             deadline = started + hours * 3600.0
 
     def launch() -> None:
+        told = campaign_args
+        if cap_flag and deadline is not None:
+            # What is left of the watchdog, less the fetch it keeps for itself: a campaign
+            # that predicts more of its own work on the machine it finds stops at once.
+            left = (deadline - 1200.0 - time.time()) / 3600.0
+            told = f"{told} {cap_flag} {max(left, 0.0):.2f}".strip()
         started_text = run_on(
             machine,
-            _launch_command(REMOTE_BUNDLE, REMOTE_OUT, devices, "/root/pffdtd", campaign_args),
+            _launch_command(REMOTE_BUNDLE, REMOTE_OUT, devices, "/root/pffdtd", told),
             what="launch",
         )
         say(f"campaign launched ({started_text.strip()[-40:]})")

@@ -292,6 +292,18 @@ recipe five to thirty solves more, by the card. Decimating the records as they a
 would cut them three to seven times; it changes the filters' numbers and is
 left until a card says the records bind.
 
+**A card said so (the first whole scene, 2026-10-05), and the records now
+leave the card instead** (lot L13): `solver.solve(records_on="host")` keeps
+512 steps on the card and copies each block to the host, the same values to
+the bit, and a trace's launches use it. The table above is then the fields
+alone: a card needs about 4 GB for one source on the Cartesian grid, the
+launches are sized for a machine's smallest card, and what bounds a
+launch's cells is the host's memory. Decimating after the fit's forward
+pass was measured against today's chain, -25 dB in the worst band at a
+factor of 2, and is not adopted. The same lot cuts one solve in slabs over
+several cards (`wave/lowband/slabs.py`), to the bit on `numpy`, for a grid
+no single card holds. `docs/adr/0016-appendix-every-card-every-core.md`.
+
 ## Reciprocity, counted
 
 A cell costs 64 solves and serves every source position; a source position

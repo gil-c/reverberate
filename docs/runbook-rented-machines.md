@@ -575,6 +575,34 @@ recipe (1646 positions, 16 529 pairs) is 1763 solves and 55 h on one RTX
 | `homecoming of pairs not complete: transfer failed after 1 attempts: rsync down did not end in 600 s`, every time, and the looks 15 minutes apart instead of 5 | A pass was given 600 s every 600 s and the watch waited for it; the line brought 0.3 to 0.5 MB/s (895 pairs of 1.2 MB in 1.6 h, of 11 481 then on the machine), so no pass could end | A pass is taken out of the pause between two looks (270 s of 300) and ends there with every whole file kept; what its last file left is removed; the log says `pairs home: N of M on the machine (+K in S s)` | in code |
 | The pair cache's way home is priced at 8.1 MB/s (43 min for 20.75 GB) and came at a twentieth of that | Not known: that host's line, the proxy, or the machine busy solving. The figure was measured on another box | **Open.** At that rate the cache is 12 h of rental after the solves. Until it is measured again: `--no-fetch-pairs` on a host whose first passes read under 2 MB/s, or the store as the way home | to decide |
 
+### Every card and every core (lot L13, phase one: not yet run on a card)
+
+After its solves that first run left seven cards and about seventy cores
+idle for the two to three hours its other stages took in one process. The
+machine's command is now one queue for the solves, the rays, the early
+trace, the levelling and the pack's rows, a process a card and a process a
+core (`docs/adr/0016-appendix-every-card-every-core.md`):
+
+- nothing is asked of the operator: the cards are read by `nvidia-smi`, the
+  cores by the container's quota, and each worker measures what it holds.
+  `--host-workers N` on `python -m reverberate.accel campaign` overrides the
+  cores taken; `--host-workers 0` is the one process of before;
+- the log says the machine as it found it and `predicted: H h of work on
+  this machine` before the first long job; `prediction.json` holds it. The
+  driver passes `--max-hours` (what its watchdog leaves): a run predicted
+  over it stops there, `campaign.failed` saying so, once the solve's rate is
+  calibrated on a card. Until then the line is said and the run goes on;
+- a launch's records are in the host's memory, not on its card: a card
+  needs about 4 GB for the grid to 1500 Hz, the launches are sized for the
+  smallest card of the machine, and the host wants 0.5 x its RAM for them.
+  **Watch the host's memory, not the cards'**, on the first run;
+- a worker's own lines are in `workers/<n>.log`; `status.json` counts jobs
+  (`job: done/all`) across every stage, and `trace_report.json` (`pool`)
+  holds each stage's work and wall and each worker's busy seconds;
+- `jobs/` holds the jobs' files while the run lasts (the pack's rows are the
+  pair cache's size again) and is removed when the pack is checked: **the
+  disk needs the pair cache twice** besides the pack.
+
 ### The options that change the result
 
 Each leaves the default pack byte for byte as it was, and each is a variant
