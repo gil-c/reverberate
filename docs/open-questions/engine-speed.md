@@ -191,9 +191,20 @@ taken as it is written; the file removed afterwards.
 | the mix, 1084 to 1096 s, walking, one process, warm | 1 | 28.7 s (0.42 times real time) | 28.7 s | | 2 to 3 |
 | the audit's stems, 90 s of its service from 280 s | 6 | 16.6 s of stem a second: the scene in 17 min at that rate | | 3.4 GB | 6 to 10 |
 
-The same bytes whatever the processes and whenever: the two whole renders
-have one SHA-256, the window of a minute has one with four processes and
-with eight, and the tests hold two processes to one engine. Neither whole
+The same bytes whatever the processes and whenever, **on the laptop**:
+the two whole renders have one SHA-256 and the window of a minute has one
+with four processes and with eight. **Not shown on the CI's Linux**: there
+the test that holds a process started afresh to the test's own process
+passed once and failed twice on the digest, with the same code. A first
+guess (a single row or column sent through the library's vector kernels)
+was removed and the test failed again, so that was not it, or not all of
+it. The cause is not known. What is left to try: the flush-to-zero state
+of the threads that a long-lived process and a fresh one do not share
+(single precision reaches 1e-38 where double never reached 1e-308), and
+the count of threads the library's products take. The test holds the two
+to 1e-12 of the peak and its message measures the difference if it is
+more. Until this is closed, "the same bytes" is a property of one
+machine's processes, not of the engine. Neither whole
 render had the laptop to itself (other agents' jobs, and a photo analysis
 daemon at 180 per cent of a core during the first). The processor time,
 3 471 and 4 065 s, is 3.2 to 3.7 times the 1 100 s one fast core needs

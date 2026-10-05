@@ -235,7 +235,9 @@ its limit that add up. Anything of the headphones.
    single precision and sums what the sources of a mix share before it
    transforms it (`docs/open-questions/engine-speed.md`).
 5. A mix written by several processes (`reverberate.render.mix.write_mix`,
-   `python -m reverberate.render mix`) is, byte for byte, the mix one
-   engine with the same settings writes from start to end; its header
+   `python -m reverberate.render mix`) is the mix one engine with the same
+   settings writes from start to end: byte for byte on the laptop it was
+   measured on, and to 1e-12 of the peak wherever the tests run
+   (`engine-speed.md` has what is not yet understood there); its header
    holds besides, under `render`, the settings, the processes, the time
    and the processor time it took.
