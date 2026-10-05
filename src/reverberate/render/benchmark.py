@@ -273,7 +273,8 @@ def density_pack(
         ),
         crossover=crossover,
         air=Air(Atmosphere(), enabled=True),
-        directivity={"voice": voice_v1(), "omni": omni()},
+        # A table of unit mean power, as every report of this benchmark was timed with.
+        directivity={"voice": voice_v1("mean"), "omni": omni("mean")},
     )
     validate(pack)
     return pack

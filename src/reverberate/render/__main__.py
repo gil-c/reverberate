@@ -1,4 +1,4 @@
-"""``python -m reverberate.render``: time the engine; validate, compact, level or check a pack."""
+"""``python -m reverberate.render``: time the engine; validate, compact, scale or check a pack."""
 
 from __future__ import annotations
 
@@ -73,11 +73,43 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         metavar="DB",
-        help="the scene's one number over the alignment's gain; left out, the median of the "
-        "pack's pairs' seams",
+        help="where the bands above the crossover stand, over the alignment's gain; left "
+        "out, the code's one number (0 dB) for a normalised pack and the median of the "
+        "pack's pairs' seams for one that is not",
     )
     join.add_argument("--undo", action="store_true", help="remove the table")
     join.add_argument("--dry-run", action="store_true", help="write nothing: say what it does")
+    scale = commands.add_parser(
+        "normalise",
+        help="put a traced pack's two bands on the physical scale, once for all, IN PLACE: "
+        "the mirror's gain one and its signature a unit pulse, the seams read without "
+        "their solve's band limit, the directivity level with its axis, and the level a "
+        "band made again; what the trace wrote is kept in the pack and --undo puts it back",
+    )
+    scale.add_argument("pack", type=Path)
+    scale.add_argument("--undo", action="store_true", help="put back what the trace wrote")
+    scale.add_argument("--dry-run", action="store_true", help="write nothing: say what it does")
+    scale.add_argument(
+        "--keep-signature",
+        action="store_true",
+        help="keep the measured signature's colour, at 0 dB over the crossover's octave: the "
+        "treble every render before had (1.8 dB down at 8 kHz, 5 dB at 16 kHz)",
+    )
+    scale.add_argument(
+        "--directivity",
+        choices=("axis", "mean"),
+        default="axis",
+        help="what the directivity tables are level with: the axis, a clip being its "
+        "talker's axis, or unit mean power, as every pack before",
+    )
+    scale.add_argument(
+        "--seam-reading-db",
+        type=float,
+        default=None,
+        metavar="DB",
+        help="what the pairs' seams were read short by; left out, 1.07 dB for pairs solved "
+        "to 1500 Hz and none for a free field's",
+    )
     loud = commands.add_parser(
         "gains",
         help="set sources' gains in a traced pack, IN PLACE; the trace's are kept and --undo "
@@ -156,14 +188,26 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(relevel_pack(args.pack, seconds=args.seconds, undo=args.undo), indent=1))
     elif args.command == "seam":
-        from reverberate.render.seam import SEAM_CONSTANT_DB, TAPER, taper_pack
+        from reverberate.render.seam import TAPER, taper_pack
 
         said = taper_pack(
             args.pack,
             taper=TAPER if args.taper is None else tuple(args.taper),
-            constant_db=SEAM_CONSTANT_DB if args.constant_db is None else args.constant_db,
+            constant_db=args.constant_db,
             undo=args.undo,
             dry_run=args.dry_run,
+        )
+        print(json.dumps(said, indent=1))
+    elif args.command == "normalise":
+        from reverberate.render.normalise import normalise_pack
+
+        said = normalise_pack(
+            args.pack,
+            undo=args.undo,
+            dry_run=args.dry_run,
+            keep_signature=args.keep_signature,
+            directivity=args.directivity,
+            seam_reading_db=args.seam_reading_db,
         )
         print(json.dumps(said, indent=1))
     elif args.command == "gains":

@@ -67,6 +67,7 @@ __all__ = [
     "fetch",
     "find_utterances",
     "format_table",
+    "heard_level_db",
     "measure",
     "store_loader",
     "wav_bytes",
@@ -107,6 +108,12 @@ MAX_UTTERANCE_S = 12.0
 #: The shortest pause an utterance may be cut at, and the shortest utterance kept.
 MIN_BREATH_S = 0.10
 MIN_UTTERANCE_S = 0.30
+
+#: Where a render starts, as a filter: the low cut of every solve's fit and of the band
+#: above the crossover, a Butterworth high pass of this order at this frequency
+#: (``reverberate.spatial.lowband.LOWCUT_HZ``). A pack is valid from 45 Hz
+#: (``docs/formats/scene-pack.md``), and a noise is levelled on what lies above.
+HEARD_FROM_HZ, HEARD_ORDER = 40.0, 8
 
 #: What ``check`` holds every clip to. A limit never moves to pass a clip.
 LIMITS: dict[str, float] = {
@@ -265,6 +272,27 @@ def find_utterances(
         )
         out.append((round(start, 3), round(min(end, total), 3)))
     return out
+
+
+def heard_level_db(samples: np.ndarray, rate: float = RATE_HZ) -> float:
+    """The long term level of what a render holds of ``samples``, dB re full scale.
+
+    The RMS of the clip through the chain's own low cut
+    (:data:`HEARD_FROM_HZ`, :data:`HEARD_ORDER`). A recording made in a room
+    may hold most of its energy under 20 Hz, where no one hears and nothing
+    is rendered: the first library's washing machine holds 98 per cent of it
+    between 10 and 20 Hz, and levelled on its whole band it was rendered
+    25 dB under the level its entry states
+    (``docs/open-questions/chain-audit.md``, D12).
+    """
+    from scipy.signal import butter, sosfilt
+
+    x = np.asarray(samples, dtype=float)
+    if x.size == 0:
+        return _db(0.0)
+    sos = butter(HEARD_ORDER, HEARD_FROM_HZ, btype="high", fs=rate, output="sos")
+    kept = np.asarray(sosfilt(sos, x))
+    return _db(float(np.sqrt(np.mean(kept * kept))))
 
 
 def measure(
@@ -480,8 +508,11 @@ def curate(
     A selection names, for every clip, the members it is made of and its
     level: ``spl_1m_db``, what the source is at 1 m. A voice (and anything
     whose ``measure`` is ``"active"``) is levelled on its active speech
-    level, a noise on its long term level. A voice is cut to its speech, and
-    its utterances are found and written.
+    level, a noise on the long term level of what a render holds of it
+    (``"heard"``, :func:`heard_level_db`); ``"rms"`` is the long term level
+    of the whole band, which the first library's noises were levelled on
+    and its selection says. A voice is cut to its speech, and its
+    utterances are found and written.
     """
     cache: dict[str, dict[str, Any]] = {}
     loader = load if load is not None else store_loader(store)
@@ -542,9 +573,13 @@ def curate(
             raw = build_clip(origin, once, gain_db=0.0)
             utterances = [(round(a - first, 3), round(b - first, 3)) for a, b in found]
         spl = float(item.get("spl_1m_db", 60.0))
-        how = str(item.get("measure", "active" if kind == "voice" else "rms"))
+        how = str(item.get("measure", "active" if kind == "voice" else "heard"))
+        if how not in ("active", "heard", "rms"):
+            raise ValueError(f"{item['name']}: a clip is levelled active, heard or rms")
         if how == "active":
             measured, _ = active_speech_level(raw)
+        elif how == "heard":
+            measured = heard_level_db(raw)
         else:
             measured = _db(float(np.sqrt(np.mean(raw * raw))))
         # A clip whose peaks would not fit at the level asked for is stored
@@ -559,6 +594,8 @@ def curate(
             _write(clip_path(root, library, str(item["name"])), payload)
         dataset = datasets.get(parts[0]["dataset"], {})
         levels = _levels(pcm, kind, utterances)
+        if how == "heard":
+            levels["heard_dbfs"] = round(heard_level_db(pcm.astype(float) / 32768.0), 2)
         if members is not None:
             gain = 10.0 ** (process["gain_db"] / 20.0)
             source = measure(_pcm(np.clip(members * gain, -0.999, 0.999)), kind="voice")
@@ -735,6 +772,9 @@ def check(manifest: Mapping[str, Any], root: Path) -> list[ClipReport]:
         if clip["level"]["measure"] == "active":
             level, _ = active_speech_level(pcm.astype(float) / 32768.0)
             limit = LIMITS["voice_level_error_db"]
+        elif clip["level"]["measure"] == "heard":
+            level = heard_level_db(pcm.astype(float) / 32768.0)
+            limit = LIMITS["noise_level_error_db"]
         else:
             level, limit = float(found["rms_dbfs"] or 0.0), LIMITS["noise_level_error_db"]
         if abs(level - stated) > limit:

@@ -561,6 +561,10 @@ class PackWriter:
             sub = group.create_group(model)
             sub.create_dataset("gain_db", data=np.asarray(pattern.gain_db, dtype="<f4"))
             sub.attrs["angles_deg"] = np.asarray(pattern.angles_deg, dtype=float)
+            # What the table is level with (``mirror.directivity``); a pack without the
+            # word holds tables of unit mean power.
+            sub.attrs["normalised"] = pattern.normalised
+            sub.attrs["pattern_sha256"] = pattern.digest
         f.create_group("sources")
 
     def add_source(self, source: Source) -> None:
@@ -729,6 +733,12 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 gain_db=np.asarray(group["gain_db"][...]),
                 angles_deg=np.asarray(group.attrs["angles_deg"], float),
                 bands_hz=header.bands_hz,
+                normalised=(
+                    _text(group.attrs["normalised"]) if "normalised" in group.attrs else "mean"
+                ),
+                pattern_digest=(
+                    _text(group.attrs["pattern_sha256"]) if "pattern_sha256" in group.attrs else ""
+                ),
             )
             for model, group in f["directivity"].items()
         }
@@ -1125,6 +1135,11 @@ def _check_tail(
 # --------------------------------------------------------------------------
 
 #: Under this the synthetic low band is faded out: see :func:`synthetic_free_field`.
+#: **An octave over a solve**, whose band is whole from 50 Hz
+#: (:data:`reverberate.spatial.lowband.LOWCUT_HZ`): a level read under 160 Hz on a
+#: synthetic pack is this profile's and no pack's (``chain-audit.md``, D11). The engine's
+#: own tests are tuned on this edge (its ring before the arrival, the compact form's
+#: bounds); the trace's stand-in, ``trace.engines.FreeFieldPairs``, starts where a solve does.
 SYNTHETIC_HIGHPASS_HZ = (80.0, 160.0)
 
 
