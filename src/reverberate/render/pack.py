@@ -33,6 +33,7 @@ from reverberate.audio import Atmosphere
 from reverberate.metrics import band_centres
 from reverberate.mirror.directivity import Directivity, omni
 from reverberate.mirror.hybrid import Crossover
+from reverberate.render.compact import CompactIr, Levers, write_compact
 from reverberate.spatial.sh import channel_count
 from reverberate.spatial.translate import (
     EXACT_UNDER_M,
@@ -262,7 +263,8 @@ class Early:
 class Low:
     """The band under the crossover: responses by pair, and which a step reads."""
 
-    #: ``[pair, channel, sample]``; an array, or the file's dataset.
+    #: ``[pair, channel, sample]``; an array, the file's dataset, or the file's
+    #: ``low/compact`` read as one (:class:`reverberate.render.compact.CompactIr`).
     ir: Any
     pair_position: np.ndarray
     pair_cell: np.ndarray
@@ -441,8 +443,12 @@ _LEVEL = {"high_gain_db": ("<f4", "step"), "onset_s": ("<f8", "step")}
 _LAZY = {"ir", "energy", "moments"}
 
 
-def _write_group(group: Any, spec: Mapping[str, tuple[str, str]], value: Any) -> None:
+def _write_group(
+    group: Any, spec: Mapping[str, tuple[str, str]], value: Any, *, but: Iterable[str] = ()
+) -> None:
     for name, (dtype, _) in spec.items():
+        if name in but:
+            continue
         data = getattr(value, name)
         if name in _LAZY and not isinstance(data, np.ndarray):
             # A table still in another file: copied a row at a time.
@@ -453,8 +459,23 @@ def _write_group(group: Any, spec: Mapping[str, tuple[str, str]], value: Any) ->
             group.create_dataset(name, data=np.asarray(data).astype(dtype, copy=False))
 
 
-def _read_group(group: Any, spec: Mapping[str, tuple[str, str]]) -> dict[str, Any]:
-    return {name: group[name] if name in _LAZY else np.asarray(group[name][...]) for name in spec}
+def _read_group(
+    group: Any, spec: Mapping[str, tuple[str, str]], *, but: Iterable[str] = ()
+) -> dict[str, Any]:
+    return {
+        name: group[name] if name in _LAZY else np.asarray(group[name][...])
+        for name in spec
+        if name not in but
+    }
+
+
+def _read_low(group: Any, header: Header) -> Low:
+    """A source's ``low``: its responses the file's ``ir``, or its ``compact`` read as one."""
+    slots = _read_group(group, _LOW_SLOTS) if "slot_pair" in group else {}
+    if "compact" not in group:
+        return Low(**_read_group(group, _LOW), **slots)
+    ir = CompactIr(group["compact"], header.channels, header.low_samples, header.low_sample_rate_hz)
+    return Low(ir=ir, **_read_group(group, _LOW, but=("ir",)), **slots)
 
 
 class PackWriter:
@@ -472,8 +493,13 @@ class PackWriter:
         crossover: Crossover | None = None,
         air: Air | None = None,
         directivity: Mapping[str, Directivity] | None = None,
+        low_levers: Levers | None = None,
     ) -> None:
         self.target = Path(target)
+        #: The levers ``low/ir`` is written with (:mod:`reverberate.render.compact`).
+        #: ``None`` writes a source's responses in the form they come in.
+        self.low_levers = low_levers
+        self._top_hz = _band_limit_hz(crossover or Crossover())
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self.header = header
         if hashlib.sha256(recipe).hexdigest() != header.recipe_sha256:
@@ -547,7 +573,22 @@ class PackWriter:
         _write_group(group.create_group("level"), _LEVEL, source.level)
         if source.low is not None:
             low = group.create_group("low")
-            _write_group(low, _LOW, source.low)
+            held = source.low.ir
+            levers = self.low_levers
+            if levers is None and isinstance(held, CompactIr):
+                levers = held.levers
+            if levers is None or levers.off:
+                _write_group(low, _LOW, source.low)
+            else:
+                _write_group(low, _LOW, source.low, but=("ir",))
+                write_compact(
+                    low,
+                    held,
+                    levers,
+                    rate_hz=self.header.low_sample_rate_hz,
+                    top_hz=self._top_hz,
+                    sound_speed_m_s=self.header.sound_speed_m_s,
+                )
             if source.low.slot_pair is not None:
                 # Most steps are at rest and hold one row and a weight of one: deflated.
                 for name, (dtype, _) in _LOW_SLOTS.items():
@@ -698,14 +739,7 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 **_read_group(group, _SOURCE),
                 early=Early(**_read_group(group["early"], _EARLY)),
                 level=Level(**_read_group(group["level"], _LEVEL)),
-                low=Low(
-                    **_read_group(group["low"], _LOW),
-                    **(
-                        _read_group(group["low"], _LOW_SLOTS) if "slot_pair" in group["low"] else {}
-                    ),
-                )
-                if "low" in group
-                else None,
+                low=_read_low(group["low"], header) if "low" in group else None,
                 tail=Tail(**_read_group(group["tail"], _TAIL)) if "tail" in group else None,
             )
         pack = ScenePack(

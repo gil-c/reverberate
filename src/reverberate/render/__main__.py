@@ -1,4 +1,4 @@
-"""``python -m reverberate.render``: time the engine, validate a pack, check a scene's sound."""
+"""``python -m reverberate.render``: time the engine, validate, compact or check a pack."""
 
 from __future__ import annotations
 
@@ -26,6 +26,20 @@ def main(argv: list[str] | None = None) -> int:
     check = commands.add_parser("validate", help="check a pack against the format")
     check.add_argument("pack", type=Path)
     check.add_argument("--deep", action="store_true", help="read every low band response")
+    smaller = commands.add_parser(
+        "compact", help="rewrite a pack with its low band responses in fewer bytes"
+    )
+    smaller.add_argument("pack", type=Path)
+    smaller.add_argument("out", type=Path)
+    smaller.add_argument(
+        "--levers",
+        default="",
+        help="which, between commas: bins (the transform's bins under the crossover's top),"
+        " int16 (those bins in 16 bits), degree=DB (each degree from where it holds that share"
+        " of the energy within 0.30 m of the cell), decay=DB (each degree cut that far under"
+        " the pressure's loudest moment)."
+        " None: the pack's own bytes",
+    )
     sealed = commands.add_parser("unseal", help="which variant each file of a blind set is")
     sealed.add_argument("key", type=Path, help="blind/key.sealed of a check of several packs")
     sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
@@ -82,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         print(table(report, before))
         if args.save:
             args.save.write_text(json.dumps(report, indent=2))
+    elif args.command == "compact":
+        from reverberate.render.compact import Levers, compact_pack
+
+        print(json.dumps(compact_pack(args.pack, args.out, Levers.parse(args.levers), say=print)))
     elif args.command == "unseal":
         from reverberate.render.check.many import unseal
 
