@@ -33,7 +33,9 @@ from reverberate.wave.lowband.harness import compare_responses, paper_numbers
 from reverberate.wave.lowband.pairs import (
     Item,
     LowbandPairs,
+    batch_bytes,
     batch_capacity,
+    halves,
     node_indices,
     pack_batches,
 )
@@ -435,6 +437,13 @@ CELLS = np.array([[20.0, 19.0, 18.0], [21.0, 18.0, 17.0]]) * H
 HEARD_AT = [[0, 1], [1], [0]]
 
 
+def whole_steps(campaign: LowbandPairs) -> int:
+    """The steps of a campaign's solve, which it knows once its arrays are placed."""
+    campaign.voxelise()
+    campaign.place()
+    return int(campaign.steps)
+
+
 class Driven(LowbandPairs):
     """The real campaign with the grid already voxelised, on ``numpy``."""
 
@@ -552,6 +561,99 @@ class TestTheCampaign:
         whole = campaign.items([0], 10 * rows)
         parts = campaign.items([0], rows)
         assert [i.cells for i in whole] == [(0, 1)] and [i.cells for i in parts] == [(0,), (1,)]
+
+    def test_a_launch_refused_its_memory_is_parted_and_tried_again(
+        self, machine: dict[str, Path]
+    ) -> None:
+        whole = a_campaign(machine)
+        whole.run()
+
+        class Refused(Driven):
+            """An allocator that gives no launch more than one cell's records."""
+
+            def run_batch(self, problem: Any, batch: Any, encoder: Any, xp: Any) -> Any:
+                self.asked = [*getattr(self, "asked", []), [i.cells for i in batch]]
+                if sum(len(i.cells) for i in batch) > 1:
+                    raise MemoryError("Out of memory allocating 10,834,217,984 bytes")
+                return super().run_batch(problem, batch, encoder, xp)
+
+        parted = Refused(
+            bundle=machine["bundle"], out=machine["root"] / "parted", pffdtd_dir=machine["root"]
+        )
+        report = parted.run()
+        # Three sources at once, then two and one, then the source of two cells in two solves.
+        assert len(parted.asked[0]) == 3
+        assert sorted(b["pairs"] for b in parted.batches) == [1, 1, 1, 1]
+        assert report["pairs_solved"] == 4 and parted.total_batches == 4
+        for source, cells in enumerate(HEARD_AT):
+            for cell in cells:
+                assert np.array_equal(
+                    parted.cache.read(parted.key_of(source, cell)),
+                    whole.cache.read(whole.key_of(source, cell)),
+                )
+
+        class OneCell(Driven):
+            def run_batch(self, problem: Any, batch: Any, encoder: Any, xp: Any) -> Any:
+                raise MemoryError("Out of memory allocating 1 byte")
+
+        hopeless = OneCell(
+            bundle=machine["bundle"], out=machine["root"] / "none", pffdtd_dir=machine["root"]
+        )
+        with pytest.raises(MemoryError):
+            hopeless.run()
+
+    def test_a_launch_is_held_against_what_its_own_card_has_free(
+        self, machine: dict[str, Path]
+    ) -> None:
+        class Crowded(Driven):
+            """A card with all its memory when the plan is made, and little of it after."""
+
+            looks = 0
+            holds = 0.0
+
+            def free_bytes(self, xp: Any) -> float:
+                self.looks += 1
+                if self.looks == 1:
+                    return 1e12
+                return (self.holds + 1.0) / 0.8
+
+        crowded = Crowded(
+            bundle=machine["bundle"], out=machine["root"] / "crowded", pffdtd_dir=machine["root"]
+        )
+        crowded.voxelise()
+        crowded.place()
+        problem = build_problem(read_entry(crowded.entry_path), seeds_of(crowded.grid, SOURCES))
+        rows = int(crowded.cell_nodes(0).size)
+        # What is free after the plan holds one source read at one cell, and no more.
+        crowded.holds = problem.bytes_shared() + batch_bytes(
+            [Item(0, (0,), rows)], problem, crowded.steps
+        )
+        crowded.run()
+        assert sorted(b["pairs"] for b in crowded.batches) == [1, 1, 1, 1]
+        assert crowded.parted_launches == 3
+        log = (machine["root"] / "crowded" / "campaign.log").read_text()
+        assert "is more than card None has free; parted" in log
+
+    def test_a_pair_s_key_names_the_seconds_solved_so_two_durations_never_share_one(
+        self, machine: dict[str, Path]
+    ) -> None:
+        whole = a_campaign(machine)
+        spec = json.loads((machine["bundle"] / "campaign.json").read_text())
+        spec["bands"]["low"]["duration_s"] = DURATION / 2
+        (machine["bundle"] / "campaign.json").write_text(json.dumps(spec))
+        short = a_campaign(machine, out="short")
+        assert short.key_of(0, 0) != whole.key_of(0, 0)
+        short.run()
+        response = short.cache.read(short.key_of(0, 0))
+        # Half the steps, half the samples: the trace brings it back to the pack's length.
+        assert response.shape == (9, 16) and short.steps < whole_steps(whole)
+
+    def test_halving_a_launch(self) -> None:
+        many = [Item(s, (0,), 10) for s in range(5)]
+        assert [len(part) for part in halves(many, lambda cell: 10) or []] == [2, 3]
+        one = halves([Item(7, (1, 2, 3), 30)], lambda cell: 10 * cell)
+        assert one == [[Item(7, (1,), 10)], [Item(7, (2, 3), 50)]]
+        assert halves([Item(7, (1,), 10)], lambda cell: 10) is None
 
     def test_the_fit_as_an_operator_is_the_fit_as_a_solve(self) -> None:
         rng = np.random.default_rng(3)

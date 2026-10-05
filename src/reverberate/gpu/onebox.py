@@ -145,9 +145,15 @@ ACCEL_PYTHON = "/root/accel-venv/bin/python"
 #: How often the laptop looks.
 POLL_S = 300.0
 #: How often what ``sync`` names is brought home while the campaign runs, and how long one
-#: such transfer may take before the watcher looks again; what did not come is resumed.
-SYNC_S = 600.0
-SYNC_TIMEOUT_S = 600.0
+#: such pass may take: every look, and less than the time between two looks, so that the
+#: watch is never late for a transfer. A pass that reaches its limit is ended and keeps
+#: every file that arrived whole; the next goes on from there. The whole scene's first run
+#: (2026-10-05) gave each pass ten minutes every ten: no pass ended, 846 pairs of 1.9 MB
+#: came in 1.5 h, and the looks were fifteen minutes apart instead of five.
+SYNC_S = 300.0
+SYNC_TIMEOUT_S = 270.0
+#: Of the time between two looks, what a pass may take at most.
+SYNC_SHARE = 0.9
 #: Files a campaign is still writing: they appear whole under their own name.
 PARTIAL_PATTERNS = ("*.partial.npy", "*.partial.h5", "*.partial.npz")
 #: Hosts tried, at most, when provisioning fails on one after the other.
@@ -730,6 +736,43 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
     return {"provision_s": provision_s, "push_s": push_s}
 
 
+def pairs_home(pulled: Path) -> int:
+    """The pairs that arrived whole under ``pulled/pairs``."""
+    return sum(1 for path in (Path(pulled) / "pairs").rglob("*.npy") if _whole(path))
+
+
+def _whole(path: Path) -> bool:
+    return not path.name.startswith(".") and not path.name.endswith(".partial.npy")
+
+
+def clear_cut_files(pulled: Path) -> int:
+    """Remove what a pass ended at its limit left of its last file; how many.
+
+    rsync receives a file under a hidden name beside its place and renames
+    it when it is whole. Ended from outside it leaves that name, which no
+    later pass looks for.
+    """
+    removed = 0
+    for path in (Path(pulled) / "pairs").rglob(".*.npy.*"):
+        path.unlink(missing_ok=True)
+        removed += 1
+    return removed
+
+
+def pairs_on_machine(machine: Any) -> int | None:
+    """The pairs the campaign has written so far; ``None`` when the machine does not say."""
+    try:
+        printed = run_on(
+            machine,
+            f"find {REMOTE_OUT}/pairs -name '*.npy' ! -name '*.partial.npy' 2>/dev/null | wc -l",
+            what="count pairs",
+            timeout=60,
+        )
+        return int(printed.strip().split()[-1])
+    except Exception:  # noqa: BLE001 - a count is a line of the log, not the campaign
+        return None
+
+
 def sync_home(
     machine: Any,
     home: Path,
@@ -738,17 +781,23 @@ def sync_home(
     *,
     timeout: float | None = SYNC_TIMEOUT_S,
 ) -> bool:
-    """What is new of ``items`` in the run directory, into ``home/pulled``; whether it came.
+    """What is new of ``items`` in the run directory, into ``home/pulled``; whether all came.
 
-    Incremental and resumed: a file already home is not sent again, and a
-    transfer cut by ``timeout`` or by the connection leaves what arrived.
-    Files the campaign is still writing are left. Never raises: the
-    campaign matters more than its copy, and the next look tries again.
+    Incremental and bounded: a file already home is not sent again, and a
+    pass that reaches ``timeout`` is ended there with every whole file it
+    brought kept, which is a pass and not a failure: the next goes on.
+    Files the campaign is still writing are left. The pairs home are said
+    against those on the machine. Never raises: the campaign matters more
+    than its copy, and the next look tries again.
     """
     if not items:
         return True
     pulled = Path(home) / "pulled"
     pulled.mkdir(parents=True, exist_ok=True)
+    counted = "pairs" in items
+    before = pairs_home(pulled) if counted else 0
+    started = time.time()
+    came, note = True, ""
     try:
         rsync(
             machine,
@@ -761,10 +810,24 @@ def sync_home(
             timeout=timeout,
         )
     except Exception as error:  # noqa: BLE001 - a copy that failed is tried again
-        if "No such file" not in str(error):
+        came = False
+        if "No such file" in str(error):
+            return False
+        if "did not end in" in str(error):
+            note = f"; the pass ended at its {timeout:g} s and the next goes on"
+        else:
             say(f"  homecoming of {', '.join(items)} not complete: {str(error)[:160]}")
-        return False
-    return True
+    if counted:
+        clear_cut_files(pulled)
+        now = pairs_home(pulled)
+        there = pairs_on_machine(machine)
+        say(
+            f"  pairs home: {now} of {'?' if there is None else there} on the machine"
+            f" (+{now - before} in {time.time() - started:.0f} s){note}"
+        )
+    elif note:
+        say(f"  homecoming of {', '.join(items)}{note}")
+    return came
 
 
 def watch(
@@ -785,7 +848,8 @@ def watch(
 
     A failed or stalled campaign is relaunched once from its state on disk;
     the second time it is the outcome. Every ``sync_s`` what ``sync`` names
-    is brought home (:func:`sync_home`). A look that cannot be taken (the
+    is brought home (:func:`sync_home`), within the pause between two looks.
+    A look that cannot be taken (the
     API or the laptop's own line failing) is said and taken again: only
     the deadline, the campaign's end or the instance's ends the watch.
     """
@@ -826,11 +890,17 @@ def watch(
         if time.time() > deadline - 1200:
             say("within 20 minutes of the rental's deadline; fetching what exists")
             return "deadline"
+        spent = 0.0
         if sync and time.time() - synced >= sync_s:
-            came = sync_home(machine, home, sync, say)
-            synced = time.time()
-            record["synced"] = {"at": synced, "complete": came, "items": list(sync)}
-        time.sleep(poll_s)
+            # Out of the pause between two looks, never added to it.
+            limit = SYNC_TIMEOUT_S if poll_s <= 0 else min(SYNC_TIMEOUT_S, SYNC_SHARE * poll_s)
+            began = time.time()
+            came = sync_home(machine, home, sync, say, timeout=limit)
+            spent = time.time() - began
+            # Counted from the pass's start: one that took its whole limit is not skipped next.
+            synced = began
+            record["synced"] = {"at": began + spent, "complete": came, "items": list(sync)}
+        time.sleep(max(0.0, poll_s - spent))
 
 
 def fetch(

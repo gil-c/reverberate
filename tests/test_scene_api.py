@@ -30,6 +30,7 @@ from reverberate.scenes import (
     recipe_sha256,
     source_state,
 )
+from reverberate.trace.plan import Profile, tracks_of
 from reverberate.viz.scene_api import (
     SceneError,
     SceneService,
@@ -111,7 +112,8 @@ def test_the_schema_is_the_parameters_themselves() -> None:
         assert all(entry["min"] <= value <= entry["max"] for value in values), entry["name"]
     by_name = {entry["name"]: entry for entry in schema}
     assert by_name["near_voice_count"]["type"] == "integer"
-    assert by_name["rail_pitch_m"]["fixed"], "rule 4 leaves no choice of the rails' pitch"
+    pitch = by_name["rail_pitch_m"]
+    assert (pitch["min"], pitch["max"], pitch["fixed"]) == (0.08, 0.12, False)
     assert by_name["speed_m_s"]["max"] == 1.5, "rule 7's speed"
 
 
@@ -123,7 +125,7 @@ def test_parameters_outside_the_schema_are_refused_by_name() -> None:
         ({"overlap_share": 1.5}, "overlap_share"),
         ({"near_voice_count": [1]}, "near_voice_count"),
         ({"loudness": 3}, "loudness"),
-        ({"rail_pitch_m": 0.1}, "rail_pitch_m"),
+        ({"rail_pitch_m": 0.2}, "rail_pitch_m"),
     ):
         with pytest.raises(SceneError, match=said) as refused:
             parameters_from(flat)
@@ -161,7 +163,22 @@ def test_generation_returns_the_generators_own_recipe_and_writes_nothing(site: _
     assert answer["describe"] == describe(expected)
     assert answer["violations"] == [] and answer["floor_checked"]
     positions = low_band_positions(expected)
-    assert answer["low_band_positions"] == {**positions, "total": sum(positions.values())}
+    assert answer["low_band_positions"] == {**positions, "total": positions["all"]}
+    assert positions["all"] == sum(
+        positions[kind] for kind in ("stations", "rail_samples", "seat_rail_samples")
+    )
+    # What a trace solves, as its dry run counts it: by the positions a rail's source reads.
+    solved = answer["low_band_solved"]
+    assert solved["pitch_m"] == 0.08
+    assert solved["by_rail_positions"] == {
+        "2": positions["audible"],
+        "8": tracks_of(expected, Profile(rail_positions=8)).positions.shape[0],
+    }
+    assert solved["by_rail_positions"]["2"] == tracks_of(expected).positions.shape[0]
+    assert f"{positions['audible']} where a source is audible" in describe(expected)
+    eight = describe(expected, 8)
+    assert f"{solved['by_rail_positions']['8']} where a source is audible" in eight
+    assert "(rails every 0.08 m, 8 positions read)" in eight
     assert answer["parameters"] == _flat(SMALL)
     assert answer["placeholder_clips"] and answer["placeholder_assets"]
     assert not site.recipes.exists()

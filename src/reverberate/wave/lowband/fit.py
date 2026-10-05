@@ -312,6 +312,19 @@ class CellEncoder:
                 self.prepare_s += encoder.prepare_s
             return self.operators[key]
 
+    def prepare_for(self, steps: int) -> None:
+        """The resampler of records of ``steps`` samples, made before any record exists.
+
+        It stays on the card for the campaign. Made inside the first cell's
+        filters it was cut from a block those filters had just freed, and
+        the pool could then never give that block back.
+        """
+        if self.xp is np:
+            return
+        if self.resampler is None or self.resampler.n_orig != int(steps):
+            self.resampler = Resampler.prepare(int(steps), self.grid_rate_hz, LOW_RATE_HZ, self.xp)
+        self.xp.get_default_memory_pool().free_all_blocks()
+
     def signals(self, u_out: Any) -> Any:
         """Node records at the grid's rate as responses at 4 kHz over the window, float64."""
         xp = self.xp

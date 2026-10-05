@@ -49,6 +49,8 @@ import numpy as np
 from reverberate.render.engine import Engine
 from reverberate.render.pack import SCHEMA as PACK_SCHEMA
 from reverberate.render.pack import ScenePack
+from reverberate.render.variant import label_of
+from reverberate.render.variant import summary as variant_summary
 from reverberate.spatial.sh import real_sh, scene_to_ambisonic
 from reverberate.viz.audit_dry import dry_track
 from reverberate.viz.audit_stems import AuditSettings, Session, StemService
@@ -83,6 +85,24 @@ def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
+def scene_digest(f: h5py.File) -> str:
+    """The digest of where the head and every source are at every step: one scene's.
+
+    Two packs of one recipe have it in common, and so have two packs whose
+    recipes differ by their rails' pitch alone, which changes where the low
+    band is solved and nothing of the movements: the page lets the owner
+    switch between such packs at one instant.
+    """
+    held = hashlib.sha256()
+    held.update(f"{int(f.attrs['steps'])} {float(f.attrs['step_s'])!r}".encode())
+    held.update(np.ascontiguousarray(f["listener/position"][...], dtype="<f8").tobytes())
+    for name in sorted(f["sources"]):
+        held.update(name.encode())
+        position = f["sources"][name]["position"][...]
+        held.update(np.ascontiguousarray(position, dtype="<f8").tobytes())
+    return held.hexdigest()
+
+
 def describe_pack(path: Path) -> dict[str, Any] | None:
     """What a pack says of itself, read off its attributes; ``None`` if it is not one."""
     try:
@@ -100,9 +120,18 @@ def describe_pack(path: Path) -> dict[str, Any] | None:
                 }
                 for name, group in f["sources"].items()
             ]
+            text = a.get("provenance_json", "{}")
+            try:
+                provenance = dict(json.loads(_text(text)))
+            except ValueError:
+                provenance = {}
+            told = variant_summary(path, provenance)
             return {
                 "id": hashlib.sha256(str(path).encode()).hexdigest()[:12],
-                "name": path.stem if path.stem != "pack" else path.parent.name,
+                # A variant's pack is called by its variant; any other, as it lies.
+                "name": told["name"] or label_of(path),
+                "variant": told,
+                "scene_sha256": scene_digest(f),
                 "path": str(path),
                 "bytes": path.stat().st_size,
                 "profile": _text(a["profile"]),
@@ -438,7 +467,16 @@ class AuditService:
                 if listed:
                     # A page is looking at packs: the workers are up before it presses play.
                     self.stems.start()
-                return [{**pack, "matches": pack["recipe_sha256"] == wanted} for pack in listed]
+                # A pack of the recipe on show, or of the same scene under another recipe.
+                scenes = {p["scene_sha256"] for p in listed if p["recipe_sha256"] == wanted}
+                return [
+                    {
+                        **pack,
+                        "matches": pack["recipe_sha256"] == wanted,
+                        "same_scene": pack["scene_sha256"] in scenes,
+                    }
+                    for pack in listed
+                ]
             case ("GET", ["tracks"]):
                 return pack_tracks(self._session(query))
             case ("POST", ["status"]):

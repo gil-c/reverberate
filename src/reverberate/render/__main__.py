@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     check = commands.add_parser("validate", help="check a pack against the format")
     check.add_argument("pack", type=Path)
     check.add_argument("--deep", action="store_true", help="read every low band response")
+    sealed = commands.add_parser("unseal", help="which variant each file of a blind set is")
+    sealed.add_argument("key", type=Path, help="blind/key.sealed of a check of several packs")
     sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
     sound.add_argument("pack", type=Path)
     sound.add_argument(
@@ -51,11 +53,20 @@ def main(argv: list[str] | None = None) -> int:
     sound.add_argument(
         "--against",
         type=Path,
-        metavar="B.h5",
-        help="only this: another pack of the same recipe. The same window of both, two ears "
-        "of each at one gain (listen/A_*.wav, listen/B_*.wav), and B less A a third octave "
-        "at a time, early and late (ab.md)",
+        nargs="+",
+        metavar="PACK",
+        help="other packs of the same scene. One: the two side by side, as files to hear at"
+        " one gain and their difference by third octave (ab.md). Several, or with --names:"
+        " a file for each at one gain, each one's difference from the first, and a blind"
+        " set (variants.md)",
     )
+    sound.add_argument(
+        "--names",
+        nargs="+",
+        help="with --against: the packs' names, the first pack's first; left out, each is"
+        " named by the variant.json beside it",
+    )
+    sound.add_argument("--blind-seed", type=int, help="the blind set's order, for a test")
     sound.add_argument("--probe-seconds", type=float, default=5.0, help="of each steady probe")
     sound.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     args = parser.parse_args(argv)
@@ -71,6 +82,11 @@ def main(argv: list[str] | None = None) -> int:
         print(table(report, before))
         if args.save:
             args.save.write_text(json.dumps(report, indent=2))
+    elif args.command == "unseal":
+        from reverberate.render.check.many import unseal
+
+        for hidden, name in sorted(unseal(args.key).items()):
+            print(f"{hidden}: {name}")
     elif args.command == "check":
         from reverberate.render.check.report import defaults, exit_code, run
         from reverberate.render.check.run import CheckSettings
@@ -86,12 +102,30 @@ def main(argv: list[str] | None = None) -> int:
                     pack, found["reference"], args.out, sources=args.sources, workers=args.workers
                 )
             return 0
+        if args.against is not None and (len(args.against) > 1 or args.names):
+            from reverberate.render.check import many
+
+            many.run(
+                args.pack,
+                args.against,
+                args.out,
+                names=args.names,
+                recipe_path=args.recipe,
+                clips_root=found["clips_root"],
+                manifest=found["manifest"],
+                window_s=None if args.window is None else (args.window[0], args.window[1]),
+                sources=args.sources,
+                measured_head=found["measured_head"],
+                settings=CheckSettings(probe_seconds=args.probe_seconds, workers=args.workers),
+                blind_seed=args.blind_seed,
+            )
+            return 0
         if args.against is not None:
             from reverberate.render.check import against
 
             against.run(
                 args.pack,
-                args.against,
+                args.against[0],
                 args.out,
                 recipe_path=args.recipe,
                 clips_root=found["clips_root"],

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -471,7 +472,7 @@ class TestTheHomecoming:
         self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def cut(*a: Any, **k: Any) -> None:
-            raise RemoteError("rsync down did not end in 600 s")
+            raise RemoteError("rsync down failed: broken pipe", 12)
 
         monkeypatch.setattr(onebox, "rsync", cut)
         said: list[str] = []
@@ -484,7 +485,86 @@ class TestTheHomecoming:
             lambda *a, **k: (_ for _ in ()).throw(RemoteError("No such file or directory", 23)),
         )
         assert onebox.sync_home("m", rental["home"], ("pairs",), said.append) is False
-        assert len(said) == 1
+        assert len(said) == 2
+
+    def test_a_pass_that_reaches_its_limit_keeps_what_came_and_says_how_much(
+        self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = rental["home"]
+        grid = home / "pulled" / "pairs" / "grid" / "aa"
+        on_machine = {"n": 7}
+
+        def bounded(machine: Any, sources: Any, target: str, **given: Any) -> None:
+            # Two files arrive whole; the third is cut under rsync's hidden name.
+            grid.mkdir(parents=True, exist_ok=True)
+            held = len(list(grid.glob("[!.]*.npy")))
+            for index in range(held, held + 2):
+                (grid / f"aa{index}.npy").write_bytes(b"whole")
+            (grid / f".aa{held + 2}.npy.Xy12Zw").write_bytes(b"cu")
+            raise RemoteError(f"rsync down did not end in {given['timeout']:g} s")
+
+        monkeypatch.setattr(onebox, "rsync", bounded)
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: f"{on_machine['n']}\n")
+        said: list[str] = []
+        assert onebox.sync_home("m", home, ("pairs",), said.append, timeout=5.0) is False
+        assert onebox.sync_home("m", home, ("pairs",), said.append, timeout=5.0) is False
+        assert "pairs home: 2 of 7 on the machine (+2 in" in said[0]
+        assert "the pass ended at its 5 s and the next goes on" in said[0]
+        assert "pairs home: 4 of 7 on the machine (+2 in" in said[1]
+        assert "not complete" not in "".join(said)
+        # What a pass left of its last file is not kept, and is not counted as a pair.
+        assert not list(grid.glob(".*")) and onebox.pairs_home(home / "pulled") == 4
+        # A machine that does not answer the count is a question mark, not a failure.
+        monkeypatch.setattr(onebox, "run_on", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+        monkeypatch.setattr(onebox, "rsync", lambda *a, **k: None)
+        assert onebox.sync_home("m", home, ("pairs",), said.append) is True
+        assert "pairs home: 4 of ? on the machine (+0 in" in said[2]
+
+    def test_a_pass_is_taken_out_of_the_pause_between_two_looks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        clock = {"t": 1000.0}
+        slept: list[float] = []
+        limits: list[float] = []
+        looks = {"n": 0}
+
+        def look(*a: Any, **k: Any) -> Any:
+            looks["n"] += 1
+            return SimpleNamespace(
+                line=lambda: "look",
+                instance_alive=looks["n"] < 4,
+                done=False,
+                failed=False,
+                stalled=False,
+            )
+
+        def home_pass(machine: Any, home: Path, items: Any, say: Any, *, timeout: float) -> bool:
+            limits.append(timeout)
+            clock["t"] += timeout
+            return False
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["t"] += seconds
+
+        monkeypatch.setattr(onebox, "monitor_once", look)
+        monkeypatch.setattr(onebox, "sync_home", home_pass)
+        monkeypatch.setattr(time, "time", lambda: clock["t"])
+        monkeypatch.setattr(time, "sleep", sleep)
+        onebox.watch(
+            None,
+            1,
+            "m",
+            lambda: None,
+            deadline=1e9,
+            poll_s=300.0,
+            record={"watches": []},
+            home=tmp_path,
+            say=lambda m: None,
+            sync=("pairs",),
+        )
+        # The first look syncs nothing; then every look does, and the looks stay 300 s apart.
+        assert limits == [270.0, 270.0] and slept == [300.0, 30.0, 30.0]
 
     def test_a_pair_cut_in_its_transfer_is_not_installed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -231,6 +231,16 @@ export function createSummary(root) {
         ["  on rails", String(cost.rail_samples)],
         ["  on seats", String(cost.seat_rail_samples)],
       ];
+      const solved = report.low_band_solved;
+      if (solved) {
+        for (const [count, positions] of Object.entries(solved.by_rail_positions)) {
+          lines.push([
+            `  solved, ${count} read`,
+            String(positions),
+            `what a trace with --rail-positions ${count} solves at a rail pitch of ${solved.pitch_m} m: the positions a source is audible at`,
+          ]);
+        }
+      }
       if (report.placeholder_clips) lines.push(["clips", "placeholders", "the recipe names no audio; a trace refuses it"]);
       if (report.placeholder_assets) lines.push(["assets", "placeholders", "the asset keys match nothing; a trace refuses it"]);
       if (recipe.generator) lines.push(["generator", `${recipe.generator.name} ${recipe.generator.version}`]);

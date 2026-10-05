@@ -99,6 +99,12 @@ _DWELLING = re.compile(r"[a-z0-9_]+")
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+#: The widest pitch the panel offers, and the readings whose solves it counts: two positions
+#: read linearly, and the eight ``docs/open-questions/rail-interpolation.md`` measured.
+RAIL_PITCH_WIDEST_M = 0.12
+RAIL_POSITIONS_OFFERED = (2, 8)
+
+
 class SceneError(Exception):
     """A request that cannot be served, with the HTTP status that says why."""
 
@@ -134,8 +140,9 @@ _LIMITS_BY_FIELD: dict[str, tuple[float, float, float]] = {
     "near_distance_m": (HEAD_CLEARANCE_M, 30.0, 0.1),
     "far_distance_m": (HEAD_CLEARANCE_M, 30.0, 0.1),
     "listener_gaze_jitter_deg": (0.0, 90.0, 1.0),
-    # Rule 4: a rail's pitch is not a choice.
-    "rail_pitch_m": (RAIL_PITCH_M, RAIL_PITCH_M, 0.01),
+    # Rule 4: a rail's pitch, from the one two positions read linearly need to the widest
+    # a trace of more positions (``--rail-positions 8``) was measured at.
+    "rail_pitch_m": (RAIL_PITCH_M, RAIL_PITCH_WIDEST_M, 0.01),
 }
 
 
@@ -327,7 +334,17 @@ def report(recipe: Recipe, floor: Floor | None) -> dict[str, Any]:
         # Without the dwelling, rules 3, 4 and 6 are checked in part only.
         "floor_checked": floor is not None,
         "floor_rules": list(FLOOR_RULES),
-        "low_band_positions": {**positions, "total": sum(positions.values())},
+        # ``total`` is every position, each once: the three kinds it is split into. It was
+        # the sum of every count of the record, ``all`` and ``audible`` among them.
+        "low_band_positions": {**positions, "total": positions["all"]},
+        # What a trace solves, by the positions a source on a rail reads: a dry run's count.
+        "low_band_solved": {
+            "pitch_m": recipe.rails[0].pitch_m if recipe.rails else RAIL_PITCH_M,
+            "by_rail_positions": {
+                str(count): low_band_positions(recipe, count)["audible"]
+                for count in RAIL_POSITIONS_OFFERED
+            },
+        },
         "parameters": restored,
         "placeholder_clips": "placeholder" in libraries,
     }

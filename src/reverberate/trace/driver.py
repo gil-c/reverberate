@@ -27,7 +27,7 @@ import h5py
 from reverberate.scenes import Recipe
 from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
 from reverberate.trace.bundle import build_bundle
-from reverberate.trace.plan import Plan, Profile, estimate, make_plan
+from reverberate.trace.plan import RAYS_MEASURED, Plan, Profile, estimate, make_plan
 
 __all__ = ["cost_records", "describe", "finish", "launch", "stamp_cost"]
 
@@ -210,6 +210,7 @@ def launch(
     plan_offers: bool = False,
     low_scheme: str = "cartesian",
     low_ppw: float | None = None,
+    low_seconds: float | None = None,
     reuse_from: Path | None = None,
     fetch_early: bool = False,
     destroy_failed: bool = False,
@@ -253,6 +254,8 @@ def launch(
     """
     home = Path(home)
     plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=patch_centre_xz)
+    cast = int(assets.settings.rays.rays)
+    rays = None if cast == RAYS_MEASURED else cast
     brought = (
         plan.profile.seconds is None if fetch_pairs is None else bool(fetch_pairs)
     ) or publish_pairs
@@ -263,6 +266,8 @@ def launch(
         check=check,
         low_engine=low_engine,
         low_ppw=low_ppw if low_engine == "lowband" else None,
+        low_seconds=low_seconds,
+        rays=rays,
     )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
@@ -283,15 +288,18 @@ def launch(
     repo = repo or Path(__file__).resolve().parents[3]
     bundle = home / "bundle"
     asked = {"engine": low_engine, "scheme": low_scheme, "ppw": low_ppw}
+    if low_seconds is not None:
+        asked["seconds"] = float(low_seconds)
     earlier = bundle / "campaign.json"
     if earlier.is_file():
         # Two grids' runs in one home would leave one's pack beside the other's pairs.
         held = dict(json.loads(earlier.read_text()).get("trace", {})).get("low")
-        was = None if held is None else {name: held.get(name) for name in asked}
+        named = [*asked, *(["seconds"] if held and "seconds" in held else [])]
+        was = None if held is None else {name: held.get(name) for name in dict.fromkeys(named)}
         if was is not None and was != asked:
             raise SystemExit(
                 f"{home} is the home of a run whose low band is {was}, not {asked}:"
-                " another grid or engine has its own home"
+                " another grid, engine or duration has its own home"
             )
     campaign = build_bundle(
         bundle,
@@ -307,6 +315,7 @@ def launch(
         low_engine=low_engine,
         low_scheme=low_scheme,
         low_ppw=low_ppw,
+        low_seconds=low_seconds,
         reuse_from=reuse_from,
     )
     found = found_assets(
@@ -365,6 +374,8 @@ def launch(
             check=check,
             low_engine=low_engine,
             low_ppw=low_ppw,
+            low_seconds=low_seconds,
+            rays=rays,
         )
         if low_engine == "lowband"
         else None,

@@ -82,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("describe", help="a recipe in words")
     p.add_argument("recipe", type=Path)
+    p.add_argument(
+        "--rail-positions",
+        type=int,
+        default=2,
+        metavar="N",
+        help="count the low band's positions as a trace of this --rail-positions solves them",
+    )
 
     p = sub.add_parser("clips", help="the library of dry clips: fetch, check, curate")
     action = p.add_subparsers(dest="action", required=True)
@@ -155,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "clips":
         return _clips(args)
     if args.command == "describe":
-        print(describe(load_recipe(args.recipe)))
+        print(describe(load_recipe(args.recipe), args.rail_positions))
         return 0
 
     if args.command == "validate":

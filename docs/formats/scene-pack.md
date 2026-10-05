@@ -833,6 +833,8 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `code_version` | the commit of `reverberate` that traced |
 | `solver` | the low band engine and its commit or version |
 | `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
+| `low_seconds` | present only when the low band was solved for fewer seconds than `low_samples` hold (`--low-seconds`): every `low/ir` is then faded to nothing over the 20 ms before that time and silent after it |
+| `rays` | present only when a tail site cast another number of rays than 100 000 (`--rays`) |
 | `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |
 | `created_utc` | |
 | `profile` | what of the recipe was traced: `{"seconds", "sources", "patch", "start_s"}`, all `null`, `false` and `0` for the whole scene |

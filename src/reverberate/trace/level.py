@@ -41,6 +41,7 @@ from reverberate.mirror.tails import TailTable
 from reverberate.spatial.lowband import (
     LOW_DURATION_S,
     LOW_RATE_HZ,
+    LOW_SAMPLES,
     decimate,
     delayed,
     low_side,
@@ -51,13 +52,42 @@ from reverberate.spatial.translate import MODE_FUSED
 from reverberate.trace.assets import FIELD_RATE_HZ, MirrorAssets
 
 __all__ = [
+    "LOW_FADE_S",
     "first_arrival_s",
+    "at_pack_length",
     "mirror_omni",
     "pair_low",
     "pair_omni",
     "pair_seam_db",
     "step_levels",
 ]
+
+
+#: A response solved for fewer seconds than the pack keeps ends in a raised cosine this long.
+LOW_FADE_S = 0.02
+
+
+def at_pack_length(cached: Any, samples: int = LOW_SAMPLES) -> Any:
+    """A pair's response in the cache form at the pack's length, ``[channel, samples]``.
+
+    A response of that length is returned as it is, the same array. One
+    solved for fewer seconds (``--low-seconds``) is faded to nothing over
+    its last :data:`LOW_FADE_S`, a raised cosine that ends where the solve
+    did, and is followed by silence: the pack's ``low_samples`` and the
+    engine's reading of it do not change.
+    """
+    held = int(cached.shape[-1])
+    if held == samples:
+        return cached
+    if held > samples:
+        raise ValueError(f"a response of {held} samples is longer than the pack's {samples}")
+    fade = min(held, int(round(LOW_FADE_S * LOW_RATE_HZ)))
+    whole = np.zeros((*cached.shape[:-1], samples), dtype=np.float32)
+    whole[..., :held] = cached
+    whole[..., held - fade : held] *= (
+        0.5 + 0.5 * np.cos(np.pi * (np.arange(fade) + 1.0) / fade)
+    ).astype(np.float32)
+    return whole
 
 
 def pair_low(

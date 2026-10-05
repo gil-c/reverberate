@@ -21,6 +21,7 @@
  * dragging the view is turning the head, the listener's place staying the
  * scene's.
  */
+import { sameScene, scenePacks, stepVariant, variantCost, variantLabels, variantName, variantTitle } from "./variants.js";
 import { headMatrix3, filterSpectra, rotateSpectra } from "./sound-decode.js";
 import {
   DEFAULT_LEVEL_DB,
@@ -89,6 +90,10 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
     }
     return group;
   };
+  // The packs of the scene on show, when there are several: one press changes the pack
+  // heard at the same instant. Filled by `say`.
+  const variantRow = seg("variants", [], "the packs of this scene: press one to hear it from the same instant ([ and ] step through them)");
+  let variantsShown = "";
   const heads = seg("whose", [["scene", "scene's head"], ["mine", "my head"]], "whose head turns the field");
   const voices = seg("voices", [["pack", "as traced"], ["on", "directive"], ["off", "omni"]], "voice directivity; changing it renders the stems it concerns again");
   const level = make("label", "tl-trail");
@@ -112,7 +117,7 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
   verify.title = "hash the bytes the page receives for the chunk under the cursor and compare with the engine's";
   const badge = make("span", "tl-badge");
   const note = make("span", "note tl-note");
-  bar.append(make("span", "tl-tag", "sound"), pick, heads, voices, level, clipBadge, ahead, verify, badge, note);
+  bar.append(make("span", "tl-tag", "sound"), pick, variantRow, heads, voices, level, clipBadge, ahead, verify, badge, note);
   root.querySelector(".tl-bar").after(bar);
 
   // --- state ------------------------------------------------------------------
@@ -378,6 +383,21 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
     }
     voices.hidden = !(pack && pack.directivity_switch);
     verify.disabled = !pack;
+    const offered = scenePacks(packs, pack);
+    const key = `${offered.map((entry) => entry.id).join(",")}|${pack ? pack.id : ""}`;
+    if (key !== variantsShown) {
+      variantsShown = key;
+      const labels = variantLabels(offered);
+      variantRow.replaceChildren(
+        ...offered.map((entry, index) => {
+          const button = make("button", entry.id === pack.id ? "on" : "", labels[index]);
+          button.type = "button";
+          button.dataset.value = entry.id;
+          button.title = variantTitle(entry, offered[0]);
+          return button;
+        })
+      );
+    }
     const placeholders = status ? Object.values(status.sources).filter((source) => source.placeholder).length : 0;
     badge.textContent = placeholders ? "placeholder audio" : "";
     badge.title = status
@@ -391,6 +411,8 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
       return;
     }
     const parts = [];
+    // Which pack is heard, and what it cost, where the scene has several.
+    if (scenePacks(packs, pack).length) parts.push([variantName(pack), variantCost(pack)].filter(Boolean).join(": "));
     if (failure) parts.push(failure);
     else if (!status) parts.push("opening the pack");
     else {
@@ -442,7 +464,10 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
     const mine = opened;
     say();
     const tracks = scene.tracks();
-    if (!tracks || tracks.recipe_sha256 !== pack.recipe_sha256) {
+    // A pack of the scene on show under another recipe (its rails solved at another pitch)
+    // moves nothing on the picture: the tracks stay, and so does the instant.
+    const shown = tracks ? packs.find((entry) => entry.recipe_sha256 === tracks.recipe_sha256) : null;
+    if (!tracks || (tracks.recipe_sha256 !== pack.recipe_sha256 && !(shown && sameScene(shown, pack)))) {
       // A pack whose recipe is not on show: the pack itself says where everything is.
       try {
         const own = await api(`tracks?${query()}`);
@@ -641,6 +666,18 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
     list(tracks ? tracks.recipe_sha256 : null);
   });
   pick.addEventListener("change", () => open(pick.value));
+  variantRow.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || !pack || button.dataset.value === pack.id) return;
+    // The same scene: the transport keeps its instant and the stream starts again there.
+    open(button.dataset.value);
+  });
+  root.ownerDocument.addEventListener("keydown", (event) => {
+    const typing = event.target && event.target.closest ? event.target.closest("input, select, textarea") : null;
+    if ((event.key !== "[" && event.key !== "]") || typing) return;
+    const next = stepVariant(scenePacks(packs, pack), pack ? pack.id : null, event.key === "]" ? 1 : -1);
+    if (next && pack && next.id !== pack.id) open(next.id);
+  });
   heads.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button) return;
@@ -678,7 +715,15 @@ export function createSceneSound({ THREE, viewport, scene, root }) {
     /** For a check that cannot listen: what the stage is doing. */
     state: () => ({
       pack: pack ? pack.id : null,
-      packs: packs.map((entry) => ({ id: entry.id, name: entry.name, matches: entry.matches })),
+      packs: packs.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        matches: entry.matches,
+        recipe_sha256: entry.recipe_sha256,
+        scene_sha256: entry.scene_sha256,
+        variant: entry.variant,
+      })),
+      variants: scenePacks(packs, pack).map((entry) => entry.id),
       streaming,
       starved,
       held: clock.held(),

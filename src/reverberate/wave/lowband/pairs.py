@@ -50,8 +50,10 @@ __all__ = [
     "SOLVER",
     "Item",
     "LowbandPairs",
+    "batch_bytes",
     "batch_capacity",
     "estimate",
+    "halves",
     "node_indices",
     "pack_batches",
     "solver_name",
@@ -88,11 +90,19 @@ PPW_EXPONENT = 2.96
 #: solve held on it: the realistic recipe's 1646 positions took 1763 solves there.
 MEASURED_CARD_GIB = 20.0
 CELLS_A_SOLVE_MEASURED = 57
+#: The seconds those solves simulated: a solve, and a cell's records, go as them.
+MEASURED_DURATION_S = 1.2
 #: Bytes of record a cell takes on the measured grid: 984 nodes, 4 bytes a step.
 CELL_RECORD_BYTES_AT_1500 = 984 * 4.0 * STEPS_AT_1500
 
 
-def cells_a_solve(card_gib: float, *, ppw: float | None = None, fmax_hz: float = 1500.0) -> int:
+def cells_a_solve(
+    card_gib: float,
+    *,
+    ppw: float | None = None,
+    fmax_hz: float = 1500.0,
+    duration_s: float = MEASURED_DURATION_S,
+) -> int:
     """The cells one solve can be read at on a card of ``card_gib``; 0 when it holds none.
 
     The batch's share of the card (:data:`MEMORY_SHARE`) less what the
@@ -101,21 +111,25 @@ def cells_a_solve(card_gib: float, *, ppw: float | None = None, fmax_hz: float =
     makes this give the 57 cells measured on a 20 GiB card, 9.8 GB, scaled
     as the nodes of another grid. A cell's array has the same number of
     nodes on every grid (its radius is twelve steps) and its records go as
-    the steps.
+    the steps, which go as the grid's step and as the seconds simulated.
     """
     points = MEASURED_PPW if ppw is None else float(ppw)
     grid = (points / MEASURED_PPW) * (fmax_hz / 1500.0)
-    record = CELL_RECORD_BYTES_AT_1500 * grid
+    record = CELL_RECORD_BYTES_AT_1500 * grid * (float(duration_s) / MEASURED_DURATION_S)
     share = MEMORY_SHARE * MEASURED_CARD_GIB * 2.0**30
     taken = (share - CELLS_A_SOLVE_MEASURED * CELL_RECORD_BYTES_AT_1500) * grid**3
     return int(max(0.0, MEMORY_SHARE * float(card_gib) * 2.0**30 - taken) // record)
 
 
 def solves_needed(
-    cells_a_position: list[int], card_gib: float, *, ppw: float | None = None
+    cells_a_position: list[int],
+    card_gib: float,
+    *,
+    ppw: float | None = None,
+    duration_s: float = MEASURED_DURATION_S,
 ) -> int | None:
     """Solves for positions heard at these many cells each; ``None`` on a card too small."""
-    held = cells_a_solve(card_gib, ppw=ppw)
+    held = cells_a_solve(card_gib, ppw=ppw, duration_s=duration_s)
     if held < 1:
         return None
     return int(sum(-(-int(count) // held) for count in cells_a_position if count > 0))
@@ -283,6 +297,31 @@ def pack_batches(
     return batches
 
 
+def batch_bytes(batch: list[Item], problem: Problem, steps: int) -> float:
+    """What a launch holds on its card besides the grid: its sources' fields and its records."""
+    fixed = problem.bytes_per_source() + 32.0 * steps
+    return float(sum(fixed + 4.0 * steps * item.rows for item in batch))
+
+
+def halves(batch: list[Item], rows_of: Any) -> list[list[Item]] | None:
+    """A launch its card does not hold, as two that ask for less; ``None`` when nothing is less.
+
+    Several sources are parted first, which halves their fields and their
+    records; one source alone is then solved twice, each time for half of
+    its cells. ``rows_of`` gives a cell's nodes. One source read at one
+    cell cannot be made smaller.
+    """
+    if len(batch) > 1:
+        middle = len(batch) // 2
+        return [batch[:middle], batch[middle:]]
+    item = batch[0]
+    if len(item.cells) < 2:
+        return None
+    middle = len(item.cells) // 2
+    parts = (item.cells[:middle], item.cells[middle:])
+    return [[Item(item.source, part, sum(int(rows_of(c)) for c in part))] for part in parts]
+
+
 @dataclass
 class LowbandPairs(PairsCampaign):
     """The pairs of a bundle on the batched solver, one worker a card."""
@@ -434,6 +473,39 @@ class LowbandPairs(PairsCampaign):
         free, _ = xp.cuda.Device().mem_info
         return float(free)
 
+    def release(self, xp: Any) -> None:
+        """Give the device back what the pool holds free, before a launch and after a refusal.
+
+        The pool keeps a block it was given until every part of it is free.
+        A launch's records are one block of gigabytes; left in the pool, the
+        next launch's small arrays are cut from it and hold the whole of it,
+        and that launch's own records are then asked of a device that no
+        longer has them. So measured on 8 x RTX 3090 (2026-10-05): a launch
+        of 10.8 GB of records refused with 15.0 GB held, of which 8.4 GB
+        were the launch before's.
+        """
+        if xp is not np:
+            xp.get_default_memory_pool().free_all_blocks()
+
+    def fits(self, problem: Problem, batch: list[Item], xp: Any) -> bool:
+        """Whether this card, as it is now, holds a launch: its share of what is really free."""
+        usable = MEMORY_SHARE * self.free_bytes(xp) - problem.bytes_shared()
+        return batch_bytes(batch, problem, self.steps) <= usable
+
+    def parted(self, batch: list[Item]) -> list[list[Item]] | None:
+        """:func:`halves` of a launch, without the pairs a first try already wrote."""
+        left = [
+            Item(item.source, cells, sum(int(self.cell_nodes(c).size) for c in cells))
+            for item in batch
+            for cells in [
+                tuple(c for c in item.cells if not self.cache.has(self.key_of(item.source, c)))
+            ]
+            if cells
+        ]
+        if not left:
+            return []
+        return halves(left, lambda cell: self.cell_nodes(cell).size)
+
     def run_batch(
         self, problem: Problem, batch: list[Item], encoder: CellEncoder, xp: Any
     ) -> dict[str, Any]:
@@ -556,12 +628,44 @@ class LowbandPairs(PairsCampaign):
                         )
                         self.total_batches = len(batches)
                         planned.set()
+                # The resampler's weights stay for the campaign: made now, on a pool that holds
+                # nothing, they are a block of their own and not a part of a launch's.
+                encoder.prepare_for(self.steps)
                 while not failures:
                     try:
                         batch = queue.get_nowait()
                     except Empty:
                         return
-                    record = self.run_batch(problem, batch, encoder, xp)
+                    self.release(xp)
+                    # The plan was made on one card, once. Each launch is held against what
+                    # its own card has free now, and parted where that is less.
+                    parts = None if self.fits(problem, batch, xp) else self.parted(batch)
+                    if parts is None:
+                        try:
+                            record = self.run_batch(problem, batch, encoder, xp)
+                        except MemoryError as error:
+                            self.release(xp)
+                            parts = self.parted(batch)
+                            if parts is None:
+                                raise
+                            self.say(
+                                f"a launch of {len(batch)} source(s) and"
+                                f" {sum(len(i.cells) for i in batch)} cell(s) was refused its"
+                                f" memory ({str(error)[:120]}); parted and tried again"
+                            )
+                    elif parts:
+                        self.say(
+                            f"a launch of {len(batch)} source(s) and"
+                            f" {sum(len(i.cells) for i in batch)} cell(s) is more than card"
+                            f" {card} has free; parted"
+                        )
+                    if parts is not None:
+                        with self._status_lock:
+                            self.total_batches += len(parts) - 1
+                            self.parted_launches = getattr(self, "parted_launches", 0) + 1
+                        for part in parts:
+                            queue.put(part)
+                        continue
                     record["card"] = card
                     with self._status_lock:
                         records.append(record)

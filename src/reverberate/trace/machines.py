@@ -129,6 +129,8 @@ def predict(
     check: str | None = None,
     low_engine: str = "lowband",
     low_ppw: float | None = None,
+    low_seconds: float | None = None,
+    rays: int | None = None,
 ) -> dict[str, Any] | None:
     """Wall hours and USD of a plan's trace on one offer; ``None`` where it cannot be said.
 
@@ -151,12 +153,13 @@ def predict(
         return None
     counts = [int(c) for c in record.get("cells_a_position", [])]
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
+    window = batched.MEASURED_DURATION_S if low_seconds is None else float(low_seconds)
     if counts:
-        solves = batched.solves_needed(counts, float(gpu_ram_gb), ppw=low_ppw)
+        solves = batched.solves_needed(counts, float(gpu_ram_gb), ppw=low_ppw, duration_s=window)
         if solves is None:
             return None
     else:
-        if batched.cells_a_solve(float(gpu_ram_gb), ppw=low_ppw) < 1:
+        if batched.cells_a_solve(float(gpu_ram_gb), ppw=low_ppw, duration_s=window) < 1:
             return None
         solves = positions
     cards = max(1, int(num_gpus))
@@ -164,6 +167,7 @@ def predict(
         solves,
         pairs,
         fmax_hz=solve_fmax_hz(),
+        duration_s=window,
         rate_usd_per_hour=dph_total,
         cards=cards,
         ppw=low_ppw,
@@ -176,6 +180,8 @@ def predict(
         check=check,
         low_engine=low_engine,
         low_ppw=low_ppw,
+        low_seconds=low_seconds,
+        rays=rays,
     )
     seconds = dict(base["seconds"])
     seconds["low"] = float(low["seconds"])

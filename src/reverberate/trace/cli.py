@@ -8,6 +8,7 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--models-from EXPORT/storey | --hssd-root DIR]
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
     [--low-engine lowband|pffdtd] [--low-ppw P] [--low-scheme cartesian|fcc]
+    [--low-seconds S] [--rays N] [--rail-positions N]
     [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
@@ -19,6 +20,11 @@ and rents nothing. The machine is the offer of the lowest predicted total within
 ``--max-hours`` of wall time, not the cheapest hour; ``--hours``, the watchdog, is taken
 from that prediction unless given. Besides:
 
+python -m reverberate.trace variants [--set FILE] --recipe R.json --window START|auto SECONDS
+    --home DIR (--mirror-from RUN/mirror | --mirror DIR) [--sources M] [--pass "ARGS"] [--dry-run]
+    a named set of cost variants (``trace/sets/listening_v1.json``): each one's predicted
+    cost on the whole scene and on the excerpt, and the ``rent --smoke`` line that makes
+    its pack under DIR/<name>, beside the ``variant.json`` the audit page reads
 python -m reverberate.trace assets --mirror-from RUN/mirror ... --models-from EXPORT/storey
     the recipe's ``assets`` block as a trace of this dwelling finds it, for ``scenes generate``
 python -m reverberate.trace bundle --recipe R.json --out B ...     the bundle alone
@@ -96,6 +102,22 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         default=None,
         help="the batched solver's points per wavelength; left out, the validated grid's 10.5."
         " Another grid's pairs have their own keys, and its run its own --home",
+    )
+    p.add_argument(
+        "--low-seconds",
+        type=float,
+        default=None,
+        metavar="S",
+        help="the seconds the batched solver simulates; left out, the pack's 1.2. A response"
+        " solved for fewer is stored at the pack's length, faded to nothing over its last"
+        " 20 ms; its pairs have their own keys, and its run its own --home",
+    )
+    p.add_argument(
+        "--rays",
+        type=int,
+        default=None,
+        metavar="N",
+        help="the rays a tail site casts; left out, the mirror's own (100 000)",
     )
     p.add_argument(
         "--reuse-from",
@@ -186,6 +208,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--yes", action="store_true")
 
+    p = sub.add_parser(
+        "variants", help="a set of cost variants: each one's price and its excerpt's command"
+    )
+    p.add_argument("--set", dest="variant_set", type=Path, default=None, help="a set, as JSON")
+    p.add_argument("--recipe", type=Path, required=True, help="the reference recipe")
+    _mirror_arguments(p)
+    p.add_argument(
+        "--window",
+        nargs=2,
+        required=True,
+        metavar=("START", "SECONDS"),
+        help="the excerpt every variant is traced on; START in seconds, or auto: where a"
+        " source speaks on the move, passes the head, or is heard from another room",
+    )
+    p.add_argument("--home", type=Path, required=True, help="a directory a variant under it")
+    p.add_argument("--sources", type=int, default=3, help="at most this many sources heard")
+    p.add_argument("--rate", type=float, default=None, help="USD an hour, for the estimate")
+    p.add_argument("--dry-run", action="store_true", help="print; write no file")
+    p.add_argument(
+        "--pass",
+        dest="passed",
+        default="",
+        metavar="ARGS",
+        help="words added to every command as they are: --models-from, --gpus, --max-hours",
+    )
+
     p = sub.add_parser("bundle", help="the bundle of a trace, on the laptop")
     _plan_arguments(p)
     p.add_argument("--out", type=Path, required=True)
@@ -217,14 +265,33 @@ def _assets(args: argparse.Namespace) -> Any:
     if (args.mirror is None) == (args.mirror_from is None):
         raise SystemExit("give the mirror as --mirror or as --mirror-from, not both")
     if args.mirror is not None:
-        return MirrorAssets.load(args.mirror)
-    return MirrorAssets.from_run(
-        args.mirror_from,
-        source=args.mirror_source,
-        calibration=args.calibration,
-        lead_s=args.lead_s,
-        gain=args.gain,
-    )
+        assets = MirrorAssets.load(args.mirror)
+    else:
+        assets = MirrorAssets.from_run(
+            args.mirror_from,
+            source=args.mirror_source,
+            calibration=args.calibration,
+            lead_s=args.lead_s,
+            gain=args.gain,
+        )
+    return with_rays(assets, getattr(args, "rays", None))
+
+
+def with_rays(assets: Any, rays: int | None) -> Any:
+    """The mirror with another number of rays a tail site; as it is when none is given.
+
+    A ray carries one part in ``rays`` of the source's energy, so a
+    histogram of fewer rays is the same energy read with more noise, and
+    nothing downstream is scaled.
+    """
+    from dataclasses import replace
+
+    if rays is None or int(rays) == assets.settings.rays.rays:
+        return assets
+    if int(rays) < 1000:
+        raise SystemExit(f"a tail site casts a thousand rays or more, not {rays}")
+    settings = replace(assets.settings, rays=replace(assets.settings.rays, rays=int(rays)))
+    return replace(assets, settings=settings)
 
 
 def _rate(args: argparse.Namespace) -> float:
@@ -263,6 +330,54 @@ def _profile(args: argparse.Namespace, recipe: Any) -> tuple[Any, tuple[float, f
         ),
         centre,
     )
+
+
+def _variants(args: argparse.Namespace, recipe: Any, assets: Any) -> int:
+    """The set priced on the whole scene and on the excerpt; a command a variant."""
+    import shlex
+
+    from reverberate.trace import variants
+    from reverberate.wave.lowband.pairs import MEASURED_RATE_USD_PER_HOUR
+
+    name, held = variants.load_set(args.variant_set)
+    seconds = float(args.window[1])
+    if args.window[0] == "auto":
+        proposed = variants.listening_windows(recipe, seconds)
+        print("windows proposed, the best first:")
+        for window in proposed:
+            print("  " + window.says())
+        start = proposed[0].start_s
+    else:
+        start = float(args.window[0])
+    # The mirror is said again in every command, as it was said here.
+    mirror = []
+    for flag in ("mirror", "mirror_from", "calibration", "lead_s", "gain"):
+        value = getattr(args, flag)
+        if value is not None:
+            mirror += [f"--{flag.replace('_', '-')}", str(value)]
+    if args.mirror_from is not None and args.mirror_source != "S1":
+        mirror += ["--mirror-source", args.mirror_source]
+    records = variants.price(
+        held,
+        recipe,
+        args.recipe,
+        assets.triangles,
+        args.home,
+        start_s=start,
+        seconds=seconds,
+        sources=args.sources,
+        rate_usd_per_hour=(
+            float(args.rate) if args.rate is not None else MEASURED_RATE_USD_PER_HOUR
+        ),
+        rays=int(assets.settings.rays.rays),
+        passed=[*mirror, *shlex.split(args.passed)],
+        write=not args.dry_run,
+    )
+    print(f"set {name}: {len(records)} variants on {seconds:g} s from {start:g} s")
+    print(variants.table(records))
+    if args.dry_run:
+        print("dry run: no recipe and no variant.json written")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -335,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
 
     recipe = load_recipe(args.recipe)
     assets = _assets(args)
+    if args.command == "variants":
+        return _variants(args, recipe, assets)
     profile, centre = _profile(args, recipe)
     if args.command == "bundle":
         from reverberate.trace.bundle import build_bundle
@@ -348,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
             low_engine=args.low_engine,
             check=args.check,
             low_ppw=args.low_ppw if args.low_engine == "lowband" else None,
+            low_seconds=args.low_seconds,
+            rays=args.rays,
         )
         print(describe(plan, priced))
         build_bundle(
@@ -362,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             low_engine=args.low_engine,
             low_scheme=args.low_scheme,
             low_ppw=args.low_ppw,
+            low_seconds=args.low_seconds,
             reuse_from=args.reuse_from,
             check=args.check,
         )
@@ -398,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         plan_offers=args.plan_offers,
         low_scheme=args.low_scheme,
         low_ppw=args.low_ppw,
+        low_seconds=args.low_seconds,
         reuse_from=args.reuse_from,
         fetch_early=args.fetch_early,
         destroy_failed=args.destroy_failed,

@@ -170,3 +170,50 @@ def test_an_output_past_full_scale_is_said_and_nothing_is_limited(out: Any) -> N
     assert "value: DEFAULT_LEVEL_DB" in source and "clip.report(message.peak" in source
     worklet = (APP / "scene" / "sound.worklet.js").read_text()
     assert "peak: this.peak" in worklet and "peakOf(output[0]" in worklet
+
+
+def test_the_packs_of_one_scene_are_offered_in_one_order_with_their_names_and_costs(
+    out: Any,
+) -> None:
+    held = out["variants"]
+    # Rails solved at another pitch are another recipe and the same scene.
+    assert held["sameSceneOtherRecipe"] is True and held["otherScene"] is False
+    assert held["withoutDigest"] == [True, False, False]
+    # The reference first, then by name; two of one name are told apart by their ids.
+    assert held["order"] == ["aaaaaa", "bbbbbb", "cccccc", "eeeeee", "ffffff"]
+    assert held["labels"] == [
+        "reference",
+        "all-cheap",
+        "low-0.8s · cccccc",
+        "low-0.8s · eeeeee",
+        "pulled",
+    ]
+    # A scene with one pack offers no choice.
+    assert held["alone"] == [] and held["none"] == []
+    assert held["names"] == ["reference", "pulled"]
+    assert held["costs"] == [
+        "whole scene 7.54 USD predicted, this pack 0.91 USD billed",
+        "whole scene 5.07 USD predicted, this pack 0.57 USD predicted",
+        "",
+    ]
+    assert held["saving"] == [76, 0, None]
+    assert held["title"] == [
+        "what all-cheap is",
+        "low_ppw = 7.2, rail_pitch_m = 0.12",
+        "whole scene 1.81 USD predicted, this pack 0.18 USD predicted",
+        "76 % less than reference on the whole scene",
+    ]
+    assert held["referenceTitle"][1] == "the reference: no option"
+    assert held["bareTitle"] == ["no variant.json beside this pack"]
+    assert held["steps"] == ["bbbbbb", "ffffff", "bbbbbb", None]
+
+
+def test_the_sound_bar_switches_among_the_packs_of_a_scene_at_one_instant() -> None:
+    source = (APP / "scene" / "sound.js").read_text()
+    # The row is filled from the packs of the scene of the pack heard, and a press opens one.
+    assert 'seg("variants", []' in source and "scenePacks(packs, pack)" in source
+    assert "open(button.dataset.value)" in source
+    # A pack of the same scene under another recipe leaves the tracks, and the instant, alone.
+    assert "!(shown && sameScene(shown, pack))" in source
+    fold = (APP / "scene" / "computed.js").read_text()
+    assert "B is not a pack of the same scene as A" in fold and "oneScene(about, aboutB)" in fold
