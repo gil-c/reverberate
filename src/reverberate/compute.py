@@ -30,10 +30,12 @@ __all__ = [
     "Devices",
     "KERNEL_OPTIONS",
     "NO_GPU_ENV",
+    "array_module_name",
     "cuda_available",
     "device_report",
     "raw_kernel",
     "to_numpy",
+    "usable_cores",
     "xp_for",
 ]
 
@@ -42,6 +44,42 @@ KERNEL_OPTIONS = ("-fmad=false", "--std=c++14")
 
 #: Set to ``1`` to run the numpy twin on a machine that has a card.
 NO_GPU_ENV = "REVERBERATE_NO_GPU"
+
+
+#: Where a container's share of the processor is written: the unified hierarchy, then the old.
+_CGROUP_MAX = "/sys/fs/cgroup/cpu.max"
+_CGROUP_QUOTA = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+_CGROUP_PERIOD = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+
+
+def _read_number(path: str, field: int = 0) -> float | None:
+    try:
+        with open(path) as handle:
+            text = handle.read().split()[field]
+    except (OSError, IndexError):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def usable_cores() -> int:
+    """The cores this process may really use: its affinity, cut to its container's quota.
+
+    ``os.cpu_count()`` is the host's. A rented container is given a share
+    of it by quota and still sees every core: the first card box counted 72
+    and had 13.8, and a transform told to use "every core" started 72
+    threads on them and ran ten times slower than one. At least one.
+    """
+    affinity = getattr(os, "sched_getaffinity", None)  # macOS has none
+    count = len(affinity(0)) if affinity is not None else (os.cpu_count() or 1)
+    quota, period = _read_number(_CGROUP_MAX, 0), _read_number(_CGROUP_MAX, 1)
+    if quota is None or period is None:
+        quota, period = _read_number(_CGROUP_QUOTA), _read_number(_CGROUP_PERIOD)
+    if quota is not None and period is not None and quota > 0 and period > 0:
+        count = min(count, int(quota // period) or 1)
+    return max(1, int(count))
 
 
 def cuda_available() -> bool:
@@ -79,6 +117,15 @@ def to_numpy(array: Any) -> np.ndarray:
     if hasattr(array, "get"):
         return np.asarray(array.get())
     return np.asarray(array)
+
+
+def array_module_name(array: Any) -> str:
+    """``numpy`` or ``cupy``: the library whose array this is, by its type and not by a flag.
+
+    What a check reads to say where a result was computed: a ``cupy`` array
+    lives on a card, whatever the code that made it was asked for.
+    """
+    return str(type(array).__module__).split(".")[0]
 
 
 def device_report() -> dict[str, Any]:
@@ -140,7 +187,7 @@ class Devices:
     @classmethod
     def detect(cls, cores: int | None = None) -> Devices:
         """Every card cupy sees; the host's cores when there is none."""
-        cores = cores or max(1, (os.cpu_count() or 2) - 1)
+        cores = cores or max(1, usable_cores() - 1)
         if not cuda_available():
             return cls((), cores)
         import cupy

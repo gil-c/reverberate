@@ -27,7 +27,6 @@ cent for a source half a metre away crossed at 1.5 m/s.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -36,6 +35,7 @@ from typing import Any, TypeVar
 import numpy as np
 from scipy.fft import next_fast_len
 
+from reverberate.compute import usable_cores
 from reverberate.metrics import octave_bank
 from reverberate.mirror.directivity import directivity_gain
 from reverberate.render import delay
@@ -71,7 +71,14 @@ def fft_module(xp: Any) -> Any:
 
 
 def workers_of(xp: Any, workers: int) -> dict[str, int]:
-    return {"workers": workers} if xp is np else {}
+    """The transforms' threads on the host: ``workers``, or every core this process may use.
+
+    Not scipy's own "every core", which counts the host's and not the
+    container's share of them (:func:`reverberate.compute.usable_cores`).
+    """
+    if xp is not np:
+        return {}
+    return {"workers": usable_cores() if workers < 0 else workers}
 
 
 def run_all(work: Callable[[_T], _R], items: Iterable[_T], xp: Any, workers: int) -> list[_R]:
@@ -83,7 +90,7 @@ def run_all(work: Callable[[_T], _R], items: Iterable[_T], xp: Any, workers: int
     other. The results do not depend on which.
     """
     items = list(items)
-    count = (os.cpu_count() or 1) if workers < 0 else workers
+    count = usable_cores() if workers < 0 else workers
     if xp is not np or count < 2 or len(items) < 2:
         return [work(item) for item in items]
     with ThreadPoolExecutor(max_workers=min(count, len(items))) as pool:

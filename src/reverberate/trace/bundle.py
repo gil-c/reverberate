@@ -75,13 +75,14 @@ def build_bundle(
     rate_usd_per_hour: float = 1.74,
     repo: Path | None = None,
     with_cache: bool = True,
+    check: str | None = None,
 ) -> dict[str, Any]:
     """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``."""
     bundle = Path(bundle)
     held = bundle / "trace"
     held.mkdir(parents=True, exist_ok=True)
     save_recipe(recipe, held / "recipe.json")
-    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour)
+    priced = estimate(plan, rate_usd_per_hour=rate_usd_per_hour, check=check)
     plan.save(held)
     (held / "plan.json").write_text(
         json.dumps({**plan.record, "estimate": priced}, indent=1, sort_keys=True)
@@ -142,6 +143,10 @@ def build_bundle(
         "export_sha256": export or assets.export_sha256,
         "recipe_sha256": plan.recipe_sha256,
     }
+    if check is not None:
+        # What the machine's ``check`` stage does; left out, the profile decides
+        # (:data:`reverberate.trace.run.CHECK_FULL` for a smoke run).
+        campaign["trace"]["check"] = str(check)
     campaign["estimate"] = priced
     (bundle / "campaign.json").write_text(json.dumps(campaign, indent=1))
     return campaign

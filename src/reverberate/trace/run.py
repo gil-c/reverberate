@@ -17,8 +17,14 @@ look for:
 6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair);
 7. ``write``: the pack, a source at a time, through
    :class:`reverberate.render.pack.PackWriter`;
-8. ``check``: the pack read back whole, and rendered by the signal engine on
-   the host and on the card, which must agree to 1e-6 of the peak.
+8. ``check``: the pack read back, and, for a smoke run or when the bundle
+   asks (``check``: ``full``), read back whole and rendered by the signal
+   engine on the host and on the card, which must agree to 1e-6 of the peak
+   and say which device computed. The whole scene pays the read alone.
+
+The stages' seconds, and the seconds of what they are made of, are in
+``trace_report.json`` (``timings_s``, ``seconds``): the cost ledger of
+``docs/adr/0016-appendix-trace-cost.md`` is read from there.
 
 ``status.json``, ``campaign.log`` and the two markers are a campaign's, so
 :mod:`reverberate.gpu.onebox` watches a trace as it watches a field.
@@ -30,6 +36,7 @@ import hashlib
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -38,7 +45,7 @@ import numpy as np
 
 from reverberate.accel.pairs import PairCache
 from reverberate.audio import Atmosphere
-from reverberate.compute import Devices, device_report, to_numpy, xp_for
+from reverberate.compute import Devices, device_report, to_numpy, usable_cores, xp_for
 from reverberate.metrics import band_centres
 from reverberate.mirror.hybrid import Crossover
 from reverberate.mirror.moving import EarlyTable, MovingSettings, prepare, trace_early
@@ -69,6 +76,7 @@ from reverberate.trace.level import (
     first_arrival_s,
     mirror_omni,
     pair_low,
+    pair_omni,
     pair_seam_db,
     step_levels,
 )
@@ -90,9 +98,20 @@ KIND = "scene-trace"
 CARD_PAIRS_PER_VALIDATION = 3_000_000
 #: The engine's two array modules must agree to this share of the peak (V4).
 RENDER_TOLERANCE = 1e-6
-#: Seconds of the pack the check renders, and the block it renders them in.
-CHECK_SECONDS = 60.0
+#: Seconds of the pack the check renders, the sources it renders (those heard longest in
+#: those seconds), and the block it renders them in. The host's render is the cost: six
+#: seconds of one core a second of a moving source on the first card box, whose check of
+#: a minute of fourteen sources did not end in thirty-five minutes.
+CHECK_SECONDS = 10.0
+CHECK_SOURCES = 3
 CHECK_BLOCK_S = 5.0
+#: What the ``check`` stage does: the whole pack read and rendered on both modules, or the
+#: pack's structure read. A smoke run takes the first unless its bundle says otherwise.
+CHECK_FULL = "full"
+CHECK_READ = "read"
+#: Pairs levelled side by side on a card. A pair is a dozen small launches the card
+#: answers in microseconds: the host's interpreter is what a thread more buys.
+LEVEL_THREADS = 6
 
 _EARLY_FIELDS = (
     "offsets",
@@ -129,6 +148,7 @@ class Journal:
             "started": self.started,
             "device": device_report(),
             "cpus": os.cpu_count(),
+            "usable_cpus": usable_cores(),
         }
 
     def say(self, message: str) -> None:
@@ -210,6 +230,9 @@ class Trace:
     card_devices: str | None = None
     solvers: int | None = None
     quiet: bool = False
+    #: :data:`CHECK_FULL` or :data:`CHECK_READ`; the bundle's, or the profile's, unless given.
+    check_mode: str | None = None
+    level_threads: int | None = None
 
     def __post_init__(self) -> None:
         self.bundle, self.out = Path(self.bundle), Path(self.out)
@@ -247,7 +270,16 @@ class Trace:
         self.journal: Any = (
             campaign if campaign is not None else Journal(self.out, quiet=self.quiet)
         )
+        if self.check_mode is None:
+            self.check_mode = str(
+                told.get("check")
+                or (CHECK_FULL if self.profile.seconds is not None else CHECK_READ)
+            )
+        if self.check_mode not in (CHECK_FULL, CHECK_READ):
+            raise ValueError(f"a trace checks {CHECK_FULL!r} or {CHECK_READ!r}")
         self.report: dict[str, Any] = {"kind": KIND, "profile": self.profile.record()}
+        #: Seconds of what the stages are made of, by stage: the ledger's units.
+        self.seconds: dict[str, dict[str, float]] = {}
         sources = self.bundle / "trace" / "positions.npy"
         if sources.is_file() and not np.array_equal(np.load(sources), self.tracks.positions):
             raise RuntimeError(
@@ -338,6 +370,10 @@ class Trace:
                     carried += 1
         self.report["low_pairs"] = {**self.engine.solve(self.heard_at), "carried": carried}
 
+    def _spent(self, stage: str, name: str, since: float) -> None:
+        held = self.seconds.setdefault(stage, {})
+        held[name] = round(held.get(name, 0.0) + time.time() - since, 2)
+
     def paths(self) -> None:
         """Every source's early table, and the table of the pairs at rest."""
         settings = self.assets.settings
@@ -346,15 +382,27 @@ class Trace:
         if self.xp is not np:
             moving = replace(moving, pairs_per_validation=CARD_PAIRS_PER_VALIDATION)
         tracks = self.tracks
+        t0 = time.time()
         self.ms = prepare(self.assets.catalogue, settings, moving)
+        self._spent("paths", "prepare", t0)
         every = [tracks.listener, self.cells, tracks.positions]
         every += [track.position for track in tracks.sources.values()]
         heads = np.concatenate([tracks.listener, self.cells])
         region = (heads.min(axis=0) - 0.5, heads.max(axis=0) + 0.5)
-        onsets = onset_field(self.assets.catalogue, np.concatenate(every), sound_speed_m_s=c)
         identity = [self.assets.catalogue.key, settings.record(), [list(r) for r in region]]
         self.early: dict[str, EarlyTable] = {}
         records: dict[str, Any] = {}
+        field_of: list[Any] = []
+
+        def onsets() -> Any:
+            # The occupancy and its graph, when a table is to be traced and not before.
+            if not field_of:
+                t0 = time.time()
+                field_of.append(
+                    onset_field(self.assets.catalogue, np.concatenate(every), sound_speed_m_s=c)
+                )
+                self._spent("paths", "onset_field", t0)
+            return field_of[0]
 
         def table(name: str, source: np.ndarray, head: np.ndarray, audible: Any) -> EarlyTable:
             heard = np.ones(source.shape[0], dtype=bool) if audible is None else audible
@@ -362,9 +410,12 @@ class Trace:
             path = self.out / "early" / f"{name}.npz"
             found = _load_early(path, digest)
             if found is None:
+                held = onsets()
+                t0 = time.time()
                 found = trace_early(
-                    self.ms, source, head, audible=heard, region=region, onsets=onsets, xp=self.xp
+                    self.ms, source, head, audible=heard, region=region, onsets=held, xp=self.xp
                 )
+                self._spent("paths", "trace", t0)
                 _save_early(path, found, digest)
                 records[name] = found.record
             else:
@@ -380,7 +431,7 @@ class Trace:
             "_pairs", tracks.positions[rows[:, 0]], self.cells[rows[:, 1]], None
         )
         self.report["paths"] = records
-        self.report["distance_fields"] = int(onsets.solved)
+        self.report["distance_fields"] = int(field_of[0].solved) if field_of else 0
 
     def rays(self) -> None:
         """Each source's tail table, in the pack's types; the histograms in their cache."""
@@ -388,6 +439,7 @@ class Trace:
         tracks = self.tracks
         self.tail_rows = tail_cells(self.cells, self.kind)
         self.tail_cache = TailCache(self.out / "tails")
+        started = time.time()
         self.tail: dict[str, dict[str, np.ndarray]] = {}
         # The source a pair is levelled with: the first whose steps read it.
         self.owner: dict[tuple[int, int], str] = {}
@@ -413,6 +465,7 @@ class Trace:
                     for cell in chosen.cell[step]:
                         if position >= 0 and cell >= 0:
                             self.owner.setdefault((int(position), int(cell)), name)
+        self._spent("rays", "tables", started)
         self.report["rays"] = {
             "tail_cells": int(self.tail_rows.size),
             "histograms_traced": int(self.tail_cache.misses),
@@ -444,9 +497,9 @@ class Trace:
         """Pair ``j``: its seam, its onset, the mirror's first arrival, how its response ends."""
         assert self.engine is not None
         settings = self.assets.settings
-        _, onset, aired = pair_low(
-            self.engine.cache.read(self.pair_key[j]),
-            self.crossover,
+        # The seam and the onset are read on channel 0 alone: the others wait for ``write``.
+        onset, aired = pair_omni(
+            self.engine.cache.read(self.pair_key[j])[:1],
             atmosphere,
             sound_speed_m_s=settings.sound_speed_m_s,
         )
@@ -496,15 +549,21 @@ class Trace:
         for j, key in enumerate(self.pair_key):
             if key not in known:
                 todo.setdefault(self.owner[self.pairs[j]], []).append(j)
-        with ledger.open("a") as handle:
+        threads = self.level_threads or (LEVEL_THREADS if self.xp is not np else 1)
+        with ledger.open("a") as handle, ThreadPoolExecutor(max_workers=threads) as pool:
             for owner, mine in todo.items():
+                t0 = time.time()
                 tails = self.pair_tails(owner, mine)
-                for local, j in enumerate(mine):
-                    record = {
-                        "key": self.pair_key[j],
-                        "identity": identity,
-                        **self.level_pair(j, tails, local, atmosphere),
-                    }
+                self._spent("level", "tails", t0)
+                t0 = time.time()
+                # A pair's record is its own whichever thread made it; the lines are
+                # written in the pairs' order.
+                levelled = pool.map(
+                    lambda item, tails=tails: self.level_pair(item[1], tails, item[0], atmosphere),
+                    list(enumerate(mine)),
+                )
+                for j, found in zip(mine, levelled, strict=True):
+                    record = {"key": self.pair_key[j], "identity": identity, **found}
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
                     handle.flush()
                     known[self.pair_key[j]] = record
@@ -516,6 +575,7 @@ class Trace:
                             job=f"{len(known)}/{len(self.pair_key)}",
                             remaining_s=round(elapsed / made * left, 1),
                         )
+                self._spent("level", "pairs", t0)
         self.levels = [known[key] for key in self.pair_key]
         seams = np.array([r["seam_db"] for r in self.levels], dtype=float)
         trails = np.array([r["onset_s"] - r["first_s"] for r in self.levels if r["direct"]])
@@ -639,13 +699,17 @@ class Trace:
                                 pair[step, a, b] = local.setdefault(j, len(local))
                 mine = sorted(local, key=lambda j: local[j])
                 ir = np.zeros((len(mine), header.channels, header.low_samples), dtype=np.float32)
+                t0 = time.time()
                 for row, j in enumerate(mine):
+                    # On the card when there is one: 64 channels of air and masks a pair.
                     ir[row] = pair_low(
                         self.engine.cache.read(self.pair_key[j]),
                         self.crossover,
                         atmosphere,
                         sound_speed_m_s=settings.sound_speed_m_s,
+                        xp=self.xp,
                     )[0]
+                self._spent("write", "low_ir", t0)
                 high_gain_db, onset_s = step_levels(
                     audible=track.audible,
                     pair=pair,
@@ -696,14 +760,59 @@ class Trace:
         return target
 
     def check(self) -> None:
-        """The pack read back whole; the engine on the host against the engine on the card."""
-        with read_pack(self.out / "pack.h5", deep=True) as pack:
+        """The pack read back; in full, the engine on the host against the engine on the card.
+
+        :data:`CHECK_READ` reads the pack's structure and stops: the whole
+        scene's check. :data:`CHECK_FULL` reads every dataset, renders the
+        first minute on both array modules, traces a source's early part
+        on both and brings some ``low/ir`` rows through both: a smoke run's.
+        """
+        full = self.check_mode == CHECK_FULL
+        t0 = time.time()
+        with read_pack(self.out / "pack.h5", deep=full) as pack:
             self.report["read_back"] = {
                 "sources": len(pack.sources),
                 "steps": pack.header.steps,
                 "cells": int(pack.cells.position.shape[0]),
+                "deep": full,
             }
-        self.report["render"] = render_check(self.out / "pack.h5", seconds=CHECK_SECONDS)
+        self._spent("check", "read_back", t0)
+        self.report["check"] = self.check_mode
+        if not full:
+            self.journal.say("check: the pack's structure read; no render (check: read)")
+            return
+        t0 = time.time()
+        self.report["render"] = render_check(
+            self.out / "pack.h5",
+            seconds=CHECK_SECONDS,
+            card=self.xp is not np,
+            sources=CHECK_SOURCES,
+        )
+        self._spent("check", "render", t0)
+        if self.report["render"].get("passed") is False:
+            # Said, not raised: the pack is written, and a failed run keeps its machine.
+            self.journal.say("check: THE ENGINE'S TWO MODULES DO NOT PASS V4; see the report")
+        if self.xp is not np and self.pairs:
+            assert self.engine is not None
+            atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
+            worst = 0.0
+            some = list(range(0, len(self.pairs), max(1, len(self.pairs) // 8)))[:8]
+            for j in some:
+                cached = self.engine.cache.read(self.pair_key[j])
+                c = self.assets.settings.sound_speed_m_s
+                on_host, on_card = (
+                    pair_low(cached, self.crossover, atmosphere, sound_speed_m_s=c, xp=xp)[0]
+                    for xp in (np, self.xp)
+                )
+                peak = float(np.abs(on_host).max())
+                if peak > 0.0:
+                    worst = max(worst, float(np.abs(on_host - on_card).max()) / peak)
+            self.report["low_host_against_card"] = {
+                "pairs": len(some),
+                "max_over_peak": worst,
+                "tolerance": RENDER_TOLERANCE,
+                "passed": bool(worst <= RENDER_TOLERANCE),
+            }
         if self.xp is not np and self.tracks.sources:
             name, track = next(iter(self.tracks.sources.items()))
             heard = np.flatnonzero(track.audible)[:400]
@@ -754,6 +863,7 @@ class Trace:
                     "recipe_sha256": hashlib.sha256(self.recipe_bytes).hexdigest(),
                     "device": journal.status.get("device", {}),
                     "timings_s": dict(journal.timings),
+                    "seconds": {stage: dict(parts) for stage, parts in self.seconds.items()},
                     "total_s": round(time.time() - journal.started, 1),
                     "pairs_engine": getattr(self.engine, "report", {}),
                 }
@@ -793,28 +903,63 @@ def _spread(values: np.ndarray, digits: int = 3) -> dict[str, float] | None:
     }
 
 
-def render_check(path: Path, *, seconds: float | None = None) -> dict[str, Any]:
+def render_check(
+    path: Path,
+    *,
+    seconds: float | None = None,
+    card: bool | None = None,
+    sources: int | None = None,
+) -> dict[str, Any]:
     """The pack rendered by the signal engine on ``numpy`` and, with a card, on ``cupy``.
 
     Dry noise at every source, the first ``seconds`` of the scene, block by
-    block. Without a card the render is only shown to be finite and not
-    silent; with one the two must agree to :data:`RENDER_TOLERANCE` of the
-    peak (V4 of the plan).
+    block; with ``sources``, at that many of them, those heard over most
+    of those seconds. Without a card the render is only shown to be finite
+    and not silent; with one the two must agree to
+    :data:`RENDER_TOLERANCE` of the peak (V4 of the plan).
+
+    **The record says which device computed**, so that an agreement is not
+    one module rendered twice: the module each engine holds, the module of
+    the arrays each engine's renderer returns before they are brought to
+    the host, the card's name, and the bytes the card's pool held at its
+    fullest during the render. Two transforms of different libraries do not
+    agree to the last bit: a difference of exactly zero is reported
+    (``identical``) and does not pass. ``card=True`` insists on a card and
+    raises without one, as a trace that ran on a card does; ``None`` asks
+    the machine.
     """
-    from reverberate.compute import cuda_available
+    from reverberate.compute import array_module_name, cuda_available, device_report, xp_for
     from reverberate.render.engine import Engine
+
+    with_card = cuda_available() if card is None else bool(card)
+    if with_card:
+        xp_for(True)  # raises when the card that was promised is not there
 
     with read_pack(path) as pack:
         h = pack.header
         samples = h.samples
         if seconds is not None:
             samples = min(samples, int(round(seconds / h.step_s)) * h.step_samples)
+        steps = samples // h.step_samples
+        heard = {
+            name: int(np.count_nonzero(np.asarray(source.audible)[:steps]))
+            for name, source in pack.sources.items()
+        }
+        chosen = sorted(heard, key=lambda name: -heard[name])
+        if sources is not None:
+            chosen = chosen[:sources]
         dry = {
             name: np.random.default_rng(source.tail_seed % 2**32).standard_normal(samples)
             for name, source in pack.sources.items()
+            if name in chosen
         }
         host = Engine(pack, dry, gpu=False)
-        card = Engine(pack, dry, gpu=True) if cuda_available() else None
+        on_card = Engine(pack, dry, gpu=True) if with_card else None
+        first = next(iter(dry), None)
+        pool = None
+        if on_card is not None:
+            pool = on_card.xp.get_default_memory_pool()
+        held_most = 0
         block = int(round(CHECK_BLOCK_S / h.step_s)) * h.step_samples
         peak = 0.0
         worst = 0.0
@@ -823,28 +968,53 @@ def render_check(path: Path, *, seconds: float | None = None) -> dict[str, Any]:
         for start in range(0, samples, block):
             stop = min(start + block, samples)
             t0 = time.time()
-            a = host.render(start, stop)
+            a = host.render(start, stop, sources=list(dry))
             seconds_host += time.time() - t0
             finite = finite and bool(np.all(np.isfinite(a)))
             peak = max(peak, float(np.abs(a).max()))
-            if card is not None:
+            if on_card is not None:
                 t0 = time.time()
-                b = to_numpy(card.render(start, stop))
+                b = to_numpy(on_card.render(start, stop, sources=list(dry)))
                 seconds_card += time.time() - t0
                 worst = max(worst, float(np.abs(a - b).max()))
-    record: dict[str, Any] = {
-        "seconds": samples / h.sample_rate_hz,
-        "sources": len(dry),
-        "finite": finite,
-        "peak": peak,
-        "host_s": round(seconds_host, 2),
-        "card": card is not None,
-    }
-    if card is not None:
-        record["card_s"] = round(seconds_card, 2)
-        record["max_over_peak"] = worst / peak if peak > 0.0 else None
-        record["tolerance"] = RENDER_TOLERANCE
-        record["passed"] = bool(peak > 0.0 and worst <= RENDER_TOLERANCE * peak)
+                if pool is not None:
+                    held_most = max(held_most, int(pool.total_bytes()))
+        record: dict[str, Any] = {
+            "seconds": samples / h.sample_rate_hz,
+            "sources": len(dry),
+            "rendered": list(dry),
+            "audible_s": round(sum(heard[name] for name in dry) * h.step_s, 2),
+            "finite": finite,
+            "peak": peak,
+            "host_s": round(seconds_host, 2),
+            "card": on_card is not None,
+            "host_module": host.xp.__name__,
+        }
+        if first is not None and samples:
+            record["host_arrays"] = array_module_name(host.source(first).render(0, h.step_samples))
+        if on_card is not None:
+            record["card_s"] = round(seconds_card, 2)
+            record["card_module"] = on_card.xp.__name__
+            if first is not None and samples:
+                record["card_arrays"] = array_module_name(
+                    on_card.source(first).render(0, h.step_samples)
+                )
+            record["device"] = device_report().get("gpu")
+            record["card_pool_bytes"] = held_most
+            record["max_over_peak"] = worst / peak if peak > 0.0 else None
+            record["identical"] = bool(worst == 0.0)
+            record["tolerance"] = RENDER_TOLERANCE
+            on_two = (
+                record["host_module"] == "numpy"
+                and record["card_module"] == "cupy"
+                and record.get("card_arrays", "cupy") == "cupy"
+                and record.get("host_arrays", "numpy") == "numpy"
+                and held_most > 0
+            )
+            record["computed_on_two_devices"] = bool(on_two)
+            record["passed"] = bool(
+                peak > 0.0 and on_two and 0.0 < worst <= RENDER_TOLERANCE * peak
+            )
     return record
 
 
@@ -857,6 +1027,7 @@ def run_trace(
     gpu: bool | None = None,
     solvers: int | None = None,
     engine: PairsEngine | None = None,
+    check: str | None = None,
 ) -> dict[str, Any]:
     return Trace(
         bundle=bundle,
@@ -866,4 +1037,5 @@ def run_trace(
         pffdtd_dir=pffdtd_dir,
         card_devices=devices,
         solvers=solvers,
+        check_mode=check,
     ).run()

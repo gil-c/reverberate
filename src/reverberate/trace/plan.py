@@ -106,18 +106,47 @@ PATCH_PITCH_M = 0.04
 #: The patch's source stands this far from its centre or further, as the dense line's did.
 PATCH_SOURCE_M = 1.2
 
-# The mirror's projection for a card (``docs/adr/0016-appendix-moving-mirror-cost.md``):
-# none of it measured on a card. A step-pair of the batched trace, a distance
-# field of the diffracted onset on the host, a source site's rays, and a
-# pair's levelling, taken as a lattice point's render (138 s for 437 points).
-CARD_PAIR_S = 1.0e-3
-ONSET_FIELD_S = 0.12
-RAYS_SITE_S = 16.0
-LEVEL_PAIR_S = 0.3
-#: Provisioning, the bundle's push and the grid: what a rental pays before it computes.
-FIXED_S = 900.0
-#: The first whole fetch of this project: 21 GB in 45 minutes.
-FETCH_BYTES_PER_S = 7.8e6
+# What a stage costs a unit, and the card and host it was measured on
+# (``docs/adr/0016-appendix-trace-cost.md``, the ledger these are read from). A stage whose
+# constant no machine has run is not in :data:`MEASURED_ON`, and the estimate
+# says so on its line.
+#: The scene, its facets and occluders' grid, then the occupancy and its graph: once a trace.
+PATHS_FIXED_S = 10.0
+#: A distinct (source, head) position of the batched trace, its diffracted onset included:
+#: 26 ms on a window of 8257 of them, 20 ms on one of 18 809.
+PATH_JOB_S = 0.0223
+#: A tail site's rays, and what a tail cell adds to them: 12.8 s a site over 18 cells and
+#: 14.5 s over 29. Two points: beyond 29 cells this is an extrapolation.
+RAYS_SITE_S = 10.0
+RAYS_SITE_CELL_S = 0.155
+#: A pair's seam and onset, the tails' tables of the pairs included: 62 and 83 ms.
+LEVEL_PAIR_S = 0.083
+#: A pair's 64 channels through the air and the masks, into the pack: 7 ms a pair on 1894
+#: pairs, read and file included. A second window took 164 ms a pair with the card idle
+#: and 5 ms of them in the pair's own work: the ledger says what that was taken to be.
+WRITE_PAIR_S = 0.010
+#: The check that reads the pack's structure, and what the full one adds: ten seconds of
+#: three sources on both array modules, 41 to 77 s.
+CHECK_READ_S = 1.0
+CHECK_FULL_S = 60.0
+#: Provisioning, the bundle's push, and what the watcher's five minutes leave unbilled to
+#: no stage: the first smoke's rental (2 x P100, 2026-10-04).
+FIXED_S = 340.0
+#: What the laptop's line brought home from the card box, and deflating did not change it.
+FETCH_BYTES_PER_S = 8.1e6
+#: The card and the host each constant was measured on; a stage absent here is projected.
+_BOX = "one RTX 3090, 2026-10-04"
+MEASURED_ON = {
+    "low": "2 x A100 (accel.pairs.estimate)",
+    "fixed": "2 x Tesla P100 (instance 54194831, 2026-10-04)",
+    "paths": _BOX,
+    "rays": _BOX,
+    "level": _BOX,
+    "write": _BOX,
+    "check": _BOX,
+    "transfer_pack": _BOX + ", to the laptop",
+    "transfer_pairs": _BOX + ", to the laptop",
+}
 PAIR_BYTES = 64 * 4800 * 4
 HISTOGRAM_BYTES = 286_000
 
@@ -890,12 +919,27 @@ def make_plan(
 # --------------------------------------------------------------------------
 
 
-def estimate(plan: Plan | dict[str, Any], *, rate_usd_per_hour: float) -> dict[str, Any]:
+def estimate(
+    plan: Plan | dict[str, Any],
+    *,
+    rate_usd_per_hour: float,
+    fetch_pairs: bool = True,
+    check: str | None = None,
+) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
 
     The low band is :func:`reverberate.accel.pairs.estimate`, measured on
-    2 x A100; the mirror's stages are the projection of ADR 0016's cost
-    appendix, which no card has run. A plan's record is enough.
+    2 x A100. Every other stage is a count of the plan times a constant of
+    this module, measured on the machine :data:`MEASURED_ON` names
+    (``docs/adr/0016-appendix-trace-cost.md``); ``measured_on`` repeats it, and ``projected``
+    lists the stages no machine has run. A card of another kind moves the
+    rays most: their kernel is double precision, which a consumer card
+    computes many times slower than its single.
+
+    ``fetch_pairs`` prices the pair cache's way home, which is as long as
+    the pack's; ``check`` is ``full`` or ``read``, a smoke run's default
+    being the first and the whole scene's the second. A plan's record is
+    enough.
     """
     from reverberate.accel.pairs import estimate as pairs_estimate
 
@@ -907,17 +951,23 @@ def estimate(plan: Plan | dict[str, Any], *, rate_usd_per_hour: float) -> dict[s
     )
     histograms = int(record["tail_sites"]) * int(record["tail_cells"])
     pack_bytes = scene_pairs * PAIR_BYTES + histograms * HISTOGRAM_BYTES
+    jobs = int(record["step_pairs"]) + scene_pairs
+    if check is None:
+        check = "full" if dict(record.get("profile", {})).get("seconds") is not None else "read"
     seconds = {
         "fixed": FIXED_S,
         "low": float(low["seconds"]),
-        "paths": (int(record["step_pairs"]) + scene_pairs) * CARD_PAIR_S,
-        "diffraction": positions * ONSET_FIELD_S,
-        "rays": int(record["tail_sites"]) * RAYS_SITE_S,
+        "paths": (PATHS_FIXED_S if jobs else 0.0) + jobs * PATH_JOB_S,
+        "rays": int(record["tail_sites"])
+        * (RAYS_SITE_S + int(record["tail_cells"]) * RAYS_SITE_CELL_S),
         "level": scene_pairs * LEVEL_PAIR_S,
-        "write": pack_bytes / 200e6,
-        "transfer": (pack_bytes + pairs * PAIR_BYTES) / FETCH_BYTES_PER_S,
+        "write": scene_pairs * WRITE_PAIR_S,
+        "check": CHECK_READ_S + (CHECK_FULL_S if check == "full" else 0.0),
+        "transfer_pack": pack_bytes / FETCH_BYTES_PER_S,
+        "transfer_pairs": pairs * PAIR_BYTES / FETCH_BYTES_PER_S if fetch_pairs else 0.0,
     }
     total = float(sum(seconds.values()))
+    measured = [name for name in seconds if name in MEASURED_ON]
     return {
         "billed_rate_usd_per_hour": float(rate_usd_per_hour),
         "seconds": {name: round(value, 1) for name, value in seconds.items()},
@@ -926,9 +976,14 @@ def estimate(plan: Plan | dict[str, Any], *, rate_usd_per_hour: float) -> dict[s
         },
         "total_s": round(total, 1),
         "total_usd": round(total / 3600.0 * rate_usd_per_hour, 2),
+        "non_solve_s": round(total - seconds["low"], 1),
+        "non_solve_usd": round((total - seconds["low"]) / 3600.0 * rate_usd_per_hour, 3),
         "pack_gb": round(pack_bytes / 1e9, 2),
         "pair_cache_gb": round(pairs * PAIR_BYTES / 1e9, 2),
+        "pairs_fetched": bool(fetch_pairs),
+        "check": check,
         "low": low,
-        "measured": ["low"],
-        "projected": ["paths", "diffraction", "rays", "level", "write", "transfer", "fixed"],
+        "measured": measured,
+        "projected": [name for name in seconds if name not in MEASURED_ON],
+        "measured_on": {name: MEASURED_ON[name] for name in measured},
     }

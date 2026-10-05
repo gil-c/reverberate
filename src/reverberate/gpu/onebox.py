@@ -89,9 +89,17 @@ FETCH_ITEMS = (*HOME_ITEMS, "driver.log", "campaign.done", "campaign.failed")
 SELFCHECK_PATTERNS = ("*.json", "*.log")
 
 
-def fetch_items(present: list[str]) -> list[str]:
-    """The entries of the run directory worth the transfer, among those present."""
-    return [item for item in FETCH_ITEMS if item in present]
+#: Of what comes home, what is single precision samples: sent as it is, not deflated.
+FETCH_AS_IS = ("pack.h5", "pairs")
+
+
+def fetch_items(present: list[str], leave: Collection[str] = ()) -> list[str]:
+    """The entries of the run directory worth the transfer, among those present.
+
+    ``leave`` names entries that stay on the machine: a trace's pair cache
+    is as large as its pack, and the pack holds every response a render reads.
+    """
+    return [item for item in FETCH_ITEMS if item in present and item not in leave]
 
 
 def missing_grids(keys: list[str], local_cache: Path) -> list[str]:
@@ -508,7 +516,15 @@ def watch(
         time.sleep(poll_s)
 
 
-def fetch(machine: Any, bundle: Path, home: Path, *, fetch_cache: bool, say: Any) -> Path:
+def fetch(
+    machine: Any,
+    bundle: Path,
+    home: Path,
+    *,
+    fetch_cache: bool,
+    say: Any,
+    leave: Collection[str] = (),
+) -> Path:
     """What the laptop keeps, into ``home/pulled``, and the grids it lacks into ``home/cache``.
 
     The first fetch of a whole run pulled 21 GB in 45 min, of which the
@@ -518,8 +534,22 @@ def fetch(machine: Any, bundle: Path, home: Path, *, fetch_cache: bool, say: Any
     pulled = home / "pulled"
     pulled.mkdir(exist_ok=True)
     listing = run_on(machine, f"ls -1 {REMOTE_OUT}", what="list run", timeout=90).split()
-    items = fetch_items(listing)
-    rsync(machine, [f"{REMOTE_OUT}/{item}" for item in items], str(pulled) + "/", download=True)
+    items = fetch_items(listing, leave)
+    left = [item for item in leave if item in listing]
+    if left:
+        say(f"left on the machine: {', '.join(left)}")
+    small = [item for item in items if item not in FETCH_AS_IS]
+    large = [item for item in items if item in FETCH_AS_IS]
+    if small:
+        rsync(machine, [f"{REMOTE_OUT}/{item}" for item in small], str(pulled) + "/", download=True)
+    if large:
+        rsync(
+            machine,
+            [f"{REMOTE_OUT}/{item}" for item in large],
+            str(pulled) + "/",
+            download=True,
+            compress=False,
+        )
     if "selfcheck" in listing:
         (pulled / "selfcheck").mkdir(exist_ok=True)
         try:
@@ -567,9 +597,12 @@ def run(
     gpu: str = "",
     campaign_args: str = "",
     avoid: Collection[int] = (),
+    leave: Collection[str] = (),
     say: Any = print,
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``leave`` names entries of the run directory that are not fetched.
 
     ``instance`` resumes on a machine already rented (the campaign resumes
     from its state on disk). ``avoid`` names offers and machines not to rent;
@@ -637,7 +670,7 @@ def run(
         say=say,
     )
     t0 = time.time()
-    pulled = fetch(machine, bundle, home, fetch_cache=fetch_cache, say=say)
+    pulled = fetch(machine, bundle, home, fetch_cache=fetch_cache, say=say, leave=leave)
     record["fetch_s"] = round(time.time() - t0, 1)
     say(f"fetched in {(time.time() - t0) / 60:.1f} min -> {pulled}")
     if record["outcome"] == "done":
