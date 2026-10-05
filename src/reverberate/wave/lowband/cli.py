@@ -28,7 +28,8 @@ python -m reverberate.wave.lowband union --bundles B1 B2 ... --out U
 
 ``compare`` and ``cost`` also take what a campaign takes: ``--boundary stencil|apart`` (where
 a card updates the walls: the same bits), ``--walls N`` (the materials fitted again with N
-branches), ``--outside open|rigid`` (the air outside the outer walls cut off) and ``--fit
+branches: 7 unless told, 0 for the materials as they are),
+``--outside open|rigid`` (the air outside the outer walls cut off) and ``--fit
 time|spectra`` (how the records reach the fit). The last three change the responses and
 are in the pairs' keys.
 
@@ -46,6 +47,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from reverberate.wave.lowband.walls import DEFAULT_BRANCHES
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,8 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--cpu", action="store_true")
         p.add_argument("--rate", type=float, default=None, help="USD an hour of the machine")
         p.add_argument("--pffdtd", type=Path, default=None)
-        p.add_argument("--boundary", choices=("stencil", "apart"), default="stencil")
-        p.add_argument("--walls", type=int, default=None, help="branches a material is refitted to")
+        p.add_argument("--boundary", choices=("stencil", "apart"), default="apart")
+        p.add_argument(
+            "--walls",
+            type=int,
+            default=DEFAULT_BRANCHES,
+            help="branches a material is fitted again with; 0 is the materials as they are",
+        )
         p.add_argument("--outside", choices=("open", "rigid"), default=None)
         p.add_argument("--fit", choices=("time", "spectra"), default="time")
         if name == "compare":
@@ -251,7 +259,7 @@ def _campaign(args: argparse.Namespace) -> Any:
         ppw=args.ppw,
         batch=getattr(args, "batch", None),
         boundary=args.boundary,
-        walls=args.walls,
+        walls=args.walls or None,
         outside=args.outside,
         fit=args.fit,
     )
@@ -499,7 +507,7 @@ def _cost(args: argparse.Namespace) -> int:
         offsets=design.positions - design.centre,
         say=campaign.say,
         boundary=args.boundary,
-        walls=None if args.walls is None else WallFit(args.walls),
+        walls=WallFit(args.walls) if args.walls else None,
         outside=args.outside,
         card=str(campaign.status["device"].get("gpu") or ""),
         probe_s=args.probe_s,

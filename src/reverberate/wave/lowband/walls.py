@@ -37,8 +37,8 @@ octave over the 50 ms after the onset. A reflection's error of ``e`` at
 each of a handful of bounces stays 10 dB under that bar when ``e`` is under
 -46 dB: :data:`REFLECTION_BAR_DB`. :func:`smallest_count` gives the fewest
 branches that hold every material under it, and under a hundredth of
-absorption. Whether the card's comparison then passes is the proof; until
-it does the solver's default is the materials as they are.
+absorption: seven on the materials of hssd_0076. The card's comparison is
+the proof, and it passed for seven (:data:`DEFAULT_BRANCHES`).
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ from scipy.optimize import least_squares
 
 __all__ = [
     "ABSORPTION_BAR",
+    "DEFAULT_BRANCHES",
     "FIT_VERSION",
     "REFLECTION_BAR_DB",
     "WallFit",
@@ -68,6 +69,12 @@ __all__ = [
     "worst_of",
 ]
 
+#: The branches a campaign's walls are fitted with unless told otherwise. Held on an RTX
+#: 3090 against the present engine on the 341 cells of the dense line of hssd_0076
+#: (2026-10-05): the worst third octave at -43.6 dB and the level within 0.02 dB, where the
+#: eleven branches themselves give -47.6 dB and 0.01 dB and the bar is -30 dB and 0.5 dB;
+#: 70.5 s a source position against 88.3. ``None`` anywhere is the materials as they are.
+DEFAULT_BRANCHES = 7
 #: In a pair's key: a change of the fitter that changes its numbers changes this.
 FIT_VERSION = 1
 #: The worst error of a reflection at normal incidence a refit may make, dB re the incident wave.

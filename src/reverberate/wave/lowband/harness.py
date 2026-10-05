@@ -186,16 +186,16 @@ def verify(
         if xp is not np:
             on_card = xp.asnumpy(solve(cut, drive_for(cut, grid, sources, receivers, duration), xp))
             record["card_equals_numpy"] = bool(np.array_equal(on_card, on_host))
-            # ... and the kernel that updates the branches apart, kept for the measurement.
-            apart = xp.asnumpy(
+            # ... and the kernel that updates the branches in the stencil's pass.
+            other = xp.asnumpy(
                 solve(
                     cut,
                     drive_for(cut, grid, sources, receivers, duration),
                     xp,
-                    boundary="apart",
+                    boundary="stencil",
                 )
             )
-            record["boundary_apart_equals_numpy"] = bool(np.array_equal(apart, on_host))
+            record["boundary_stencil_equals_numpy"] = bool(np.array_equal(other, on_host))
             record["card_max_difference_over_peak"] = float(
                 np.abs(on_card - on_host).max() / np.abs(on_host).max()
             )
@@ -615,7 +615,7 @@ def cost_table(
     encoder: Any = None,
     offsets: np.ndarray | None = None,
     say: Any = print,
-    boundary: str = "stencil",
+    boundary: str = "apart",
     walls: Any = None,
     outside: str | None = None,
     card: str = "",

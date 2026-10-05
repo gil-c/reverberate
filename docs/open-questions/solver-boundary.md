@@ -2,19 +2,25 @@
 
 Date: 2026-10-05
 
-Status: **phase one of lot L25 of ADR 0016: designed, written and proven on
-the laptop's cores. No card was rented and no card has run any of it.** The
+Status: **lot L25 of ADR 0016. Phase one was designed, written and proven on
+the laptop's cores; phase two ran it on one RTX 3090 (section 2, which
+overrides every prediction after it). The card refuted the first remedy,
+confirmed the second and the third's cost, and broke the fourth.** The
 performance audit (`performance-audit.md`, sections 4 to 6) found that the
 walls are 51 % of the bytes a step of the low band solver moves, that a
 material needs seven branches under 1500 Hz where eleven are kept, that the
 fit after a solve is 13 to 37 times its floor, that 11 % of the nodes are air
 outside the dwelling, and that five recipes of a dwelling ask three times the
 solves they need. This note says what was built for each, what the laptop
-could prove, and what a card must still say (section 8, with its commands).
-Nothing here changes a rendered number by default: every option that does is
-off, and is in the pairs' keys when on.
+could prove, and what a card then said (section 2).
+One option that changes a rendered number is now the default, the walls of
+seven branches, since the card's comparison passed; the others are off. Each
+is in the pairs' keys.
 
-## 1. The answer
+## 1. The answer, as predicted before a card
+
+The table and the predictions of this section are phase one's, kept as they
+were written. Section 2 says what a card made of them.
 
 | | what | proven here | changes responses | default |
 | --- | --- | --- | --- | --- |
@@ -40,9 +46,133 @@ hour):
 
 and the fit from 0.55 s a pair (6.1 s a position at eleven pairs a position)
 to a predicted 0.02 to 0.05 s. With a campaign over a dwelling's recipes
-(section 7) the count of positions falls to a third at five recipes.
+(section 8) the count of positions falls to a third at five recipes.
 
-## 2. A: the boundary in the stencil's pass
+## 2. What the card said
+
+One RTX 3090 24 GB (instance 54379263, 0.155 USD an hour, 2026-10-05), the
+reference grid of hssd_0076 to 1500 Hz (47 371 003 updated nodes, 2 687 916
+lossy, 32 769 steps), the dense line's 341 cells and one source position.
+`compare` is against the present engine (PFFDTD's card binary, 14.3 min for
+the one position); its bar is -30 dB in the worst third octave over the
+50 ms after the onset and 0.5 dB of level.
+
+**`verify`: every verdict true**, on the Cartesian and the face centred
+grid: `card_equals_numpy`, `boundary_apart_equals_numpy`,
+`batch_equals_singles_on_card`, a difference of 0.0. The kernel of the
+stencil's pass is the `numpy` step to the bit on a card, as the host's
+compile of its text had said.
+
+**Seconds a source position, measured**, and USD at this card's 0.155 an
+hour:
+
+| | s a position | USD a thousand positions | GB/s of memory | against the bytes' prediction |
+| --- | --- | --- | --- | --- |
+| as it was (`apart`, 11 branches) | 87.4 (`cost`), 88.3 (`compare`) | 3.80 | 523 | 88.0 predicted |
+| A, the stencil's pass, a batch of 1 | **199.5** | 8.59 | 194 | 75.0 predicted: **refuted** |
+| A, a batch of 4 and of 8 | 143.4, 147.5 | 6.17 | | |
+| 8 branches (`apart`) | 73.5 | 3.16 | | 79.9 by the bytes |
+| **7 branches (`apart`)** | **70.5** (`compare`), 68.5 (`cost`) | **3.04** | 586 | 77.1 by the bytes |
+| the outside cut, openings open (`apart`, 11) | 72.0 | 3.10 | 528 | 71.5 by the bytes |
+| the fit, a pair: the time chain | 0.29 in a launch, 0.37 alone | | | |
+| the fit, a pair: in its spectra | 0.07 in a launch | | | 0.02 to 0.05 predicted |
+
+The probe (10 s, on the campaign's own grid) read 523 GB/s for the kernels
+as they were, 102 % of what the bytes give at the measured share: this card
+is the first scene's card, and scene B's 1.0e10 updates a second is not
+seen here. It called the stencil's pass slow in its ten seconds (38 %).
+
+**A is refuted, and why.** The stencil's kernel is one block a column and a
+warp is 32 nodes of that column. Counted on the grid: 44.8 % of the warps
+hold a lossy node, and 707 622 of those 860 446 hold exactly one, a floor's
+or a ceiling's. That lane reads and writes its 22 branch states alone: a
+32 byte sector of the card's memory for each 4 byte value, where the kernel
+apart streams 256 neighbouring lossy nodes a block, floors and ceilings of
+neighbouring columns side by side. Timed alone (while the present engine
+shared the card, so the ratios and not the figures): the air's kernel 1.44
+ms a step, the walls' kernel apart 1.69 ms, the stencil's one kernel 7.22
+ms, and the same kernel with no node flagged lossy 1.55 ms. The air's path
+in the larger kernel costs nothing; the branches in it cost 5.7 ms where
+they cost 1.7 apart. The audit's table counted the bytes of a lossy node as
+if they streamed in either kernel; in the stencil's they do not. **The
+default is the kernel apart again**; the stencil's pass is kept as an
+option, proven and measured, and the bytes model (`step_bytes`) holds for
+`apart` only.
+
+**B passes.** The refitted walls against the present engine, worst of the
+341 cells; and against the eleven branches on the same solver (`between`):
+
+| branches | worst third octave | at | level, worst | worst degree | against 11: worst third octave | level |
+| --- | --- | --- | --- | --- | --- | --- |
+| 11 | -47.6 dB | 100 Hz | 0.01 dB | 4: -38.3 dB | | |
+| 8 | -46.1 dB | 100 Hz | 0.01 dB | 4: -37.7 dB | -46.9 dB at 1250 Hz | 0.01 dB |
+| **7** | **-43.6 dB** | 100 Hz | 0.02 dB | 4: -36.9 dB | -50.5 dB at 1000 Hz | 0.02 dB |
+
+Seven is 13.6 dB inside the bar and 4 dB from what the solver itself gives
+with eleven; its worst degree, the fourth, is within 1.4 dB of eleven's. Eight is not
+nearer eleven than seven is (its fit is better on paper and not on the
+line). **Seven is the default** (`walls.DEFAULT_BRANCHES`): 70.5 s a
+position where 88.3 were, 20 % of the solves' cost. Six was not run on the
+card: the queue was cut for the next lot's turn, and it does not hold the
+materials on paper.
+
+**C costs what the bytes said and is not the second slope.** The cut found
+on the card what it found on the laptop (5 829 632 nodes, 12.3 %; 2 007 628
+lossy nodes left of 2 687 916) and a position takes 72.0 s. The decay, 341
+cells, the median time at which the energy left is 40 dB and 60 dB down:
+
+| third octave | with the ring: -40 dB | -60 dB | slopes, dB/s | without it: -40 dB | -60 dB | slopes, dB/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 125 Hz | 0.489 s | 0.753 s | -82 then -73 | 0.467 s | 0.792 s | -86 then -64 |
+| 250 Hz | 0.396 | 0.599 | -101 then -89 | 0.390 | 0.588 | -102 then -94 |
+| 500 Hz | 0.274 | 0.423 | -146 then -126 | 0.266 | 0.422 | -150 then -123 |
+| 630 Hz | 0.288 | 0.457 | -139 then -119 | 0.285 | 0.451 | -140 then -117 |
+| 800 Hz | 0.271 | 0.436 | -147 then -124 | 0.270 | 0.431 | -148 then -126 |
+| 1000 Hz | 0.260 | 0.422 | -154 then -119 | 0.258 | 0.412 | -155 then -125 |
+| 1250 Hz | 0.284 | 0.504 | -141 then -91 | 0.274 | 0.492 | -146 then -90 |
+| 500 to 1400 Hz | 0.271 | 0.541 | -148 then -73 | 0.265 | 0.534 | -151 then -75 |
+| the whole band | 0.378 | 1.056 | -106 then -29 | 0.368 | 1.045 | -109 then -29 |
+
+**The two slopes are there without the ring, to a few per cent, and the
+present engine gives the same ones** (-106 then -29 on the whole band). A
+third octave alone has nearly one slope, 10 to 25 % slower in its last 20
+dB (35 % at 1250 Hz). The
+whole band's second slope is the sum of bands that decay at different
+rates: after the octaves round 1 kHz have fallen at 150 dB/s, what is left
+is the low end at 80, and the top third octave's own slow end. It is the
+dwelling's, not an artefact of the grid, and the late window is not a place
+to save steps without the ear.
+
+What the ring does change is the early response near the openings: the cut
+against the grid as exported, over the 50 ms after the onset, is -25 dB in
+the median cell, -15 dB at the ninth decile and -6.9 dB in the worst (1250
+Hz), with 1.6 dB of level there. A cell near an outer opening hears the
+shell 0.4 m behind it, or does not. That is a change of the scene for the
+owner and the correctness audit; the option stays off.
+
+**D fails on real records, and why.** In its spectra the fit took 0.07 s a
+pair in a launch where the chain takes 0.29, and its low degrees are the
+chain's at -62.9 dB in the median, the resampler's ripple, as predicted.
+But against eleven branches by the chain it is +23 dB at 1250 Hz in the
+worst cell and +11 dB at degree 4. One cell's real records say why: above
+the band, from 4 kHz to the grid's limit, a record holds 42 dB more than
+in the band, and that part does not decay (the last 50 ms are 0.9 dB under
+the whole record's level). The time chain's forward low pass removes it
+before the record stops; the spectra saw the record stop at full level,
+and what the low pass makes of that stop, 50 dB over the response's end,
+is spread by the fit's high degrees over the last third of a second.
+Phase one's test records decayed at every frequency and could not show it.
+Read on the box's cores from the same records: with the record's last 10 ms
+faded before the transform, the bins are the chain's to 104 dB from 0.4 s
+on and 118 dB from 0.8 s, where they were 62 to 81 dB. **The fade is now
+in `SpectralChain` and the test's records end at full level; no card has
+compared the corrected chain, so the option stays off.**
+
+**Not run**: `compare` at six branches, `cost` of the outside cut and of
+the spectral fit apart, the corrected spectral fit. The card was needed by
+the next lot at 00:07.
+
+## 3. A: the boundary in the stencil's pass
 
 **What it was.** One kernel walked every stored node and made a boundary
 node's rigid update; a second, one thread a lossy node, then read that value
@@ -77,8 +207,7 @@ included, and is held to the `numpy` step as before. The `numpy` step itself
 is not touched: it never had the second pass.
 
 What this does not prove: `nvcc`'s own choices and threads at once. `verify`
-on a card says that (section 8); until it has, `--boundary apart` is the
-kernel every cached pair was made by.
+on a card said that, and the card's clock said the rest (section 2).
 
 **Bytes a step** (`solver.step_bytes`, from the arrays' sizes; the reference
 grid: 47 371 003 updated nodes, 2 687 916 lossy, 383 884 columns of 146):
@@ -99,7 +228,7 @@ again: 160 MB a launch. A worker now keeps one stepper's grid for the
 campaign (`LowbandPairs.grid_on_card`) and a launch shares it. The kernels
 were already compiled once a process.
 
-## 3. B: a wall fitted again for the band
+## 4. B: a wall fitted again for the band
 
 `wave/lowband/walls.py`. Each material's own admittance, as its eleven
 branches give it, is fitted over 40 to 1500 Hz by `M` branches whose three
@@ -144,10 +273,10 @@ of absorption, on the material that is most of the dwelling.
 
 The option is `walls=N` of `LowbandPairs` (`--walls N` of `compare` and
 `cost`); the default is the materials as they are until the card's
-comparison passes (section 8). The solver's name in a pair's key then says
+comparison passes (it did: section 2). The solver's name in a pair's key then says
 "walls of N branches fitted from 40 to 1500 Hz", so the caches never mix.
 
-## 4. C: the air outside the outer walls
+## 5. C: the air outside the outer walls
 
 **What it is**, read in the first scene's `as_computed.npz` (both grids):
 the export wraps the storey in a shell 0.39 to 0.41 m beyond the outer
@@ -197,7 +326,7 @@ to 12 dB less. **The two slopes the audit read on the whole band (40 dB in
 0.43 s, then 20 dB in 0.62 s) are not reproduced here in any of the four,
 so the ring is not shown to be their cause; they are strongest from 500 to
 1400 Hz, where this coarse grid says nothing.** That is one comparison on a
-card (section 8).
+card (section 2: it is not the ring's).
 
 **What is right.** Outdoors is free field: what leaves by an opening does
 not come back. A ring lined like a wall that returns a part of it a second
@@ -221,7 +350,7 @@ meets the opening squarely is absorbed, 45 dB in a duct under its first
 cross mode by test). `outside=` of `LowbandPairs` and `--outside` of
 `compare` and `cost`; off by default; in the pairs' keys.
 
-## 5. D: the fit in its spectra
+## 6. D: the fit in its spectra
 
 `fit.SpectralChain`. The integration with the 40 Hz low cut, the zero phase
 low pass at 1500 Hz and the resampling to 4 kHz are linear and do not
@@ -257,7 +386,7 @@ pair, to be measured by `cost --fit spectra`. `fit="spectra"` of
 `LowbandPairs`; off by default; in the pairs' keys, since 0.006 dB is not
 the same bits.
 
-## 6. E: the order of a run, and a probe
+## 7. E: the order of a run, and a probe
 
 - **Longest first, the last short** (`pairs.last_short`). A queue's
   launches go by their count of sources, most first; the last two a card
@@ -275,7 +404,7 @@ the same bits.
   `state/probe.*.json`. Scene B's 1.0e10 updates a second where the bytes
   give 1.4e10 would have been said in its first minute.
 
-## 7. F: a dwelling's recipes solved once
+## 8. F: a dwelling's recipes solved once
 
 A pair's key holds its two positions in whole millimetres, the grid, the
 encoder, the solver and the window, and no recipe. So nothing in the cache
@@ -294,7 +423,7 @@ the rental and hand its campaign's pair cache to each recipe's trace
 `low_grid(..., walls=, outside=, fit=)`, when any of the three options is
 on, or the bundle's keys will not be the machine's.
 
-## 8. What a card must say, and the commands
+## 9. The card's commands
 
 One RTX 3090 for about 45 minutes, 0.15 USD. `B` is a pairs bundle of the
 dense line (341 cells, one source), `O` an output directory, on the machine.
@@ -330,20 +459,24 @@ python -m reverberate.wave.lowband cost --bundle B --out O/cost_spectra --fit sp
 #   predicted: 60 dB under w11; a pair in 0.02 to 0.05 s
 ```
 
-## 9. What is the owner's to decide
+## 10. What is the owner's to decide
 
-1. **Seven branches** as the default once `compare` passes, or eight for a
-   margin of 15 dB more at 4 % of a step.
-2. **What an outer opening is**: open, shut, or as exported. It changes the
-   low frequencies' late level by up to 15 dB and is 17 % of a step. The
+1. **What an outer opening is**: open, shut, or as exported. It changes the
+   early response of the cells near an opening by up to 1.6 dB and the low
+   frequencies' late level, and is 18 % of a solve (72 s for 88). The
    correctness audit should see the slices first.
-3. **The fit in its spectra** as the default: it moves every pair by 0.006
-   dB, so every cached pair is then another pair.
-4. Whether the union of a dwelling's recipes is the trace's default.
+2. Whether the union of a dwelling's recipes is the trace's default.
+3. Already taken here, to be undone if unwanted: seven branches are the
+   default, so every pair made from now on is another pair than the cached
+   ones (`--walls 0`, or `walls=None`, is the materials as they are).
 
-## 10. Not done
+## 11. Not done
 
-- Nothing ran on a card.
+- The corrected spectral fit has not been compared on a card: one
+  `compare --fit spectra` and its `between`, ten minutes.
+- The boundary's remedy is still to be found: the walls' kernel is 54 % of
+  a step (1.69 of 3.12 ms). What the card showed is that its states must
+  stream; seven branches are the gain taken.
 - The trace does not pass the new options (`trace/engines.py`,
   `trace/bundle.py`): they are reachable from `LowbandPairs` and from
   `compare` and `cost`.

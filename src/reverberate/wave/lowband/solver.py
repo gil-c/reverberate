@@ -27,17 +27,25 @@ verify``; without a card the kernels' own text is compiled for the host
 (:mod:`reverberate.wave.lowband.hostkernel`) and the tests hold it to the
 first, to the bit.
 
-**A boundary node is updated where the stencil is.** One kernel walks every
-stored node: the air, a boundary node's rigid update from the adjacency in
-its mask, and, for a lossy node, its branches, in the same thread, which
-still holds the value the node had two steps before. The lossy nodes' rows
-in the branch arrays are found from a base a column and the column's lossy
-bits (:func:`lossy_rows`). The kernel that did the branches apart
-(``boundary="apart"``) is kept for the measurement of one against the other:
-it read a node's value back from the field (a sector of the card's memory
-for one value), kept the value of two steps before in an array of its own,
-and four index arrays beside. The arithmetic of a node is the same in both,
-operation for operation, and so are the bits.
+**Two ways of the boundary, the same bits.** One kernel walks every stored
+node: the air, and a boundary node's rigid update from the adjacency in its
+mask. A lossy node's branches are then updated by a kernel of their own
+(``boundary="apart"``, the default), one thread a lossy node in the grid's
+order, or by the first kernel in the same thread (``boundary="stencil"``),
+which still holds the value the node had two steps before and finds the
+node's row from a base a column and the column's lossy bits
+(:func:`lossy_rows`). The arithmetic of a node is the same in both,
+operation for operation, and so are the bits, on a card as on the host.
+
+The second moves fewer bytes on paper (:func:`step_bytes`) and was built to
+be the faster. **Measured on an RTX 3090 on the reference grid it is the
+slower by far: 199 s a source position against 87** (2026-10-05,
+``docs/open-questions/solver-boundary.md``). A warp of the stencil's kernel
+is 32 nodes of one column, and 45 % of the warps hold a lossy node, four in
+five of those exactly one: a floor's, a ceiling's. That lane then reads and
+writes its 22 states alone, a sector of the card's memory for each value,
+where the kernel apart streams 256 neighbouring nodes' states a block. It
+is kept because it is proven and measured, not because it should be used.
 
 The arithmetic is the CPU engine's, not the card engine's: PFFDTD's CUDA air
 kernel sums its neighbours pairwise and fuses the last products, so the two
@@ -619,7 +627,7 @@ def lossy_rows(problem: Problem) -> tuple[np.ndarray, np.ndarray]:
     return base, bits
 
 
-def step_bytes(problem: Problem, boundary: str = "stencil") -> dict[str, Any]:
+def step_bytes(problem: Problem, boundary: str = "apart") -> dict[str, Any]:
     """Bytes of a card's memory one source moves a step, by what moves them.
 
     Counted from the arrays' own sizes, as the kernels read and write them:
@@ -671,17 +679,15 @@ def step_bytes(problem: Problem, boundary: str = "stencil") -> dict[str, Any]:
 class CardStepper:
     """The step on a card: every source of the batch in each launch.
 
-    One kernel walks every stored node and writes the air, a boundary
-    node's rigid update from the adjacency in its mask, and a lossy node's
-    branches, whose states are stored in the grid's order, which is the
-    order the kernel walks. With ``boundary="apart"`` the branches are a
-    kernel of their own over the lossy nodes, as they were: it needs the
-    value each held two steps before, which the stencil's kernel has by
-    then overwritten and is therefore kept beside the branches, and it
-    reads and writes each node's value in the field, one node a sector.
-    Measured so on the reference grid, the walls were 51 % of the bytes a
-    step moves for 5.7 % of its nodes
-    (``docs/open-questions/performance-audit.md``).
+    One kernel walks every stored node and writes the air and a boundary
+    node's rigid update from the adjacency in its mask. With
+    ``boundary="apart"`` the branches are then a kernel of their own over
+    the lossy nodes: it needs the value each held two steps before, which
+    the stencil's kernel has by then overwritten and is therefore kept
+    beside the branches, and it reads and writes each node's value in the
+    field. With ``boundary="stencil"`` the first kernel goes on into the
+    branches in the same thread. The same bits, and the first the faster on
+    a card by a factor of two (the module's docstring says why).
 
     ``compile`` builds a kernel from its text; the tests give the host's
     (:func:`reverberate.wave.lowband.hostkernel.host_kernel`) with ``numpy``
@@ -696,7 +702,7 @@ class CardStepper:
         drive: Drive,
         xp: Any,
         *,
-        boundary: str = "stencil",
+        boundary: str = "apart",
         compile: Any = raw_kernel,  # noqa: A002 - what it does
         shared: CardStepper | None = None,
     ) -> None:
@@ -899,7 +905,7 @@ def solve(
     records_on: str = "device",
     spool_steps: int = SPOOL_STEPS,
     stepper: Any = None,
-    boundary: str = "stencil",
+    boundary: str = "apart",
 ) -> Any:
     """Every step of a batch; the records, ``[record, step]`` single precision.
 
