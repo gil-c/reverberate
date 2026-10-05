@@ -396,8 +396,10 @@ band on the batched solver on one RTX 3080 20 GB (instance 54201838,
 `docs/open-questions/low-band-solver.md`), every other stage on one RTX 3090
 (instance 54204430, `docs/adr/0016-appendix-trace-cost.md`), and smoke runs
 of the whole chain on 2 x Tesla P100 and after. **The whole scene of twenty
-minutes has not**: what follows is what the smoke runs and those two boxes
-measured, and what the rentals of 2026-10-05 broke.
+minutes ran twice on 2026-10-05**, on 8 and on 4 RTX 3090, each to a pack
+after two failures and two resumes; their ledgers are in the cost appendix,
+and what they taught about bringing a run home and driving a rental is
+below (*Bringing a run home*, *When a run fails after its solves*).
 
 ### What is given
 
@@ -438,9 +440,17 @@ python -m reverberate.trace rent --recipe V1_near.json --home H_v1_near $M $X \
     --check full --fetch-pairs --max-dph 0.6 --yes
 python -m reverberate.render check H_v1_near/pulled/pack.h5 --reference-point --out H_v1_near/check
 
-# 5. The whole scene, on several cards, within a wall time.
+# 5. The whole scene, on several cards, within a wall time. The pack is written as
+#    the bins of its low band in 16 bits (--low-levers, 9.5 GB for 24.5) and comes home
+#    first, in chunks; the pair cache comes while the run lasts, and what is left of it
+#    after the pack (--no-fetch-pairs leaves it on the machine, which goes with it).
 python -m reverberate.trace rent --recipe R.json --home H_full $M $X \
-    --gpus 4 --max-hours 16 --max-dph 2.0 --fetch-early --yes
+    --gpus 8 --max-hours 10 --max-dph 2.0 --yes
+
+#    The listening variant of 3.5 GB (each degree cut where it has decayed 60 dB), and
+#    the samples as they were:
+python -m reverberate.trace rent ... --low-levers bins,int16,decay=60
+python -m reverberate.trace rent ... --low-levers none
 
 # 6. The same scene with its low band on the coarser grid, in a home of its own.
 python -m reverberate.trace rent --recipe R.json --home H_full_72 $M $X \
@@ -453,8 +463,13 @@ python -m reverberate.render check H_full/pulled/pack.h5 \
 # 8. After a failure: the same command again. What came home is carried and not solved twice.
 python -m reverberate.trace rent --recipe R.json --home H_full $M $X \
     --gpus 4 --max-hours 16 --max-dph 2.0 --fetch-early --yes
-#    or, on the machine if it is still rented and the last line said so:
+#    or, on the machine if it is still rented: the run's last lines give this command
+#    whole, with its instance, after what the machine holds and what an hour of it costs.
 python -m reverberate.trace rent --recipe R.json --home H_full $M $X --instance ID
+
+# 9. What a run that came home took, stage by stage from its own log, against what the
+#    prediction says of its plan on that machine. Nothing rented, nothing written.
+python -m reverberate.trace ledger --home H_full --gpu "RTX 3090" --gpus 8 --gpu-ram 24
 ```
 
 ### The defaults, as they are now
@@ -466,7 +481,11 @@ python -m reverberate.trace rent --recipe R.json --home H_full $M $X --instance 
 | the machine | the lowest predicted total USD among the offers predicted within `--max-hours` | `--gpus N`, `--gpu NAME`, `--max-dph`, `--avoid` |
 | the watchdog, `--hours` | the prediction times 1.5 (2 for a card not measured) and half an hour, the largest of the six offers that may be tried | `--hours H` |
 | the check | a smoke run renders on both modules (`full`); the whole scene reads the pack (`read`) | `--check` |
-| the pair cache | home for the whole scene, every ten minutes while it runs; left for a smoke run | `--fetch-pairs`, `--no-fetch-pairs` |
+| the pack's low band | `bins,int16`: the bins of each response under the crossover's top, in 16 bits; 78 dB under the response in the worst third octave measured, 0.357 of the bytes | `--low-levers none` (the samples), `--low-levers bins,int16,decay=60` (a listening variant, 0.14) |
+| the pair cache's form | compact where the pack is: every bin to 2 kHz in 16 bits, every degree whole, 0.51 of the bytes; a cache reads both forms | follows `--low-levers`; `none` keeps the samples |
+| the pair cache | home for the whole scene, every five minutes while it runs, in batches of whole files; left for a smoke run | `--fetch-pairs`, `--no-fetch-pairs` |
+| the way home | the pack first, in chunks of 32 MB on four kept connections, resumed and verified; the instance's own address tried first, the proxy otherwise | |
+| how the offers' fetch is priced | through the proxy, 4.4 MB/s measured | `--line direct`, once a direct connection has been seen to work |
 | the early tables | left on the machine | `--fetch-early`, for a second run's `--reuse-from` |
 | a run that failed twice | fetched, kept for inspection, named in the last line | `--destroy-failed` |
 | hosts never rented | `gpu.vast.KNOWN_BAD_HOSTS` (machine 35928, 2026-10-05) and `--avoid` | |
@@ -481,8 +500,8 @@ campaign`, which reads in the bundle that it is a trace, which engine solves
 its low band and on which grid (`trace.low`); a flag overrules the bundle.
 The watcher looks every five minutes, relaunches a stalled run once (a
 trace resumes: pairs in their cache, paths in `early/`, histograms in
-`tails/`, seams in `level.jsonl`), and every ten minutes brings home what is
-new of the pair cache.
+`tails/`, seams in `level.jsonl`), and every five minutes brings home what is
+new of the pair cache, where it was asked for.
 
 | what happens | what the driver does |
 | --- | --- |
@@ -492,17 +511,31 @@ new of the pair cache.
 | a host is destroyed and not verified gone | the run stops there; the last line names it |
 | a look fails (the API, the laptop's line) | said, and taken again |
 | the driver itself fails after the launch | the pair cache is asked for once more, the instance destroyed and verified; outcome `error`, the traceback in `onebox.json` |
-| the campaign is `done` | fetched, destroyed, verified |
-| the fetch of a finished run fails | the instance is kept, since what it made is on it; the last line says what it bills until its watchdog |
-| the campaign failed twice | fetched and kept, the last line says so; destroyed with `--destroy-failed` |
+| the campaign is `done` | the pack fetched in chunks and verified, then the reports, then the pair cache if asked; destroyed, verified |
+| a stream of the fetch drops or stalls | its chunk alone is asked for again, after a pause every stream shares; thirty failures in a row end the fetch |
+| the fetch of a finished run fails | the instance is kept, since what it made is on it; the last lines say what it bills until its watchdog and the command that fetches again, from the chunks that are home |
+| the campaign failed twice | fetched and kept; the last lines say what the machine holds, what a resume makes again, the command, and the hourly cost; destroyed with `--destroy-failed` |
 | the rental's deadline is twenty minutes away | what exists is fetched, the instance destroyed |
 | the host vanishes | nothing to fetch: what the homecomings brought is installed |
 | a person interrupts the driver | the campaign runs on, detached; the last line names the instance |
 
-The last line of a run that leaves a machine rented is `INSTANCE n IS STILL
-RENTED: why. It bills r USD/h until its watchdog at hh:mm: x USD more at
-most. Resume with --instance n, or destroy it.` The command exits non-zero
-unless the outcome is `done`.
+The last lines of a run that leaves a machine rented are, as scene A's
+would have been:
+
+```
+INSTANCE 54262814 IS STILL RENTED: the campaign failed twice and is kept for inspection. It bills 1.382 USD/h until its watchdog at 22:24: 10.96 USD more at most. Resume with --instance 54262814, or destroy it.
+  on the machine: 18219 pairs solved (the plan counts 16887), 15 early tables, 848 histograms, 18219 pairs levelled, 0 blocks of the pack's rows, no pack
+  a resume keeps all of it and makes again: the pack's write and its check. A stage's check runs again on what is kept
+  it stopped with: RuntimeError("the low band and the mirror are not on one clock: ...
+  resume:  python -m reverberate.trace rent --recipe R.json --home H_full ... --instance 54262814
+  destroy: python -m reverberate.gpu.vast destroy 54262814
+```
+
+The command exits non-zero unless the outcome is `done`. A run resumed with
+`--instance` reads its watchdog's hour in this machine's ledger. **Resumed
+on a machine whose trace is done, it launches nothing and fetches**, from
+the chunks that are home: what failed there was the fetch. `--relaunch`
+launches the trace all the same.
 
 **Whatever the outcome, what came home is installed**: the pairs go into
 `data/cache/low-pairs/<grid key>/`, a pair cut in its transfer is left out,
@@ -514,58 +547,167 @@ again.
 
 ### Choosing the machine
 
-The low band divides over a machine's cards, one batch a card, and so do
-the rays; the early trace, the levelling and the pack's write are one
-process and the host; the pack's way home is the laptop's line, 8.1 MB/s.
-`trace.machines.predict` adds that up for an offer:
+A rental is billed from the moment it exists to the moment its pack is
+home. `trace.machines.predict` prices that whole span on an offer, as the
+trace runs since it is one queue over every card and every core:
 
-- **the solves**, counted as the machine will make them: a source position
-  heard at more cells than a card holds records for is solved more than
-  once. A 20 GB card holds the records of 57 cells a solve, a 24 GB card
-  83, an 80 GB card over 450; at 7.2 points per wavelength a 20 GB card
-  holds 158. A card that holds no cell's records beside the grid is not
-  offered;
-- **the card's throughput**, over the RTX 3080's:
+- **the start**, 10.5 minutes with no card working: the instance answering,
+  the engine built, the bundle pushed (8.1 and 13.4 minutes on the two hosts
+  of 2026-10-05), then the grid voxelised and the launches planned (1.8
+  minutes on the validated grid, 4.0 at 7.2 points per wavelength);
+- **the solves**, a launch a card: a source position's card seconds (below),
+  8.6 s a launch, a pair's fit (0.55 s on the validated grid, 0.21 at 7.2
+  points), over the cards; 55 s before the first launch steps; and **half a
+  launch of idleness a card at the end**, since the last launches do not end
+  together (555 s a card after launches of 20.7 minutes, 255 s after
+  launches of 19.5);
+- **the rays**, a site a card, 18 s a site of 53 cells;
+- **the host's stages** under the solves: they add to the wall only on a
+  host of very few cores;
+- **the write and the check**;
+- **the fetch**, at the machine's rate: the pack in the form it is written
+  in, at 4.4 MB/s through the proxy, and what the run left no time for of
+  the pair cache. **It is in the total the offers are ranked by**: the
+  first scene's pack as samples is 1.5 h of any machine, 2.08 USD of the
+  eight card host and 1.20 USD of the four card one; as `bins,int16` it is
+  40 minutes, 0.91 and 0.53 USD;
+- **the rental's own rate**: an offer's `dph_total` is priced with 5 GB of
+  disk, and the two scenes, rented with 219 GB, were billed 1.382 USD/h for
+  an offer of 1.284 and 0.797 for one of 0.543. An offer that says what its
+  disk costs (`storage_cost`) is priced with the disk the run asks for.
 
-| card | throughput | from |
-| --- | --- | --- |
-| RTX 3080 20 GB | 1.0 | **measured**: the batched solver, 110 s a source position, 0.31 s a pair, 1.4e10 node updates a second |
-| A100 | 4.2 | **measured, through the present engine**: 15.9 s a position on 2 x A100 against 135 s on the RTX 3080 |
-| Tesla P100 | 0.74 | **measured, through the present engine**: 183 s a position on 2 x P100, one engine process a card, against 135 s. Half that if the 183 s were of both cards on one solve |
-| RTX 3090 | 1.2 | estimate, memory bandwidth. It is the card every stage but the solve was measured on |
-| RTX 3080 Ti, 3090 Ti, 4090, 5080, 6000 Ada | 1.2 to 1.3 | estimate, memory bandwidth |
-| RTX 5090 | 2.3 | estimate, memory bandwidth |
-| RTX 4080, A5000, A6000, A40, L40, L40S, Titan RTX, V100, 2080 Ti | 0.8 to 1.2 | estimate, memory bandwidth |
-| RTX 4070 Ti, A4000 | 0.6 to 0.65 | estimate, memory bandwidth |
-| H100, H200 | 4.2 | estimate, taken as the A100's |
+A source position of 1.2 s on the grid to 1500 Hz, in card seconds:
 
-  The bandwidth ratio would give the A100 2.0 to 2.5 and the P100 0.96: it
-  is 70 per cent short on one and 30 per cent long on the other. An
-  estimated card is marked `ESTIMATED` in the table of offers and its
-  watchdog is given twice the prediction, not one and a half. A card with
-  no row is not offered;
-- **the coarser grid**: 36 s a source position at 7.2 points per wavelength
-  on the same RTX 3080 against 110 s, a power of 2.96 of the points;
-- **the pair cache's way home** costs no machine time while the run lasts,
-  since it is brought every ten minutes; only what the run leaves no time
-  for is waited for.
-
-The first recipe (seed 20261004, 375 source positions, 1964 pairs, 72 tail
-sites over 23 cells), `trace.machines.predict` of 2026-10-05:
-
-| machine | solves | wall, validated grid | wall, 7.2 points |
+| card | validated grid | 7.2 points | from |
 | --- | --- | --- | --- |
-| 1 x RTX 3080 20 GB | 396, of which 21 for the records | 12.9 h | 4.6 h |
-| 4 x RTX 3080 20 GB | 396 | 3.5 h | 1.4 h |
-| 4 x RTX 3090 (estimated) | 388 | 2.9 h | 1.2 h |
-| 2 x A100 80 GB | 375 | 1.9 h | 0.9 h |
-| 2 x Tesla P100 16 GB | 419 | 9.2 h | 3.1 h |
+| RTX 3090 | 88.0 | 34.6 | **measured**: 1505 positions on 8 cards and 1496 on 4, the two whole scenes of 2026-10-05; 90 s on 4 cards in launches of 8 |
+| RTX 3080 20 GB | 110 | 36 | **measured**: one card, 2026-10-05 |
+| A100 | 26 | 8.6 | the RTX 3080's over 4.2, **measured through the present engine** (15.9 s a position on 2 x A100 against 135 s) |
+| Tesla P100 | 149 | 49 | the RTX 3080's over 0.74, **measured through the present engine** |
+| any other card | 110 over its throughput | by the points to the power 2.96 | **estimate**, memory bandwidth (`trace.machines.CARDS`) |
 
-The total in USD is those hours times the offer's rate: the same work costs
-about the same on one card of a kind as on four, and four give it in a
-quarter of the time, so the wall time allowed is what chooses. The realistic
-recipe (1646 positions, 16 529 pairs) is 1763 solves and 55 h on one RTX
-3080, 14 h on four (`docs/open-questions/low-band-solver.md`).
+An estimated card is marked `ESTIMATED` in the table of offers and its
+watchdog is given twice the prediction, not one and a half. A card with no
+row is not offered.
+
+**Checked against the two whole scenes** (`python -m reverberate.trace
+ledger`, the prediction made as each run planned its launches, their code
+being of before the queue):
+
+| | scene A, 8 x RTX 3090, 1.382 USD/h | scene B, 4 x RTX 3090, 7.2 points, 0.797 USD/h |
+| --- | --- | --- |
+| solve, wall: predicted, actual | 19 836 s, 19 784 s | 15 290 s, 14 745 s |
+| solves, card seconds | 144 030, 141 160 | 55 041, 54 147 |
+| fits, card seconds | 9 288, 10 066 | 3 546, 3 166 |
+| paths, one process | 1 409 s, 1 076 s | 1 409 s, 1 052 s |
+| level, one process | 1 402 s, 1 417 s | 1 402 s, 1 156 s |
+| rays | 460 s, 1 436 s | 920 s, 1 625 s |
+| write | 169 s, 153 s | 169 s, 120 s |
+| between attempts | 0, 825 s | 0, 825 s |
+
+The solves are within 0.3 and 3.7 per cent. **The rays are not**: that
+code divided one site over every card (1 094 and 1 266 s for the 202
+sites), the queue gives a site a card, and no whole scene has run it; and
+both runs read their tails' tables again in the resume that wrote the pack
+(342 and 359 s). The prediction of the queue for the next run of scene A
+on the same host: 6.2 h and 8.6 USD with the pack home, of which the solves
+are 5.2 h; on the four cards at 7.2 points, 5.3 h and 4.3 USD.
+
+### Bringing a run home
+
+Measured on the two packs of 2026-10-05, from two hosts in California
+through Vast's ssh proxy, on a line that carries 70 MB/s to Europe and
+17 MB/s to the United States:
+
+| streams | bytes a second | |
+| --- | --- | --- |
+| 1 | 2.0 to 2.3 MB/s | one `rsync`, one `dd` |
+| 4 | 4.4 MB/s | each pack, 4 streams each, both at once: 5.2 and 5.0 MB/s for 25 minutes |
+| 8 | 5.9 MB/s | |
+| 12, reconnecting fast | refused | `Connection timed out during banner exchange`, then every stream dropped at once: the instance's `sshd` admits ten connections that have not authenticated (`MaxStartups`) |
+| the pair cache by `rsync`, while the cards solved | 0.3 to 0.5 MB/s | 12 351 pairs of 16 887 home in six hours |
+
+The proxy is the limit, a few streams are worth having, and a stream may
+stop for ten minutes with its connection open (scene A's did, at 244
+chunks of 284). `gpu.homecoming` is built on that:
+
+- **a large file comes in chunks of 32 MB** on four workers
+  (`fetch_file`). A chunk that arrived whole is written at its place in
+  `pack.h5.partial` and noted in `pack.h5.chunks.json`: a stream that drops
+  costs its chunk, and a fetch that is interrupted, or a command run
+  again, asks only for what is missing. A chunk is checked by its size and
+  the file by the SHA-256 the machine computes of it while the chunks
+  come; where the two differ the chunks are compared one by one and the
+  wrong ones fetched again;
+- **each worker keeps one connection** for all its chunks
+  (`ControlMaster`, a socket under `~/.ssh`): three hundred chunks open
+  four connections, not three hundred;
+- **a failure makes every worker wait**, twice as long with each failure
+  that follows another, up to two minutes; thirty in a row end the fetch.
+  A chunk that brings less than 150 kB/s is ended and asked for again;
+- **the pair cache comes as batches of whole files** (`fetch_tree`, a
+  `tar` stream of about 32 MB a batch), a file checked by its size, what
+  is home never sent again, a pass bounded by the pause between two looks;
+- **the order is the pack, the reports, then the pair cache if asked**: a
+  fetch that is cut has brought what the run was for;
+- **a direct connection is tried first**. An instance is now asked for
+  with direct ssh (`runtype` `ssh_direc ssh_proxy`, Vast's own words for
+  `--ssh --direct`), which maps its port 22 to a port of the host's own
+  address; the API's record then carries `public_ipaddr` and
+  `ports["22/tcp"][0]["HostPort"]`, the transfers probe that address once
+  and use it where it answers, and every command still goes through the
+  proxy. A request Vast refuses as malformed is made again as it was
+  (`runtype` `ssh`), and the log says so.
+
+**Not yet seen on a machine**, and the first run's to verify: that an
+instance created so reports its port and answers on it; what a chunked
+fetch brings on four kept connections through the proxy and directly;
+that the compact pair cache is written and read by a whole trace. The
+tests answer from a directory. Until the direct way is measured the offers
+are priced through the proxy; `--line direct` prices them by the laptop's
+line to where each host is (70 MB/s for Europe, 17 for the United States,
+8 elsewhere, and no more than four fifths of what the host says it sends),
+with which a host in Europe wins by its fetch.
+
+**The compact forms.** The trace writes the pack's low band as `bins,int16`
+unless told (`--low-levers`, in the bundle's `trace.low_levers` and the
+pack's provenance): 9.51 GB for scene A's 24.50 and 8.07 GB for scene B's
+20.51, as `python -m reverberate.render compact` made them on the machines.
+The pair cache follows (`trace.pair_cache`): 621 kB a pair for 1 229 kB.
+**It keeps every bin to 2 kHz**, not the bins to the solve's 1500 Hz: a
+cached pair holds 45 dB under its energy above 1500 Hz in the median and
+32 dB in the worst of forty, the pack's response is cut from it in time
+before its masks, and what is dropped there comes back under 1414 Hz, 46 dB
+under the stored response in its worst third octave. With every bin the
+stored response is the plain one's to 83 dB (sixty pairs of scene A) and no
+onset moves. A cache reads either form pair by pair, a pair's key does not
+say its form, and a pair goes from cache to cache, to the bundle and to
+the store in the form it is in.
+
+### When a run fails after its solves
+
+Both scenes ended `campaign.failed` after five hours of solves, stopped by
+the clock's check, and the driver said "kept for inspection". The check was
+wrong, not the clock: it read each pair's loudest sample, which at a far
+pair is an arrival 5 to 20 ms after its direct sound. It now reads the
+response where the mirror puts the direct sound (`trace.clock`): the first
+peak within 3 ms of the mirror's time, and the level there over 300 to
+800 Hz against `1 / d` on the field's scale; the first quartile of the
+times within half a millisecond and the third of the levels within 3 dB.
+On scene A's pairs: -0.02 ms and +0.3 dB over every distance, +0.01 ms and
++0.3 dB at 4 m and more, +0.04 ms and -1.8 dB at 8 m and more, where the
+loudest sample read 12.0 and 12.7 ms at its first decile against a lead of
+10.67; on scene B's, at 7.2 points, +0.17 ms and -1.7 dB at 8 m and more. A
+cache 1 ms off, 6 dB off or carrying a lead of its own stops the trace
+with a message that says which.
+
+A run that fails keeps its machine, and its last lines are the ones under
+*What the driver does* above. What a trace keeps as it goes, and a resume
+therefore does not make again: the pairs (`pairs/`), the early tables
+(`early/`), the tails' histograms (`tails/`), the pairs' levelling
+(`level.jsonl`), the pack's rows (`jobs/rows/`). Scene A's resume took 9.5
+minutes for a pack: 0 solves, 5.7 minutes reading its tails' tables, 2.6
+writing.
 
 ### What the whole scene's first run showed (2026-10-05)
 
@@ -573,7 +715,11 @@ recipe (1646 positions, 16 529 pairs) is 1763 solves and 55 h on one RTX
 | --- | --- | --- | --- |
 | `trace FAILED: OutOfMemoryError('Out of memory allocating 10,834,217,984 bytes (allocated so far: 15,031,810,048 bytes)')` at job 94 of 304 on 8 x RTX 3090 of 24 576 MiB | The refused block is one launch's records: 84 cells of 984 nodes, 4 bytes a step, 32 769 steps. The 15.0 GB held were not that launch's: the launch before had left its own records (65 cells, 8.4 GB) in cupy's pool, the new launch's masks and fields were cut from that block, and the pool cannot give back a block of which a part is in use. The plan itself held: it was made once, on the first card, and counted one launch at a time | The pool gives its free blocks back before every launch; the resampler's weights, which stay for the campaign, are made before the first; each launch is held against what its own card has free at that moment, 80 % of it, and parted where that is less; a launch refused its memory is parted (its sources first, then one source's cells) and tried again. One source at one cell that is refused is the campaign's failure | in code, tested with an allocator that refuses; not run on a card |
 | `homecoming of pairs not complete: transfer failed after 1 attempts: rsync down did not end in 600 s`, every time, and the looks 15 minutes apart instead of 5 | A pass was given 600 s every 600 s and the watch waited for it; the line brought 0.3 to 0.5 MB/s (895 pairs of 1.2 MB in 1.6 h, of 11 481 then on the machine), so no pass could end | A pass is taken out of the pause between two looks (270 s of 300) and ends there with every whole file kept; what its last file left is removed; the log says `pairs home: N of M on the machine (+K in S s)` | in code |
-| The pair cache's way home is priced at 8.1 MB/s (43 min for 20.75 GB) and came at a twentieth of that | Not known: that host's line, the proxy, or the machine busy solving. The figure was measured on another box | **Open.** At that rate the cache is 12 h of rental after the solves. Until it is measured again: `--no-fetch-pairs` on a host whose first passes read under 2 MB/s, or the store as the way home | to decide |
+| The pair cache's way home is priced at 8.1 MB/s (43 min for 20.75 GB) and came at a twentieth of that | The proxy carries 2 MB/s a stream, and one `rsync` of thousands of files on a machine busy solving a quarter of that | Batches of whole files on four kept connections, the cache half its size, the way home priced at the 4.4 MB/s four streams measured. `--no-fetch-pairs` leaves it | in code; the rate of the batches not measured on a machine |
+| The pack, 24.5 GB, came home at 2 MB/s with the eight cards billing 1.38 USD/h | The same proxy, one stream; twelve streams were refused together and a stream that dropped lost its 2 GB part | The pack is written 9.5 GB, fetched first, in chunks of 32 MB that are kept, on four connections that are kept | in code, tested against a directory |
+| `trace FAILED: RuntimeError("the low band and the mirror are not on one clock: ... 13.21 ms in the median")` after 5.9 h, on both scenes | The check read the pairs' loudest samples; at 4 m and more those are a later arrival | The check reads the direct sound where the mirror puts it, its time and its level (`trace.clock`) | in code; on both scenes' own pairs it passes at every distance |
+| The driver's last line: "kept for inspection" | It did not know what the machine held or how it was called | The last lines: what is on the machine, what a resume makes again, the command, the hourly cost | in code |
+| A rental billed 0.797 USD/h for an offer of 0.543 | The offer's price holds 5 GB of disk and the rental asked for 219 GB, of which the trace used 53 | The offers are priced with their disk. **The disk asked for is still a field campaign's**: sizing it for a trace (the pack, its rows, the cache and a margin, about 90 GB) is not done | half in code |
 
 ### Every card and every core (lot L13, phase one: not yet run on a card)
 

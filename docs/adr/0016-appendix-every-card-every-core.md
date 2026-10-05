@@ -193,8 +193,12 @@ with no near pair at all is still stopped**: the 5 s window of three far
 voices here has its first decile at 15.53 ms, every one of its 129 direct
 pairs being at 4.4 m or more. The reading that would hold for any scene is
 the one measured above, the response's peak within a millisecond or two of
-where the mirror puts the direct sound, and not its loudest sample; it is
-proposed and not built. **What the check leaves open is not the check's**: `low/onset_s` of a pair is its loudest
+where the mirror puts the direct sound, and not its loudest sample. **It is
+built since lot L15a** (`trace.clock`): the first peak within 3 ms of the
+mirror's time and the level there against `1 / d`, on every pair with a
+direct path; on the two whole scenes' own pairs it reads -0.02 to +0.17 ms
+and +0.3 to -1.8 dB at every distance, at 8 m and more too, and a cache
+1 ms or 6 dB off stops the trace with a message that says which. **What the check leaves open is not the check's**: `low/onset_s` of a pair is its loudest
 sample, and at a far pair the pack therefore anchors the join of the two
 bands 5 to 20 ms after the direct sound. Whether that is heard is for a
 listening of far sources to say; it was so before this lot.

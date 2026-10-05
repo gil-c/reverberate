@@ -65,9 +65,13 @@ round to its end by the transform that takes the masks. The pair cache is
 on the geometric clock, so the trace delays each pair by `lead_s` before it
 takes its masks (`spatial.lowband.delayed`: what leaves the end is dropped,
 the last `lead_s` fall to zero, nothing wraps). **A trace whose pairs do
-not trail their direct sound by `lead_s`, to half a millisecond in the
-median over the pairs with a direct path, stops with an error**
-(`trace.run.CLOCK_S`). The first pack a card made (2026-10-04) had its
+not hold their direct sound `lead_s` after the mirror's first arrival, to
+half a millisecond, and at `1 / d` on the field's scale, to 3 dB, stops
+with an error that says which** (`trace.clock`: each pair with a direct
+path is read where the mirror puts its direct sound, the first quartile of
+the times and the third of the levels are judged, and what the pairs'
+loudest samples trail by is in the report and no longer the check: at a
+far pair the loudest sample is a later arrival). The first pack a card made (2026-10-04) had its
 pairs on the geometric clock and its mirror `lead_s` later: the band under
 1 kHz came 10.5 ms before the band over it, and the direct sound, 10.7 ms
 after the window anchored on the pair, took the power mask.
@@ -484,7 +488,11 @@ than an array's radius is the case.
 
 **`compact`: the same responses in fewer bytes.** An option of the writer
 (`PackWriter(low_levers=...)`, `reverberate.render.compact.Levers`), off
-unless asked for, and of `python -m reverberate.render compact IN OUT
+unless asked for. **A trace asks for it**: `python -m reverberate.trace
+rent` and `bundle` write `bins,int16` unless told (`--low-levers TEXT`;
+`none` is `low/ir`), the bundle says which (`trace.low_levers`) and so does
+the pack's provenance. It is also an option of `python -m
+reverberate.render compact IN OUT
 --levers ...`, which rewrites a pack that exists so that one trace is heard
 both ways. A pack written with it has, **in place of `ir`**, the group
 `low/compact`, and nothing else of the pack changes. A reader that knows the
@@ -897,6 +905,8 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `assets_mismatched` | the names of the recipe's asset keys that are not the trace's; empty unless the trace was told to allow them |
 | `low_seconds` | present only when the low band was solved for fewer seconds than `low_samples` hold (`--low-seconds`): every `low/ir` is then faded to nothing over the 20 ms before that time and silent after it |
 | `rays` | present only when a tail site cast another number of rays than 100 000 (`--rays`) |
+| `low_levers` | present only when the pack holds `low/compact`: the levers it was written with, as `low/compact`'s own `levers_json` |
+| `pair_cache` | present only when the pair cache the responses were read from was kept compact: its levers, `bins,int16` |
 | `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |
 | `created_utc` | |
 | `profile` | what of the recipe was traced: `{"seconds", "sources", "patch", "start_s"}`, all `null`, `false` and `0` for the whole scene |
@@ -942,6 +952,17 @@ the direct sound; before its masks, its air, the lead and the division
 that make it `low/ir`. Every engine that fills the cache gives that form,
 the monopole of `trace.engines.FreeFieldPairs` included.
 
+**A cache keeps a pair as its samples or compact** (`<key>.npy` or
+`<key>.npz`, `accel.pairs.PairCache`): every bin of its transform up to
+2 kHz, in 16 bits with a scale a channel and 100 Hz, 621 kB for 1 229 kB,
+every degree whole. A trace's machine writes the compact form where its
+pack is compact (the bundle's `trace.pair_cache`). A cache reads either,
+pair by pair, and the key does not say which: into `low/ir` the compact
+pair is the other to 83 dB in the worst third octave of sixty pairs of the
+first scene, and its onset is the same sample. The bins are not cut at the
+solve's 1500 Hz: a cached pair still holds something there (32 to 45 dB
+under its energy), and `low/ir` is cut from it in time before its masks.
+
 ## Size
 
 For 20 minutes, `steps = 24 001`, and 14 sources. The per step tables are
@@ -959,9 +980,10 @@ histograms a source.
 | `tail` | 286 kB a histogram | 69 MB | 0.96 GB |
 | **the pack** | | | **about 8 GB** |
 
-The first scene measured: 16 887 pairs, 20.7 GB of `low/ir` in a pack of
-24 GB. Written with `low/compact` (`bins,int16,decay=60`) the same pairs
-are 2.9 GB.
+The first scene measured: 18 992 rows of `low/ir`, 23.3 GB, in a pack of
+24.5 GB. Written as a trace now writes it, `low/compact` with `bins,int16`,
+the rows are 8.3 GB and the pack 9.5 GB; with `bins,int16,decay=60` the
+rows are about 3.3 GB.
 
 The rendered order 7 signal of the same scene is 14.7 GB. The pack is
 `low/ir`: pairs times 1.23 MB, and the number of pairs is the number of
