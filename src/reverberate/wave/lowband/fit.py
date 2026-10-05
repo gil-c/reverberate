@@ -280,6 +280,8 @@ SPECTRAL_PADDING = 3.0
 #: Half the taps of that kernel, and its Kaiser window's shape: an error of a millionth.
 SPECTRAL_TAPS = 8
 SPECTRAL_BETA = 13.0
+#: Seconds over which a record's end is faded before it is transformed.
+SPECTRAL_FADE_S = 0.010
 
 
 @dataclass
@@ -310,6 +312,18 @@ class SpectralChain:
     response is kept and the band is cut exactly. The two differ by the
     response to a record's two ends, where a room's response is silent at
     the start and 60 dB down at the end; the tests measure it.
+
+    **A record's end is faded**, over :data:`SPECTRAL_FADE_S`. A solver's
+    record does not end in silence: above the band, from 4 kHz to the grid's
+    own limit, it holds 40 dB more than in the band and that part does not
+    decay (measured on the reference grid: the last 50 ms at 0.9 dB under
+    the whole record's level). The time chain's forward low pass has removed
+    it before the record stops. Transformed as it is, the record stops at
+    full level, and what the low pass makes of that stop lies at the
+    record's end, 50 dB over the response there; the fit's high degrees
+    then spread it over the last third of a second. Faded over 10 ms the
+    stop is gone: the bins are the time chain's to 100 dB from 0.4 s on,
+    and the response's last 10 ms, 60 dB down, are faded with it.
     """
 
     n_orig: int
@@ -317,6 +331,7 @@ class SpectralChain:
     first: Any
     weights: Any
     response: Any
+    fade: Any = None
 
     @classmethod
     def prepare(
@@ -348,12 +363,15 @@ class SpectralChain:
         low_pass = sosfreqz(lowpass, worN=omega)[1]
         response = sosfreqz(lowcut, worN=omega)[1] * np.abs(low_pass) ** 2
         response = response * (encoder.sample_rate_hz / grid_rate_hz)
+        ramp = max(1, min(int(n_orig) // 2, round(SPECTRAL_FADE_S * grid_rate_hz)))
+        fade = 0.5 * (1.0 + np.cos(np.pi * (np.arange(ramp) + 1.0) / ramp))
         return cls(
             n_orig=int(n_orig),
             padded=int(padded),
             first=xp.asarray(first),
             weights=xp.asarray(weights),
             response=xp.asarray(response),
+            fade=xp.asarray(fade.astype(np.float32)),
         )
 
     def apply(self, records: Any, xp: Any) -> Any:
@@ -362,7 +380,11 @@ class SpectralChain:
             raise ValueError(
                 f"prepared for records of {self.n_orig} samples, not {records.shape[1]}"
             )
-        spectrum = xp.fft.rfft(xp.asarray(records, dtype=xp.float32), n=self.padded, axis=-1)
+        held = xp.array(records, dtype=xp.float32, copy=True)
+        if self.fade is not None:
+            held[:, held.shape[1] - int(self.fade.shape[0]) :] *= self.fade[None, :]
+        spectrum = xp.fft.rfft(held, n=self.padded, axis=-1)
+        del held
         read = xp.zeros((spectrum.shape[0], int(self.first.shape[0])), dtype=xp.complex128)
         for tap in range(2 * SPECTRAL_TAPS):
             index = self.first + tap

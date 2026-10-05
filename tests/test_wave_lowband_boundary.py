@@ -147,15 +147,17 @@ class TestTheWallsFittedAgain:
         assert json.loads(kept.read_text())["fit"] == WallFit(9).name()
 
     def test_an_option_that_changes_a_response_changes_the_solver_s_name(self) -> None:
-        plain = solver_name(CARTESIAN, 10.5)
+        plain = solver_name(CARTESIAN, 10.5, walls=None)
         assert plain == "reverberate.wave.lowband/1 cartesian at 10.5 points per wavelength"
+        # Left alone, a campaign's walls are of seven branches, and its pairs say so.
+        assert solver_name(CARTESIAN, 10.5) == solver_name(CARTESIAN, 10.5, walls=7) != plain
         names = {
             plain,
             solver_name(CARTESIAN, 10.5, walls=7),
             solver_name(CARTESIAN, 10.5, walls=6),
-            solver_name(CARTESIAN, 10.5, outside="open"),
-            solver_name(CARTESIAN, 10.5, outside="rigid"),
-            solver_name(CARTESIAN, 10.5, fit="spectra"),
+            solver_name(CARTESIAN, 10.5, walls=None, outside="open"),
+            solver_name(CARTESIAN, 10.5, walls=None, outside="rigid"),
+            solver_name(CARTESIAN, 10.5, walls=None, fit="spectra"),
             solver_name(CARTESIAN, 10.5, walls=7, outside="open", fit="spectra"),
         }
         assert len(names) == 7 and all(name.startswith(plain) for name in names)
@@ -299,8 +301,15 @@ def a_cell(steps: int) -> tuple[np.ndarray, np.ndarray, float]:
     envelope = np.where(time > onset, 10.0 ** (-3.0 * (time - onset) / span), 0.0)
     smooth = rng.standard_normal((40, steps)) * envelope[None, :]
     smooth[:, int(onset * rate) + 3] += 30.0
-    # The solver's source is differentiated, and so are its records.
-    records = (np.diff(smooth, axis=1, prepend=0.0) * rate).astype(np.float32)
+    # The solver's source is differentiated, and so are its records; and above the band,
+    # from 4 kHz to the grid's limit, a record holds 40 dB more that does not decay.
+    grid_noise = rng.standard_normal((40, steps))
+    grid_noise = sosfilt(butter(6, 4000.0, btype="high", fs=rate, output="sos"), grid_noise, axis=1)
+    grid_noise[:, : int(onset * rate)] = 0.0
+    records = np.diff(smooth, axis=1, prepend=0.0) * rate
+    in_band = sosfilt(butter(4, 1500.0, fs=rate, output="sos"), records, axis=1)
+    grid_noise *= 100.0 * np.sqrt((in_band**2).mean() / (grid_noise**2).mean())
+    records = (records + grid_noise).astype(np.float32)
     offsets = rng.uniform(-0.3, 0.3, size=(40, 3))
     offsets[0] = 0.0
     return records, offsets, rate

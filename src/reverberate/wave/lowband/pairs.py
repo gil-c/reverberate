@@ -56,7 +56,7 @@ from reverberate.wave.lowband.solver import (
     step_bytes,
     steps_for,
 )
-from reverberate.wave.lowband.walls import WallFit
+from reverberate.wave.lowband.walls import DEFAULT_BRANCHES, WallFit
 
 __all__ = [
     "SOLVER",
@@ -231,15 +231,15 @@ def solver_name(
     scheme: Scheme,
     ppw: float,
     *,
-    walls: int | None = None,
+    walls: int | None = DEFAULT_BRANCHES,
     outside: str | None = None,
     fit: str = "time",
 ) -> str:
     """What a pair's key and a pack's provenance say solved it.
 
-    Left alone, the name every cached pair carries. Each option that
-    changes a response adds its own words, so that pairs made with it are
-    other pairs: the walls fitted again with ``walls`` branches
+    Each option that changes a response adds its own words, so that pairs
+    made with it are other pairs: the walls fitted again with ``walls``
+    branches, which a campaign's are unless told ``None``
     (:mod:`reverberate.wave.lowband.walls`), the air outside the outer walls
     cut off and its openings closed as ``outside`` says
     (:mod:`reverberate.wave.lowband.outside`), the fit made in its spectra
@@ -296,7 +296,7 @@ def probe(
     xp: Any,
     *,
     seconds: float = PROBE_S,
-    boundary: str = "stencil",
+    boundary: str = "apart",
     card: str = "",
     stepper: Any = None,
 ) -> dict[str, Any]:
@@ -473,7 +473,7 @@ def low_grid(
     scheme: str = CARTESIAN.name,
     ppw: float | None = None,
     bundle_ppw: float = 10.5,
-    walls: int | None = None,
+    walls: int | None = DEFAULT_BRANCHES,
     outside: str | None = None,
     fit: str = "time",
 ) -> tuple[Any, str]:
@@ -592,13 +592,12 @@ class LowbandPairs(PairsCampaign):
     #: Where a launch's records are kept (:func:`reverberate.wave.lowband.solver.solve`):
     #: on the device, or on the host as a queue's launches keep them.
     records_on: str = "device"
-    #: Where a card updates a lossy node's branches: the same bits either way
-    #: (:class:`reverberate.wave.lowband.solver.CardStepper`).
-    boundary: str = "stencil"
+    #: Where a card updates a lossy node's branches: the same bits either way, and the
+    #: kernel apart the faster on a card (:class:`reverberate.wave.lowband.solver.CardStepper`).
+    boundary: str = "apart"
     #: Branches a material is fitted again with for the band; ``None`` is the materials as
-    #: they are, the default until a card's comparison has passed
-    #: (:mod:`reverberate.wave.lowband.walls`). In the pairs' keys.
-    walls: int | None = None
+    #: they are (:mod:`reverberate.wave.lowband.walls`). In the pairs' keys.
+    walls: int | None = DEFAULT_BRANCHES
     #: ``"open"`` or ``"rigid"``: the air between the outer walls and the shell cut off
     #: (:mod:`reverberate.wave.lowband.outside`); ``None`` is the grid as exported. In the keys.
     outside: str | None = None
