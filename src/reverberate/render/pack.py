@@ -273,6 +273,12 @@ class Low:
     position_weight: np.ndarray
     cell: np.ndarray
     mode: np.ndarray
+    #: More than two source positions a step, when the pack was traced so:
+    #: ``[step, slot, 2]`` rows of ``ir`` and ``[step, slot, knot]`` weights at
+    #: ``slot_knots_hz``. ``None`` in a pack whose steps read ``pair`` alone.
+    slot_pair: np.ndarray | None = None
+    slot_weight: np.ndarray | None = None
+    slot_knots_hz: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -411,6 +417,15 @@ _LOW = {
     "cell": ("<i4", "step,2"),
     "mode": ("u1", "step"),
 }
+#: The optional tables of ``low``: all three or none.
+_LOW_SLOTS = {
+    "slot_pair": ("<i4", "step,slot,2"),
+    "slot_weight": ("<f4", "step,slot,knot"),
+    "slot_knots_hz": ("<f8", "knot"),
+}
+#: A slot's weight is a share of a response: the weights of a step may pass one where
+#: the source is past the last position of its rail, never by this much.
+SLOT_WEIGHT_LIMIT = 16.0
 _TAIL = {
     "energy": ("<f4", "hist,bin,band"),
     "moments": ("<f4", "hist,bin,band,moment"),
@@ -531,7 +546,14 @@ class PackWriter:
         _write_group(group.create_group("early"), _EARLY, source.early)
         _write_group(group.create_group("level"), _LEVEL, source.level)
         if source.low is not None:
-            _write_group(group.create_group("low"), _LOW, source.low)
+            low = group.create_group("low")
+            _write_group(low, _LOW, source.low)
+            if source.low.slot_pair is not None:
+                # Most steps are at rest and hold one row and a weight of one: deflated.
+                for name, (dtype, _) in _LOW_SLOTS.items():
+                    data = np.asarray(getattr(source.low, name)).astype(dtype, copy=False)
+                    packed = {} if data.ndim == 1 else {"compression": "gzip", "shuffle": True}
+                    low.create_dataset(name, data=data, **packed)
         if source.tail is not None:
             _write_group(group.create_group("tail"), _TAIL, source.tail)
 
@@ -676,7 +698,14 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 **_read_group(group, _SOURCE),
                 early=Early(**_read_group(group["early"], _EARLY)),
                 level=Level(**_read_group(group["level"], _LEVEL)),
-                low=Low(**_read_group(group["low"], _LOW)) if "low" in group else None,
+                low=Low(
+                    **_read_group(group["low"], _LOW),
+                    **(
+                        _read_group(group["low"], _LOW_SLOTS) if "slot_pair" in group["low"] else {}
+                    ),
+                )
+                if "low" in group
+                else None,
                 tail=Tail(**_read_group(group["tail"], _TAIL)) if "tail" in group else None,
             )
         pack = ScenePack(
@@ -735,7 +764,7 @@ def _shapes(
 
 
 #: Sizes that belong to one group of one source, not to the pack.
-_FREE = {"row", "pair", "hist", "bin"}
+_FREE = {"row", "pair", "hist", "bin", "slot", "knot"}
 
 
 def _unit(where: str, vectors: np.ndarray) -> None:
@@ -927,6 +956,10 @@ def _check_low(
                 np.all(low.pair_cell[rows[held]] == cell[held, b]),
                 f"{where}: pair[k, {a}, {b}] was not solved at cell[k, {b}]",
             )
+    given = [getattr(low, name) is not None for name in _LOW_SLOTS]
+    _need(all(given) or not any(given), f"{where} holds some of {sorted(_LOW_SLOTS)}, not all")
+    if all(given):
+        _check_slots(where, low, audible, sizes, pairs)
     exact = float(pack.header.fusion.get("exact_under_m", 0.001))
     is_exact = audible & (mode == 1)
     if is_exact.any():
@@ -949,6 +982,59 @@ def _check_low(
                 peak == 0.0 or float(spectrum[:, above].max()) <= 1e-4 * peak,
                 f"{where}/ir[{row}] is not zero above {limit:.0f} Hz",
             )
+
+
+def _check_slots(
+    where: str, low: Low, audible: np.ndarray, sizes: dict[str, int], pairs: int
+) -> None:
+    """Invariant 13: the slots of a step past the first two, and every slot's weights."""
+    _shapes(where, _LOW_SLOTS, low, sizes)
+    slots = np.asarray(low.slot_pair)
+    weights = np.asarray(low.slot_weight, dtype=float)
+    knots = np.asarray(low.slot_knots_hz, dtype=float)
+    _need(slots.shape[1] >= 2, f"{where}/slot_pair holds fewer than two slots")
+    _need(
+        knots.size >= 2 and knots[0] == 0.0 and np.all(np.diff(knots) > 0.0),
+        f"{where}/slot_knots_hz does not rise from zero",
+    )
+    _need(
+        np.allclose(np.diff(knots), knots[1] - knots[0]),
+        f"{where}/slot_knots_hz is not evenly spaced",
+    )
+    _need(np.all((slots >= -1) & (slots < pairs)), f"{where}/slot_pair points outside its table")
+    _need(
+        np.array_equal(slots[:, :2, :], np.asarray(low.pair)),
+        f"{where}/slot_pair[k, :2] is not pair[k]",
+    )
+    cell = np.asarray(low.cell)
+    for b in range(2):
+        rows = slots[:, :, b]
+        held = rows >= 0
+        _need(
+            np.all(
+                low.pair_cell[rows[held]] == np.broadcast_to(cell[:, b : b + 1], rows.shape)[held]
+            ),
+            f"{where}: slot_pair[k, :, {b}] was not solved at cell[k, {b}]",
+        )
+        if b:
+            _need(
+                np.all(held == (held[:, :1] & (slots[:, :, 0] >= 0))),
+                f"{where}/slot_pair[k, :, 1] is not valid exactly where the second cell is used",
+            )
+    _need(np.all(np.isfinite(weights)), f"{where}/slot_weight is not finite")
+    _need(
+        np.all(np.abs(weights) <= SLOT_WEIGHT_LIMIT),
+        f"{where}/slot_weight passes {SLOT_WEIGHT_LIMIT}",
+    )
+    _need(
+        np.all(weights[slots[:, :, 0] < 0] == 0.0),
+        f"{where}/slot_weight is not zero where a slot holds no row",
+    )
+    alone = audible & (slots[:, 1, 0] < 0)
+    _need(
+        np.all(weights[alone, 0, :] == 1.0),
+        f"{where}/slot_weight is not one where a step reads one position",
+    )
 
 
 def _check_tail(

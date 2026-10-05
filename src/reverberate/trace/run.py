@@ -525,7 +525,7 @@ class Trace:
             self.tail[name] = held
             chosen = self.low[name]
             for step in np.flatnonzero(track.audible):
-                for position in track.slot[step]:
+                for position in track.read(int(step)):
                     for cell in chosen.cell[step]:
                         if position >= 0 and cell >= 0:
                             self.owner.setdefault((int(position), int(cell)), name)
@@ -783,6 +783,17 @@ class Trace:
                             if position >= 0 and cell >= 0:
                                 j = row_of[(position, cell)]
                                 pair[step, a, b] = local.setdefault(j, len(local))
+                # More than two positions a step: the same rows, and those of the others.
+                slot_pair = None
+                if track.rail_slot is not None:
+                    slot_pair = np.full((steps, track.rail_slot.shape[1], 2), -1, dtype=np.int32)
+                    for step in np.flatnonzero(track.audible):
+                        for a, position in enumerate(track.rail_slot[step]):
+                            for b in range(2):
+                                cell = int(chosen.cell[step, b])
+                                if position >= 0 and cell >= 0:
+                                    j = row_of[(int(position), cell)]
+                                    slot_pair[step, a, b] = local.setdefault(j, len(local))
                 mine = sorted(local, key=lambda j: local[j])
                 # A pair at a time, from the cache to the file: the array of a source's
                 # rows is never held (:class:`PairRows`).
@@ -827,6 +838,9 @@ class Trace:
                             position_weight=track.weight.astype(np.float32),
                             cell=chosen.cell,
                             mode=chosen.mode,
+                            slot_pair=slot_pair,
+                            slot_weight=track.rail_weight,
+                            slot_knots_hz=tracks.rail_knots_hz,
                         ),
                         level=Level(high_gain_db=high_gain_db, onset_s=onset_s),
                         directivity_model=source.directivity.model,

@@ -11,6 +11,15 @@ convolved with each cell's response, the two source positions weighted by
 ``position_weight``, in one transform a step (the pairs' spectra are kept
 while they are in use).
 
+**More than two source positions** are read when the pack holds
+``low/slot_pair``: every slot's response is weighted by ``low/slot_weight``,
+which is given per frequency on a few knots and read between them in a
+straight line. A weight that changes with frequency is a short filter with
+no delay, as long before the arrival as after it, so the step's transform
+then takes :data:`SLOT_REACH` samples more of the dry signal at both ends
+and leaves them out of what it returns. A pack without those tables is
+rendered as it always was, sample for sample.
+
 **The head** is reached in frames one step long, four to a step, under a
 square root Hann window at both ends, so the frames add to one. A frame
 takes the pairs, the weight, the cells and the mode of the step nearest its
@@ -39,12 +48,15 @@ from reverberate.render.early import fft_module, workers_of
 from reverberate.render.pack import ScenePack, Source
 from reverberate.render.translate import Translation
 
-__all__ = ["FRAMES_PER_STEP", "LowPart"]
+__all__ = ["FRAMES_PER_STEP", "SLOT_REACH", "LowPart"]
 
 #: Frames of the head's translation in one step.
 FRAMES_PER_STEP = 4
 #: Channels brought to the output rate at once.
 CHANNELS_AT_ONCE = 8
+#: What a slot's weights may reach either side of a response, in samples of the
+#: low rate: 64 ms, three times the 20 ms period that knots 50 Hz apart give them.
+SLOT_REACH = 256
 
 
 class LowPart:
@@ -76,7 +88,18 @@ class LowPart:
         self.frame = self.step
         #: A step's convolution covers the frames it owns: ``[step k - frame, step k + cover)``.
         self.cover = self.frame + (FRAMES_PER_STEP - 1) * self.hop
-        self.n = next_fast_len(h.low_samples + self.cover, real=True)
+        self.slots = self.low.slot_pair is not None
+        self.pad = SLOT_REACH if self.slots else 0
+        self.n = next_fast_len(h.low_samples + self.cover + 2 * self.pad, real=True)
+        if self.low.slot_pair is not None and self.low.slot_knots_hz is not None:
+            # Where each bin of a step's transform lies among the knots of the weights.
+            knots = np.asarray(self.low.slot_knots_hz, dtype=float)
+            at = np.fft.rfftfreq(self.n, 1.0 / self.rate) / (knots[1] - knots[0])
+            at = np.minimum(at, knots.size - 1.0)
+            self._knot = np.minimum(at.astype(np.int64), knots.size - 2)
+            self._share = at - self._knot
+            # Every slot's spectrum at both cells of the steps a run holds.
+            pairs_held = max(pairs_held, 4 * int(self.low.slot_pair.shape[1]))
         window = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(self.frame) / self.frame)
         # Frames a hop apart: FRAMES_PER_STEP / 2 Hann windows add at every sample.
         self.hann = xp.asarray(window / (FRAMES_PER_STEP / 2))
@@ -128,21 +151,44 @@ class LowPart:
         mode = int(self.low.mode[k])
         end = k * self.step - self.frame + self.cover
         made = None
-        if mode != 0 and not self.track.silent(end - self.n, end):
+        last = end + self.pad
+        if mode != 0 and not self.track.silent(last - self.n, last):
             fft = fft_module(xp)
-            dry = fft.rfft(xp.asarray(self.track.read(end - self.n, end)))
+            dry = fft.rfft(xp.asarray(self.track.read(last - self.n, last)))
             weight = float(self.low.position_weight[k])
             fields = []
             for b in range(2 if mode == 3 else 1):
-                spectrum = (1.0 - weight) * self._spectrum(int(self.low.pair[k, 0, b]))
-                if weight > 0.0:
-                    spectrum = spectrum + weight * self._spectrum(int(self.low.pair[k, 1, b]))
+                if self.slots:
+                    spectrum = self._slotted(k, b)
+                else:
+                    spectrum = (1.0 - weight) * self._spectrum(int(self.low.pair[k, 0, b]))
+                    if weight > 0.0:
+                        spectrum = spectrum + weight * self._spectrum(int(self.low.pair[k, 1, b]))
                 fields.append(spectrum * dry[None, :])
             made = fft.irfft(xp.stack(fields), self.n, axis=-1, **workers_of(xp, self.workers))[
-                ..., self.n - self.cover :
+                ..., self.n - self.pad - self.cover : self.n - self.pad
             ]
         self._fields[k] = made
         return made
+
+    def _slotted(self, k: int, b: int) -> Any:
+        """Step ``k``'s response at its cell ``b`` from every slot it reads, as a spectrum."""
+        xp = self.xp
+        assert self.low.slot_pair is not None and self.low.slot_weight is not None
+        rows = np.asarray(self.low.slot_pair[k, :, b])
+        if rows[1] < 0:
+            return self._spectrum(int(rows[0]))  # one position, whose weight is one
+        # A few numbers a slot, on the host: the weights at the knots, read at every bin.
+        weights = np.asarray(self.low.slot_weight[k], dtype=float)
+        lower, upper = weights[:, self._knot], weights[:, self._knot + 1]
+        at_bins = xp.asarray(lower + (upper - lower) * self._share[None, :])
+        spectrum = None
+        for slot, row in enumerate(rows):
+            if row < 0:
+                continue
+            term = at_bins[slot][None, :] * self._spectrum(int(row))
+            spectrum = term if spectrum is None else spectrum + term
+        return spectrum
 
     def _frame(self, m: int) -> Any:
         """Frame ``m``, centred on the low sample ``m hop``: ``[channel, frame]`` or ``None``."""

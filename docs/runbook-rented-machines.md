@@ -425,6 +425,10 @@ python -m reverberate.trace rent --recipe R.json --home H $M --dry-run
 python -m reverberate.trace rent --recipe R.json --home H $M $X \
     --gpus 4 --max-hours 16 --max-dph 2.0 --plan-offers
 
+#    With fewer solves: the same scene generated at another rail pitch, read from eight
+#    positions a step instead of two (docs/open-questions/rail-interpolation.md).
+python -m reverberate.trace rent --recipe R_12cm.json --home H $M --rail-positions 8 --dry-run
+
 # 3. A smoke run: a minute, three sources, every stage, the engine on both modules.
 python -m reverberate.trace rent --recipe R.json --home H_smoke $M $X \
     --smoke 60 --smoke-sources 3 --smoke-start auto --max-dph 0.6 --yes

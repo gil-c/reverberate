@@ -10,6 +10,7 @@ from reverberate.experiments.w44_interpolation.leave_one_out import leave_one_ou
 from reverberate.experiments.w44_interpolation.line_channels import line_channels
 from reverberate.experiments.w44_interpolation.line_gaps import line_gaps
 from reverberate.experiments.w44_interpolation.plane_wave import leave_one_out_fusion
+from reverberate.experiments.w44_interpolation.rail_interpolation import rail_interpolation
 from reverberate.experiments.w44_interpolation.translation_failures import translation_failures
 
 
@@ -26,15 +27,21 @@ def main(argv: list[str] | None = None) -> int:
         ("line-gaps", "the error against the spacing, on a line solved every 2 cm"),
         ("failures", "where a translation of one pitch fails round 500 Hz"),
         ("line-channels", "all 64 channels on the line, between the arrays' true centres"),
+        ("rail", "a moving source's solved positions: every interpolator at every pitch"),
     ):
         command = commands.add_parser(name, help=text)
         command.add_argument("--field", type=Path, required=True, help="one source's field, HDF5")
         command.add_argument("--out", type=Path, required=True, help="where the summary is written")
         if name == "leave-one-out":
             command.add_argument("--limit", type=int, default=None, help="the first points only")
-        if name == "line-channels":
+        if name in ("line-channels", "rail"):
             command.add_argument("--plan", type=Path, default=None, help="the campaign's plan.json")
+        if name == "line-channels":
             command.add_argument("--scene", type=Path, default=None, help="mirror/scene.npz")
+        if name == "rail":
+            command.add_argument(
+                "--pitches", type=int, nargs="*", default=None, help="in points of the line"
+            )
     args = parser.parse_args(argv)
     if args.command == "leave-one-out":
         leave_one_out(args.field, args.out, limit=args.limit)
@@ -44,6 +51,13 @@ def main(argv: list[str] | None = None) -> int:
         line_gaps(args.field, args.out)
     elif args.command == "line-channels":
         line_channels(args.field, args.out, plan=args.plan, scene=args.scene)
+    elif args.command == "rail":
+        rail_interpolation(
+            args.field,
+            args.out,
+            plan=args.plan,
+            pitches=None if args.pitches is None else tuple(args.pitches),
+        )
     else:
         translation_failures(args.field, args.out)
     return 0

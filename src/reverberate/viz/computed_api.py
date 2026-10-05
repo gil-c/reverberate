@@ -65,7 +65,7 @@ from reverberate.viz import computed_grid as cg
 from reverberate.viz.audit_api import AuditService, Binary
 from reverberate.viz.scene_api import SceneError
 
-__all__ = ["PREFIX", "ComputedService", "packed"]
+__all__ = ["PREFIX", "ComputedService", "low_at", "packed"]
 
 #: The path every endpoint lives under.
 PREFIX = "api/computed"
@@ -124,6 +124,68 @@ class _Mirror:
     sheets: np.ndarray
     grid: Any = None
     edges: Any = None
+
+
+def low_at(pack: ScenePack, source: Any, step: int) -> dict[str, Any]:
+    """What the band under the crossover reads at a step: its cells and their source positions."""
+    held = source.low
+    mode = int(held.mode[step])
+    head = np.asarray(pack.listener.position[step], dtype=float)
+    here = np.asarray(source.position[step], dtype=float)
+    weight = float(held.position_weight[step])
+    knot = 0
+    if held.slot_knots_hz is not None:
+        knot = int(np.argmin(np.abs(np.asarray(held.slot_knots_hz) - pack.crossover.cutoff_hz)))
+    cells = []
+    for slot in range(2):
+        cell = int(held.cell[step, slot])
+        if cell < 0:
+            continue
+        centre = np.asarray(pack.cells.position[cell], dtype=float)
+        pairs = []
+        sides: list[tuple[int, float]] = [
+            (int(held.pair[step, 0, slot]), 1.0 - weight),
+            (int(held.pair[step, 1, slot]), weight),
+        ]
+        if held.slot_pair is not None and held.slot_weight is not None:
+            # More than two positions: each with its weight at the crossover.
+            sides = [
+                (int(row), float(held.slot_weight[step, side, knot]))
+                for side, row in enumerate(held.slot_pair[step, :, slot])
+            ]
+        for row, share in sides:
+            if row < 0 or (share <= 0.0 and held.slot_pair is None):
+                continue
+            position = np.asarray(held.pair_position[row], dtype=float)
+            pairs.append(
+                {
+                    "row": row,
+                    "weight": round(share, 4),
+                    "position_m": _list(position, 4),
+                    "from_source_mm": round(float(np.linalg.norm(position - here)) * 1000.0, 1),
+                    "key": _text(held.pair_key[row]),
+                }
+            )
+        cells.append(
+            {
+                "cell": cell,
+                "centre_m": _list(centre, 4),
+                "translation_mm": round(float(np.linalg.norm(head - centre)) * 1000.0, 1),
+                "pairs": pairs,
+            }
+        )
+    return {
+        "exact": "the pack's own tables at this step"
+        if held.slot_knots_hz is None
+        else "the pack's own tables at this step; a position's weight changes with "
+        f"frequency and is given at {float(held.slot_knots_hz[knot]):.0f} Hz",
+        "step": step,
+        "mode": mode,
+        "mode_name": {0: "inaudible", 1: "exact", 2: "translated", 3: "fused"}.get(mode, "?"),
+        "listener_m": _list(head, 4),
+        "source_m": _list(here, 4),
+        "cells": cells,
+    }
 
 
 class ComputedService:
@@ -914,51 +976,9 @@ class ComputedService:
         _, _, pack = self._pack(query)
         source = self._source(pack, query)
         step = self._whole(query, "step", 0, pack.header.steps)
-        held = source.low
-        if held is None:
+        if source.low is None:
             raise SceneError(404, "the source has no low band")
-        mode = int(held.mode[step])
-        head = np.asarray(pack.listener.position[step], dtype=float)
-        here = np.asarray(source.position[step], dtype=float)
-        weight = float(held.position_weight[step])
-        cells = []
-        for slot in range(2):
-            cell = int(held.cell[step, slot])
-            if cell < 0:
-                continue
-            centre = np.asarray(pack.cells.position[cell], dtype=float)
-            pairs = []
-            for side, share in ((0, 1.0 - weight), (1, weight)):
-                row = int(held.pair[step, side, slot])
-                if row < 0 or share <= 0.0:
-                    continue
-                position = np.asarray(held.pair_position[row], dtype=float)
-                pairs.append(
-                    {
-                        "row": row,
-                        "weight": round(share, 4),
-                        "position_m": _list(position, 4),
-                        "from_source_mm": round(float(np.linalg.norm(position - here)) * 1000.0, 1),
-                        "key": _text(held.pair_key[row]),
-                    }
-                )
-            cells.append(
-                {
-                    "cell": cell,
-                    "centre_m": _list(centre, 4),
-                    "translation_mm": round(float(np.linalg.norm(head - centre)) * 1000.0, 1),
-                    "pairs": pairs,
-                }
-            )
-        return {
-            "exact": "the pack's own tables at this step",
-            "step": step,
-            "mode": mode,
-            "mode_name": {0: "inaudible", 1: "exact", 2: "translated", 3: "fused"}.get(mode, "?"),
-            "listener_m": _list(head, 4),
-            "source_m": _list(here, 4),
-            "cells": cells,
-        }
+        return low_at(pack, source, step)
 
     # -- routing ----------------------------------------------------------------
 
