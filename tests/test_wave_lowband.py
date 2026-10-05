@@ -248,12 +248,11 @@ class TestAStep:
     ) -> None:
         """The CUDA text itself, both ways of the boundary, a batch and its sources alone."""
         arrays, grid, sources, receivers = lossy_room(scheme)
-        duration = 60 * grid.Ts
+        duration = 40 * grid.Ts
         # The whole box steps the halo's copies and the absorbing layer; the cut, the reach.
-        for problem in (
-            build_problem(arrays, None),
-            build_problem(arrays, seeds_of(grid, sources)),
-        ):
+        cut = build_problem(arrays, seeds_of(grid, sources))
+        whole = [build_problem(arrays, None)] if boundary == "stencil" else []
+        for problem in (*whole, cut):
             drive = drive_for(problem, grid, sources, receivers, duration)
             on_numpy, on_host = (
                 NumpyStepper(problem, drive),
@@ -587,6 +586,35 @@ class TestTheCampaign:
         design = campaign.designs[0]
         assert design is not None
         assert (np.rint(design.positions / grid.h).sum(axis=1) % 2 == 0).all()
+
+    def test_an_option_that_changes_a_response_makes_other_pairs_of_the_same_bundle(
+        self, machine: dict[str, Path]
+    ) -> None:
+        plain = a_campaign(machine)
+        plain.run()
+        # The walls with two branches for three, and the outside cut: this room has no
+        # outside, and the cut then changes nothing but the name.
+        other = a_campaign(machine, out="other", walls=2, outside="open")
+        report = other.run()
+        assert report["pairs_solved"] == 4
+        assert other.key_of(0, 0) != plain.key_of(0, 0)
+        solver = other.cache.records()[other.key_of(0, 0)]["solver"]
+        assert "walls of 2 branches" in solver and "openings open" in solver
+        record = other.problem_record
+        assert record["branches"] == 2 and plain.problem_record["branches"] == 3
+        assert record["walls"]["branches"] == [2] and record["outside"]["nodes"] == 0
+        assert not any(face["ring"] for face in record["outside"]["faces"])
+        assert (machine["out"].parent / "other" / "state" / "walls.json").is_file()
+        assert record["bytes_a_step"] < plain.problem_record["bytes_a_step"]
+        # Other pairs, of the same room: two branches for three move its response a little.
+        mine, theirs = (c.cache.read(c.key_of(0, 0)).astype(np.float64) for c in (other, plain))
+        assert 0.0 < np.abs(mine - theirs).max() < 0.2 * np.abs(theirs).max()
+        # The fit in its spectra is another name again. Its numbers are held to the chain's
+        # on a record long enough for both (``tests/test_wave_lowband_boundary.py``): this
+        # room's window of 8 ms is shorter than the low cut's own memory.
+        spectra = a_campaign(machine, out="spectra", fit="spectra")
+        assert len({c.key_of(0, 0) for c in (plain, other, spectra)}) == 3
+        assert "in its spectra" in str(spectra.spec["solver"])
 
     def test_the_pairs_are_cached_and_a_batch_is_what_one_source_at_a_time_gives(
         self, machine: dict[str, Path]

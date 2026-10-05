@@ -92,8 +92,10 @@ def outside_air(
     row's first run ends on the same node, the outer wall's, a gap's width
     from the first node any row reaches. That node is the face's, and on
     each row whose first run starts within the gap, the run is the ring as
-    far as it. The record says, a face, the gap found and the rows that
-    agreed, or why none was.
+    far as it. A gap has the dwelling behind its wall: where most of those
+    rows reach nothing further in, the face holds a shallow room and not a
+    ring. The record says, a face, the gap found and the rows that agreed,
+    or why none was.
     """
     reached = np.asarray(reached, dtype=bool)
     outside = np.zeros(reached.shape, dtype=bool)
@@ -122,6 +124,11 @@ def outside_air(
             width = int(np.argmax(counts)) if counts.size else 0
             agreeing = int(counts[max(width - 1, 0) : width + 2].sum()) if counts.size else 0
             share = agreeing / max(int(ends.size), 1)
+            wall = start + width
+            # A gap has the dwelling behind its wall: a room that is merely shallow has not.
+            gap_rows = any_reached & (np.abs(end - wall) <= 1)
+            behind = (rows & (index > end[..., None])).any(axis=-1) & gap_rows
+            backed = int(np.count_nonzero(behind)) / max(int(np.count_nonzero(gap_rows)), 1)
             found = {
                 "face": name,
                 "first_node": start,
@@ -129,11 +136,14 @@ def outside_air(
                 "gap_m": round(width * step_m, 4),
                 "rows": int(ends.size),
                 "rows_agreeing": round(share, 4),
+                "rows_with_air_behind": round(backed, 4),
             }
             if width < 1 or share < AGREEING_ROWS:
                 faces.append({**found, "ring": False, "why": "the rows agree on no gap"})
                 continue
-            wall = start + width
+            if backed < AGREEING_ROWS:
+                faces.append({**found, "ring": False, "why": "no air behind the wall"})
+                continue
             chosen = any_reached & (first < wall)
             mark = (
                 (index >= first[..., None])

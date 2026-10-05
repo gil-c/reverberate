@@ -569,7 +569,9 @@ def load_problem(
         if seeds is None:
             raise ValueError("the outside is what the sources reach beyond the walls: give seeds")
         mask, found = outside_air(reach_of(arrays, seeds), arrays.h)
-        arrays, cut = without(arrays, mask, closure=outside)
+        cut: dict[str, Any] = {"closure": outside, "closing_nodes": 0, "closing_m2": 0.0}
+        if bool(mask.any()):
+            arrays, cut = without(arrays, mask, closure=outside)
         record["outside"] = {**found, **cut}
     if walls is not None:
         from reverberate.wave.lowband.walls import refit_kept

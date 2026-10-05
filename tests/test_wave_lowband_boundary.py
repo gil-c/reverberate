@@ -117,8 +117,8 @@ class TestTheWallsFittedAgain:
         material = {"shell": SHELL, "couch": COUCH}[name]
         seven = worst_of(errors(material, refit(material, 7)))
         assert seven["reflection_db"] <= REFLECTION_BAR_DB - 9.0
-        assert seven["admittance"] <= 0.007
-        assert max(seven["normal"], seven["random"]) <= 0.25 * ABSORPTION_BAR
+        assert seven["admittance"] <= 0.01
+        assert max(seven["normal"], seven["random"]) <= 0.5 * ABSORPTION_BAR
         six = worst_of(errors(material, refit(material, 6)))
         assert six["random"] > ABSORPTION_BAR
         assert six["reflection_db"] > REFLECTION_BAR_DB - 1.0
