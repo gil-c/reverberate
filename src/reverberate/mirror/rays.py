@@ -85,9 +85,17 @@ class RaySettings:
     #: ... and arriving within this many seconds, the image tree's window;
     #: zero skips them whenever they arrive.
     skip_window_s: float = 0.0
+    #: ``double``: the hits of double precision arithmetic, whatever structure finds
+    #: them. ``single``: positions, directions and the triangle test in single
+    #: precision (:mod:`reverberate.mirror.tracer`), another draw of the same tail.
+    precision: str = "double"
 
     def record(self) -> dict[str, Any]:
+        # A precision is written where it is not the reference's, so that what was
+        # recorded and keyed before the choice existed reads and names the same.
+        chosen = {} if self.precision == "double" else {"precision": self.precision}
         return {
+            **chosen,
             "rays": self.rays,
             "duration_s": self.duration_s,
             "bin_s": self.bin_s,

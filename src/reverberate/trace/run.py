@@ -12,7 +12,8 @@ The stages, each leaving what the next and a rerun look for:
    steps, and of every pair at rest for the levelling, with the diffracted
    onsets (``early/<source>.npz``), a block of steps a job;
 5. ``rays``: the histograms at the tail's sites over the tail's cells, in
-   their cache (``tails/``), a site a job, and each source's table;
+   their cache (``tails/``, a (site, cell) an entry, the dwelling's own under
+   ``REVERBERATE_MIRROR_STORE``), a site a job, and each source's table;
 6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), the
    pairs of some cells a job;
 7. ``rows``: a pair as the pack stores it, a block of pairs a job;
@@ -90,10 +91,12 @@ from reverberate.mirror.tails import (
     TailCache,
     TailTable,
     shared_scene,
+    site_key,
     sites_read,
     tail_key,
     tail_table,
 )
+from reverberate.mirror.tracer import structure as ray_structure
 from reverberate.render.compact import Levers
 from reverberate.render.pack import (
     Air,
@@ -1015,13 +1018,13 @@ class Trace:
         self._prepared()
         settings = self.assets.settings
         tracks = self.tracks
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         shared = shared_scene(self.tail_cache, self.assets.catalogue, settings)
         rays = settings.traced_rays()
         cells = self.cells[self.tail_rows]
         self.tail: dict[str, dict[str, np.ndarray]] = {}
         positions: dict[str, np.ndarray] = {}
+        absent: dict[str, int] = {}
         read_by: dict[str, list[str]] = {}
         at_rest: dict[str, list[int]] = {}
         for j, pair in enumerate(self.pairs):
@@ -1035,11 +1038,20 @@ class Trace:
                 rows |= {int(r) for r in sites_read(solved, sites)}
             read_by[name] = []
             for row in sorted(rows):
-                key = tail_key(shared["key"], sites.positions[row], cells, rays)
-                positions[key] = sites.positions[row]
+                # A site is a job; what is kept of it is a (site, cell) at a time, so a
+                # site is cast again only for the cells no recipe of the dwelling has read.
+                key = site_key(shared["key"], sites.positions[row], rays)
+                if key not in positions:
+                    positions[key] = sites.positions[row]
+                    absent[key] = len(
+                        self.tail_cache.absent(
+                            [tail_key(shared["key"], positions[key], cell, rays) for cell in cells]
+                        )
+                    )
                 read_by[name].append(key)
-        todo = [key for key in positions if not (self.out / "tails" / f"{key}.npz").is_file()]
+        todo = [key for key in positions if absent[key]]
         self._ray_sites = (len(positions), len(todo))
+        self._ray_cells = (len(positions) * len(cells), sum(absent.values()))
         jobs = [
             Job("rays", key, {"position": [float(v) for v in positions[key]]}, on=CARD)
             for key in todo
@@ -1065,6 +1077,12 @@ class Trace:
                 "tail_cells": int(self.tail_rows.size),
                 "histograms_traced": int(self._ray_sites[1]),
                 "histograms_read": int(self._ray_sites[0] - self._ray_sites[1]),
+                # A (site, cell) at a time: what another recipe of the dwelling left.
+                "site_cells_traced": int(self._ray_cells[1]),
+                "site_cells_read": int(self._ray_cells[0] - self._ray_cells[1]),
+                "structure": ray_structure(),
+                "precision": rays.precision,
+                "cache": str(self.tail_cache.directory),
             }
 
         merge = Job("tails", "_read", on=PARENT, after=tuple(t.key for t in tables), work=read)
@@ -1074,8 +1092,7 @@ class Trace:
         """One job of the rays: a site's histograms over the tail's cells, into the cache."""
         from reverberate.mirror.tails import histograms
 
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         t0 = time.time()
         histograms(
             self.assets.catalogue,
@@ -1084,9 +1101,30 @@ class Trace:
             self.cells[self.tail_rows],
             devices=self._ray_devices(),
             cache=self.tail_cache,
+            store=self._ray_store(),
         )
         self._spent("rays", "sites", t0)
         return {"traced": 1}
+
+    def _tails(self) -> TailCache:
+        """The histograms' cache: the dwelling's where one is named, the run's own otherwise.
+
+        Under :data:`STORE_VARIABLE` the histograms outlive the run beside
+        the mirror's shared preparation: a second recipe of the dwelling
+        reads every (site, cell) the first one cast.
+        """
+        if getattr(self, "tail_cache", None) is None:
+            shared = os.environ.get(STORE_VARIABLE)
+            root = Path(shared) / "tails" if shared else self.out / "tails"
+            self.tail_cache = TailCache(root, keep=TAILS_KEPT)
+        return self.tail_cache
+
+    def _ray_store(self) -> Store:
+        """Where the rays' tree is kept: the mirror's store, made here when it is not yet."""
+        store = getattr(self, "store", None)
+        if store is None:
+            store = Store(Path(os.environ.get(STORE_VARIABLE) or self.out / "mirror_store"))
+        return store
 
     def _ray_devices(self) -> Devices:
         """What one job's rays are cast on: this process's card, or one share on its host.
@@ -1103,8 +1141,7 @@ class Trace:
     def _tail_job(self, source: str) -> dict[str, Any]:
         """One job of the tables: a source's ``tail`` group in the pack's types, to its file."""
         self._prepared()
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         track = self.tracks.sources[source]
         t0 = time.time()
         held = tail_table(
@@ -1370,8 +1407,7 @@ class Trace:
     def _level_block(self, block: int, pairs: list[int]) -> dict[str, Any]:
         """One job of the levelling: the pairs of ``pairs``, a record each, to the job's file."""
         self._prepared()
-        if getattr(self, "tail_cache", None) is None:
-            self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
+        self._tails()
         identity, _ = self._levelled(read=False)
         atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
         table = self._pairs_early()

@@ -282,11 +282,14 @@ extern "C" __global__ void rays(
     int channels, double floor_energy,
     const int* __restrict__ tri_reflector, const int* __restrict__ tri_furniture,
     int skip_order, int skip_furniture, double skip_reach,
-    long long* __restrict__ energy_out, long long* __restrict__ moments_out, long long* __restrict__ hits_out)
+    long long* __restrict__ energy_out, long long* __restrict__ moments_out, long long* __restrict__ hits_out,
+    long long* __restrict__ stats_out)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= ray_count) return;
     int ray = ray_start + local;
+    /* What the tree's text counts too: this ray's segments, and whether it met no triangle. */
+    long long segments = 0, escaped = 0;
     Grid g;
     for (int k = 0; k < 3; ++k) { g.origin[k] = grid_origin[k]; g.shape[k] = grid_shape[k]; }
     g.cell = grid_cell;
@@ -340,6 +343,8 @@ extern "C" __global__ void rays(
             return true;
         });
         double segment = best_t < remaining ? best_t : remaining;
+        segments += 1;
+        if (best_tri < 0) escaped = 1;
         /* Receivers whose sphere the segment enters: the twin's ``_sphere_crossings``,
            over the receivers listed in the cells the segment crosses, each counted in
            the cell its entry point lies in. */
@@ -445,6 +450,8 @@ extern "C" __global__ void rays(
         }
         last_triangle = best_tri;
     }
+    atomicAdd((unsigned long long*)stats_out, (unsigned long long)segments);
+    if (escaped) atomicAdd((unsigned long long*)(stats_out + 3), 1ULL);
 }
 """
 )

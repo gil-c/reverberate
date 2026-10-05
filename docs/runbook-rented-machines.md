@@ -770,7 +770,14 @@ workers prepared each for themselves is kept once in the run's
   hidden under short solves any more. Install one, or accept it;
 - `mirror_store` is about 8 GB for the whole scene (trees, distance
   fields). `REVERBERATE_MIRROR_STORE=DIR` puts it where a second run or a
-  second scene of the dwelling finds it; deleting it costs time only;
+  second scene of the dwelling finds it; deleting it costs time only.
+  Under that variable the tail's histograms are kept there too (`DIR/tails`,
+  an entry a (site, cell)): a second recipe of the dwelling casts rays only
+  from the sites, and for the cells, that no earlier recipe read. Without
+  it they stay in the run's own `tails`;
+- `REVERBERATE_RAY_STRUCTURE=tree` casts the rays through a hierarchy of
+  boxes in place of the uniform grid (`docs/open-questions/ray-tracer.md`):
+  the same histograms, and off until a card has shown it;
 - `REVERBERATE_NO_NATIVE=1` forces the `numpy` twin;
   `REVERBERATE_PATHS_ON_CARD=1` lets a card's worker sieve and validate on
   its card, and is off until a card has shown one digest with and without
