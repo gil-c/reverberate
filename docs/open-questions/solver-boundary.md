@@ -178,21 +178,21 @@ the first window:
 | 40 to 100 Hz | at 0.45 s | at 0.95 s | slope, first 0.5 s | slope, last 0.6 s |
 | --- | --- | --- | --- | --- |
 | as exported, openings whole | -39.0 | -84.0 | -102 dB/s | -77 dB/s |
-| as exported, a leaf to 2.1 m | -37.3 | -79.3 | -98 | -70 |
-| the outside cut, openings open | -41.1 | -88.5 | -108 | -71 |
+| as exported, a leaf to 2.1 m | -36.4 | -76.7 | -97 | -72 |
+| the outside cut, openings open | -41.8 | -87.7 | -108 | -62 |
 | the outside cut, openings rigid | -33.1 | -72.1 | -89 | -72 |
 
 | 100 to 230 Hz | at 0.45 s | at 0.95 s | slope, first 0.5 s | slope, last 0.6 s |
 | --- | --- | --- | --- | --- |
 | as exported, openings whole | -27.7 | -66.5 | -72 dB/s | -76 dB/s |
-| as exported, a leaf to 2.1 m | -27.3 | -64.5 | -71 | -76 |
-| the outside cut, openings open | -30.6 | -72.9 | -79 | -80 |
+| as exported, a leaf to 2.1 m | -26.6 | -63.8 | -69 | -77 |
+| the outside cut, openings open | -30.8 | -73.0 | -80 | -80 |
 | the outside cut, openings rigid | -23.0 | -58.2 | -58 | -68 |
 
 Read: under 230 Hz the ring is not a reservoir that makes a second slope.
 The decay has one slope in all four, within its own curvature. The ring
 behaves as a poor absorber: against openings that let the sound out it
-leaves 4 to 9 dB more after a second, and against a wall in their place 6
+leaves 4 to 11 dB more after a second, and against a wall in their place 5
 to 12 dB less. **The two slopes the audit read on the whole band (40 dB in
 0.43 s, then 20 dB in 0.62 s) are not reproduced here in any of the four,
 so the ring is not shown to be their cause; they are strongest from 500 to
