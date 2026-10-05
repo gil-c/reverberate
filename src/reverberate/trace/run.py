@@ -13,8 +13,8 @@ The stages, each leaving what the next and a rerun look for:
    onsets (``early/<source>.npz``), a block of steps a job;
 5. ``rays``: the histograms at the tail's sites over the tail's cells, in
    their cache (``tails/``), a site a job, and each source's table;
-6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), a
-   block of pairs a job;
+6. ``level``: a pair's seam and onset (``level.jsonl``, a line a pair), the
+   pairs of some cells a job;
 7. ``rows``: a pair as the pack stores it, a block of pairs a job;
 8. ``write``: the pack, a source at a time, through
    :class:`reverberate.render.pack.PackWriter`;
@@ -29,9 +29,12 @@ left (:mod:`reverberate.trace.resources`). A job waits for the jobs whose
 files it reads and for nothing else, so the stages overlap: the cards cast
 the rays and solve while the host's cores trace the early paths, level the
 pairs whose launches are home and make their rows. What only a card does
-well (the solver, the rays) is a card's; what the interpreter bounds (the
-early trace, the levelling, the rows) is the cores', on ``numpy`` on every
-machine. A job's result is a file under the job's name and a stage's merge
+well (the solver, the rays) is a card's; the early trace, the levelling and
+the rows are the cores', on ``numpy`` on every machine, the early trace's
+inner loops in a compiled text that decides as ``numpy`` does
+(:mod:`reverberate.mirror.native`). What the early trace's workers would
+each prepare is made once and mapped by all (:mod:`reverberate.mirror.shared`,
+the run's ``mirror_store``). A job's result is a file under the job's name and a stage's merge
 reads them in the jobs' order: **the pack is the same bytes, but for its
 date and its seconds, whatever the cards and the cores and whichever job
 failed and was made again** (:func:`pack_digest`, ``tests/test_trace_pool.py``).
@@ -70,6 +73,7 @@ from reverberate.compute import (
     xp_for,
 )
 from reverberate.metrics import band_centres
+from reverberate.mirror import native
 from reverberate.mirror.hybrid import Crossover
 from reverberate.mirror.moving import (
     KIND_DIRECT,
@@ -79,6 +83,8 @@ from reverberate.mirror.moving import (
     trace_early,
 )
 from reverberate.mirror.moving_onset import onset_field
+from reverberate.mirror.render import TailNoise
+from reverberate.mirror.shared import Store
 from reverberate.mirror.tails import (
     TailCache,
     TailTable,
@@ -176,6 +182,9 @@ PAIRS_BLOCK = 64
 PAIRS_TABLE = "_pairs"
 #: Histograms a worker's process keeps in memory: a site's is tens of megabytes.
 TAILS_KEPT = 12
+#: Where the mirror's shared preparation is kept instead of the run's own ``mirror_store``:
+#: a directory that outlives the run, for a second scene of the same dwelling.
+STORE_VARIABLE = "REVERBERATE_MIRROR_STORE"
 
 _EARLY_FIELDS = (
     "offsets",
@@ -344,6 +353,10 @@ def _joined(parts: list[EarlyTable], source: np.ndarray, head: np.ndarray) -> Ea
         for key, value in part.record.items():
             if isinstance(value, int) and not isinstance(value, bool):
                 record[key] = int(record.get(key, 0)) + value
+    # What sieved and validated the blocks: the compiled text, numpy, or some of each.
+    engines = sorted({str(part.record["engine"]) for part in parts if "engine" in part.record})
+    if engines:
+        record["engine"] = "; ".join(engines)
     return EarlyTable(
         offsets=np.concatenate(offsets),
         **{name: np.concatenate([getattr(part, name) for part in parts]) for name in _ROW_FIELDS},
@@ -351,19 +364,6 @@ def _joined(parts: list[EarlyTable], source: np.ndarray, head: np.ndarray) -> Ea
         listener=np.atleast_2d(np.asarray(head, dtype=float)),
         sound_speed_m_s=parts[0].sound_speed_m_s,
         record=record,
-    )
-
-
-def _rows_of(table: EarlyTable, start: int, stop: int) -> EarlyTable:
-    """Steps ``start`` to ``stop`` of a table, as a table of their own."""
-    first, last = int(table.offsets[start]), int(table.offsets[stop])
-    return EarlyTable(
-        offsets=np.asarray(table.offsets[start : stop + 1], dtype=np.int64) - first,
-        **{name: getattr(table, name)[first:last] for name in _ROW_FIELDS},
-        source=table.source[start:stop],
-        listener=table.listener[start:stop],
-        sound_speed_m_s=table.sound_speed_m_s,
-        record={},
     )
 
 
@@ -783,16 +783,29 @@ class Trace:
     def _prepared(self) -> None:
         """The mirror as the early trace reads it, the traced region, what names a table: once.
 
-        On ``numpy``, whatever the machine holds. The early trace is bound
+        On the host, whatever the machine holds. The early trace was bound
         by the interpreter and not by the device (25 ms a position on a
-        laptop's core, 22 ms on an RTX 3090 with one core): it is a process
-        a core, and its tables are then the same bytes on every machine.
+        laptop's core, 22 ms on an RTX 3090 with one core): its pairs are
+        now sieved and validated by a compiled text, 2 ms a position
+        (:mod:`reverberate.mirror.native`), a process a core, and its tables
+        are the same bytes on every machine, with that text or with the
+        ``numpy`` twin a machine without a compiler falls back to.
         """
         if getattr(self, "ms", None) is not None:
             return
         settings = self.assets.settings
+        if self.worker is None:
+            why = native.why_not()
+            self.journal.say(
+                "paths: sieved and validated by the compiled text"
+                if why is None
+                else f"paths: on numpy, about ten times the seconds: {why}"
+            )
         t0 = time.time()
-        self.ms = prepare(self.assets.catalogue, settings, MovingSettings())
+        # What every worker would build for itself is built once and mapped by the others
+        # (:mod:`reverberate.mirror.shared`): the work no longer grows with the workers.
+        self.store = Store(Path(os.environ.get(STORE_VARIABLE) or self.out / "mirror_store"))
+        self.ms = prepare(self.assets.catalogue, settings, MovingSettings(), store=self.store)
         self._spent("paths", "prepare", t0)
         heads = np.concatenate([self.tracks.listener, self.cells])
         # Half a metre round the heads, out to the next quarter metre: the arrays' centres
@@ -820,6 +833,7 @@ class Trace:
                 self.assets.catalogue,
                 np.concatenate(every),
                 sound_speed_m_s=self.assets.settings.sound_speed_m_s,
+                store=self.store,
             )
             self._spent("paths", "onset_field", t0)
         return self._onset_field
@@ -844,21 +858,35 @@ class Trace:
         """One job of the early trace: steps ``start`` to ``stop`` of ``table``, to its file."""
         self._prepared()
         source, head, heard = (a[start:stop] for a in self._table_inputs(table))
-        t0 = time.time()
+        onsets = self._onsets()
+        solved, read = int(onsets.solved), int(onsets.read)
+        made, met = dict(self.store.made), dict(self.store.found)
+        t0, cpu = time.time(), time.process_time()
         found = trace_early(
             self.ms,
             source,
             head,
             audible=heard,
             region=self.region,
-            onsets=self._onsets(),
-            xp=np,
+            onsets=onsets,
+            # A worker that holds a card sieves and validates on it where that is asked
+            # for (:data:`reverberate.mirror.native.CARD_VARIABLE`): the same text as a
+            # host's core runs, and the same table.
+            xp=self.xp if (self.xp is not np and native.on_cards()) else np,
         )
         self._spent("paths", "trace", t0)
         _save_early(
             self._block_path(table, block), found, _digest(source, head, heard, self.identity)
         )
-        return {"record": found.record, "fields": int(self._onsets().solved)}
+        return {
+            "record": found.record,
+            "fields": int(onsets.solved) - solved,
+            "fields_read": int(onsets.read) - read,
+            # This process's own seconds, without what it waited for another's entry.
+            "cpu_s": round(time.process_time() - cpu, 4),
+            "made": {k: v - made.get(k, 0) for k, v in self.store.made.items()},
+            "found": {k: v - met.get(k, 0) for k, v in self.store.found.items()},
+        }
 
     def _merge_early(self, name: str, digest: str, blocks: list[tuple[int, int]]) -> None:
         """A table from its blocks, in the blocks' order, to ``early/<name>.npz``."""
@@ -926,6 +954,10 @@ class Trace:
                     work=functools.partial(self._merge_early, name, digest, blocks),
                 )
             )
+        if any(job.on == HOST for job in jobs):
+            # The onsets' field too is made here, once, before a worker asks for it: every
+            # worker's first block would otherwise make its own at the same moment.
+            self._onsets()
         return jobs
 
     def paths(self) -> None:
@@ -935,13 +967,22 @@ class Trace:
 
     def _paths_report(self) -> None:
         self.report["paths"] = dict(self._paths_records)
-        self.report["distance_fields"] = int(
-            sum(
-                int(record.get("fields", 0))
-                for key, record in self.pool.done.items()
-                if key.startswith("paths/")
-            )
-        )
+        records = [r for key, r in self.pool.done.items() if key.startswith("paths/")]
+        for name in ("fields", "fields_read"):
+            self.report["distance_" + name] = int(sum(int(r.get(name, 0)) for r in records))
+        # What the store was asked to hold and what was found in it, over every worker: a
+        # tree, a list or a field made twice is two in ``made``.
+        shared: dict[str, dict[str, int]] = {
+            "made": dict(self.store.made),
+            "found": dict(self.store.found),
+        }
+        if self.pool.make is not None:
+            for record in records:
+                for name in ("made", "found"):
+                    for kind, count in dict(record.get(name, {})).items():
+                        shared[name][kind] = shared[name].get(kind, 0) + int(count)
+        self.report["mirror_store"] = {"root": str(self.store.root), **shared}
+        self.report["paths_cpu_s"] = round(sum(float(r.get("cpu_s", 0.0)) for r in records), 2)
 
     # ---- the rays: a site a job on a card, a source's table a job on the host ------------------
 
@@ -1095,6 +1136,7 @@ class Trace:
         atmosphere: Atmosphere,
         early: EarlyTable | None = None,
         row: int | None = None,
+        noise: TailNoise | None = None,
     ) -> dict[str, Any]:
         """Pair ``j``: its seam, its onset, the mirror's first arrival, how its response ends.
 
@@ -1124,6 +1166,7 @@ class Trace:
             self.assets,
             seed=settings.seed + self.pairs[j][1],
             xp=np,
+            noise=noise,
         )
         first = first_arrival_s(early, row)
         # A diffracted onset has no reflection either: the direct path is a kind, not an order.
@@ -1177,35 +1220,57 @@ class Trace:
     def _level_path(self, block: int) -> Path:
         return self.out / "jobs" / "level" / f"{block}.json"
 
-    def level_jobs(self, others: list[Job]) -> list[Job]:
-        """The pairs not yet levelled, a block of them a job, and the ledger's merge.
+    def _level_groups(self) -> list[list[int]]:
+        """The pairs in the levelling's jobs: whole cells, :data:`PAIRS_BLOCK` pairs or more.
 
-        A block waits for what it reads and for nothing else: its own block
-        of the pairs' early table, the tail's sites, and the launches its
-        pairs come from. So the levelling goes on while the cards solve.
+        By cell, and not in the pairs' own order: the mirror's tail at a
+        pair is noise drawn from the cell's seed, eleven million deviates
+        and two thirds of what a pair's levelling cost, and the pairs of
+        one cell draw the same. In the pairs' order a job of 64 held 49
+        cells of the whole scene's 831; by cell a job draws once a cell. The
+        groups depend on the pairs alone, never on the machine.
+        """
+        order = sorted(range(len(self.pairs)), key=lambda j: (self.pairs[j][1], self.pairs[j][0]))
+        groups: list[list[int]] = []
+        for j in order:
+            fresh = not groups or (
+                len(groups[-1]) >= PAIRS_BLOCK and self.pairs[groups[-1][-1]][1] != self.pairs[j][1]
+            )
+            if fresh:
+                groups.append([])
+            groups[-1].append(j)
+        return groups
+
+    def level_jobs(self, others: list[Job]) -> list[Job]:
+        """The pairs not yet levelled, some cells' pairs a job, and the ledger's merge.
+
+        A job waits for what it reads and for nothing else: the pairs'
+        early table, the tail's sites, and the launches its pairs come from.
+        A cell is heard from every source that speaks while the head is
+        there, so its launches are many and its job starts late in the
+        solves: what is left of the levelling when the last launch ends is a
+        tenth of a second a pair over the host's workers.
         """
         identity, known = self._levelled()
         present = {job.key for job in others}
         jobs: list[Job] = []
-        blocks = list(range(0, len(self.pairs), PAIRS_BLOCK))
-        for block, start in enumerate(blocks):
-            stop = min(start + PAIRS_BLOCK, len(self.pairs))
+        for block, group in enumerate(self._level_groups()):
             path = self._level_path(block)
             if path.is_file():
-                # A block a run levelled and did not live to merge.
+                # A job a run levelled and did not live to merge.
                 for record in json.loads(path.read_text()):
                     if record.get("identity") == identity:
                         known.setdefault(str(record["key"]), record)
-            todo = [j for j in range(start, stop) if self.pair_key[j] not in known]
+            todo = [j for j in group if self.pair_key[j] not in known]
             if not todo:
                 continue
-            waits = {f"paths/{PAIRS_TABLE}.{block}", f"paths/{PAIRS_TABLE}", *self._ray_keys}
+            waits = {f"paths/{PAIRS_TABLE}", *self._ray_keys}
             waits |= {self.made_by.get(self.pairs[j], "") for j in todo}
             jobs.append(
                 Job(
                     "level",
                     str(block),
-                    {"block": block, "start": start, "stop": stop, "pairs": todo},
+                    {"block": block, "pairs": todo},
                     on=HOST,
                     after=tuple(sorted(waits & present)),
                     priority=2,
@@ -1229,27 +1294,31 @@ class Trace:
         jobs.append(Job("level", "_merge", on=PARENT, after=tuple(j.key for j in jobs), work=merge))
         return jobs
 
-    def _level_block(self, block: int, start: int, stop: int, pairs: list[int]) -> dict[str, Any]:
-        """One job of the levelling: the pairs of ``pairs``, a record each, to the block's file."""
+    def _level_block(self, block: int, pairs: list[int]) -> dict[str, Any]:
+        """One job of the levelling: the pairs of ``pairs``, a record each, to the job's file."""
         self._prepared()
         if getattr(self, "tail_cache", None) is None:
             self.tail_cache = TailCache(self.out / "tails", keep=TAILS_KEPT)
         identity, _ = self._levelled(read=False)
         atmosphere = Atmosphere(**self.recipe.atmosphere.to_dict())
-        table = self._pair_table(block, start, stop)
-        # A source at a time: the tails of its pairs are a table that is not kept.
+        table = self._pairs_early()
+        # The tails a source at a time, as the pack gives them to that source's steps.
+        t0 = time.time()
         todo: dict[str, list[int]] = {}
         for j in pairs:
             todo.setdefault(self.owner[self.pairs[j]], []).append(j)
+        tails = {owner: self.pair_tails(owner, mine) for owner, mine in todo.items()}
+        local = {j: (owner, k) for owner, mine in todo.items() for k, j in enumerate(mine)}
+        self._spent("level", "tails", t0)
+        # The pairs a cell at a time: a cell's noise is drawn once (:class:`TailNoise`),
+        # and a pair's record is the same in whatever order the job's pairs are taken.
+        t0 = time.time()
+        noise = TailNoise()
         found: dict[int, dict[str, Any]] = {}
-        for owner, mine in todo.items():
-            t0 = time.time()
-            tails = self.pair_tails(owner, mine)
-            self._spent("level", "tails", t0)
-            t0 = time.time()
-            for local, j in enumerate(mine):
-                found[j] = self.level_pair(j, tails, local, atmosphere, table, j - start)
-            self._spent("level", "pairs", t0)
+        for j in sorted(pairs, key=lambda j: (self.pairs[j][1], self.pairs[j][0])):
+            owner, k = local[j]
+            found[j] = self.level_pair(j, tails[owner], k, atmosphere, table, j, noise)
+        self._spent("level", "pairs", t0)
         # A pair's record is its own whoever made it; the lines are in the pairs' order.
         records = [{"key": self.pair_key[j], "identity": identity, **found[j]} for j in pairs]
         target = self._level_path(block)
@@ -1257,16 +1326,10 @@ class Trace:
         partial = target.with_suffix(".partial.json")
         partial.write_text(json.dumps(records, sort_keys=True))
         partial.replace(target)
-        return {"pairs": len(records)}
+        return {"pairs": len(records), "noise_drawn": noise.drawn}
 
-    def _pair_table(self, block: int, start: int, stop: int) -> EarlyTable:
-        """The pairs' early table over one block: the block's own file, or the whole's rows."""
-        source, head, heard = (a[start:stop] for a in self._table_inputs(PAIRS_TABLE))
-        found = _load_early(
-            self._block_path(PAIRS_TABLE, block), _digest(source, head, heard, self.identity)
-        )
-        if found is not None:
-            return found
+    def _pairs_early(self) -> EarlyTable:
+        """The early table of the pairs at rest, read from the run's file once a process."""
         if getattr(self, "pair_early", None) is None:
             whole = self._table_inputs(PAIRS_TABLE)
             held = _load_early(
@@ -1275,7 +1338,7 @@ class Trace:
             if held is None:
                 raise RuntimeError("the early table of the pairs at rest is not on disk")
             self.pair_early = held
-        return _rows_of(self.pair_early, start, stop)
+        return self.pair_early
 
     def level(self) -> None:
         """Every pair's seam and onset, a line each in ``level.jsonl``: the stage alone."""
@@ -1821,6 +1884,7 @@ class Trace:
 
         heard = sum(int(np.count_nonzero(t.audible)) for t in self.tracks.sources.values())
         count = {stage: sum(1 for j in jobs if j.stage == stage) for stage in ("rays", "level")}
+        to_level = sum(len(j.payload.get("pairs", ())) for j in jobs if j.stage == "level")
         counts = {
             "node_updates": self.planned.get("node_updates", 0.0),
             "pairs": self.planned.get("pairs", 0.0),
@@ -1830,7 +1894,7 @@ class Trace:
             "site_s": (RAYS_SITE_S + int(self.tail_rows.size) * RAYS_SITE_CELL_S)
             * (self.assets.settings.rays.rays / RAYS_MEASURED),
             "paths_jobs": heard + len(self.pairs),
-            "level_pairs": count["level"] * PAIRS_BLOCK,
+            "level_pairs": to_level,
             "row_pairs": len(self.pairs),
             "write_s": 0.010 * len(self.pairs),
         }
@@ -1853,7 +1917,9 @@ class Trace:
             + ("" if said["calibrated"] else " (the solve's rate is the box's, not calibrated)")
             + f"; {json.dumps(said['seconds'])}"
         )
-        over = self.max_hours is not None and said["hours"] > float(self.max_hours)
+        # Held on the seconds, not on the hours as they are printed: a second and a half
+        # of host's work is 0.000 h, and is still over an allowance it exceeds.
+        over = self.max_hours is not None and said["wall_s"] > float(self.max_hours) * 3600.0
         if over and not said["calibrated"] and counts["node_updates"]:
             # A rate that is not the grid's own does not stop a rented machine.
             self.journal.say(

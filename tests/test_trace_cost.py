@@ -62,9 +62,13 @@ def test_distance_fields_solved_together_are_those_solved_one_at_a_time(
     # One call for the four, and the fields are each start's own search.
     assert calls == [len(set(starts))] and held.solved == len(set(starts))
     for start in starts:
-        distance, predecessor = held.root(start)
+        predecessor = held.root(start)
         alone = dijkstra(held.graph, directed=False, indices=start, return_predecessors=True)
-        assert np.array_equal(distance, alone[0]) and np.array_equal(predecessor, alone[1])
+        assert np.array_equal(predecessor, alone[1])
+        # A field is kept as its predecessors: a cell is reached when it has one, or is the start.
+        reached = predecessor >= 0
+        reached[start] = True
+        assert np.array_equal(reached, np.isfinite(alone[0]))
     # Held: asking again solves nothing; what was just asked for is never dropped.
     held.solve(starts)
     assert calls == [len(set(starts))]

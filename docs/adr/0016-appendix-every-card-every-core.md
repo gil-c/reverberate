@@ -5,7 +5,10 @@ run and measured on a machine of 4 x RTX 3090 (instance 54299322, 32 threads
 of a Threadripper PRO 3975WX, 0.484 USD/h) and on the 38 lent cores of a host
 whose cards could not be opened (instance 54294466). **The section "Measured
 on cards" is the authority where it and a later section differ**: the later
-sections are phase one's, kept with what they expected.
+sections are phase one's, kept with what they expected. **The section "The
+host's stages, compiled and shared" is later than both** (lot L15b, the same
+day, on the laptop alone): it is the authority on what the early trace and
+the levelling cost and on how their jobs are cut, and no card has run it.
 
 The first whole scene (1529 wave solves, 16 887 pairs) left a machine of
 eight cards and about seventy cores with one card and one core at work for
@@ -256,7 +259,260 @@ solves counted) and in the pack's way home.
   of the launches could follow the rays' jobs instead of preceding every
   job.
 - The early trace's workers preparing the same things, above: the one
-  stage whose work grows with its workers.
+  stage whose work grows with its workers. Closed by L15b, below.
+
+## The host's stages, compiled and shared (lot L15b, phase one: the laptop, no card)
+
+The queue hid the early trace and the levelling under the solves. The solves
+are being cut (a coarser grid, fewer positions, shorter responses), and on a
+machine of one card and two cores the host's stages are what is left. This
+lot makes them cheaper **without changing a table**: every figure below is
+of runs whose pack has the digest the code of before writes.
+
+Everything is measured on the 20 s window of phase one (hssd_0076 from
+1075 s: 373 audible steps and 284 pairs at rest, 657 positions of which 630
+are distinct, 72 cells, 34 cells a source stands in while it is shadowed),
+`--free-field --cpu`, histograms handed in. **The laptop was not alone**: it
+rendered audio through the afternoon at a load of 4 to 5, and the same run
+took 7 s at one moment and 17 s at another. So a before and its after are
+always two runs taken minutes apart, counts are given beside seconds, and
+no rented machine has run any of this.
+
+### Where the seconds were
+
+One process, `cProfile`, the code of before:
+
+| early trace, 15.2 s, 23 ms a position | seconds | what it is |
+| --- | --- | --- |
+| validation of the sieved pairs | 5.25 | 314 317 (step, image) pairs on flat arrays: the legs' walk through the occluders' cells is 4.47 of it, 6 705 turns of a loop in Python, each a dozen temporaries the length of the block |
+| the step's sieve | 2.5 | 13 435 436 pairs through `_walk`, a million at a time: a gigabyte of temporaries a block |
+| distance fields | 2.1 | Dijkstra from each cell a shadowed source stands in, about 50 ms a field on a graph of 484 532 free cells, in `scipy`'s own compiled code |
+| the onsets' occupancy, graph and edges | 1.8 | once a process |
+| image trees | 1.1 | 25 anchors, 45 ms each, once a process and again when a tree leaves its sixteen |
+| short lists | 1.1 | a tree of 209 506 images walked from a listener's cell, 27 ms a list |
+| the mirror prepared | 0.8 | which facets face which, the occluders' grid: once a process |
+| geodesics, edges, rows, identities | 0.9 | Python a path |
+
+| levelling, 21.7 s, 76 ms a pair | ms a pair | what it is |
+| --- | --- | --- |
+| the tail's noise | 46 | 11 059 200 normal deviates from the pair's seed (39 ms) and their squares summed a bin (7 ms) |
+| the tail's directions and filters | 15 | a direction a burst from the moments (3.6), the bank's eight filters over 1.2 s at 48 kHz (5.2, of which the filters' own transform, the same every time, is half), the bursts laid (1.3) |
+| the air, twice | 6 | 472 transforms a pair, a frame at a time in Python: the loop phase one left |
+| the pair's file | 4.5 | mapped, and saved a sample after the other by the free field: channel 0 touched every page |
+| the rest | 4 | the early part, the signature, the low cut designed again a pair, the seam |
+
+Peak memory of the process: 3.8 GB, the sieve's blocks.
+
+### What was done
+
+1. **The sieve and the validation in C, a pair at a time**
+   (`reverberate.mirror.native`). The tests of `moving._walk`,
+   `moving._validate`, `_inside_facet` and `_blocked` written out for one
+   pair, leaving at the first test the pair fails: no temporaries, and a
+   leg's walk is a loop of the processor. One text, built once a machine by
+   its own compiler (`cc -O2 -ffp-contract=off`, 0.25 s) into a directory
+   named by the text, the flags and the compiler, and called through
+   `ctypes`, which lets go of the interpreter's lock for the call. **Every
+   operation that decides a path is the twin's, in the twin's order, and
+   none is fused with its neighbour** (`ism.dot3`, the lesson of PR #57).
+   What the twin takes from an arc sine and an arc cosine, the tree's beam,
+   is not in the text: `numpy` is asked for it, of the few pairs that passed
+   everything else, so no machine's own library decides a grazing path.
+   The window's 13.4 M sieved pairs and 314 k validations: 7.8 s on flat
+   arrays, **0.85 s** in the text. A short list: 27 ms, **3.1 ms**. A
+   machine without a compiler, or with `REVERBERATE_NO_NATIVE=1`, takes the
+   twin and its log says so.
+2. **The same text for a card** (`native.DEVICE_SOURCE`): the tests are
+   plain C that is also C++, and two launches, a thread a pair, call them
+   under the project's kernel options. A worker that holds a card takes the
+   early trace's jobs when it has nothing of its own (the queue already
+   handed them to it, to run on `numpy`); with `REVERBERATE_PATHS_ON_CARD=1`
+   it sieves and validates on its card. **Off by default: no card has run
+   it.** What is proved is that the card's text, built for the host with a
+   loop in place of the threads, gives the host's rows
+   (`tests/test_mirror_native.py`).
+3. **One preparation for every process** (`reverberate.mirror.shared`). A
+   store is a directory of arrays named by a digest of what they were made
+   from: the prepared mirror (161 MB here, the occluders' triangles), the
+   onsets' field (65 MB), each anchor's tree (14 MB), each short list
+   (85 kB), each distance field (3.1 MB, its predecessors alone). An entry
+   is written under another name and renamed, read by mapping its files
+   (one copy in the page cache for every worker), and made under a lock of
+   its own name, so that a process that asks while another makes it waits
+   and maps. The queue's process makes the mirror and the onsets' field
+   before the first job. The store is the run's `mirror_store`, or
+   `REVERBERATE_MIRROR_STORE` for one that outlives the run: a resumed run
+   finds everything, and a second scene of the dwelling finds what does not
+   depend on its positions (the mirror, the trees and the lists of the
+   cells it shares; not the onsets' field, which frees the cells round the
+   scene's own positions).
+4. **The levelling's jobs by cell.** A pair's tail is drawn from the seed of
+   its cell, so the pairs of one cell draw the same eleven million
+   deviates. A job was 64 pairs in the pairs' order, which on the whole
+   scene (16 887 pairs, 831 cells) is 12 918 (job, cell) meetings: nearly
+   every pair drew its own. A job is now the pairs of whole cells, 64 or
+   more, levelled a cell after the other with the cell's draws kept
+   (`render.TailNoise`): 831 draws for the scene. Such a job waits for more
+   launches than a job of neighbours did, and starts later in the solves;
+   what is left of the levelling when the last launch ends is a few
+   seconds of each host worker.
+5. **What was recomputed, kept; what was looped, taken at once.** The
+   bank's filters' transform (`render._bank_spectra`), the low cut's
+   sections, the bank's bands; a tail at order 0 does not look for the
+   direction of a burst whose encoding does not depend on it; the air's
+   frames are transformed in one call each way and their gains kept by
+   length (`audio.apply_air_absorption`), which the pack's rows gain from
+   as well. Each is the same array to the bit, held by a test against what it was.
+
+### Before and after
+
+One process, the window, the store empty and then filled (taken between
+15:25 and 15:50 that afternoon):
+
+| | before | after, a first run | after, the store filled |
+| --- | --- | --- | --- |
+| early trace | 15.2 s, 23 ms a position | 7.4 s (the mirror 0.9, the onsets' field 2.0, 18 trees 1.1, 34 fields 1.9, 57 lists 0.2; the text 0.85) | **1.25 s, 1.9 ms a position** |
+| levelling | 21.7 s, 76 ms a pair | **7.0 s, 25 ms a pair** (63 draws 3.1 s; 13.8 ms a pair besides) | the same |
+| peak memory of the process | 3.8 GB | 3.1 GB (it builds the onsets' field) | 1.7 GB |
+
+Through the queue, each count a whole run with a store of its own, the two
+codes run one after the other (15:57 to 16:00; seconds of the jobs summed
+over the workers, and against one worker's):
+
+| workers | early trace, before | after | levelling, before | after | rows, before | after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 19.3 | 6.0 | 27.0 | 7.4 | 5.8 | 4.1 |
+| 2 | 38.8 (2.02) | 8.5 (1.41) | 30.2 (1.12) | 7.8 (1.05) | 5.7 (0.98) | 4.3 (1.06) |
+| 4 | 76.3 (3.96) | 14.9 (2.47) | 48.5 (1.80) | 12.3 (1.67) | 9.5 (1.62) | 6.5 (1.59) |
+
+**Six runs, one pack**: the digest of the three counts of before is that of
+the three of after.
+
+**Whether the work still grows with the workers, this laptop cannot say in
+seconds**: at four processes it gives each 1.6 times the seconds for the
+same work (the rows, which share nothing, are the control: 1.59 and 1.62).
+What it can say is counted. At 1, 2 and 4 workers the run made **the same
+entries: 1 mirror, 1 onsets' field, 18 trees, 57 lists, 34 distance fields**
+(`trace_report.json`, `mirror_store`), the others read (19 trees, 43 lists
+and 27 fields at four). The seconds a job spends as a process
+(`paths_cpu_s`: what it waits for another's entry is not in it) are 4.7,
+5.0 and 6.6: 1.05 and 1.39 times one worker's, under the control's 1.06 and
+1.59. What the table's 2.47 holds beyond that is waiting: on a window of
+twelve jobs every worker's first job wants the trees and the fields
+another is making at that moment. A machine of many cores and a longer
+window is where the curve is to be read (the commands below).
+
+### The whole scene, from these figures
+
+The plan of the first scene, counted on the laptop (`trace bundle` without
+`--smoke`): 179 652 audible steps, 16 887 pairs over 831 cells, 231 source
+anchors, 2 959 pairs of anchors, at most 1 274 cells a source stands in. In
+seconds of the laptop's core, one process:
+
+| | before | after | what it is made of |
+| --- | --- | --- | --- |
+| early trace | 1 830 (79 600 positions at 23 ms: the first run's 62 751 and the pairs, taken as distinct) | about 250 | 160 of positions at 2 ms; and once a scene, whatever the workers: 64 of fields at most, 10 of trees, 9 of lists, 3 of mirror and field |
+| levelling | 1 250 | about 270 | 233 of pairs at 13.8 ms, 38 of 831 draws |
+| rows | 340 | about 240 | |
+
+The host of the eight cards took 17.9 and 23.6 minutes for the first two in
+one process (`campaign.log` of run A): by the same ratios, about 2.5 and 5
+minutes of one of its cores, and under a minute of wall on eight workers.
+On the store's disk: 231 trees of 14 MB, up to 1 274 fields of 3.1 MB and
+the lists, **about 8 GB for the scene**, beside the pair cache.
+
+**The target was ten times less work in each stage. The early trace is at
+twelve once its store is filled and about seven on a first run of the
+scene; the levelling is at four to five, and stops there while its numbers
+may not change.** What bounds each:
+
+- *the early trace*: the distance fields. A field is `scipy`'s Dijkstra
+  over the whole dwelling, 50 ms, and its predecessors are read along one
+  chain: a search that stopped at the listener, or another heap, would
+  break equal lengths another way and bend the onset round another cell.
+  They are now solved once a cell and a machine, never once a worker, and
+  remain a quarter of a first run. Then the text itself, 1.3 ms a position,
+  of which the sieve of 20 000 images a position is most;
+- *the levelling*: a response of 1.2 s at 48 kHz in eight bands for one
+  number read over one octave under 2 kHz. The eight filters are 4 ms of
+  transforms, the tail's assembly 3.5, the air 2, and the cell's draws 46 ms
+  once. Rendering the mirror's channel 0 at 4 kHz for the seam, or keeping a
+  cell's bursts summed, would divide it by five to ten **and move
+  `low/seam_db` in its last digits**: a change of the pack's numbers, for
+  the owner to decide, not done here;
+- neither is bound by the interpreter any more, and neither by a card: the
+  levelling cannot go to a card and keep its numbers at all, a card's
+  transforms and its generator not being `numpy`'s.
+
+### C, Numba or Cython
+
+The sieve of one tree (209 506 images from one listener's cell, the laptop,
+the best of five):
+
+| | ms | against `numpy` | compiled |
+| --- | --- | --- | --- |
+| `numpy`, the twin | 28.1 | 1 | |
+| the C text through `ctypes` | 3.10 | 9.1 | 0.25 s for the whole text, once a machine |
+| the same loop in Numba (0.68, no fast math) | 3.35 | 8.4 | 0.26 s for this one loop, in every process without a cache; 0.19 s of import |
+
+The three give the same list. Numba is in the environment already (through
+`resampy`) and costs no dependency either; Cython would hand the same C to
+the same compiler, for the same speed, and needs a build step this
+repository does not have (it is run from `src`), so it was not built. The C
+text was taken for what the others do not give: **the lines a card
+compiles are the lines the host runs**, so the two are equal by
+construction and one is tested through the other; contraction is a flag
+of the build and not a property of a just in time compiler's version;
+there is nothing to warm in a worker; and a machine without a compiler
+loses speed, not the trace. No dependency was added.
+
+`ctypes` lets go of the interpreter's lock, so one process could run the
+text in threads. It does not: a worker is a process a core, and the text
+is now a third of what a position costs.
+
+### The commands for a machine with cards
+
+`B` is a bundle of a window with its pairs (the commands further down),
+`O` a directory on the machine. The first two need no card.
+
+```
+# The early trace and the levelling against the workers, on the host alone: the table,
+# scaling.json, and per count trace_report.json (mirror_store, paths_cpu_s).
+python -m reverberate.trace scaling --bundle B --out O/by_cores --workers 1,2,4,8,16,32 \
+    --free-field --cpu --seed-from O/free --seed tails --keep
+
+# The twin against the compiled text on this machine's processor: one digest.
+REVERBERATE_NO_NATIVE=1 python -m reverberate.trace run --bundle B --out O/twin \
+    --free-field --cpu --check read
+python -m reverberate.trace run --bundle B --out O/text --free-field --cpu --check read
+python -m reverberate.trace digest O/twin/pack.h5 O/text/pack.h5
+
+# The text on the cards: every card's worker sieves and validates on its card. The
+# digest must be the host's, and trace_report.json (paths, engine) must say
+# "compiled, on a card" for the tables a card's worker traced.
+REVERBERATE_PATHS_ON_CARD=1 python -m reverberate.trace run --bundle B --out O/cards \
+    --free-field --check read --workers 0
+python -m reverberate.trace digest O/text/pack.h5 O/cards/pack.h5
+
+# A second run on the first one's store: nothing made, every entry read.
+REVERBERATE_MIRROR_STORE=O/text/mirror_store python -m reverberate.trace run --bundle B \
+    --out O/again --free-field --cpu --check read
+```
+
+### Not done
+
+- threads inside a worker, above; the image trees' growth in C (45 ms an
+  anchor, 10 s a scene, once);
+- the prediction's host units are the window's (`resources.REFERENCE`: 8,
+  21 and 10 ms), a first run's; the estimate printed with a bundle
+  (`trace.plan`) still holds the seconds measured on one RTX 3090 before
+  the queue, and is not this lot's file;
+- the pair cache saves a response in the order of the array it is given
+  (`accel.pairs.PairCache.write`): the free field's are a sample after the
+  other, and a levelling that maps such a file for its first channel
+  touches every page of it: 4.5 ms a pair here, which lot L15a's reader
+  (`PairCache.first_channel`) still pays on such files. Saving a response
+  a channel after the other would cost nothing; it is that lot's file.
 
 ## The design
 
@@ -277,7 +533,7 @@ not need each other:
 | rays | a tail site's histograms | a card | nothing |
 | paths | 256 audible steps of one source; 64 pairs at rest | a core | nothing |
 | tails | one source's tail table | a core | the sites it reads |
-| level | 64 pairs | a core | their early block, the sites, the launches of its pairs |
+| level | the pairs of some cells, 64 or more (64 in the pairs' order until L15b) | a core | the pairs' early table, the sites, the launches of its pairs |
 | rows | 64 pairs as `low/ir` keeps them | a core | the launches of its pairs |
 
 A job's message is its name and a few numbers. A worker takes the first job

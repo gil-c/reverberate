@@ -45,12 +45,13 @@ diffracted onset of a step without a direct path
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import numpy as np
 
 from reverberate.compute import to_numpy
+from reverberate.mirror import native
 from reverberate.mirror.engine import facet_buckets
 from reverberate.mirror.geometry import DerivedScene
 from reverberate.mirror.ism import (
@@ -68,6 +69,7 @@ from reverberate.mirror.ism import (
 from reverberate.mirror.parameters import apply_parameters, image_scene
 from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.render import RenderSettings, early_signals
+from reverberate.mirror.shared import Store, name_of
 from reverberate.render.pack import (
     KIND_DIFFRACTED,
     KIND_DIFFRACTED_REFLECTED,
@@ -146,6 +148,10 @@ class MovingScene:
     #: ``[facet, 10]`` origin u, origin v, extent u, extent v, axis u, axis v.
     rectangle: np.ndarray
     host: dict[str, np.ndarray]
+    #: What names the scene as prepared, and where what is derived from it is kept
+    #: between processes (:mod:`reverberate.mirror.shared`); without, in this one alone.
+    key: str = ""
+    store: Store | None = None
     _device: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
     _candidates: dict[tuple[Any, ...], Candidates] = field(default_factory=dict, repr=False)
     _lists: dict[tuple[Any, ...], np.ndarray] = field(default_factory=dict, repr=False)
@@ -160,62 +166,93 @@ class MovingScene:
         held = self._device.get(id(xp))
         if held is None:
             held = {name: xp.asarray(array) for name, array in self.host.items()}
+            if xp is np:
+                # The same arrays as the compiled text reads them (:mod:`.native`).
+                held["native"] = native.scene_of(self.host)
             self._device[id(xp)] = held
         return held
+
+
+#: The arrays of a prepared scene a store keeps beside ``host``'s.
+_PREPARED = ("front", "furniture")
 
 
 def prepare(
     catalogue: DerivedScene,
     settings: MirrorSettings | None = None,
     moving: MovingSettings | None = None,
+    *,
+    store: Store | None = None,
 ) -> MovingScene:
-    """Everything of the scene the steps share, from the catalogue and the mirror's settings."""
+    """Everything of the scene the steps share, from the catalogue and the mirror's settings.
+
+    With a ``store`` the arrays that cost (which facets face which, the
+    facets' buckets, the occluders' grid) are made by the first process
+    that asks and mapped by the others, and the trees, the short lists and
+    the distance fields derived from the scene are kept there too.
+    """
     settings = settings or MirrorSettings()
     moving = moving or MovingSettings()
     scene = apply_parameters(catalogue, settings.parameters)
     images = image_scene(catalogue, settings.parameters)
     ism = replace(settings.ism, sound_speed_m_s=settings.sound_speed_m_s)
-    normals, offsets, furniture, both = _facet_arrays(scene, ism.coincident_facets)
-    count = normals.shape[0]
-    centres, radii = _facet_spheres(scene)
-    front = (
-        _in_front(scene, normals, offsets, ism.coincident_facets)
-        if count
-        else np.zeros((0, 0), dtype=bool)
+    # The parameters as they are, not as their record rounds them.
+    key = name_of(
+        "moving scene 1",
+        catalogue.key,
+        asdict(settings.parameters),
+        asdict(ism),
+        moving.occluder_cell_m,
     )
-    frame, shape, base, bucket_offsets, bucket_members = facet_buckets(scene)
-    grid = occluder_grid(scene, moving.occluder_cell_m)
-    rectangle = np.zeros((count, 10))
-    if count:
-        rectangle[:, 0:2] = frame[:, 0:2]
-        rectangle[:, 2:4] = shape * frame[:, 2:3]
-        rectangle[:, 4:10] = frame[:, 3:9]
-    reflectors = np.asarray(scene.reflector_vertices, dtype=float).reshape(-1, 3, 3)
-    occluders = np.asarray(scene.occluder_vertices, dtype=float).reshape(-1, 3, 3)
-    host = {
-        "normals": np.ascontiguousarray(normals, dtype=float),
-        "offsets": np.ascontiguousarray(offsets, dtype=float),
-        "both": np.ascontiguousarray(both),
-        "centres": centres,
-        "radii": radii,
-        "rectangle": rectangle,
-        "frame": np.ascontiguousarray(frame, dtype=float),
-        "shape": np.ascontiguousarray(shape, dtype=np.int64),
-        "base": np.ascontiguousarray(base, dtype=np.int64),
-        "bucket_offsets": np.ascontiguousarray(bucket_offsets, dtype=np.int64),
-        "bucket_members": np.ascontiguousarray(bucket_members, dtype=np.int64),
-        "reflector_v0": np.ascontiguousarray(reflectors[:, 0]),
-        "reflector_e1": np.ascontiguousarray(reflectors[:, 1] - reflectors[:, 0]),
-        "reflector_e2": np.ascontiguousarray(reflectors[:, 2] - reflectors[:, 0]),
-        "occluder_v0": np.ascontiguousarray(occluders[:, 0]),
-        "occluder_e1": np.ascontiguousarray(occluders[:, 1] - occluders[:, 0]),
-        "occluder_e2": np.ascontiguousarray(occluders[:, 2] - occluders[:, 0]),
-        "grid_origin": np.asarray(grid.origin, dtype=float),
-        "grid_shape": np.asarray(grid.shape, dtype=np.int64),
-        "grid_cell": np.asarray(float(grid.cell_m)),
-        "cell_offsets": np.asarray(grid.offsets, dtype=np.int64),
-        "cell_members": np.asarray(grid.members, dtype=np.int64),
-    }
+
+    def build() -> dict[str, np.ndarray]:
+        normals, offsets, furniture, both = _facet_arrays(scene, ism.coincident_facets)
+        count = normals.shape[0]
+        centres, radii = _facet_spheres(scene)
+        front = (
+            _in_front(scene, normals, offsets, ism.coincident_facets)
+            if count
+            else np.zeros((0, 0), dtype=bool)
+        )
+        frame, shape, base, bucket_offsets, bucket_members = facet_buckets(scene)
+        grid = occluder_grid(scene, moving.occluder_cell_m)
+        rectangle = np.zeros((count, 10))
+        if count:
+            rectangle[:, 0:2] = frame[:, 0:2]
+            rectangle[:, 2:4] = shape * frame[:, 2:3]
+            rectangle[:, 4:10] = frame[:, 3:9]
+        reflectors = np.asarray(scene.reflector_vertices, dtype=float).reshape(-1, 3, 3)
+        occluders = np.asarray(scene.occluder_vertices, dtype=float).reshape(-1, 3, 3)
+        return {
+            "normals": np.ascontiguousarray(normals, dtype=float),
+            "offsets": np.ascontiguousarray(offsets, dtype=float),
+            "both": np.ascontiguousarray(both),
+            "centres": centres,
+            "radii": radii,
+            "rectangle": rectangle,
+            "frame": np.ascontiguousarray(frame, dtype=float),
+            "shape": np.ascontiguousarray(shape, dtype=np.int64),
+            "base": np.ascontiguousarray(base, dtype=np.int64),
+            "bucket_offsets": np.ascontiguousarray(bucket_offsets, dtype=np.int64),
+            "bucket_members": np.ascontiguousarray(bucket_members, dtype=np.int64),
+            "reflector_v0": np.ascontiguousarray(reflectors[:, 0]),
+            "reflector_e1": np.ascontiguousarray(reflectors[:, 1] - reflectors[:, 0]),
+            "reflector_e2": np.ascontiguousarray(reflectors[:, 2] - reflectors[:, 0]),
+            "occluder_v0": np.ascontiguousarray(occluders[:, 0]),
+            "occluder_e1": np.ascontiguousarray(occluders[:, 1] - occluders[:, 0]),
+            "occluder_e2": np.ascontiguousarray(occluders[:, 2] - occluders[:, 0]),
+            "grid_origin": np.asarray(grid.origin, dtype=float),
+            "grid_shape": np.asarray(grid.shape, dtype=np.int64),
+            "grid_cell": np.asarray(float(grid.cell_m)),
+            "cell_offsets": np.asarray(grid.offsets, dtype=np.int64),
+            "cell_members": np.asarray(grid.members, dtype=np.int64),
+            "front": front,
+            "furniture": np.asarray(furniture, dtype=bool),
+        }
+
+    made = build() if store is None else store.make("scene", key, build)[0]
+    host = {name: np.asarray(array) for name, array in made.items() if name not in _PREPARED}
+    host["grid_cell"] = np.asarray(float(host["grid_cell"]))
     return MovingScene(
         scene=scene,
         images=images,
@@ -224,13 +261,15 @@ def prepare(
         moving=moving,
         normals=host["normals"],
         offsets=host["offsets"],
-        furniture=np.asarray(furniture, dtype=bool),
+        furniture=np.asarray(made["furniture"], dtype=bool),
         both=host["both"],
-        centres=centres,
-        radii=radii,
-        front=front,
-        rectangle=rectangle,
+        centres=host["centres"],
+        radii=host["radii"],
+        front=np.asarray(made["front"]),
+        rectangle=host["rectangle"],
         host=host,
+        key=key,
+        store=store,
     )
 
 
@@ -261,7 +300,9 @@ class Candidates:
     #: An image is an affine function of its source: ``rotation @ source + translation``.
     rotation: np.ndarray
     translation: np.ndarray
-    _device: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
+    #: The tree's name in a store, and so what its short lists are named from.
+    entry: str = ""
+    _device: dict[int, Any] = field(default_factory=dict, repr=False)
 
     @property
     def count(self) -> int:
@@ -282,6 +323,57 @@ class Candidates:
             }
             self._device[id(xp)] = held
         return held
+
+    def typed(self, xp: Any) -> dict[str, Any]:
+        """The tree on ``xp`` in the compiled text's own types; moved there once."""
+        held = self._device.get(-2 - id(xp))
+        if held is None:
+            held = {
+                name: xp.asarray(np.ascontiguousarray(getattr(self, name), dtype=dtype))
+                for name, dtype, _ in native.TREE_ARRAYS
+            }
+            held["rotation"] = held["rotation"].reshape(-1, 9)
+            self._device[-2 - id(xp)] = held
+        found: dict[str, Any] = held
+        return found
+
+    def native(self) -> native.Held:
+        """The tree's arrays as the compiled text reads them; made once."""
+        held = self._device.get(-1)
+        if held is None:
+            held = native.tree_of(
+                {name: getattr(self, name) for name in _TREE_FIELDS}, int(self.sequence.shape[1])
+            )
+            self._device[-1] = held
+        found: native.Held = held
+        return found
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        """What a store keeps of the tree."""
+        return {
+            "anchor": self.anchor,
+            "slack_m": np.asarray(self.slack_m),
+            "general": self.general,
+            **{name: getattr(self, name) for name in _TREE_FIELDS},
+        }
+
+    @classmethod
+    def of(cls, arrays: dict[str, np.ndarray]) -> Candidates:
+        """The tree a store kept, on the store's own arrays."""
+        return cls(
+            anchor=np.asarray(arrays["anchor"], dtype=float),
+            slack_m=float(arrays["slack_m"]),
+            positions=arrays["positions"],
+            order=arrays["order"],
+            parent=arrays["parent"],
+            sequence=arrays["sequence"],
+            general=arrays["general"],
+            rotation=arrays["rotation"],
+            translation=arrays["translation"],
+        )
+
+
+_TREE_FIELDS = ("positions", "order", "parent", "sequence", "rotation", "translation")
 
 
 def _beam_with_slack(
@@ -708,6 +800,8 @@ def _blocked(xp: Any, held: dict[str, Any], a: Any, b: Any, epsilon_m: float, bl
     out = xp.zeros(rows, dtype=bool)
     if rows == 0:
         return out
+    if xp is np and native.available():
+        return native.blocked(held["native"], a, b, epsilon_m)
     direction = b - a
     length = _norm(xp, direction)
     seg = xp.flatnonzero(length > 2.0 * epsilon_m)
@@ -748,6 +842,54 @@ def _blocked(xp: Any, held: dict[str, Any], a: Any, b: Any, epsilon_m: float, bl
     return out
 
 
+def _beam(xp: Any, held: dict[str, Any], position: Any, before: Any, facet: Any) -> Any:
+    """The tree's beam test: whether ``facet`` lies in the cone ``before`` opens from ``position``.
+
+    :func:`reverberate.mirror.ism._through_the_beam` a row at a time. The
+    one test of a path that reads a transcendental function, and so the one
+    the compiled text (:mod:`reverberate.mirror.native`) does not hold:
+    whoever validated the rest, this is asked of the array library.
+    """
+    axis = held["centres"][before] - position
+    distance = _norm(xp, axis)
+    axis = axis / xp.maximum(distance, 1e-12)[:, None]
+    radius = held["radii"][before]
+    half = xp.where(
+        distance <= radius,
+        np.pi,
+        xp.arcsin(xp.clip(radius / xp.maximum(distance, 1e-12), 0.0, 1.0)),
+    )
+    to_facet = held["centres"][facet] - position
+    far = _norm(xp, to_facet)
+    cosine = _dot(to_facet, axis) / xp.maximum(far, 1e-12)
+    angle = xp.arccos(xp.clip(cosine, -1.0, 1.0))
+    subtended = xp.arcsin(xp.clip(held["radii"][facet] / xp.maximum(far, 1e-12), 0.0, 1.0))
+    return angle <= half + subtended
+
+
+def _in_the_beam(
+    held: dict[str, Any],
+    chain: np.ndarray,
+    sequence: np.ndarray,
+    order: np.ndarray,
+    general: np.ndarray,
+) -> np.ndarray:
+    """Which pairs the text kept pass the beam at every level of their own, on ``numpy``.
+
+    ``chain`` is ``[pair, width + 1, 3]``, the images level by level from
+    the source: level ``k``'s test is made where the image of level ``k``
+    stands, as :func:`_validate` makes it.
+    """
+    alive = np.ones(int(order.shape[0]), dtype=bool)
+    for level in range(1, int(sequence.shape[1])):
+        rows = np.flatnonzero((order > level) & alive)
+        if rows.size == 0:
+            continue
+        ok = _beam(np, held, chain[rows, level], sequence[rows, level - 1], sequence[rows, level])
+        alive[rows[~(ok | (level >= general[rows]))]] = False
+    return alive
+
+
 def _validate(
     xp: Any,
     ms: MovingScene,
@@ -775,6 +917,21 @@ def _validate(
     pairs = int(source.shape[0])
     width = int(sequence.shape[1])
     reach = ms.ism.sound_speed_m_s * ms.ism.window_s
+    if xp is np and native.available() and width <= native.MAX_WIDTH:
+        kept, at, leaves, links = native.validate_pairs(
+            held["native"],
+            source,
+            listener,
+            sequence,
+            order,
+            region=region,
+            reach=reach,
+            epsilon=epsilon_m,
+        )
+        index = np.flatnonzero(kept)
+        beam = _in_the_beam(held, links[index], sequence[index], order[index], general[index])
+        index = index[beam]
+        return index.astype(np.int64), at[index], leaves[index]
     chain = xp.zeros((pairs, width + 1, 3))
     chain[:, 0] = source
     alive = xp.ones(pairs, dtype=bool)
@@ -790,21 +947,7 @@ def _validate(
         ok = (height > 0.0) | held["both"][facet]
         if level >= 1:
             before = xp.where(use, sequence[:, level - 1], 0)
-            axis = held["centres"][before] - position
-            distance = _norm(xp, axis)
-            axis = axis / xp.maximum(distance, 1e-12)[:, None]
-            radius = held["radii"][before]
-            half = xp.where(
-                distance <= radius,
-                np.pi,
-                xp.arcsin(xp.clip(radius / xp.maximum(distance, 1e-12), 0.0, 1.0)),
-            )
-            to_facet = held["centres"][facet] - position
-            far = _norm(xp, to_facet)
-            cosine = _dot(to_facet, axis) / xp.maximum(far, 1e-12)
-            angle = xp.arccos(xp.clip(cosine, -1.0, 1.0))
-            subtended = xp.arcsin(xp.clip(held["radii"][facet] / xp.maximum(far, 1e-12), 0.0, 1.0))
-            ok &= (angle <= half + subtended) | (level >= general)
+            ok &= _beam(xp, held, position, before, facet) | (level >= general)
         mirrored = position - 2.0 * height[:, None] * normal
         if region is not None:
             gap = xp.maximum(xp.maximum(lo[None, :] - mirrored, mirrored - hi[None, :]), 0.0)
@@ -1068,8 +1211,15 @@ def trace_early(
     if onsets is not None and not bool(direct.all()):
         from reverberate.mirror.moving_onset import onset_rows
 
+        # With the compiled text on a card the onsets stay on the host, in the same text.
         record["diffraction"] = onset_rows(
-            ms, onsets, job_source, job_listener, np.flatnonzero(~direct), xp, rows
+            ms,
+            onsets,
+            job_source,
+            job_listener,
+            np.flatnonzero(~direct),
+            np if native.on_cards() else xp,
+            rows,
         )
     # The jobs' rows, laid on the steps that asked for them.
     job = np.concatenate(rows.job) if rows.job else np.zeros(0, dtype=np.int64)
@@ -1124,7 +1274,21 @@ def _candidates_of(
     if found is None:
         # Half the cell's diagonal: the farthest a source of this cell is from its anchor.
         slack = 0.5 * np.sqrt(3.0) * pitch * (1.0 + 1e-9)
-        found = grow_candidates(ms, np.asarray(key, dtype=float) * pitch, slack, region)
+        entry = name_of("candidates 1", ms.key, [int(v) for v in key], pitch, slack, name[2])
+        grown: list[Candidates] = []
+
+        def grow() -> dict[str, np.ndarray]:
+            grown.append(grow_candidates(ms, np.asarray(key, dtype=float) * pitch, slack, region))
+            return grown[0].arrays()
+
+        kept: dict[str, Any] = {}
+        if ms.store is None:
+            grow()
+        else:
+            # One process of the machine grows an anchor's tree; the others map it.
+            kept, _ = ms.store.make("trees", entry, grow)
+        found = grown[0] if grown else Candidates.of(kept)
+        found.entry = entry
         while len(ms._candidates) >= max(1, ms.moving.anchors_kept):
             ms._candidates.pop(next(iter(ms._candidates)))
         ms._candidates[name] = found
@@ -1148,8 +1312,28 @@ def _short_lists(
     missing = [k for k, n in enumerate(names) if n not in ms._lists]
     count = candidates.count
     per = max(1, moving.pairs_per_block // max(1, count))
-    held, tree = ms.on(xp), candidates.on(xp)
     found: dict[int, np.ndarray] = {}
+    store = ms.store if candidates.entry else None
+    entries = {
+        k: name_of("short list 1", candidates.entry, names[k][1], pitch, margin) for k in missing
+    }
+    if store is not None:
+        for k in list(missing):
+            kept = store.load("lists", entries[k])
+            if kept is not None:
+                found[k] = np.asarray(kept["images"], dtype=np.int64)
+                missing.remove(k)
+    made = list(missing)
+    # On a host's core in C whatever ``xp`` is: a list is three milliseconds there, and
+    # the same list on every machine.
+    if native.available() and missing:
+        scene_held, tree_held = ms.on(np)["native"], candidates.native()
+        for k in missing:
+            found[k] = native.short_list(
+                scene_held, tree_held, keys[k].astype(float) * pitch, margin
+            )
+        missing = []
+    held, tree = (ms.on(xp), candidates.on(xp)) if missing else ({}, {})
     for first in range(0, len(missing), per):
         share = missing[first : first + per]
         anchors = xp.asarray(keys[share].astype(float) * pitch)
@@ -1160,6 +1344,9 @@ def _short_lists(
         bounds = np.searchsorted(host_job, np.arange(len(share) + 1))
         for k, which in enumerate(share):
             found[which] = host_image[bounds[k] : bounds[k + 1]]
+    if store is not None:
+        for k in made:
+            store.save("lists", entries[k], {"images": found[k].astype(np.int32)})
     out = [found[k] if k in found else ms._lists[names[k]] for k in range(len(names))]
     for k, n in enumerate(names):
         ms._lists.pop(n, None)
@@ -1198,9 +1385,66 @@ def _image_rows(
     waiting: list[tuple[np.ndarray, Any, Any, Any, Any, Any]] = []
     waiting_pairs = 0
 
+    on_card = xp is not np and native.on_cards()
+    compiled = (on_card or (xp is np and native.available())) and ms.width <= native.MAX_WIDTH
+    record["engine"] = (
+        "compiled, on a card"
+        if compiled and on_card
+        else "compiled"
+        if compiled
+        else getattr(xp, "__name__", "numpy")
+    )
+
+    def block_compiled(candidates: Candidates, parts: list[tuple[np.ndarray, np.ndarray]]) -> None:
+        """The jobs of ``parts`` through the compiled text: sieved, validated, laid."""
+        block_jobs = np.concatenate([share for share, _ in parts])
+        sizes = np.asarray([short.size for _, short in parts], dtype=np.int64)
+        first = np.concatenate([[0], np.cumsum(sizes)])
+        part_of = np.repeat(np.arange(len(parts)), [share.size for share, _ in parts])
+        record["sieved"] += int(sum(share.size * short.size for share, short in parts))
+        given = (
+            job_source[block_jobs],
+            job_listener[block_jobs],
+            first[part_of],
+            first[part_of + 1],
+            np.concatenate([short for _, short in parts]),
+        )
+        limits: dict[str, Any] = {
+            "margin": SIEVE_MARGIN_M,
+            "region": region,
+            "reach": ms.ism.sound_speed_m_s * ms.ism.window_s,
+            "epsilon": ms.ism.epsilon_m,
+        }
+        if on_card:
+            job, image, image_at, leaves, chain, kept = native.device_trace_jobs(
+                xp, held, candidates.typed(xp), *given, **limits
+            )
+        else:
+            job, image, image_at, leaves, chain, kept = native.trace_jobs(
+                held["native"], candidates.native(), *given, **limits
+            )
+        record["pairs"] += int(kept)
+        sequence = np.asarray(candidates.sequence)[image]
+        order = np.asarray(candidates.order)[image].astype(np.int64)
+        # The beam is numpy's, of the host's own arrays, wherever the rest was decided.
+        beam = _in_the_beam(
+            ms.on(np), chain, sequence, order, np.asarray(candidates.general)[image]
+        )
+        if bool(beam.any()):
+            lay(
+                block_jobs[job[beam]],
+                image_at[beam],
+                leaves[beam],
+                order[beam],
+                sequence[beam].astype(np.int32),
+            )
+
     def block(candidates: Candidates, parts: list[tuple[np.ndarray, np.ndarray]]) -> None:
         """Sieve the jobs of ``parts`` against their short lists."""
         nonlocal waiting_pairs
+        if compiled:
+            block_compiled(candidates, parts)
+            return
         tree = candidates.on(xp)
         block_jobs = np.concatenate([share for share, _ in parts])
         starts = np.concatenate([[0], np.cumsum([share.size for share, _ in parts])])
@@ -1264,13 +1508,26 @@ def _image_rows(
         waiting_pairs = 0
         if index.size == 0:
             return
-        job = pair_job[index]
+        lay(
+            pair_job[index],
+            image_at,
+            first,
+            to_numpy(order_x)[index],
+            to_numpy(sequence_x)[index].astype(np.int32),
+        )
+
+    def lay(
+        job: np.ndarray,
+        image_at: np.ndarray,
+        first: np.ndarray,
+        order: np.ndarray,
+        sequence: np.ndarray,
+    ) -> None:
+        """The paths found, as rows: whoever validated them, these are ``numpy``'s."""
         receiver = job_listener[job]
         # The twin's own expressions, on the host: its lengths, directions and gains.
         lengths = norm3(image_at - receiver)
         arrival = (image_at - receiver) / np.maximum(lengths, 1e-12)[:, None]
-        order = to_numpy(order_x)[index]
-        sequence = to_numpy(sequence_x)[index].astype(np.int32)
         gain = _gains(ms.images, sequence, lengths)
         departure = _unit(first - job_source[job])
         # Pairs were laid job by job, candidates in the tree's order: so are these.

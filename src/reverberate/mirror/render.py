@@ -10,7 +10,8 @@ air absorption, the reference chain's low cut, and the source's signature.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections import OrderedDict
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Any
 
@@ -28,6 +29,7 @@ from reverberate.spatial.sh import channel_count, real_sh, scene_to_ambisonic
 
 __all__ = [
     "RenderSettings",
+    "TailNoise",
     "band_pulse_energy",
     "bank_reading",
     "early_signals",
@@ -58,12 +60,17 @@ class RenderSettings:
         return asdict(self)
 
 
-def _band_map(rate: float) -> tuple[tuple[int, ...], np.ndarray]:
-    """The bank's bands at this rate, and which material band each reads its gain from."""
+@lru_cache(maxsize=8)
+def _band_picks(rate: float) -> tuple[tuple[int, ...], tuple[int, ...]]:
     centres = band_centres(int(round(rate)))
     material = np.asarray(OCTAVE_BANDS, dtype=float)
-    picks = np.array([int(np.argmin(np.abs(material - c))) for c in centres], dtype=int)
-    return centres, picks
+    return centres, tuple(int(np.argmin(np.abs(material - c))) for c in centres)
+
+
+def _band_map(rate: float) -> tuple[tuple[int, ...], np.ndarray]:
+    """The bank's bands at this rate, and which material band each reads its gain from."""
+    centres, picks = _band_picks(float(rate))
+    return centres, np.array(picks, dtype=int)
 
 
 def _fractional_pulses(
@@ -91,10 +98,42 @@ def _bank_kernels(rate: float) -> np.ndarray:
     return kernels
 
 
+@lru_cache(maxsize=8)
+def _bank_spectra(rate: float, bands: tuple[int, ...], transform: int) -> np.ndarray:
+    """The transforms of the bank's filters ``bands`` at a length: what a convolution reads."""
+    from scipy import fft as sp_fft
+
+    kernels = np.asarray(_bank_kernels(rate))[np.asarray(bands, dtype=int)]
+    spectra = np.asarray(sp_fft.rfftn(kernels, [transform], axes=[1]))
+    spectra.setflags(write=False)
+    return spectra
+
+
+def _band_rows_host(rows: np.ndarray, rate: float, bands: np.ndarray) -> np.ndarray:
+    """:func:`octave_filter_rows` with the filters' transforms read once, to the bit.
+
+    ``scipy.signal.fftconvolve`` in ``same`` mode written out: the rows'
+    transform at the next fast length, times the filters', back, and the
+    middle kept. The filters' transform is the same call on the same array
+    every time, a third of a tail's filtering, and is kept by rate and bands.
+    """
+    from scipy import fft as sp_fft
+
+    block = np.atleast_2d(np.asarray(rows, dtype=float))
+    held = int(block.shape[1])
+    taps = int(_bank_kernels(rate).shape[1])
+    full = held + taps - 1
+    transform = int(sp_fft.next_fast_len(full, True))
+    spectra = _bank_spectra(rate, tuple(int(b) for b in np.asarray(bands).ravel()), transform)
+    out = sp_fft.irfftn(sp_fft.rfftn(block, [transform], axes=[1]) * spectra, [transform], axes=[1])
+    first = (full - held) // 2
+    return np.asarray(out[:, :full][:, first : first + held].copy())
+
+
 def band_rows(rows: Any, rate: float, bands: np.ndarray, xp: Any = np) -> Any:
     """:func:`octave_filter_rows` on ``xp``: row k through band ``bands[k]``, same length."""
     if xp is np:
-        return octave_filter_rows(np.asarray(rows, dtype=float), int(round(rate)), bands)
+        return _band_rows_host(np.asarray(rows, dtype=float), rate, bands)
     from cupyx.scipy.signal import fftconvolve  # type: ignore[import-not-found]
 
     kernels = xp.asarray(_bank_kernels(rate))[xp.asarray(np.asarray(bands, dtype=int))]
@@ -183,6 +222,58 @@ def early_signals(
     return signals
 
 
+@dataclass
+class TailNoise:
+    """The draws of a tail's seed, kept for the next tail of that seed.
+
+    A tail's noise is a function of its seed and of its sizes alone: eleven
+    million normal deviates for 1.2 s at 48 kHz, 40 ms of one core, and
+    their sum of squares bin by bin. The levelling renders the mirror at
+    every pair, and a pair's seed is its cell's, so the pairs of one cell
+    draw the same noise: read here, they draw it once. The arrays are the
+    generator's own, in its own order, and are not written to afterwards.
+    """
+
+    #: Seeds kept: each is 8 bytes a deviate, 88 MB for the levelling's tail.
+    keep: int = 2
+    drawn: int = 0
+    read: int = 0
+    _held: OrderedDict[tuple[int, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = field(
+        default_factory=OrderedDict, repr=False
+    )
+
+    def of(
+        self, seed: int, held: int, count: int, bursts: int, bin_samples: int, length: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The uniform draws ``[bin, band, burst]``, the bursts and their energies a bin."""
+        name = (int(seed), held, count, bursts, bin_samples, length)
+        found = self._held.get(name)
+        if found is None:
+            found = _tail_draws(seed, held, count, bursts, bin_samples, length)
+            self._held[name] = found
+            self.drawn += 1
+            while len(self._held) > max(1, self.keep):
+                self._held.popitem(last=False)
+        else:
+            self._held.move_to_end(name)
+            self.read += 1
+        return found
+
+
+def _tail_draws(
+    seed: int, held: int, count: int, bursts: int, bin_samples: int, length: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """What a tail takes of its generator, in the generator's order, on the host."""
+    rng = np.random.default_rng(seed)
+    drawn = rng.random((held, count, bursts))
+    span = held * bin_samples
+    draws = rng.standard_normal((count, bursts, span))
+    if span > length:
+        draws[:, :, length:] = 0.0
+    segments = draws.reshape(count, bursts, held, bin_samples)
+    return drawn, segments, np.sum(segments**2, axis=-1)
+
+
 def tail_from_histogram(
     histogram: Histogram,
     receiver: int,
@@ -195,6 +286,7 @@ def tail_from_histogram(
     scale_per_band: np.ndarray,
     band_gain_db: np.ndarray | None = None,
     xp: Any = np,
+    noise: TailNoise | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """The tail as noise shaped by a receiver's histogram, band by band, with its anisotropy.
 
@@ -209,7 +301,8 @@ def tail_from_histogram(
 
     ``scale_per_band`` turns the histogram's energy into the response's, per
     bank band; ``band_gain_db``, per octave band, is the calibration's tail
-    gain on top.
+    gain on top. ``noise`` keeps a seed's draws for the next tail of that
+    seed (:class:`TailNoise`), on the host.
     """
     from reverberate.spatial.sh import quadrature
 
@@ -221,7 +314,6 @@ def tail_from_histogram(
     moments = histogram.moments[receiver]  # [bin, band, channel]
     bins = energy.shape[0]
     bin_samples = int(round(histogram.bin_s * rate))
-    rng = np.random.default_rng(seed)
     grid, weights = quadrature(2 * histogram.order + 2)
     basis_low = real_sh(histogram.order, grid)  # [direction, low channel]
     basis_out = real_sh(settings.order, grid)  # [direction, out channel]
@@ -241,29 +333,39 @@ def tail_from_histogram(
     held = min(bins, -(-length // bin_samples))
     energy_in = np.array(wanted[:held], dtype=float)
     energy_in[: min(from_bin, held)] = 0.0
-    density = np.maximum(moments[:held][:, picks, :] @ basis_low.T, 0.0) * weights
-    empty = density.sum(axis=-1, keepdims=True) <= 0.0
-    density = np.where(empty, weights, density)
-    cumulative = np.cumsum(density / density.sum(axis=-1, keepdims=True), axis=-1)
-    cumulative[..., -1] = np.inf
-    drawn = rng.random((held, count, bursts))
-    # The same comparisons on either device: the first direction whose
-    # cumulative probability passes the draw, [bin, band, burst].
-    chosen = xp.argmax(
-        xp.asarray(drawn)[..., None] < xp.asarray(cumulative)[:, :, None, :], axis=-1
-    )
     span = held * bin_samples
-    if xp is np:
-        draws = rng.standard_normal((count, bursts, span))
-    else:
+    if xp is not np:
+        rng = np.random.default_rng(seed)
+        drawn = rng.random((held, count, bursts))
         draws = xp.random.default_rng(seed).standard_normal((count, bursts, span))
-    if span > length:
-        draws[:, :, length:] = 0.0
-    segments = draws.reshape(count, bursts, held, bin_samples)
-    have = xp.sum(segments**2, axis=-1)  # [band, burst, bin]
+        if span > length:
+            draws[:, :, length:] = 0.0
+        segments = draws.reshape(count, bursts, held, bin_samples)
+        have = xp.sum(segments**2, axis=-1)  # [band, burst, bin]
+    elif noise is not None:
+        drawn, segments, have = noise.of(seed, held, count, bursts, bin_samples, length)
+    else:
+        drawn, segments, have = _tail_draws(seed, held, count, bursts, bin_samples, length)
+    if bool(np.all(basis_out == basis_out[0])):
+        # Every direction encodes alike (order 0): which one a burst drew changes nothing,
+        # and is not looked for. The draws are taken all the same, above.
+        coefficients = xp.asarray(
+            np.broadcast_to(basis_out[0], (held, count, bursts, basis_out.shape[1]))
+        )
+    else:
+        density = np.maximum(moments[:held][:, picks, :] @ basis_low.T, 0.0) * weights
+        empty = density.sum(axis=-1, keepdims=True) <= 0.0
+        density = np.where(empty, weights, density)
+        cumulative = np.cumsum(density / density.sum(axis=-1, keepdims=True), axis=-1)
+        cumulative[..., -1] = np.inf
+        # The same comparisons on either device: the first direction whose
+        # cumulative probability passes the draw, [bin, band, burst].
+        chosen = xp.argmax(
+            xp.asarray(drawn)[..., None] < xp.asarray(cumulative)[:, :, None, :], axis=-1
+        )
+        coefficients = xp.asarray(basis_out)[chosen]  # [bin, band, burst, channel]
     share = xp.asarray(energy_in.T / bursts)[:, None, :]  # [band, 1, bin]
     gain = xp.where(share > 0.0, xp.sqrt(share / xp.maximum(have, 1e-30)), 0.0)
-    coefficients = xp.asarray(basis_out)[chosen]  # [bin, band, burst, channel]
     coefficients = coefficients * gain.transpose(2, 0, 1)[..., None]
     laid = xp.matmul(
         coefficients.transpose(1, 0, 3, 2),  # [band, bin, channel, burst]
@@ -295,6 +397,14 @@ def tail_from_histogram(
         "seed": seed,
     }
     return tail, record
+
+
+@lru_cache(maxsize=8)
+def _lowcut_sections(rate: float) -> np.ndarray:
+    """The reference chain's low cut as second order sections: designed once a rate."""
+    sos = np.asarray(butter(LOWCUT_ORDER, LOWCUT_HZ, btype="high", fs=rate, output="sos"))
+    sos.setflags(write=False)
+    return sos
 
 
 @lru_cache(maxsize=8)
@@ -341,6 +451,7 @@ def render_point(
     fallback: tuple[Any, ...] | None = None,
     signature: np.ndarray | None = None,
     xp: Any = np,
+    noise: TailNoise | None = None,
 ) -> tuple[Ambisonic, dict[str, Any]]:
     """Point ``index``: its paths, then its histogram's tail, then air, low cut and signature.
 
@@ -365,6 +476,7 @@ def render_point(
         "bursts": settings.tail_bursts,
         "band_gain_db": np.asarray(tail_gain_db, dtype=float),
         "xp": xp,
+        "noise": noise,
     }
     if direct.any() and heard:
         distance = float(paths.length_m[direct][0])
@@ -412,7 +524,8 @@ def render_point(
     else:
         record["tail"] = None if not direct.any() else "no ray reached this receiver"
     signals = air_absorption(signals, rate, xp, sound_speed_m_s=sound_speed_m_s)
-    sos = butter(LOWCUT_ORDER, LOWCUT_HZ, btype="high", fs=rate, output="sos")
+    # A copy: the recursion's own code asks for an array it may write to.
+    sos = _lowcut_sections(float(rate)).copy()
     if xp is np:
         if signature is not None and signature.size:
             signals = apply_signature(signals, signature)

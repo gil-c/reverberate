@@ -61,12 +61,17 @@ REFERENCE: dict[str, Any] = {
     "host": "the laptop, one performance core at 3.6 GHz, alone (2026-10-05)",
     "host_updates_per_s": 1.14e8,
     "host_transform_s": 0.0052,
-    #: Host seconds a unit, one process, ``numpy``, on a 20 s window of the realistic
-    #: scene (hssd_0076, 630 positions, 284 pairs): a (source, head) position of the early
-    #: trace, a pair levelled, a pair's 64 channels through the air and the masks.
-    "paths_job_s": 0.026,
-    "level_pair_s": 0.076,
-    "row_pair_s": 0.014,
+    #: Host seconds a unit, one process, on a 20 s window of the realistic scene
+    #: (hssd_0076, 630 positions, 284 pairs): a (source, head) position of the early
+    #: trace, a pair levelled, a pair's 64 channels through the air and the masks. They
+    #: were 0.026, 0.076 and 0.014 on ``numpy`` alone; these are those, times what the
+    #: same window took after over before on the same afternoon (the laptop was not alone:
+    #: 6.0 s of 19.3, 7.4 of 27.0, 4.1 of 5.8). The early trace's is a window that fills
+    #: its store, trees, lists and distance fields included; with the store filled a
+    #: position is 0.002 (``docs/adr/0016-appendix-every-card-every-core.md``).
+    "paths_job_s": 0.008,
+    "level_pair_s": 0.021,
+    "row_pair_s": 0.010,
     #: The solver on the grid to 1500 Hz against the same card's box of free air: the
     #: boundary and its branches. Measured on 4 x RTX 3090 (instance 54299322, 2026-10-05):
     #: 1.72e10 node updates a second a card in launches of 8 against 3.74e10 on the box.

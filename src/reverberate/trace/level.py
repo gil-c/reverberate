@@ -36,7 +36,7 @@ from reverberate.audio import Atmosphere
 from reverberate.mirror.hybrid import Crossover, seam_db
 from reverberate.mirror.moving import EarlyTable
 from reverberate.mirror.rays import Histogram
-from reverberate.mirror.render import _band_map, band_pulse_energy, render_point
+from reverberate.mirror.render import TailNoise, _band_map, band_pulse_energy, render_point
 from reverberate.mirror.tails import TailTable
 from reverberate.spatial.lowband import (
     LOW_DURATION_S,
@@ -170,6 +170,7 @@ def mirror_omni(
     *,
     seed: int,
     xp: Any = np,
+    noise: TailNoise | None = None,
 ) -> np.ndarray:
     """Channel 0 of the mirror at one pair, on the wave field's clock and scale: 1.2 s at 48 kHz.
 
@@ -182,6 +183,9 @@ def mirror_omni(
     scale and summed in energy, then the air, the low cut and the
     signature; shifted by the alignment's lead and multiplied by its gain,
     as :func:`reverberate.mirror.files.write_field` writes a field.
+
+    ``noise`` keeps the tail's draws from one pair to the next of the same
+    seed (:class:`reverberate.mirror.render.TailNoise`): the same response.
     """
     settings = assets.settings
     render = replace(
@@ -237,6 +241,7 @@ def mirror_omni(
         fallback=None if bool(direct.any()) else (scale, straight, onset),
         signature=assets.signature,
         xp=xp,
+        noise=noise,
     )
     signal = np.asarray(response.signals[0], dtype=float)
     lead = assets.lead_samples

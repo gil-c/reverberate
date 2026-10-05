@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from reverberate.mirror import native
 from reverberate.mirror.moving import MovingSettings, prepare, trace_early
 from reverberate.trace import run as run_module
 from reverberate.trace.pool import CARD, HOST, PARENT, Job, Pool, PoolError, WorkerSpec
@@ -294,6 +295,44 @@ def test_the_pack_is_the_same_on_any_machine(
         assert report["predicted"]["cards"] == len(cards)
 
 
+def test_the_pack_is_the_same_from_the_twin_and_with_the_store_elsewhere(
+    reference: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reference ran the compiled text where the machine has a compiler; this run is
+    # ``numpy``'s, every pair on flat arrays, with its store in a directory of its own.
+    monkeypatch.setenv("REVERBERATE_NO_NATIVE", "1")
+    monkeypatch.setenv(run_module.STORE_VARIABLE, str(tmp_path / "kept"))
+    small_blocks(monkeypatch)
+    trace, _, _ = quick(tmp_path)
+    report = trace.run()
+    assert pack_digest(tmp_path / "out" / "pack.h5") == reference["digest"]
+    engines = {record["engine"] for record in report["paths"].values()}
+    assert engines == {"numpy"}
+    if native.available():
+        assert {r["engine"] for r in reference["report"]["paths"].values()} == {"compiled"}
+    assert (tmp_path / "kept" / "scene").is_dir()
+    assert not (tmp_path / "out" / "mirror_store").exists()
+    # The levelling's jobs hold whole cells, every pair once, and draw a cell's noise once.
+    groups = trace._level_groups()
+    assert sorted(j for group in groups for j in group) == list(range(len(trace.pairs)))
+    cells = [{trace.pairs[j][1] for j in group} for group in groups]
+    assert len(groups) > 2 and sum(len(held) for held in cells) == len(set().union(*cells))
+    drawn = sum(
+        int(record.get("noise_drawn", 0))
+        for key, record in trace.pool.done.items()
+        if key.startswith("level/")
+    )
+    assert 0 < drawn <= len(set().union(*cells)) < len(trace.pairs)
+    # A second scene of the dwelling on that store: the same pack, and nothing made again.
+    monkeypatch.delenv("REVERBERATE_NO_NATIVE")
+    second, _, _ = quick(tmp_path / "second")
+    again = second.run()
+    assert pack_digest(tmp_path / "second" / "out" / "pack.h5") == reference["digest"]
+    assert again["mirror_store"]["made"] == {} and again["distance_fields"] == 0
+    assert again["mirror_store"]["found"]["trees"] > 0
+    assert again["distance_fields_read"] == report["distance_fields"] > 0
+
+
 def test_a_job_made_again_after_a_failure_leaves_the_pack_as_it_was(
     reference: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -328,6 +367,14 @@ def test_the_pack_is_the_same_from_processes_of_their_own(
     workers = report["pool"]["workers"]
     assert len(workers) == 2 and sum(w["jobs"] for w in workers) > 10
     assert (tmp_path / "out" / "state" / "centres.json").is_file()
+    # What the early trace shares was made once between the two processes and this one:
+    # as many trees and distance fields as one process makes, and each tree read by
+    # whoever did not grow it.
+    alone, shared = reference["report"]["mirror_store"], report["mirror_store"]
+    for kind in ("scene", "onsets", "trees", "fields"):
+        assert shared["made"][kind] == alone["made"][kind] > 0, kind
+    assert report["distance_fields"] == reference["report"]["distance_fields"]
+    assert shared["found"]["trees"] > 0
     # A run stopped before the pack is taken up from the jobs' files: nothing is made twice.
     (tmp_path / "out" / "pack.h5").unlink()
     second, _, _ = quick(tmp_path)

@@ -44,6 +44,7 @@ a long tail by 38 per cent of T60 at 16 kHz.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import h5py
@@ -378,6 +379,32 @@ def frame_for(duration_s: float) -> int:
     return 2048
 
 
+@lru_cache(maxsize=16)
+def _frame_gains(
+    frame: int,
+    sample_rate_hz: float,
+    padded: int,
+    sound_speed_m_s: float,
+    atmosphere: Atmosphere,
+    start_time_s: float,
+) -> np.ndarray:
+    """``[frame, bin]``: what the air takes of each frame of a padded response of this length.
+
+    A frame's gain is a function of its place and of the air alone, the
+    same for every response of one length: computed a frame at a time, as
+    :func:`apply_air_absorption` always did, and kept.
+    """
+    frequency = np.fft.rfftfreq(frame, 1.0 / sample_rate_hz)
+    attenuation = atmosphere.attenuation_np_per_m(frequency)
+    starts = range(0, padded - frame + 1, frame // 4)
+    gains = np.empty((len(starts), frequency.size))
+    for k, start in enumerate(starts):
+        centre = (start + frame / 2.0 - frame) / sample_rate_hz + start_time_s
+        gains[k] = np.exp(-attenuation * sound_speed_m_s * max(centre, 0.0))
+    gains.setflags(write=False)
+    return gains
+
+
 def apply_air_absorption(
     signals: np.ndarray,
     sample_rate_hz: float,
@@ -526,14 +553,26 @@ def apply_air_absorption(
     # remembered one is how a whole response acquires a quiet 2.5 dB of gain.
     overlap = np.zeros(padded.shape[1])
 
-    frequency = np.fft.rfftfreq(frame, 1.0 / sample_rate_hz)
-    attenuation = (atmosphere or Atmosphere()).attenuation_np_per_m(frequency)
-    for start in range(0, padded.shape[1] - frame + 1, hop):
-        centre = (start + frame / 2.0 - frame) / sample_rate_hz + start_time_s
-        gain = np.exp(-attenuation * sound_speed_m_s * max(centre, 0.0))
-        spectrum = np.fft.rfft(padded[:, start : start + frame] * window, axis=-1)
-        out[:, start : start + frame] += np.fft.irfft(spectrum * gain, n=frame, axis=-1) * window
-        overlap[start : start + frame] += window * window
+    # Every frame's transform in one call each way: the interpreter took a frame at a
+    # time, 230 of them a response, and that was most of what a short response cost. A
+    # frame's transform is its own whatever is transformed beside it, so each sample is
+    # the sum it was, added in the frames' order.
+    starts = range(0, padded.shape[1] - frame + 1, hop)
+    gains = _frame_gains(
+        frame,
+        float(sample_rate_hz),
+        int(padded.shape[1]),
+        float(sound_speed_m_s),
+        atmosphere or Atmosphere(),
+        float(start_time_s),
+    )
+    frames = np.lib.stride_tricks.sliding_window_view(padded, frame, axis=1)[:, ::hop]
+    spectra = np.fft.rfft(frames * window, axis=-1)
+    laid = np.fft.irfft(spectra * gains, n=frame, axis=-1) * window
+    squared = window * window
+    for k, start in enumerate(starts):
+        out[:, start : start + frame] += laid[:, k]
+        overlap[start : start + frame] += squared
     interior = slice(frame, frame + length)
     if np.min(overlap[interior]) <= 0.0:
         raise ValueError("the window and hop do not cover every sample")
