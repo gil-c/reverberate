@@ -157,7 +157,14 @@ class Parameters:
     speed_m_s: Range = (0.5, 1.1)
     dwell_s: Range = (400.0, 1500.0)
     gain_db: Range = (-6.0, 0.0)
-    noise_gain_db: Range = (-18.0, -6.0)
+    #: A noise's level about the one its clip is stored at, which is its source's at 1 m
+    #: (``clip-library.md``): a television, a shower, a hood as loud as they are, 6 dB
+    #: either way. The first scene drew -18 to -6 and its five noises together stood 5 to
+    #: 9 dB under a near voice in the median and 20 dB under at their quietest: a scene of
+    #: voices, with nothing to separate speech from. Centred on the stored level, the
+    #: noises stand about where the far voices do, and a near voice 0 to 5 dB over the rest
+    #: in the median (``docs/open-questions/first-scene-defects.md``).
+    noise_gain_db: Range = (-6.0, 6.0)
     #: The share of a voice's stations that are seats.
     seated_share: Range = (0.5, 0.9)
     #: A talk spurt and the pause after it.

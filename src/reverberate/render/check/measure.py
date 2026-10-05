@@ -6,6 +6,7 @@ whose answer is known, and on a seeded fault that must make it fire.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,14 +22,17 @@ __all__ = [
     "Sidebands",
     "a_weighted",
     "annihilate",
+    "arrival_near",
     "band_split",
     "c50_db",
+    "comb",
     "decay_times_s",
     "difference_outlier",
     "direction_of",
     "envelope_arrival",
     "frame_levels_db",
     "instantaneous_hz",
+    "join_step",
     "level_step_db",
     "pink_noise",
     "seam_deviation_db",
@@ -148,6 +152,40 @@ def envelope_arrival(signal: np.ndarray, *, share: float = 0.5) -> int:
     return start + int(np.argmax(envelope[start : stop + 1]))
 
 
+def arrival_near(
+    signal: np.ndarray, expected: float, reach: int, *, share: float = 0.6
+) -> tuple[int, float]:
+    """The first peak of the envelope within ``reach`` samples of ``expected``, and its size.
+
+    Where a response's direct sound is, when something says where to look:
+    at a far or shadowed place a band's direct sound is weaker than what
+    follows it by 5 to 20 ms, and a first arrival read against the band's
+    largest peak (:func:`envelope_arrival`) is then a reflection. The first
+    peak, not the largest: a floor's reflection follows the direct sound by
+    1 to 2 ms and may be the larger. A peak counts from ``share`` of the
+    largest envelope inside the search; under it are the ripples a band
+    limited pulse has before it. The size is the peak over the envelope's
+    largest anywhere. ``(-1, 0.0)`` where the envelope has no peak there and
+    only rises or falls through the search.
+    """
+    envelope = np.abs(hilbert(np.asarray(signal, dtype=float)))
+    centre = int(round(expected))
+    low, high = max(centre - reach, 1), min(centre + reach, envelope.size - 2)
+    top = float(envelope.max())
+    if high <= low or top <= 0.0:
+        return -1, 0.0
+    held = envelope[low : high + 1]
+    peaks = np.flatnonzero(
+        (held >= share * float(held.max()))
+        & (held >= envelope[low - 1 : high])
+        & (held >= envelope[low + 1 : high + 2])
+    )
+    if peaks.size == 0:
+        return -1, 0.0
+    at = low + int(peaks[0])
+    return at, float(envelope[at]) / top
+
+
 def direction_of(first_order: np.ndarray) -> np.ndarray:
     """The direction a sound comes from, from the first four channels (ACN, N3D).
 
@@ -250,19 +288,68 @@ def difference_outlier(
     return float(ratio[at]), at + 1
 
 
+def comb(samples: int, rate: float, tones_hz: Iterable[float], *, seed: int = 0) -> np.ndarray:
+    """Tones of one size at ``tones_hz``, their phases drawn from ``seed``, at an rms of 0.1.
+
+    With every tone a multiple of 100 Hz, a frame of 10 ms holds a whole
+    number of periods of each and of every difference between two: the
+    power of the comb is the same in every such frame, to rounding, which
+    no noise is. It is what a band's level is read on
+    (:func:`level_step_db`): through a room each tone fades on its own as
+    things move, and the sum of many keeps the band's level.
+    """
+    tones = np.asarray(list(tones_hz), dtype=float)
+    phases = np.random.default_rng(seed).uniform(0.0, 2.0 * np.pi, tones.size)
+    time = np.arange(samples) / rate
+    made = np.zeros(samples)
+    for tone, phase in zip(tones, phases, strict=True):
+        made += np.sin(2.0 * np.pi * tone * time + phase)
+    return np.asarray(made * (0.1 / np.sqrt(0.5 * max(tones.size, 1))))
+
+
+def join_step(signal: np.ndarray, at: int, rate: float, *, window_s: float = 0.02) -> float:
+    """The step from sample ``at - 1`` to ``at`` over the rms of the steps round it.
+
+    What two pieces put end to end are held to where they meet: a signal
+    that goes on through the join steps there as it does everywhere, about
+    once its rms step; a cut reads the signal's size over that, tens of
+    times it. The statistic of :func:`difference_outlier`, at one place.
+    """
+    x = np.asarray(signal, dtype=float)
+    half = max(int(round(0.5 * window_s * rate)), 8)
+    lo, hi = max(at - half, 0), min(at + half, x.size)
+    if not lo < at < hi:
+        return 0.0
+    steps = np.diff(x[lo:hi])
+    here = at - 1 - lo
+    others = np.delete(steps, here)
+    typical = float(np.sqrt(np.mean(others * others))) if others.size else 0.0
+    if typical <= 0.0:
+        return 0.0 if steps[here] == 0.0 else float("inf")
+    return float(abs(steps[here]) / typical)
+
+
 def level_step_db(
-    signal: np.ndarray, rate: float, *, frame_s: float = 0.01, within_db: float = 15.0
+    signal: np.ndarray,
+    rate: float,
+    *,
+    frame_s: float = 0.01,
+    within_db: float = 15.0,
+    envelope: bool = True,
 ) -> tuple[float, int]:
     """The largest change of level between a frame and the next but one, in dB, and where.
 
-    Frames of ``frame_s`` of the envelope's power. The frame between the two
-    is skipped so that a step in the middle of a frame is read whole. Only
-    pairs within ``within_db`` of the median level count: a tone carried
-    through a null of the room moves fast and is not a step.
+    Frames of ``frame_s`` of the envelope's power, or of the signal's own
+    without ``envelope`` (a :func:`comb`, whose frames hold whole periods).
+    The frame between the two is skipped so that a step in the middle of a
+    frame is read whole. Only pairs within ``within_db`` of the median level
+    count: a tone carried through a null of the room moves fast and is not a
+    step.
     """
-    envelope = np.abs(hilbert(np.asarray(signal, dtype=float)))
+    held = np.asarray(signal, dtype=float)
+    read = np.abs(hilbert(held)) if envelope else held
     frame = max(int(round(frame_s * rate)), 1)
-    levels = frame_levels_db(envelope, frame)
+    levels = frame_levels_db(read, frame)
     if levels.size < 3:
         return 0.0, 0
     floor = float(np.median(levels)) - within_db
@@ -285,7 +372,13 @@ class Sidebands:
 
 
 def sidebands_db(
-    signal: np.ndarray, rate: float, tone_hz: float, spacing_hz: float, *, harmonics: int = 5
+    signal: np.ndarray,
+    rate: float,
+    tone_hz: float,
+    spacing_hz: float,
+    *,
+    harmonics: int = 5,
+    beyond_hz: float = 0.0,
 ) -> Sidebands:
     """The lines ``spacing_hz`` apart round ``tone_hz``: a gain that moves in steps.
 
@@ -298,6 +391,13 @@ def sidebands_db(
     or failing one the loudest. Lines nearer the carrier than the window
     resolves (a signal shorter than eight periods of the spacing) read
     nothing.
+
+    ``beyond_hz`` is the Doppler spread of the carrier: how far a path of
+    the scene may shift the tone, each way. A moving source or listener
+    turns one tone into as many as there are paths, each at its own shift,
+    and those are lines too: a place within ``beyond_hz`` (and the window's
+    two bins) of the carrier is not read, and where no place is left the
+    answer is no line.
     """
     x = np.asarray(signal, dtype=float)
     n = np.arange(x.size)
@@ -323,6 +423,8 @@ def sidebands_db(
 
     found = []
     for k in range(1, harmonics + 1):
+        if beyond_hz > 0.0 and k * spacing_hz <= beyond_hz + 2.0 * resolution:
+            continue
         for sign in (-1.0, 1.0):
             line = around(sign * k * spacing_hz)
             floor = max(
@@ -330,6 +432,8 @@ def sidebands_db(
             )
             prominence = float(db(line / max(floor, 1e-15 * carrier)))
             found.append((prominence >= 6.0, float(db(line / carrier)), prominence, k))
+    if not found:
+        return Sidebands(float("-inf"), 0.0, 0)
     _, level, prominence, k = max(found)
     return Sidebands(level, prominence, k)
 

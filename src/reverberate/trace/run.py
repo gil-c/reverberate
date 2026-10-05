@@ -121,6 +121,7 @@ from reverberate.trace.level import (
     at_pack_length,
     first_arrival_s,
     mirror_omni,
+    pair_anchor_s,
     pair_low,
     pair_omni,
     pair_seam_db,
@@ -1186,6 +1187,14 @@ class Trace:
         return {
             "seam_db": pair_seam_db(aired, mirror, self.crossover),
             "onset_s": onset,
+            # Where the pair's two bands are joined in pressure: its own direct sound,
+            # and its loudest sample where it holds none (``level.pair_anchor_s``).
+            "anchor_s": pair_anchor_s(
+                aired,
+                self._straight_s(j),
+                lead_s=self.assets.pack_lead_s,
+                sound_speed_m_s=settings.sound_speed_m_s,
+            ),
             "first_s": first,
             "direct": direct,
             **heard,
@@ -1206,8 +1215,9 @@ class Trace:
             self.crossover.record(),
             self.recipe.atmosphere.to_dict(),
             settings.record(),
-            # A ledger of before the direct sound was read is levelled again.
-            {"lead_s": self.assets.pack_lead_s, "clock": "direct/1"},
+            # A ledger of before the direct sound was read is levelled again, and one of
+            # before the join was anchored on it.
+            {"lead_s": self.assets.pack_lead_s, "clock": "direct/1", "anchor": "direct/1"},
         )
         if read and ledger.is_file():
             for line in ledger.read_text().splitlines():
@@ -1413,6 +1423,7 @@ class Trace:
                 "c": self.assets.settings.sound_speed_m_s,
                 "lead_s": self.assets.pack_lead_s,
                 "unit": FIELD_UNIT_AT_1M,
+                "anchor": "direct/1",
             },
         )
         return self.out / "jobs" / "rows" / f"{block}.{digest[:16]}.npy"
@@ -1457,6 +1468,12 @@ class Trace:
         partial.replace(target)
         return {"pairs": int(rows.shape[0])}
 
+    def _straight_s(self, j: int) -> float:
+        """Pair ``j``'s source position to its cell over the sound speed: its direct sound's."""
+        position, cell = self.pairs[j]
+        apart = np.linalg.norm(self.tracks.positions[int(position)] - self.cells[int(cell)])
+        return float(apart) / self.assets.settings.sound_speed_m_s
+
     def _made_row(self, j: int, atmosphere: Atmosphere, xp: Any) -> np.ndarray:
         assert self.engine is not None
         row = pair_low(
@@ -1466,6 +1483,7 @@ class Trace:
             sound_speed_m_s=self.assets.settings.sound_speed_m_s,
             lead_s=self.assets.pack_lead_s,
             unit_at_1m=FIELD_UNIT_AT_1M,
+            straight_s=self._straight_s(j),
             xp=xp,
         )[0]
         return np.asarray(row, dtype=np.float32)
@@ -1555,8 +1573,10 @@ class Trace:
         target = self.out / "pack.h5"
         partial = self.out / "pack.partial.h5"
         seam = np.array([r["seam_db"] for r in self.levels], dtype=float)
-        onset = np.array([r["onset_s"] for r in self.levels], dtype=float)
-        trail = np.array([r["onset_s"] - r["first_s"] for r in self.levels], dtype=float)
+        # The anchor of each pair's join, which its row was made with, and what it trails
+        # the mirror's first arrival at the pair by: the engine's window follows it.
+        onset = np.array([r["anchor_s"] for r in self.levels], dtype=float)
+        trail = np.array([r["anchor_s"] - r["first_s"] for r in self.levels], dtype=float)
         row_of = {pair: j for j, pair in enumerate(self.pairs)}
         with PackWriter(
             partial,
