@@ -8,11 +8,12 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--models-from EXPORT/storey | --hssd-root DIR]
     [--dry-run] [--smoke SECONDS [--smoke-sources M] [--smoke-start T|auto]] [--patch [X Z]]
     [--low-engine lowband|pffdtd] [--low-ppw P] [--low-scheme cartesian|fcc]
-    [--low-seconds S] [--rays N] [--rail-positions N]
+    [--low-seconds S] [--rays N] [--rail-positions N] [--low-levers TEXT]
     [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
-    [--allow-asset-mismatch] [--plan-offers] [--yes]
+    [--line proxy|direct] [--allow-asset-mismatch] [--plan-offers] [--yes]
+    [--instance ID [--relaunch]]
 
 ``--dry-run`` prints the plan and its cost and rents nothing. ``--plan-offers`` builds
 the bundle, asks for the offers and prints what the run is predicted to take on each,
@@ -41,6 +42,15 @@ python -m reverberate.trace scaling --bundle B --out O [--workers 1,2,4,8 | --ca
     line, the serial fraction, and whether every count wrote the same pack
 python -m reverberate.trace digest PACK [PACK ...]
     what each pack holds but for its date and its seconds; fails where two differ
+python -m reverberate.trace ledger --home H --gpu NAME --gpus N --gpu-ram GB [--dph USD_PER_H]
+    [--cores N] [--fetch-s S] [--queue | --before-the-queue]
+    what a run that came home took, stage by stage from its own log, beside what the
+    prediction says of its plan on that machine; nothing is rented and nothing written
+
+``--low-levers`` is the form the pack's low band is written in on the machine
+(``bins,int16`` unless told: 9.5 GB for the first scene's 24.5; ``none`` for ``low/ir`` as
+it was; ``bins,int16,decay=60`` for the listening variant of 3.5 GB). Where it keeps the
+bins the machine's pair cache is kept compact too, every degree whole.
 
 ``--check full`` reads the pack back whole and renders a minute of it on the host and on
 the card (V4, with the proof of which device computed); ``read`` reads the pack's
@@ -128,6 +138,14 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         help="the rays a tail site casts; left out, the mirror's own (100 000)",
     )
     p.add_argument(
+        "--low-levers",
+        default=None,
+        metavar="TEXT",
+        help="the form the pack's low band is written in on the machine: bins,int16 when"
+        " left out; none for low/ir as it was; bins,int16,decay=60 for a listening variant."
+        " Said in the bundle and in the pack's provenance",
+    )
+    p.add_argument(
         "--reuse-from",
         type=Path,
         default=None,
@@ -195,7 +213,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--gpu", default="", help="only cards whose name contains this")
     p.add_argument("--avoid", type=int, nargs="*", default=[], metavar="ID")
+    p.add_argument(
+        "--line",
+        choices=("proxy", "direct"),
+        default="proxy",
+        help="how the offers' way home is priced: through Vast's proxy, 4.4 MB/s measured"
+        " (the default), or by the laptop's line to where the host is, once a direct"
+        " connection has been seen to work. The transfer itself tries the direct way first"
+        " whatever is said here",
+    )
     p.add_argument("--instance", type=int, default=None, help="resume on a machine already rented")
+    p.add_argument(
+        "--relaunch",
+        action="store_true",
+        help="with --instance: launch the trace again even where it is done on the machine"
+        " (left out, a machine whose trace is done is fetched from, and nothing is launched)",
+    )
     p.add_argument("--devices", default=None)
     p.add_argument("--campaign-args", default="", help="extra flags for the machine's command")
     p.add_argument("--fetch-grid", action="store_true", help="bring the low grid home too")
@@ -288,6 +321,20 @@ def build_parser() -> argparse.ArgumentParser:
         "digest", help="what packs hold but for their date and seconds; fails where they differ"
     )
     p.add_argument("packs", type=Path, nargs="+")
+
+    p = sub.add_parser(
+        "ledger", help="what a run took, from its own log, against its prediction on that machine"
+    )
+    p.add_argument("--home", type=Path, required=True, help="where the run came home")
+    p.add_argument("--gpu", required=True, help="the card's name, as the offer wrote it")
+    p.add_argument("--gpus", type=int, required=True, help="the cards the run had")
+    p.add_argument("--gpu-ram", type=float, required=True, metavar="GB", help="a card's memory")
+    p.add_argument("--dph", type=float, default=None, help="USD an hour; left out, the watches'")
+    p.add_argument("--cores", type=float, default=0.0, help="the host's vCPU, for its stages")
+    p.add_argument("--fetch-s", type=float, default=None, help="what the pack's fetch took, s")
+    which = p.add_mutually_exclusive_group()
+    which.add_argument("--queue", dest="queue", action="store_true", default=None)
+    which.add_argument("--before-the-queue", dest="queue", action="store_false")
     return parser
 
 
@@ -476,6 +523,21 @@ def main(argv: list[str] | None = None) -> int:
         for path, digest in zip(args.packs, found, strict=True):
             print(f"{digest}  {path}")
         return 0 if len(set(found)) == 1 else 1
+    if args.command == "ledger":
+        from reverberate.trace.machines import against
+
+        told = against(
+            args.home,
+            gpu_name=args.gpu,
+            num_gpus=args.gpus,
+            gpu_ram_gb=args.gpu_ram,
+            dph_total=args.dph,
+            cpu_cores=args.cores,
+            queue=args.queue,
+            fetch_s=args.fetch_s,
+        )
+        print("\n".join(told["lines"]))
+        return 0
     if args.command == "finish":
         from reverberate.trace.driver import finish
 
@@ -514,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         return _variants(args, recipe, assets)
     profile, centre = _profile(args, recipe)
     if args.command == "bundle":
-        from reverberate.trace.bundle import build_bundle
+        from reverberate.trace.bundle import build_bundle, levers_text
         from reverberate.trace.driver import describe
         from reverberate.trace.plan import estimate, make_plan
 
@@ -527,6 +589,7 @@ def main(argv: list[str] | None = None) -> int:
             low_ppw=args.low_ppw if args.low_engine == "lowband" else None,
             low_seconds=args.low_seconds,
             rays=args.rays,
+            low_levers=levers_text(args.low_levers),
         )
         print(describe(plan, priced))
         build_bundle(
@@ -544,10 +607,11 @@ def main(argv: list[str] | None = None) -> int:
             low_seconds=args.low_seconds,
             reuse_from=args.reuse_from,
             check=args.check,
+            low_levers=args.low_levers,
         )
         print(args.out)
         return 0
-    from reverberate.trace.driver import launch
+    from reverberate.trace.driver import launch, resume_command
 
     result = launch(
         recipe,
@@ -582,6 +646,11 @@ def main(argv: list[str] | None = None) -> int:
         reuse_from=args.reuse_from,
         fetch_early=args.fetch_early,
         destroy_failed=args.destroy_failed,
+        low_levers=args.low_levers,
+        line=args.line,
+        relaunch=args.relaunch,
+        # The same words again, on the machine this run leaves: what its last lines say.
+        resume=resume_command(argv),
     )
     # A rental that did not end in a pack is a failure of the command.
     outcome = dict(result.get("onebox", {})).get("outcome")

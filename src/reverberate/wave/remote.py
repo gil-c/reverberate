@@ -26,7 +26,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +61,12 @@ _SSH_OPTIONS = [
     "-o",
     "ServerAliveInterval=30",
 ]
+#: A connection that is kept and used again (``ControlMaster``) closes itself this long
+#: after its last command, s.
+CONTROL_PERSIST_S = 120
+#: A connection that is not answered in this long is a failure and not a wait, s: Vast's
+#: proxy let twelve streams wait for its banner and dropped them together (2026-10-05).
+CONNECT_TIMEOUT_S = 30
 
 
 @dataclass(frozen=True)
@@ -71,24 +77,82 @@ class Machine:
     port: int = 22
     user: str = "root"
     identity: Path | None = None
+    #: The instance's own address and the port its 22 is mapped to, where it was created
+    #: with direct ssh and says them: a way round the proxy, tried first for a transfer.
+    direct: tuple[str, int] | None = None
+    #: A socket's path (``ControlPath``): commands that name the same one share one
+    #: connection, opened by the first and kept :data:`CONTROL_PERSIST_S` after the last.
+    control: str | None = None
 
     @classmethod
     def from_instance(cls, instance: Any, identity: Path | None = None) -> Machine:
         """Address a :class:`reverberate.gpu.vast.Instance`."""
         if not instance.ssh_host:
             raise ValueError(f"instance {instance.id} has no ssh host yet")
-        return cls(host=instance.ssh_host, port=instance.ssh_port, identity=identity)
+        return cls(
+            host=instance.ssh_host,
+            port=instance.ssh_port,
+            identity=identity,
+            direct=getattr(instance, "direct", None),
+        )
+
+    def directly(self) -> Machine | None:
+        """This machine by its own address, past the proxy; ``None`` where it gave none."""
+        if self.direct is None:
+            return None
+        return replace(self, host=self.direct[0], port=int(self.direct[1]), direct=None)
+
+    def sharing(self, name: str, directory: Path | None = None) -> Machine:
+        """This machine with every command on one kept connection, the one ``name`` names.
+
+        Each new ``ssh`` is a new connection to the host's ``sshd``, which
+        admits ten at once before it starts refusing (``MaxStartups``); a
+        transfer in chunks that opens one a chunk is a storm of them. With
+        a socket the first command opens the connection and the next ones
+        are sessions on it. The path is short on purpose: a socket's is
+        bounded near a hundred characters.
+        """
+        where = Path(directory) if directory is not None else Path.home() / ".ssh"
+        return replace(self, control=str(where / f"rv-%C.{name}"))
+
+    def _options(self) -> list[str]:
+        options = [*_SSH_OPTIONS, "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}"]
+        if self.control:
+            options += [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                f"ControlPath={self.control}",
+                "-o",
+                f"ControlPersist={CONTROL_PERSIST_S}",
+            ]
+        return options
 
     def ssh_command(self, remote: str) -> list[str]:
         """The ``ssh`` argv for one remote command."""
-        argv = ["ssh", *_SSH_OPTIONS, "-p", str(self.port)]
+        argv = ["ssh", *self._options(), "-p", str(self.port)]
         if self.identity:
             argv += ["-i", str(self.identity)]
         return [*argv, f"{self.user}@{self.host}", remote]
 
+    def close_command(self) -> list[str] | None:
+        """The argv that ends this machine's kept connection; ``None`` where it keeps none."""
+        if not self.control:
+            return None
+        return [
+            "ssh",
+            "-o",
+            f"ControlPath={self.control}",
+            "-O",
+            "exit",
+            "-p",
+            str(self.port),
+            f"{self.user}@{self.host}",
+        ]
+
     def scp_command(self, sources: list[Path], destination: str, *, download: bool) -> list[str]:
         """The ``scp`` argv for a transfer in either direction."""
-        argv = ["scp", *_SSH_OPTIONS, "-P", str(self.port)]
+        argv = ["scp", *self._options(), "-P", str(self.port)]
         if self.identity:
             argv += ["-i", str(self.identity)]
         if download:
@@ -130,6 +194,8 @@ _TRANSIENT = (
     "Connection reset",
     "Connection timed out",
     "Operation timed out",
+    "mux_client_request_session",
+    "Control socket connect",
     "Broken pipe",
     "kex_exchange",
     "ssh_exchange_identification",

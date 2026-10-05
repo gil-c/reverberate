@@ -87,6 +87,7 @@ from reverberate.mirror.tails import (
     tail_key,
     tail_table,
 )
+from reverberate.render.compact import Levers
 from reverberate.render.pack import (
     Air,
     Cells,
@@ -107,6 +108,7 @@ from reverberate.scenes import canonical_bytes, load_recipe
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
 from reverberate.trace.assets import MirrorAssets, directivity_models, found_assets, mismatched
+from reverberate.trace.clock import CLOCK_S, read_direct, verdict
 from reverberate.trace.computed import write_as_computed
 from reverberate.trace.engines import CardPairs, PairsEngine
 from reverberate.trace.level import (
@@ -151,9 +153,6 @@ KIND = "scene-trace"
 CARD_PAIRS_PER_VALIDATION = 3_000_000
 #: The engine's two array modules must agree to this share of the peak (V4).
 RENDER_TOLERANCE = 1e-6
-#: The pairs' onsets must trail their direct sound by the pack's lead to this, s: half a
-#: period of the crossover's 1 kHz, beyond which the two bands cancel at the join.
-CLOCK_S = 0.5e-3
 #: Seconds of the pack the check renders, the sources it renders (those heard longest in
 #: those seconds), and the block it renders them in. The host's render is the cost: six
 #: seconds of one core a second of a moving source on the first card box, whose check of
@@ -370,10 +369,9 @@ def _rows_of(table: EarlyTable, start: int, stop: int) -> EarlyTable:
 
 def _first_channel(cache: PairCache, key: str) -> np.ndarray:
     """Channel 0 of a pair in the cache, ``[1, sample]``: the file mapped, 19 kB of it read."""
-    path = cache.path(key)
-    if not path.is_file():
+    if not cache.has(key):
         raise KeyError(f"no pair {key} under {cache.directory}: not in the cache after the solve")
-    return np.array(np.load(path, mmap_mode="r")[:1])
+    return cache.first_channel(key)
 
 
 #: What of a pack's provenance says when and on what it was made, and not what it holds.
@@ -690,8 +688,9 @@ class Trace:
             held = PairCache(carried_root, self.engine.voxel_low_key)
             for key, record in held.records().items():
                 if held.has(key) and not self.engine.cache.has(key):
-                    self.engine.cache.write(
-                        key, held.read(key), {k: v for k, v in record.items() if k != "key"}
+                    # The file as it is, in the form it was kept in: the cache reads both.
+                    self.engine.cache.adopt(
+                        key, held.path(key), {k: v for k, v in record.items() if k != "key"}
                     )
                     carried += 1
         return carried
@@ -1126,12 +1125,27 @@ class Trace:
             seed=settings.seed + self.pairs[j][1],
             xp=np,
         )
+        first = first_arrival_s(early, row)
+        # A diffracted onset has no reflection either: the direct path is a kind, not an order.
+        direct = bool(np.any(early.kind[early.rows(row)] == KIND_DIRECT))
+        # The clock and the scale are read where the mirror puts the direct sound, on
+        # every pair that has one (:mod:`reverberate.trace.clock`).
+        heard = (
+            read_direct(
+                aired,
+                first,
+                lead_s=self.assets.pack_lead_s,
+                sound_speed_m_s=settings.sound_speed_m_s,
+            )
+            if direct
+            else {}
+        )
         return {
             "seam_db": pair_seam_db(aired, mirror, self.crossover),
             "onset_s": onset,
-            "first_s": first_arrival_s(early, row),
-            # A diffracted onset has no reflection either: the direct path is a kind, not an order.
-            "direct": bool(np.any(early.kind[early.rows(row)] == KIND_DIRECT)),
+            "first_s": first,
+            "direct": direct,
+            **heard,
             # The engine convolves a response as it stands: one that rings up to its
             # last 50 ms was cut, or wrapped, by whatever made it. One solved for fewer
             # seconds than the pack keeps is read where its solve ended, before its fade.
@@ -1149,7 +1163,8 @@ class Trace:
             self.crossover.record(),
             self.recipe.atmosphere.to_dict(),
             settings.record(),
-            {"lead_s": self.assets.pack_lead_s},
+            # A ledger of before the direct sound was read is levelled again.
+            {"lead_s": self.assets.pack_lead_s, "clock": "direct/1"},
         )
         if read and ledger.is_file():
             for line in ledger.read_text().splitlines():
@@ -1276,12 +1291,12 @@ class Trace:
         direct = [r for r in self.levels if r["direct"]]
         trails = np.array([r["onset_s"] - r["first_s"] for r in direct], dtype=float)
         away = np.array([r["first_s"] for r in direct]) * self.assets.settings.sound_speed_m_s
-        # The clock is read where the direct sound is the loudest. A far pair's loudest
-        # sample is often a later arrival: at 4 to 9 m in hssd_0076 the direct sound is
-        # there, at its time and at its level, and something 5 to 8 ms after it is half as
-        # loud again. The median of a scene of far sources is then not the lead, and two
-        # whole scenes were stopped by it after all their solves (2026-10-05). The first
-        # decile is the pairs whose loudest sample is their direct sound.
+        # What the pairs' loudest samples trail their direct sound by: the report's, and no
+        # longer the check's. A far pair's loudest sample is often a later arrival: at 4
+        # to 9 m in hssd_0076 the direct sound is there, at its time and at its level, and
+        # something 5 to 8 ms after it is half as loud again. Two whole scenes were
+        # stopped by the median of this after all their solves (2026-10-05), and a window
+        # of far pairs alone fails at its first decile too.
         early = float(np.percentile(trails, 10)) if trails.size else self.assets.pack_lead_s
         by_distance: dict[str, Any] = {}
         for low, high in ((0.0, 2.0), (2.0, 4.0), (4.0, 8.0), (8.0, float("inf"))):
@@ -1304,7 +1319,18 @@ class Trace:
             "trail_s_by_distance": by_distance,
             "lead_s": self.assets.pack_lead_s,
         }
-        if abs(early - self.assets.pack_lead_s) > CLOCK_S:
+        # The check: each pair read where the mirror puts its direct sound, its time and
+        # its level against 1/d on the field's scale.
+        clock, stopped = verdict(
+            self.levels,
+            self.assets.pack_lead_s,
+            sound_speed_m_s=self.assets.settings.sound_speed_m_s,
+        )
+        self.report["level"]["direct_sound"] = clock
+        if stopped is not None:
+            raise RuntimeError(stopped)
+        # Pairs that carry no such reading are judged as they were, by their loudest samples.
+        if not clock["pairs"] and abs(early - self.assets.pack_lead_s) > CLOCK_S:
             raise RuntimeError(
                 "the low band and the mirror are not on one clock: the pairs' onsets trail their"
                 f" direct sound by {early * 1e3:.2f} ms at the first decile, lead included,"
@@ -1441,6 +1467,14 @@ class Trace:
             provenance["low_seconds"] = float(low_seconds)
         if settings.rays.rays != RAYS_MEASURED:
             provenance["rays"] = int(settings.rays.rays)
+        # The form the responses are written in, and the form the cache they were read
+        # from is kept in, as the bundle says them (``trace.low_levers``, ``pair_cache``);
+        # a bundle that says neither writes ``low/ir`` as it always was.
+        levers = Levers.parse(str(self.told.get("low_levers") or ""))
+        if not levers.off:
+            provenance["low_levers"] = levers.record()
+        if getattr(self.engine.cache, "levers", None):
+            provenance["pair_cache"] = str(self.engine.cache.levers)
         header = Header(
             profile="trace",
             recipe_sha256=provenance["recipe_sha256"],
@@ -1491,6 +1525,7 @@ class Trace:
             crossover=self.crossover,
             air=Air(atmosphere, True),
             directivity={name: models[name] for name in named if name in models},
+            low_levers=None if levers.off else levers,
         ) as writer:
             for number, (name, track) in enumerate(tracks.sources.items(), start=1):
                 self.journal.set_status(source=name, job=f"{number}/{len(tracks.sources)}")

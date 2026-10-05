@@ -262,12 +262,17 @@ def test_the_pair_cache_stays_on_the_machine_when_told_and_samples_are_not_defla
     def copied(machine: Any, sources: list[str], destination: str, **given: Any) -> None:
         sent.append(([Path(s).name for s in sources], bool(given.get("compress", True))))
 
+    def chunked(machine: Any, remote: str, local: Path, **given: Any) -> dict[str, Any]:
+        sent.append(([Path(remote).name], False))
+        return {"bytes": 1, "seconds": 1.0, "bytes_per_s": 1.0, "failures": 0}
+
     monkeypatch.setattr(onebox, "rsync", copied)
+    monkeypatch.setattr(onebox, "fetch_file", chunked)
     monkeypatch.setattr(onebox, "run_on", lambda *a, **k: "\n".join(present))
     said: list[str] = []
     onebox.fetch(None, tmp_path, tmp_path, fetch_cache=False, say=said.append, leave=("pairs",))
-    # The reports are deflated; the pack, single precision samples, goes as it is.
-    assert sent == [(["trace_report.json", "level.jsonl"], True), (["pack.h5"], False)]
+    # The pack first, as it is and in chunks; then the reports, deflated.
+    assert sent == [(["pack.h5"], False), (["trace_report.json", "level.jsonl"], True)]
     assert said == ["left on the machine: pairs"]
     argv: list[list[str]] = []
     monkeypatch.setattr(remote_voxelise, "_run", lambda command, what: argv.append(command))

@@ -25,6 +25,7 @@ from reverberate import auth
 from reverberate.accel.pairs import PairCache, install_pairs
 from reverberate.gpu import onebox, vast
 from reverberate.trace import machines
+from reverberate.trace.cli import main
 from reverberate.trace.plan import estimate
 from reverberate.wave import remote, remote_voxelise
 from reverberate.wave.lowband import pairs as batched
@@ -286,6 +287,16 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         if download:
             script["pulled"].append((sources, kw))
 
+    def fetch_tree(machine: Any, remote_dir: str, local_dir: Path, **kw: Any) -> dict[str, Any]:
+        # The pair cache: batches of whole files (``gpu.homecoming``), not an rsync.
+        script["calls"].append(f"tree {Path(remote_dir).name}")
+        script["pulled"].append(([remote_dir], kw))
+        return {"files": 0, "bytes": 0, "left": 0, "complete": True, "there": 1, "seconds": 0.0}
+
+    def fetch_file(machine: Any, remote: str, local: Path, **kw: Any) -> dict[str, Any]:
+        script["calls"].append(f"chunks {Path(remote).name}")
+        return {"bytes": 9_500_000_000, "seconds": 2160.0, "bytes_per_s": 4.4e6, "failures": 0}
+
     monkeypatch.setattr(auth, "inject", lambda names: None)
     monkeypatch.setattr(vast, "VastClient", lambda timeout: client)
     monkeypatch.setattr(vast, "account_identity", lambda client: tmp_path / "id")
@@ -294,6 +305,8 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(onebox, "provision", provision)
     monkeypatch.setattr(onebox, "run_on", run_on)
     monkeypatch.setattr(onebox, "rsync", rsync)
+    monkeypatch.setattr(onebox, "fetch_tree", fetch_tree)
+    monkeypatch.setattr(onebox, "fetch_file", fetch_file)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     return script
 
@@ -391,6 +404,37 @@ class TestTheRental:
         record = run(rental)
         assert record["outcome"] == "failed" and rental["client"].alive == {1001}
         assert "failed twice and is kept for inspection" in rental["said"][-1]
+        # The last lines say what to do: the command that resumes it, on what it holds,
+        # what an hour of leaving it costs, and the command that ends it.
+        rental["client"].alive = {1001}
+        record = run(
+            rental,
+            resume_command="python -m reverberate.trace rent --recipe R.json --home H"
+            " --instance {instance}",
+            inventory=lambda machine: [
+                "on the machine: 16887 pairs solved, 15 early tables, no pack",
+                "a resume keeps all of it and makes again: the pack's write and its check",
+            ],
+        )
+        last = rental["said"][-1].splitlines()
+        assert last[0].startswith("INSTANCE 1001 IS STILL RENTED: the campaign failed twice")
+        assert "It bills 0.500 USD/h until its watchdog" in last[0]
+        assert last[1] == "  on the machine: 16887 pairs solved, 15 early tables, no pack"
+        assert last[2].startswith("  a resume keeps all of it and makes again")
+        assert last[3] == (
+            "  resume:  python -m reverberate.trace rent --recipe R.json --home H --instance 1001"
+        )
+        assert last[4] == "  destroy: python -m reverberate.gpu.vast destroy 1001"
+        assert record["left_alive"] == rental["said"][-1]
+        # A machine that cannot be asked is said so, and the command is still given.
+        rental["client"].alive = {1001}
+
+        def silent(machine: Any) -> list[str]:
+            raise ConnectionLost("Connection refused")
+
+        run(rental, resume_command="resume --instance {instance}", inventory=silent)
+        assert "could not be asked" in rental["said"][-1]
+        assert "  resume:  resume --instance 1001" in rental["said"][-1]
         rental["client"].alive.clear()
         record = run(rental, destroy_failed=True)
         assert record["outcome"] == "failed" and record["destroyed"] is True
@@ -407,6 +451,94 @@ class TestTheRental:
         assert record["outcome"] == "done" and "destroyed" not in record
         assert "its fetch failed; what it made is on the machine" in record["left_alive"]
         assert "USD more at most" in record["left_alive"]
+        assert "a resume launches nothing" in record["left_alive"]
+
+    def test_a_resume_on_a_machine_whose_campaign_is_done_fetches_and_launches_nothing(
+        self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rental["client"].alive = {1001}
+        monkeypatch.setattr(vast, "wait_for_ssh", lambda client, instance, identity: "machine-1")
+        monkeypatch.setattr(vast, "deadline_of", lambda instance: time.time() + 7200.0)
+        asked: Any = vars(onebox)["run_on"]
+
+        def run_on(machine: Any, command: str, *, what: str, timeout: Any = None) -> str:
+            if what == "done":
+                return "/root/campaign/out/campaign.done\n"
+            return str(asked(machine, command, what=what, timeout=timeout))
+
+        monkeypatch.setattr(onebox, "run_on", run_on)
+        record = run(rental, instance=1001, hours=None, leave=("pairs",))
+        assert record["outcome"] == "done" and record["destroyed"] is True
+        assert "launch" not in rental["calls"] and "watch" not in rental["calls"]
+        assert "chunks pack.h5" in rental["calls"]
+        assert any("nothing is launched" in line for line in rental["said"])
+        # Told to, or on a machine whose campaign is not done, it launches as it did.
+        rental["calls"].clear()
+        rental["client"].alive = {1001}
+        run(rental, instance=1001, hours=None, relaunch=True)
+        assert "launch" in rental["calls"]
+        rental["calls"].clear()
+        rental["client"].alive = {1001}
+        monkeypatch.setattr(onebox, "run_on", asked)
+        run(rental, instance=1001, hours=None)
+        assert "launch" in rental["calls"]
+
+    def test_the_pack_comes_first_in_chunks_then_the_reports_then_the_pairs_if_asked(
+        self, rental: dict[str, Any]
+    ) -> None:
+        record = run(rental)
+        calls = rental["calls"]
+        # What the run is for, then its reports, then what the next run would not solve again.
+        assert calls.index("chunks pack.h5") < calls.index("rsync down") < calls.index("tree pairs")
+        assert calls.index("tree pairs") < calls.index("teardown 1001")
+        assert record["fetched"]["pack.h5"]["bytes_per_s"] == 4.4e6
+        assert onebox.fetch_order(["pairs", "status.json", "pack.h5", "level.jsonl"]) == [
+            "pack.h5",
+            "status.json",
+            "level.jsonl",
+            "pairs",
+        ]
+        # Left on the machine: not asked for at all.
+        rental["calls"].clear()
+        rental["client"].alive.clear()
+        run(rental, leave=("pairs",))
+        assert "tree pairs" not in rental["calls"] and "chunks pack.h5" in rental["calls"]
+
+    def test_the_instance_s_own_address_is_tried_first_and_the_proxy_is_fallen_back_on(
+        self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        through: list[Any] = []
+
+        def fetch_file(machine: Any, remote: str, local: Path, **kw: Any) -> dict[str, Any]:
+            through.append(machine)
+            if machine == "its own address":
+                raise ConnectionLost("Connection refused")
+            return {"bytes": 1, "seconds": 1.0, "bytes_per_s": 1.0, "failures": 0}
+
+        monkeypatch.setattr(onebox, "fastest", lambda machine, say=None: "its own address")
+        monkeypatch.setattr(onebox, "fetch_file", fetch_file)
+        record = run(rental, leave=("pairs",))
+        assert through == ["its own address", "machine-1"]
+        assert record["outcome"] == "done" and record["fetched"]["pack.h5"]["direct"] is False
+        assert any("the direct way failed" in line for line in rental["said"])
+        # Where it answers, the pack comes by it and the record says so.
+        through.clear()
+        rental["client"].alive.clear()
+        monkeypatch.setattr(onebox, "fastest", lambda machine, say=None: "another address")
+        assert run(rental, leave=("pairs",))["fetched"]["pack.h5"]["direct"] is True
+        assert through == ["another address"]
+
+    def test_a_pack_that_does_not_come_in_chunks_comes_as_it_did(
+        self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def no_dd(*a: Any, **k: Any) -> dict[str, Any]:
+            raise RemoteError("chunk failed: dd: not found", 127)
+
+        monkeypatch.setattr(onebox, "fetch_file", no_dd)
+        record = run(rental, leave=("pairs",))
+        assert record["outcome"] == "done" and record["fetched"]["pack.h5"]["by"] == "rsync"
+        assert any("not home in chunks" in line for line in rental["said"])
+        assert (["/root/campaign/out/pack.h5"]) in [sources for sources, _ in rental["pulled"]]
 
     def test_a_look_that_fails_is_taken_again(
         self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -462,8 +594,8 @@ class TestTheHomecoming:
         assert len(rental["pulled"]) == 3
         for sources, given in rental["pulled"]:
             assert sources == ["/root/campaign/out/pairs"]
-            assert given["compress"] is False and "*.partial.npy" in given["exclude"]
-            assert given["attempts"] == 1 and given["timeout"] == onebox.SYNC_TIMEOUT_S
+            assert "*.partial.npy" in given["exclude"] and "*.partial.npz" in given["exclude"]
+            assert given["seconds"] == onebox.SYNC_TIMEOUT_S
         # Nothing is fetched from a host that is gone, and nothing is left to bill.
         assert "list run" not in rental["calls"] and "left_alive" not in record
         assert record["synced"]["items"] == ["pairs"]
@@ -471,21 +603,29 @@ class TestTheHomecoming:
     def test_a_homecoming_that_fails_is_a_note_and_the_watch_goes_on(
         self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def cut(*a: Any, **k: Any) -> None:
-            raise RemoteError("rsync down failed: broken pipe", 12)
+        def cut(*a: Any, **k: Any) -> dict[str, Any]:
+            return {"complete": False, "left": 5, "there": 9, "error": "files failed: broken pipe"}
 
-        monkeypatch.setattr(onebox, "rsync", cut)
+        monkeypatch.setattr(onebox, "fetch_tree", cut)
         said: list[str] = []
         assert onebox.sync_home("m", rental["home"], ("pairs",), said.append) is False
-        assert "homecoming of pairs not complete" in said[0]
+        assert "homecoming of pairs not complete" in said[0] and "broken pipe" in said[0]
         # A directory the campaign has not made yet is not worth a line.
         monkeypatch.setattr(
             onebox,
-            "rsync",
-            lambda *a, **k: (_ for _ in ()).throw(RemoteError("No such file or directory", 23)),
+            "fetch_tree",
+            lambda *a, **k: {"complete": False, "there": 0, "error": "No such file or directory"},
         )
         assert onebox.sync_home("m", rental["home"], ("pairs",), said.append) is False
         assert len(said) == 2
+        # Another entry than the pair cache still goes by rsync, as it is.
+        monkeypatch.setattr(
+            onebox,
+            "rsync",
+            lambda *a, **k: (_ for _ in ()).throw(RemoteError("rsync down failed: reset", 12)),
+        )
+        assert onebox.sync_home("m", rental["home"], ("early",), said.append) is False
+        assert "homecoming of early not complete" in said[2]
 
     def test_a_pass_that_reaches_its_limit_keeps_what_came_and_says_how_much(
         self, rental: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -494,16 +634,18 @@ class TestTheHomecoming:
         grid = home / "pulled" / "pairs" / "grid" / "aa"
         on_machine = {"n": 7}
 
-        def bounded(machine: Any, sources: Any, target: str, **given: Any) -> None:
-            # Two files arrive whole; the third is cut under rsync's hidden name.
+        def bounded(machine: Any, remote_dir: str, local_dir: Path, **given: Any) -> dict[str, Any]:
+            # Two pairs arrive whole, one in each form; a file an rsync of before had cut
+            # is still there under its hidden name.
             grid.mkdir(parents=True, exist_ok=True)
-            held = len(list(grid.glob("[!.]*.npy")))
-            for index in range(held, held + 2):
-                (grid / f"aa{index}.npy").write_bytes(b"whole")
+            held = len(list(grid.glob("[!.]*.np[yz]")))
+            (grid / f"aa{held}.npy").write_bytes(b"whole")
+            (grid / f"aa{held + 1}.npz").write_bytes(b"whole")
             (grid / f".aa{held + 2}.npy.Xy12Zw").write_bytes(b"cu")
-            raise RemoteError(f"rsync down did not end in {given['timeout']:g} s")
+            assert given["seconds"] == 5.0
+            return {"files": 2, "left": 3, "complete": False, "there": 8}
 
-        monkeypatch.setattr(onebox, "rsync", bounded)
+        monkeypatch.setattr(onebox, "fetch_tree", bounded)
         monkeypatch.setattr(onebox, "run_on", lambda *a, **k: f"{on_machine['n']}\n")
         said: list[str] = []
         assert onebox.sync_home("m", home, ("pairs",), said.append, timeout=5.0) is False
@@ -516,7 +658,9 @@ class TestTheHomecoming:
         assert not list(grid.glob(".*")) and onebox.pairs_home(home / "pulled") == 4
         # A machine that does not answer the count is a question mark, not a failure.
         monkeypatch.setattr(onebox, "run_on", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
-        monkeypatch.setattr(onebox, "rsync", lambda *a, **k: None)
+        monkeypatch.setattr(
+            onebox, "fetch_tree", lambda *a, **k: {"files": 0, "complete": True, "there": 5}
+        )
         assert onebox.sync_home("m", home, ("pairs",), said.append) is True
         assert "pairs home: 4 of ? on the machine (+0 in" in said[2]
 
@@ -538,7 +682,11 @@ class TestTheHomecoming:
                 stalled=False,
             )
 
-        def home_pass(machine: Any, home: Path, items: Any, say: Any, *, timeout: float) -> bool:
+        def home_pass(
+            machine: Any, home: Path, items: Any, say: Any, *, timeout: float, way: Any = None
+        ) -> bool:
+            # The transfers' way is asked once: a machine with no address of its own is itself.
+            assert way == "m"
             limits.append(timeout)
             clock["t"] += timeout
             return False
@@ -620,11 +768,25 @@ class TestTheChoice:
         assert priced["low"]["solves"] == 1711
         low = batched.ONCE_S + 1711 * batched.SOLVE_S_AT_1500 + sum(COUNTS) * batched.PAIR_S
         assert priced["seconds"]["low"] == pytest.approx(low, abs=0.1)
-        # The pack's bytes at the laptop's line: gigabytes at 8 MB/s are most of an hour.
+        # The pack's bytes through the proxy: gigabytes at 4.4 MB/s are over an hour.
         assert priced["seconds"]["transfer_pack"] == pytest.approx(
-            priced["pack_gb"] * 1e9 / 8.1e6, rel=1e-3
+            priced["pack_gb"] * 1e9 / 4.4e6, rel=1e-3
         )
-        assert priced["pack_gb"] > 9 and priced["seconds"]["transfer_pack"] > 1200
+        assert priced["pack_gb"] > 9 and priced["seconds"]["transfer_pack"] > 2400
+        # Written as the bins in 16 bits the pack is 0.357 of its low band, and the pair
+        # cache half; the decay's lever is a listening variant's 0.14.
+        compact = estimate(RECORD, rate_usd_per_hour=0.136, low_levers="bins,int16")
+        pairs = sum(COUNTS)
+        assert priced["pack_gb"] - compact["pack_gb"] == pytest.approx(
+            pairs * (1_228_800 - 439_080) / 1e9, abs=0.01
+        )
+        assert compact["pair_cache_gb"] == pytest.approx(pairs * 621_446 / 1e9, abs=0.01)
+        assert compact["low_levers"] == "bins,int16" and "low_levers" not in priced
+        assert estimate(RECORD, rate_usd_per_hour=0.136, low_levers="none") == priced
+        decay = estimate(RECORD, rate_usd_per_hour=0.136, low_levers="bins,int16,decay=60")
+        assert decay["pack_gb"] < 0.6 * compact["pack_gb"]
+        assert decay["pair_cache_gb"] == compact["pair_cache_gb"]
+        assert compact["seconds"]["write"] > priced["seconds"]["write"]
         # A record without the cells of each position prices the positions alone.
         bare = {k: v for k, v in RECORD.items() if k != "cells_a_position"}
         assert estimate(bare, rate_usd_per_hour=0.136)["extra_solves"] == 0
@@ -645,8 +807,9 @@ class TestTheChoice:
 
     def test_the_table_says_which_cards_were_measured(self) -> None:
         measured = {card.name for card in machines.CARDS if card.measured}
-        assert measured == {"RTX 3080", "A100", "Tesla P100"}
+        assert measured == {"RTX 3080", "RTX 3090", "A100", "Tesla P100"}
         assert machines.card_of("RTX 3080").throughput == 1.0  # type: ignore[union-attr]
+        assert machines.card_of("RTX 3090").throughput == 1.25  # type: ignore[union-attr]
         # An offer's name, as Vast writes it, finds its row and not a shorter one's.
         named = {
             "RTX 3080 Ti": "RTX 3080 Ti",
@@ -664,28 +827,89 @@ class TestTheChoice:
         table = "\n".join(machines.throughput_table())
         assert "ESTIMATED" in table and "measured" in table and "183 s" in table
 
-    def test_a_prediction_divides_the_low_band_and_the_rays_over_the_cards(self) -> None:
+    def test_a_prediction_is_the_queue_over_the_cards_with_the_fetch_in_it(self) -> None:
         def on(**offer: Any) -> dict[str, Any]:
             told = machines.predict(RECORD, **{"dph_total": 0.14, "gpu_ram_gb": 20.0, **offer})
             assert told is not None
             return told
 
         one, four = on(gpu_name="RTX 3080", num_gpus=1), on(gpu_name="RTX 3080", num_gpus=4)
-        assert one["solves"] == 1711 and one["extra_solves"] == 65 and one["measured"]
-        once = batched.ONCE_S
-        assert four["seconds"]["low"] - once == pytest.approx(
-            (one["seconds"]["low"] - once) / 4, abs=0.2
+        # A launch's records are on the host: a position is solved once whatever a card holds.
+        assert one["solves"] == len(COUNTS) and one["extra_solves"] == 0 and one["measured"]
+        assert one["work"] == four["work"] and one["source_s"] == 110.0
+        assert one["launches"] == -(-len(COUNTS) // batched.LAUNCH_SOURCES)
+        # The cards divide the solves, the fits and the rays; several idle half a launch
+        # each at the end, where one card has no end to wait for.
+        tail = 0.5 * batched.LAUNCH_SOURCES * 110.0
+        assert four["seconds"]["low"] == pytest.approx(
+            (one["seconds"]["low"] - 55.0) / 4 + 55.0 + tail, abs=0.5
         )
         assert four["seconds"]["rays"] == pytest.approx(one["seconds"]["rays"] / 4, abs=0.1)
-        # The host's stages and the pack's way home are the same on both.
-        for stage in ("paths", "level", "write", "transfer_pack", "fixed"):
+        # The host's stages are under the solves, and the rest is the same on both.
+        assert (
+            one["seconds"]["host_beyond_the_cards"] == four["seconds"]["host_beyond_the_cards"] == 0
+        )
+        for stage in ("start", "prepare", "write", "check", "transfer_pack"):
             assert four["seconds"][stage] == one["seconds"][stage]
+        assert one["hours"] == pytest.approx(sum(one["seconds"].values()) / 3600.0, abs=1e-3)
         assert one["hours"] > 50 and four["hours"] < 0.3 * one["hours"]
         assert one["usd"] == pytest.approx(one["hours"] * 0.14)
-        # A larger card makes fewer solves; a faster one makes them sooner; neither is measured.
-        big = on(gpu_name="RTX 3090", num_gpus=1, gpu_ram_gb=24.0)
-        assert big["solves"] < one["solves"] and not big["measured"]
-        assert big["seconds"]["low"] < one["seconds"]["low"]
+        # The first whole scenes' own figures: 88 s a position on an RTX 3090, 34.6 s at 7.2.
+        big = on(gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, dph_total=1.38)
+        assert big["source_s"] == 88.0 and big["measured"] and big["card"] == "RTX 3090"
+        assert on(gpu_name="RTX 3090", num_gpus=4, low_ppw=7.2)["source_s"] == 34.6
+        assert on(gpu_name="RTX 4090", num_gpus=4)["source_s"] == pytest.approx(110 / 1.3, abs=0.1)
+        assert not on(gpu_name="RTX 4090", num_gpus=4)["measured"]
+        # The fetch is in the total, at the machine's rate: the form the pack is written in
+        # is minutes of the rental, and the same pack costs a dearer machine more.
+        plain = on(gpu_name="RTX 3090", num_gpus=8, dph_total=1.38, low_levers="none")
+        compact = on(gpu_name="RTX 3090", num_gpus=8, dph_total=1.38, low_levers="bins,int16")
+        assert compact["seconds"]["transfer_pack"] < 0.5 * plain["seconds"]["transfer_pack"]
+        assert compact["fetch_usd"] == pytest.approx(
+            compact["seconds"]["transfer_pack"] / 3600.0 * 1.38, abs=1e-3
+        )
+        assert plain["usd"] - compact["usd"] > 0.4
+        cheap = on(gpu_name="RTX 3090", num_gpus=8, dph_total=0.69, low_levers="bins,int16")
+        assert cheap["fetch_usd"] == pytest.approx(compact["fetch_usd"] / 2, abs=1e-3)
+        assert "the fetch" in compact["note"]
+        # The rental's hour is the offer's and its disk's: the total is of what is billed.
+        told = machines.predictor(RECORD, disk_gb=219.0)(
+            SimpleNamespace(
+                gpu_name="RTX 3090",
+                num_gpus=4,
+                gpu_ram_gb=24.0,
+                dph_total=0.543,
+                billed_dph=lambda disk_gb: 0.543 + 0.85 * (disk_gb - 5.0) / 730.0,
+            )
+        )
+        assert told["rate_usd_per_hour"] == pytest.approx(0.792, abs=0.001)
+        assert told["usd"] == pytest.approx(told["hours"] * told["rate_usd_per_hour"], abs=0.01)
+        assert "billed 0.792 USD/h with its disk" in told["note"]
+        # A direct line is the laptop's to where the host is, and is not a measurement.
+        there = {"gpu_name": "RTX 3090", "num_gpus": 4, "line": "direct"}
+        europe = on(**there, location="Czechia, CZ", inet_up_mbps=900.0)
+        states = on(**there, location="California, US", inet_up_mbps=900.0)
+        slow = on(**there, location="Czechia, CZ", inet_up_mbps=40.0)
+        proxy = on(gpu_name="RTX 3090", num_gpus=4, location="Czechia, CZ")
+        assert europe["line_bytes_per_s"] == 70e6 and states["line_bytes_per_s"] == 17e6
+        assert slow["line_bytes_per_s"] == pytest.approx(0.8 * 40e6 / 8)
+        assert proxy["line_bytes_per_s"] == 4.4e6 and proxy["line_measured"]
+        assert not europe["line_measured"]
+        assert europe["usd"] < states["usd"] < proxy["usd"]
+        # A host of two cores takes longer over its stages than eight fast cards over theirs.
+        fast: dict[str, Any] = {
+            "gpu_name": "A100",
+            "num_gpus": 8,
+            "gpu_ram_gb": 80.0,
+            "dph_total": 2.0,
+        }
+        walked: dict[str, Any] = {**RECORD, "step_pairs": 458_640}
+        few = machines.predict(walked, **fast, cpu_cores=2.0)
+        many = machines.predict(walked, **fast, cpu_cores=64.0)
+        assert few is not None and many is not None
+        assert (
+            few["seconds"]["host_beyond_the_cards"] > 0 == many["seconds"]["host_beyond_the_cards"]
+        )
         # The pairs come home while the machine works: no time of their own unless left over.
         late = machines.predict(
             RECORD,
@@ -697,6 +921,11 @@ class TestTheChoice:
         )
         assert late is not None and one["seconds"]["transfer_pairs"] == 0.0
         assert late["seconds"]["transfer_pairs"] > 2000
+        # The trace of before the queue: records on the card, one process after the solves.
+        old = on(gpu_name="RTX 3080", num_gpus=1, queue=False)
+        assert old["solves"] == 1711 and old["extra_solves"] == 65 and not old["queue"]
+        assert old["seconds"]["paths"] > 0 and old["seconds"]["level"] > 0
+        assert "host_beyond_the_cards" not in old["seconds"]
         # No figure, no price: an unknown card, a card too small, the present engine.
         assert (
             on.__name__
@@ -720,6 +949,74 @@ class TestTheChoice:
             )
             is None
         )
+
+    def test_a_run_s_own_log_is_read_against_its_prediction(self, tmp_path: Path) -> None:
+        """Two attempts as the first whole scene's log wrote them, and a watch's bill."""
+        home = tmp_path / "A"
+        (home / "pulled").mkdir(parents=True)
+        (home / "bundle" / "trace").mkdir(parents=True)
+        (home / "bundle" / "campaign.json").write_text(
+            json.dumps({"trace": {"low": {"ppw": None}, "low_levers": "none"}})
+        )
+        (home / "bundle" / "trace" / "plan.json").write_text(json.dumps(RECORD))
+        day = "2026-10-05 "
+        first = "trace hssd_0076: 24001 steps, 14 source(s), 831 cell(s), profile {}"
+        planned = "solve(s) in {} batch(es) on 8 card(s), up to 14 at once"
+        log = [
+            f"05:43:27 +0.00 h | {first}",
+            "05:43:27 +0.00 h | voxelise: start",
+            "05:44:18 +0.02 h | voxelise: done in 0.8 min",
+            "05:45:15 +0.03 h | solve: start",
+            f"05:46:12 +0.05 h | solve: 1600 {planned.format(304)}",
+            "05:49:02 +0.09 h | batch of 1: 89 pair(s), solve 91.868 s at 1.7e+10 updates/s,"
+            " encode 75.666 s",
+            "06:19:15 +0.60 h | trace FAILED: OutOfMemoryError('Out of memory')",
+            f"06:29:20 +0.00 h | {first}",
+            "06:30:30 +0.02 h | solve: start",
+            f"06:31:27 +0.04 h | solve: 1505 {planned.format(210)}",
+            "11:24:20 +4.92 h | batch of 14: 14 pair(s), solve 1229.698 s at 1.77e+10 updates/s,"
+            " encode 3.791 s",
+            "11:26:13 +4.95 h | solve: done in 295.7 min",
+            "11:26:13 +4.95 h | paths: start",
+            "11:44:05 +5.25 h | paths: done in 17.9 min",
+            "11:44:05 +5.25 h | level: start",
+            "12:25:55 +5.94 h | trace FAILED: RuntimeError('not on one clock')",
+        ]
+        (home / "pulled" / "campaign.log").write_text("\n".join(day + line for line in log))
+        (home / "driver.log").write_text(
+            "08:13:44 up 0.64 h cost 0.89 USD credit 28.04 | solve\n"
+            "14:28:00 up 6.88 h cost 9.50 USD credit 12.74 | failed\n"
+        )
+        (home / "onebox.json").write_text(
+            json.dumps({"watches": ["14:39:44 up 7.07 h cost 9.77 USD credit 12.15 | done"]})
+        )
+        took = machines.actual(home)
+        assert len(took["attempts"]) == 2 and took["attempts"][0]["failed"].startswith("OutOf")
+        # A stage that did not end, ended with its attempt: 34 minutes of solves, then 295.7.
+        assert took["stages"]["solve"] == pytest.approx(34 * 60 + 295.7 * 60, abs=45)
+        assert took["stages"]["paths"] == 1072.0
+        assert took["stages"]["level"] == pytest.approx(41 * 60 + 50, abs=1)
+        assert took["idle_s"] == 605.0 and took["launches"] == 2 and took["sources"] == 15
+        assert took["solve_card_s"] == pytest.approx(91.868 + 1229.698, abs=0.1)
+        assert took["longest_launch_s"] == pytest.approx(1233.5, abs=0.1)
+        assert took["billed"] == {"hours": 7.07, "usd": 9.77, "rate_usd_per_hour": 1.382}
+        assert took["attempts"][0]["planned"]["launch_sources"] == 14
+        told = machines.against(home, gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0)
+        # A log with a paths stage of its own is of before the queue, and is priced so:
+        # as that run planned its launches, at the rate its watches say.
+        assert not told["predicted"]["queue"] and told["rate_usd_per_hour"] == 1.382
+        assert told["predicted"]["launches"] == 304
+        text = "\n".join(told["lines"])
+        assert "8 x RTX 3090 at 1.382 USD/h, the trace of before the queue" in text
+        assert "paths (one process)" in text and "between attempts" in text
+        assert "billed at the last watch: 7.07 h, 9.77 USD" in text
+        queued = machines.against(
+            home, gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, queue=True, fetch_s=2160.0
+        )
+        assert queued["predicted"]["queue"]
+        assert "host stages beyond the cards" in "\n".join(queued["lines"])
+        asked = ["ledger", "--home", str(home), "--gpu", "RTX 3090", "--gpus", "8"]
+        assert main([*asked, "--gpu-ram", "24"]) == 0
 
     def offers(self) -> list[Offer]:
         return [
@@ -762,7 +1059,8 @@ class TestTheChoice:
         text = "\n".join(said)
         assert "1 offer(s) left out: a card the prediction has no figure for" in text
         assert "2 offer(s) left out: predicted over the 20 h of wall time allowed" in text
-        assert f"chosen: offer {first.offer.id}" in text and "ESTIMATED" in text
+        assert f"chosen: offer {first.offer.id}" in text and "measured" in text
+        assert "the fetch" in text
         # The watchdog is the largest cap of the offers that may be tried, margin stated.
         caps = [onebox.cap_hours(p) for p in plan.priced]
         assert plan.hours == max(caps) and "watchdog:" in text and "times 1.5" in text

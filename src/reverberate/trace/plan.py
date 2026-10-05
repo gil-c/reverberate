@@ -141,8 +141,11 @@ CHECK_FULL_S = 60.0
 #: Provisioning, the bundle's push, and what the watcher's five minutes leave unbilled to
 #: no stage: the first smoke's rental (2 x P100, 2026-10-04).
 FIXED_S = 340.0
-#: What the laptop's line brought home from the card box, and deflating did not change it.
-FETCH_BYTES_PER_S = 8.1e6
+#: What comes home through Vast's ssh proxy on four streams, bytes a second: the two
+#: whole scenes of 2026-10-05, a pack each from California (one stream 2.0 to 2.3 MB/s,
+#: eight 5.9, on a line that carries 17 MB/s to the United States and 70 to Europe: the
+#: proxy is the limit). The 8.1 MB/s of the first card box (2026-10-04) was not seen again.
+FETCH_BYTES_PER_S = 4.4e6
 #: The card and the host each constant was measured on; a stage absent here is projected.
 _BOX = "one RTX 3090, 2026-10-04"
 MEASURED_ON = {
@@ -153,11 +156,40 @@ MEASURED_ON = {
     "level": _BOX,
     "write": _BOX,
     "check": _BOX,
-    "transfer_pack": _BOX + ", to the laptop",
-    "transfer_pairs": _BOX + ", to the laptop",
+    "transfer_pack": "8 x and 4 x RTX 3090, 2026-10-05, through the proxy on four streams",
+    "transfer_pairs": "8 x and 4 x RTX 3090, 2026-10-05, through the proxy on four streams",
 }
 PAIR_BYTES = 64 * 4800 * 4
 HISTOGRAM_BYTES = 286_000
+#: A pair of the pack with ``bins,int16``: 8 339 007 472 bytes for the 18 992 rows of the
+#: first scene's pack, every pair the same (``python -m reverberate.render compact``).
+PACK_PAIR_BYTES_BINS_INT16 = 439_080
+#: What each other lever divides a pair's bytes by, on 600 pairs of the first scene
+#: (``docs/open-questions/low-band-compact.md``): the bins alone, 16 bits of them, each
+#: degree cut where it has decayed 60 dB, the degrees let go 50 dB under the whole. The
+#: decay's and the degree's figures are those two settings'; another is priced as they are.
+_LEVER_FACTOR = {"bins": 1.41, "int16": 1.985, "decay": 2.54, "degree": 1.14}
+#: A pair's encoding into those bins on the machine, beside its row's write: 5 ms on the
+#: laptop's core (2026-10-05); the machine's has not been read apart.
+WRITE_COMPACT_PAIR_S = 0.008
+
+
+def pack_pair_bytes(low_levers: str | None) -> float:
+    """What a pair takes in a pack written with ``low_levers`` (``None``, ``none``: samples)."""
+    from reverberate.render.compact import Levers
+
+    levers = Levers.parse(low_levers)
+    if levers.off:
+        return float(PAIR_BYTES)
+    if levers.sample == "int16":
+        size = float(PACK_PAIR_BYTES_BINS_INT16)
+    else:
+        size = PAIR_BYTES / _LEVER_FACTOR["bins"]
+    if levers.decay_db:
+        size /= _LEVER_FACTOR["decay"]
+    if levers.degree_db:
+        size /= _LEVER_FACTOR["degree"]
+    return size
 
 
 @dataclass(frozen=True)
@@ -1091,8 +1123,15 @@ def estimate(
     low_ppw: float | None = None,
     low_seconds: float | None = None,
     rays: int | None = None,
+    low_levers: str | None = None,
 ) -> dict[str, Any]:
     """Machine-seconds and USD of a plan at an hourly rate, stage by stage.
+
+    ``low_levers`` is the form the pack's low band is written in
+    (:func:`pack_pair_bytes`; ``None`` and ``none`` are the samples): the
+    pack's size and its way home follow, and where it keeps the bins the
+    pair cache is priced compact too
+    (:data:`reverberate.accel.pairs.COMPACT_PAIR_BYTES`).
 
     This is the plan on the machines the constants were measured on, one
     card; :func:`reverberate.trace.machines.predict` is the plan on an
@@ -1162,9 +1201,13 @@ def estimate(
             positions, pairs, fmax_hz=solve_fmax_hz(), rate_usd_per_hour=rate_usd_per_hour
         )
     histograms = int(record["tail_sites"]) * int(record["tail_cells"])
-    pack_bytes = scene_pairs * PAIR_BYTES + histograms * HISTOGRAM_BYTES
+    from reverberate.render.compact import Levers
+
+    compact = not Levers.parse(low_levers).off
+    pack_bytes = scene_pairs * pack_pair_bytes(low_levers) + histograms * HISTOGRAM_BYTES
     jobs = int(record["step_pairs"]) + scene_pairs
-    pair_bytes = pairs * PAIR_BYTES * (window / LOW_DURATION_S)
+    cached = float(present.COMPACT_PAIR_BYTES if compact else PAIR_BYTES)
+    pair_bytes = pairs * cached * (window / LOW_DURATION_S)
     if check is None:
         check = "full" if dict(record.get("profile", {})).get("seconds") is not None else "read"
     seconds = {
@@ -1175,7 +1218,7 @@ def estimate(
         * (RAYS_SITE_S + int(record["tail_cells"]) * RAYS_SITE_CELL_S)
         * (cast / RAYS_MEASURED),
         "level": scene_pairs * LEVEL_PAIR_S,
-        "write": scene_pairs * WRITE_PAIR_S,
+        "write": scene_pairs * (WRITE_PAIR_S + (WRITE_COMPACT_PAIR_S if compact else 0.0)),
         "check": CHECK_READ_S + (CHECK_FULL_S if check == "full" else 0.0),
         "transfer_pack": pack_bytes / FETCH_BYTES_PER_S,
         "transfer_pairs": pair_bytes / FETCH_BYTES_PER_S if fetch_pairs else 0.0,
@@ -1202,6 +1245,7 @@ def estimate(
         # Named only when they are not the reference's, whose records they leave as they were.
         **({} if low_seconds is None else {"low_seconds": window}),
         **({} if rays is None else {"rays": cast}),
+        **({"low_levers": str(low_levers)} if compact else {}),
         "solves": solves,
         "extra_solves": solves - positions,
         "measured": measured,

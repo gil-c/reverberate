@@ -11,6 +11,13 @@ homecoming: the pack is read, its provenance receives the cost records with
 the rate the rental was billed at, and the pairs go into this machine's
 cache, and into the shared store when asked.
 
+**A run that fails after its solves says what to do.** Two whole scenes
+ended ``campaign.failed`` after five hours of solves (2026-10-05) and the
+driver said "kept for inspection". Its last lines are now what the machine
+holds (:func:`machine_holds`), what a resume keeps of it and makes again,
+the exact command that resumes (:func:`resume_command`), and what an hour
+of leaving the machine costs.
+
 Nothing here knows acoustics, and nothing in :mod:`reverberate.trace.run`
 knows Vast.
 """
@@ -18,7 +25,9 @@ knows Vast.
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
+import shlex
+import sys
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +35,18 @@ import h5py
 
 from reverberate.scenes import Recipe
 from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
-from reverberate.trace.bundle import build_bundle
+from reverberate.trace.bundle import build_bundle, levers_text
 from reverberate.trace.plan import RAYS_MEASURED, Plan, Profile, estimate, make_plan
 
-__all__ = ["cost_records", "describe", "finish", "launch", "stamp_cost"]
+__all__ = [
+    "cost_records",
+    "describe",
+    "finish",
+    "launch",
+    "machine_holds",
+    "resume_command",
+    "stamp_cost",
+]
 
 #: A stage of the machine's report to the stage a cost record names.
 _STAGE_OF = {
@@ -82,12 +99,110 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
         f"   pack {priced['pack_gb']} GB, pair cache {priced['pair_cache_gb']} GB"
         + ("" if priced.get("pairs_fetched", True) else " (left on the machine)")
     )
+    lines.append(
+        f"  the pack's low band is written as {priced.get('low_levers') or 'low/ir, the samples'}"
+        " (--low-levers); the fetch is priced at the machine's rate, which bills until the"
+        " pack is home"
+    )
     if "non_solve_s" in priced:
         lines.append(
             f"  all but the low band's solves: {priced['non_solve_s']:.1f} s,"
             f" {priced['non_solve_usd']:.3f} USD; check: {priced.get('check')}"
         )
     return "\n".join(lines)
+
+
+#: Flags of ``trace rent`` that a resume does not repeat, and how many words follow each.
+_NOT_RESUMED = {"--yes": 0, "--plan-offers": 0, "--dry-run": 0, "--instance": 1}
+
+
+def resume_command(argv: Sequence[str] | None = None) -> str:
+    """The command that resumes a run on its machine, ``{instance}`` standing for the instance.
+
+    ``argv`` is the command's own words (left out: this process's): the
+    same recipe, home, mirror and options, without what rents, and
+    ``--instance``. The home is what makes it a resume: its bundle is the
+    run's, and what came home is carried.
+    """
+    words = list(sys.argv[1:] if argv is None else argv)
+    kept: list[str] = []
+    skip = 0
+    for word in words:
+        if skip:
+            skip -= 1
+            continue
+        if word in _NOT_RESUMED:
+            skip = _NOT_RESUMED[word]
+            continue
+        kept.append(word)
+    return f"python -m reverberate.trace {shlex.join(kept)} --instance {{instance}}"
+
+
+def machine_holds(
+    machine: Any, record: dict[str, Any] | None = None, *, run_on: Any = None
+) -> list[str]:
+    """What a trace's machine holds of its run, and what a resume makes again: lines to say.
+
+    One command on the machine counts what the trace keeps as it goes:
+    the pairs in their cache, the early tables, the tails' histograms, the
+    pairs levelled, the pack's rows, the pack. A resume reads each of them
+    and computes what is missing, so the lines say both. ``record`` is the
+    plan's, for the pairs wanted.
+    """
+    from reverberate.gpu.onebox import REMOTE_OUT
+    from reverberate.wave import remote
+
+    ask = run_on or remote.run_on
+    said = ask(
+        machine,
+        f"cd {REMOTE_OUT} 2>/dev/null || exit 0;"
+        " echo pairs $(find pairs -name '*.np[yz]' ! -name '*.partial.*' 2>/dev/null | wc -l);"
+        " echo early $(find early -name '*.npz' ! -name '*.partial.*' 2>/dev/null | wc -l);"
+        " echo tails $(find tails -type f 2>/dev/null | wc -l);"
+        " echo level $(cat level.jsonl 2>/dev/null | wc -l);"
+        " echo rows $(find jobs/rows -name '*.npy' ! -name '*.partial.*' 2>/dev/null | wc -l);"
+        " echo pack $(stat -c %s pack.h5 2>/dev/null || echo 0);"
+        " echo failed $(head -c 400 campaign.failed 2>/dev/null | tr '\n' ' ')",
+        what="what the machine holds",
+        timeout=120,
+    )
+    found: dict[str, str] = {}
+    for line in str(said).splitlines():
+        name, _, value = line.strip().partition(" ")
+        if name in ("pairs", "early", "tails", "level", "rows", "pack", "failed"):
+            found[name] = value.strip()
+
+    def count(name: str) -> int:
+        value = found.get(name, "0").split()[:1]
+        return int(value[0]) if value and value[0].isdigit() else 0
+
+    wanted = int((record or {}).get("pairs", 0))
+    pairs, pack = count("pairs"), count("pack")
+    of = f" (the plan counts {wanted})" if wanted else ""
+    lines = [
+        f"on the machine: {pairs} pairs solved{of}, {count('early')} early tables,"
+        f" {count('tails')} histograms, {count('level')} pairs levelled, {count('rows')} blocks"
+        f" of the pack's rows, {'no pack' if not pack else f'a pack of {pack / 1e9:.2f} GB'}",
+    ]
+    again = []
+    if wanted and pairs < wanted:
+        again.append(f"the solves of about {wanted - pairs} pairs")
+    if not count("early"):
+        again.append("the early trace")
+    if not count("tails"):
+        again.append("the rays")
+    if not count("level") or (wanted and count("level") < min(pairs, wanted)):
+        again.append("the levelling of the pairs level.jsonl lacks")
+    if not pack:
+        again.append("the pack's write and its check")
+    lines.append(
+        "a resume keeps all of it and makes again: "
+        + ("; ".join(again) if again else "nothing but the fetch")
+        + ". A stage's check runs again on what is kept"
+    )
+    if found.get("failed"):
+        lines.append(f"it stopped with: {found['failed'][:300]}")
+    return lines
 
 
 def cost_records(
@@ -227,8 +342,24 @@ def launch(
     repo: Path | None = None,
     say: Any = print,
     low_engine: str = "lowband",
+    low_levers: str | None = None,
+    line: str = "proxy",
+    resume: str = "",
+    relaunch: bool = False,
 ) -> dict[str, Any]:
     """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
+
+    ``low_levers`` is the form the machine writes the pack's low band in
+    (:data:`reverberate.trace.bundle.LOW_LEVERS` when left out, ``none``
+    for the samples); the estimate's pack and its way home follow, and so
+    does the pair cache's form. ``line`` prices the offers' way home
+    through the proxy or by the laptop's line to each host
+    (:func:`reverberate.trace.machines.line_bytes_per_s`). ``resume`` is
+    the command that resumes this run on its machine
+    (:func:`resume_command`): the last lines of a run that leaves its
+    machine rented say it, after what the machine holds. A resume on a
+    machine whose trace is done fetches and launches nothing, unless
+    ``relaunch``.
 
     ``fetch_pairs`` brings the pair cache home beside the pack. The pack
     holds every response a render reads; the cache holds them before their
@@ -259,6 +390,7 @@ def launch(
     brought = (
         plan.profile.seconds is None if fetch_pairs is None else bool(fetch_pairs)
     ) or publish_pairs
+    levers = levers_text(low_levers)
     priced = estimate(
         plan,
         rate_usd_per_hour=rate_usd_per_hour,
@@ -268,6 +400,7 @@ def launch(
         low_ppw=low_ppw if low_engine == "lowband" else None,
         low_seconds=low_seconds,
         rays=rays,
+        low_levers=levers,
     )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
@@ -317,6 +450,7 @@ def launch(
         low_ppw=low_ppw,
         low_seconds=low_seconds,
         reuse_from=reuse_from,
+        low_levers=levers,
     )
     found = found_assets(
         recipe,
@@ -376,9 +510,16 @@ def launch(
             low_ppw=low_ppw,
             low_seconds=low_seconds,
             rays=rays,
+            low_levers=levers,
+            line=line,
+            # The disk the rental asks for is billed by the hour with the cards.
+            disk_gb=_disk_gb(bundle),
         )
         if low_engine == "lowband"
         else None,
+        resume_command=resume,
+        relaunch=relaunch,
+        inventory=lambda machine: machine_holds(machine, plan.record),
         sync=("pairs",) if brought else (),
         **({} if sync_s is None else {"sync_s": sync_s}),
         plan_only=plan_offers,
@@ -395,6 +536,16 @@ def launch(
     if record.get("left_alive"):
         say(str(record["left_alive"]))
     return result
+
+
+def _disk_gb(bundle: Path) -> float:
+    """The disk the rental of ``bundle`` asks for, GB; 0 where the bundle does not size one."""
+    from reverberate.gpu import onebox
+
+    try:
+        return float(onebox.campaign_need(bundle).disk_gb)
+    except (KeyError, OSError, ValueError):
+        return 0.0
 
 
 def _unsolved(record: dict[str, Any], carried: int) -> dict[str, Any]:

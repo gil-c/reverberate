@@ -38,6 +38,18 @@ watchdog's cap set from the prediction with a margin, since it can never be
 extended once the machine is rented. What can be brought home while the
 campaign runs (``sync``) is, every few minutes, so that a host that dies
 takes only its last minutes with it.
+
+**What comes home comes in chunks, the pack first.** A machine bills while
+the laptop downloads: the first whole scene's pack was forty minutes of an
+eight card host at 1.38 USD an hour. The large files go through
+:mod:`reverberate.gpu.homecoming` (ranges of 32 MB on four kept
+connections, resumed and verified, past the proxy where the instance has
+an address of its own), in the order of what the run is for: the pack,
+then the reports, then the pair cache if it was asked for.
+
+**A campaign that failed says what to do.** The last lines of a run that
+leaves its machine rented are what is on it, what a resume keeps and makes
+again, the command that resumes it, and what an hour of leaving it costs.
 """
 
 from __future__ import annotations
@@ -58,6 +70,7 @@ from reverberate.accel.bundle import HOME_ITEMS
 from reverberate.accel.lattice import sim_constants
 from reverberate.accel.solve import OUTPUT_SAMPLE_BYTES_PATCHED
 from reverberate.gpu import vast
+from reverberate.gpu.homecoming import WORKERS, fastest, fetch_file, fetch_tree
 from reverberate.wave.remote import one_at_a_time, run_on
 from reverberate.wave.remote_voxelise import grid_shape_of, provision, rsync
 from reverberate.wave.voxelise import cache_root
@@ -119,6 +132,10 @@ SELFCHECK_PATTERNS = ("*.json", "*.log")
 
 #: Of what comes home, what is single precision samples: sent as it is, not deflated.
 FETCH_AS_IS = ("pack.h5", "pairs")
+#: The order of a fetch: what the run is for, then its reports, then what the next run
+#: would not solve again. A fetch that is cut has brought the first of these it could.
+FETCH_FIRST = ("pack.h5", "field")
+FETCH_LAST = ("pairs",)
 
 
 def fetch_items(
@@ -133,6 +150,13 @@ def fetch_items(
     """
     wanted = (*FETCH_ITEMS, *(item for item in also if item not in FETCH_ITEMS))
     return [item for item in wanted if item in present and item not in leave]
+
+
+def fetch_order(items: list[str]) -> list[str]:
+    """``items`` in the order they come: :data:`FETCH_FIRST`, the rest, :data:`FETCH_LAST`."""
+    first = [item for item in FETCH_FIRST if item in items]
+    last = [item for item in FETCH_LAST if item in items]
+    return [*first, *(item for item in items if item not in first and item not in last), *last]
 
 
 def missing_grids(keys: list[str], local_cache: Path) -> list[str]:
@@ -162,6 +186,8 @@ SYNC_TIMEOUT_S = 270.0
 SYNC_SHARE = 0.9
 #: Files a campaign is still writing: they appear whole under their own name.
 PARTIAL_PATTERNS = ("*.partial.npy", "*.partial.h5", "*.partial.npz")
+#: A pair of the cache, in either form it is kept in (:class:`reverberate.accel.pairs.PairCache`).
+PAIR_SUFFIXES = (".npy", ".npz")
 #: Hosts tried, at most, when provisioning fails on one after the other.
 PROVISION_HOSTS = 4
 #: The watchdog's cap from a predicted run: the prediction times a factor, and half an
@@ -759,11 +785,16 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
 
 def pairs_home(pulled: Path) -> int:
     """The pairs that arrived whole under ``pulled/pairs``."""
-    return sum(1 for path in (Path(pulled) / "pairs").rglob("*.npy") if _whole(path))
+    return sum(1 for path in (Path(pulled) / "pairs").rglob("*.np[yz]") if _whole(path))
 
 
 def _whole(path: Path) -> bool:
-    return not path.name.startswith(".") and not path.name.endswith(".partial.npy")
+    return (
+        path.suffix in PAIR_SUFFIXES
+        and not path.name.startswith(".")
+        and ".partial." not in path.name
+        and ".incoming." not in str(path.parent)
+    )
 
 
 def clear_cut_files(pulled: Path) -> int:
@@ -774,7 +805,7 @@ def clear_cut_files(pulled: Path) -> int:
     later pass looks for.
     """
     removed = 0
-    for path in (Path(pulled) / "pairs").rglob(".*.npy.*"):
+    for path in (Path(pulled) / "pairs").rglob(".*.np[yz].*"):
         path.unlink(missing_ok=True)
         removed += 1
     return removed
@@ -785,7 +816,7 @@ def pairs_on_machine(machine: Any) -> int | None:
     try:
         printed = run_on(
             machine,
-            f"find {REMOTE_OUT}/pairs -name '*.npy' ! -name '*.partial.npy' 2>/dev/null | wc -l",
+            f"find {REMOTE_OUT}/pairs -name '*.np[yz]' ! -name '*.partial.*' 2>/dev/null | wc -l",
             what="count pairs",
             timeout=60,
         )
@@ -801,6 +832,7 @@ def sync_home(
     say: Any,
     *,
     timeout: float | None = SYNC_TIMEOUT_S,
+    way: Any = None,
 ) -> bool:
     """What is new of ``items`` in the run directory, into ``home/pulled``; whether all came.
 
@@ -810,6 +842,12 @@ def sync_home(
     Files the campaign is still writing are left. The pairs home are said
     against those on the machine. Never raises: the campaign matters more
     than its copy, and the next look tries again.
+
+    The pair cache, thousands of files of half a megabyte, comes as
+    batches of whole files on a few kept connections
+    (:func:`reverberate.gpu.homecoming.fetch_tree`); one ``rsync`` stream
+    brought the first scene's at 0.3 to 0.5 MB/s. ``way`` is the machine as
+    the transfers reach it, its own address where it has one.
     """
     if not items:
         return True
@@ -820,16 +858,34 @@ def sync_home(
     started = time.time()
     came, note = True, ""
     try:
-        rsync(
-            machine,
-            [f"{REMOTE_OUT}/{item}" for item in items],
-            str(pulled) + "/",
-            download=True,
-            compress=False,
-            exclude=PARTIAL_PATTERNS,
-            attempts=1,
-            timeout=timeout,
-        )
+        others = [item for item in items if item not in FETCH_LAST]
+        if others:
+            rsync(
+                machine,
+                [f"{REMOTE_OUT}/{item}" for item in others],
+                str(pulled) + "/",
+                download=True,
+                compress=False,
+                exclude=PARTIAL_PATTERNS,
+                attempts=1,
+                timeout=timeout,
+            )
+        for item in (item for item in items if item in FETCH_LAST):
+            told = fetch_tree(
+                way if way is not None else machine,
+                f"{REMOTE_OUT}/{item}",
+                pulled / item,
+                exclude=PARTIAL_PATTERNS,
+                seconds=timeout,
+            )
+            if "No such file" in str(told.get("error", "")) or not told.get("there"):
+                # A directory the campaign has not made yet is not worth a line.
+                return False
+            if told.get("error"):
+                raise RuntimeError(str(told["error"]))
+            if not told["complete"]:
+                came = False
+                note = f"; the pass ended at its {timeout:g} s and the next goes on"
     except Exception as error:  # noqa: BLE001 - a copy that failed is tried again
         came = False
         if "No such file" in str(error):
@@ -877,6 +933,8 @@ def watch(
     watches: list[Watch] = []
     relaunched = 0
     synced = time.time()
+    # Asked once, at the first pass: the instance's own address where it answers.
+    way: list[Any] = []
     while True:
         try:
             look = monitor_once(
@@ -916,7 +974,9 @@ def watch(
             # Out of the pause between two looks, never added to it.
             limit = SYNC_TIMEOUT_S if poll_s <= 0 else min(SYNC_TIMEOUT_S, SYNC_SHARE * poll_s)
             began = time.time()
-            came = sync_home(machine, home, sync, say, timeout=limit)
+            if not way:
+                way.append(fastest(machine, say=say))
+            came = sync_home(machine, home, sync, say, timeout=limit, way=way[0])
             spent = time.time() - began
             # Counted from the pass's start: one that took its whole limit is not skipped next.
             synced = began
@@ -933,33 +993,94 @@ def fetch(
     say: Any,
     leave: Collection[str] = (),
     also: Collection[str] = (),
+    record: dict[str, Any] | None = None,
+    workers: int = WORKERS,
 ) -> Path:
     """What the laptop keeps, into ``home/pulled``, and the grids it lacks into ``home/cache``.
 
     The first fetch of a whole run pulled 21 GB in 45 min, of which the
     field and the audit view were 6.6 GB; the encodings, the self-check
     samples and grids the laptop already held were the rest.
+
+    **In the order of what the run is for** (:func:`fetch_order`): the
+    pack, the reports, then the pair cache where it is not left. The pack
+    comes in chunks, resumed and verified against the machine's own digest
+    (:func:`reverberate.gpu.homecoming.fetch_file`), and the pair cache as
+    batches of whole files; both past the proxy where the instance has an
+    address of its own and it answers, and through the proxy otherwise. A
+    chunked transfer that fails for another reason than its connection is
+    made again by ``rsync``, the way that was. ``record`` receives what
+    each large transfer was (``fetched``): bytes, seconds, bytes a second.
     """
     pulled = home / "pulled"
     pulled.mkdir(exist_ok=True)
     listing = run_on(machine, f"ls -1 {REMOTE_OUT}", what="list run", timeout=90).split()
-    items = fetch_items(listing, leave, also)
+    items = fetch_order(fetch_items(listing, leave, also))
     left = [item for item in leave if item in listing]
     if left:
         say(f"left on the machine: {', '.join(left)}")
     small = [item for item in items if item not in FETCH_AS_IS]
     large = [item for item in items if item in FETCH_AS_IS]
-    if small:
-        rsync(machine, [f"{REMOTE_OUT}/{item}" for item in small], str(pulled) + "/", download=True)
-    if large:
+    fetched: dict[str, Any] = {} if record is None else record.setdefault("fetched", {})
+    way = fastest(machine, say=say) if large else machine
+
+    def as_it_was(item: str) -> None:
         rsync(
             machine,
-            [f"{REMOTE_OUT}/{item}" for item in large],
+            [f"{REMOTE_OUT}/{item}"],
             str(pulled) + "/",
             download=True,
             compress=False,
             exclude=PARTIAL_PATTERNS,
         )
+
+    def bring(through: Any, item: str) -> dict[str, Any]:
+        if item not in FETCH_LAST:
+            found: dict[str, Any] = fetch_file(
+                through, f"{REMOTE_OUT}/{item}", pulled / item, workers=workers, say=say
+            )
+            return found
+        told: dict[str, Any] = fetch_tree(
+            through,
+            f"{REMOTE_OUT}/{item}",
+            pulled / item,
+            exclude=PARTIAL_PATTERNS,
+            workers=workers,
+        )
+        if not told["complete"]:
+            raise RuntimeError(
+                f"{told['left']} file(s) of {item} did not come: {told.get('error', '')}"
+            )
+        return told
+
+    def in_chunks(item: str) -> None:
+        began = time.time()
+        # The instance's own address where it answered, then the proxy, then the way that was.
+        ways = [way] if way is machine else [way, machine]
+        why = ""
+        for through in ways:
+            try:
+                told = bring(through, item)
+            except Exception as error:  # noqa: BLE001 - the next way is tried
+                why = str(error)[:160]
+                if through is not machine:
+                    say(f"  {item}: the direct way failed ({why}); through the proxy")
+                continue
+            fetched[item] = {
+                k: told[k] for k in ("bytes", "seconds", "bytes_per_s", "failures") if k in told
+            }
+            fetched[item]["direct"] = through is not machine
+            return
+        say(f"  {item}: not home in chunks ({why}); by rsync")
+        as_it_was(item)
+        fetched[item] = {"seconds": round(time.time() - began, 1), "by": "rsync"}
+
+    for item in (item for item in large if item not in FETCH_LAST):
+        in_chunks(item)
+    if small:
+        rsync(machine, [f"{REMOTE_OUT}/{item}" for item in small], str(pulled) + "/", download=True)
+    for item in (item for item in large if item in FETCH_LAST):
+        in_chunks(item)
     if "selfcheck" in listing:
         (pulled / "selfcheck").mkdir(exist_ok=True)
         try:
@@ -991,10 +1112,36 @@ def fetch(
     return pulled
 
 
+def campaign_done(machine: Any) -> bool:
+    """Whether the campaign on ``machine`` has ended well; false where it cannot be asked."""
+    try:
+        said = run_on(
+            machine, f"ls {REMOTE_OUT}/campaign.done 2>/dev/null; true", what="done", timeout=60
+        )
+    except Exception:  # noqa: BLE001 - a machine that does not answer is launched, as before
+        return False
+    return "campaign.done" in str(said)
+
+
 def still_rented(
-    client: Any, instance: int, why: str, *, deadline: float | None, say: Any, resume: str = ""
+    client: Any,
+    instance: int,
+    why: str,
+    *,
+    deadline: float | None,
+    say: Any,
+    resume: str = "",
+    held: Collection[str] = (),
+    command: str = "",
 ) -> str:
-    """The last line of a run that leaves its instance alive: which, why, and what it bills."""
+    """The last lines of a run that leaves its instance alive: which, why, and what to do.
+
+    The first line is the instance, the reason and its bill: what an hour
+    of leaving it costs, and what it costs at most until its watchdog.
+    ``held`` are lines of what is on the machine and what a resume makes
+    again; ``command`` is the exact command that resumes the run, in which
+    ``{instance}`` is the instance. Then the command that destroys it.
+    """
     rate = None
     try:
         found = client.instance(instance)
@@ -1011,10 +1158,15 @@ def still_rented(
                 f" {left * rate:.2f} USD more at most"
             )
         bill += "."
-    line = (
+    lines = [
         f"INSTANCE {instance} IS STILL RENTED: {why}.{bill}"
-        f" Resume with --instance {instance}{(' ' + resume) if resume else ''}, or destroy it."
-    )
+        f" Resume with --instance {instance}{(' ' + resume) if resume else ''}, or destroy it.",
+        *(f"  {line}" for line in held),
+    ]
+    if command:
+        lines.append("  resume:  " + command.replace("{instance}", str(instance)))
+    lines.append(f"  destroy: python -m reverberate.gpu.vast destroy {instance}")
+    line = "\n".join(lines)
     say(line)
     return line
 
@@ -1060,8 +1212,22 @@ def run(
     plan_only: bool = False,
     destroy_failed: bool = False,
     cap_flag: str = "",
+    resume_command: str = "",
+    inventory: Callable[[Any], list[str]] | None = None,
+    relaunch: bool = False,
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``resume_command`` is the command that resumes this run on its
+    machine, ``{instance}`` standing for the instance; ``inventory`` asks a
+    machine what of the run it holds and answers in lines. Both are said
+    in the last lines of a run that leaves its machine rented
+    (:func:`still_rented`), a campaign's failure first among them.
+
+    **A run resumed on a machine whose campaign is done fetches and
+    launches nothing**: what failed there was the fetch, and a campaign
+    launched again would write its pack again under the chunks that are
+    home. ``relaunch`` launches it all the same.
 
     ``cap_flag`` names a flag of the campaign's command that is told the
     hours the watchdog leaves it (``--max-hours`` for a trace, which
@@ -1106,6 +1272,7 @@ def run(
     identity = vast.account_identity(client)
     started = time.time()
     deadline: float | None = None
+    resumed = instance is not None
 
     def save() -> None:
         (home / "onebox.json").write_text(json.dumps(record, indent=1, default=str))
@@ -1200,8 +1367,10 @@ def run(
         machine = vast.wait_for_ssh(client, instance, identity)
         record["instance"] = instance
         rsync(machine, [str(repo / "src")], REMOTE_SRC + "/", download=False)
-        if hours is not None:
-            deadline = started + hours * 3600.0
+        # Left unsaid: the watchdog armed when it was rented, as this machine's ledger has it.
+        deadline = started + hours * 3600.0 if hours is not None else vast.deadline_of(instance)
+    if getattr(client, "direct_refused", False):
+        say("direct ssh was refused at the rental: every transfer goes through the proxy")
 
     def launch() -> None:
         told = campaign_args
@@ -1218,20 +1387,24 @@ def run(
         say(f"campaign launched ({started_text.strip()[-40:]})")
 
     try:
-        launch()
-        record["outcome"] = watch(
-            client,
-            instance,
-            machine,
-            launch,
-            deadline=deadline if deadline is not None else started + DEFAULT_HOURS * 3600.0,
-            poll_s=poll_s,
-            record=record,
-            home=home,
-            say=say,
-            sync=sync,
-            sync_s=sync_s,
-        )
+        if resumed and not relaunch and campaign_done(machine):
+            say("the campaign is done on the machine: nothing is launched, what it made is fetched")
+            record["outcome"] = "done"
+        else:
+            launch()
+            record["outcome"] = watch(
+                client,
+                instance,
+                machine,
+                launch,
+                deadline=deadline if deadline is not None else started + DEFAULT_HOURS * 3600.0,
+                poll_s=poll_s,
+                record=record,
+                home=home,
+                say=say,
+                sync=sync,
+                sync_s=sync_s,
+            )
     except BaseException as error:
         record["outcome"] = "error"
         record["error"] = repr(error)[:2000]
@@ -1253,7 +1426,12 @@ def run(
             return record
         # Interrupted by a person: the campaign runs on, detached, and is theirs to end.
         record["left_alive"] = still_rented(
-            client, instance, "the driver was interrupted", deadline=deadline, say=say
+            client,
+            instance,
+            "the driver was interrupted",
+            deadline=deadline,
+            say=say,
+            command=resume_command,
         )
         save()
         raise
@@ -1263,7 +1441,14 @@ def run(
     if outcome != "instance vanished":
         try:
             pulled = fetch(
-                machine, bundle, home, fetch_cache=fetch_cache, say=say, leave=leave, also=also
+                machine,
+                bundle,
+                home,
+                fetch_cache=fetch_cache,
+                say=say,
+                leave=leave,
+                also=also,
+                record=record,
             )
             say(f"fetched in {(time.time() - t0) / 60:.1f} min -> {pulled}")
         except Exception as error:  # noqa: BLE001 - said, and the instance accounted for below
@@ -1271,6 +1456,15 @@ def run(
             record["fetch_error"] = repr(error)[:2000]
             say(f"the fetch failed: {error!r}"[:600])
     record["fetch_s"] = round(time.time() - t0, 1)
+
+    def held() -> list[str]:
+        if inventory is None:
+            return []
+        try:
+            return list(inventory(machine))
+        except Exception as error:  # noqa: BLE001 - the last lines are said whatever answers
+            return [f"what the machine holds could not be asked ({str(error)[:120]})"]
+
     if outcome == "done" and not fetched:
         record["left_alive"] = still_rented(
             client,
@@ -1278,6 +1472,11 @@ def run(
             "the campaign is done and its fetch failed; what it made is on the machine",
             deadline=deadline,
             say=say,
+            held=[
+                "a resume launches nothing: it finds the campaign done and fetches, from the"
+                " chunks that are home",
+            ],
+            command=resume_command,
         )
     elif outcome == "failed" and not destroy_failed:
         record["left_alive"] = still_rented(
@@ -1286,6 +1485,8 @@ def run(
             "the campaign failed twice and is kept for inspection",
             deadline=deadline,
             say=say,
+            held=held(),
+            command=resume_command,
         )
     elif not release(client, instance, record, say):
         record["left_alive"] = still_rented(

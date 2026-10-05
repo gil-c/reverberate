@@ -36,7 +36,39 @@ from reverberate.trace.assets import MirrorAssets
 from reverberate.trace.plan import RAYS_MEASURED, Plan, estimate
 from reverberate.trace.run import KIND
 
-__all__ = ["build_bundle", "carry_early", "carry_pairs", "code_version", "export_digest"]
+__all__ = [
+    "LOW_LEVERS",
+    "build_bundle",
+    "carry_early",
+    "carry_pairs",
+    "code_version",
+    "export_digest",
+    "levers_text",
+]
+
+#: The form a trace writes its pack's low band in unless told (``--low-levers``): the
+#: bins of each response's transform under the crossover's top, in 16 bits
+#: (:mod:`reverberate.render.compact`). Its error is 78 dB under the response in the
+#: worst third octave of the worst pair measured, 36 dB under any other error of the
+#: chain, and the first scene's pack is 9.5 GB so written against 24.5.
+#: ``bins,int16,decay=60`` is 3.5 GB and changes a response's tail at -42 dB: a
+#: listening variant, not the default. ``none`` is ``low/ir`` as it always was.
+LOW_LEVERS = "bins,int16"
+
+
+def levers_text(text: str | None) -> str:
+    """Levers as the bundle and the estimate name them: canonical, ``none`` for none."""
+    from reverberate.render.compact import Levers
+
+    levers = Levers.parse(LOW_LEVERS if text is None else text)
+    if levers.off:
+        return "none"
+    words = ["bins"] + (["int16"] if levers.sample == "int16" else [])
+    if levers.degree_db:
+        words.append(f"degree={levers.degree_db:g}")
+    if levers.decay_db:
+        words.append(f"decay={levers.decay_db:g}")
+    return ",".join(words)
 
 
 def code_version(repo: Path) -> str:
@@ -77,10 +109,8 @@ def carry_pairs(carried_root: Path, local: Any, keys: list[str]) -> int:
     for name in keys:
         if local.has(name) and not carried.has(name):
             record = {k: v for k, v in records.get(name, {}).items() if k != "key"}
-            carried.path(name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(local.path(name), carried.path(name))
-            with (carried.directory / "index.jsonl").open("a") as handle:
-                handle.write(json.dumps({"key": name, **record}, sort_keys=True) + "\n")
+            # In the form this machine keeps it in: the machine's cache reads both.
+            carried.adopt(name, local.path(name), record)
     return len(carried.records())
 
 
@@ -119,8 +149,17 @@ def build_bundle(
     low_ppw: float | None = None,
     low_seconds: float | None = None,
     reuse_from: Path | None = None,
+    low_levers: str | None = None,
 ) -> dict[str, Any]:
     """Everything a trace of ``plan`` reads, into ``bundle``; returns ``campaign.json``.
+
+    ``low_levers`` is the form the pack's low band is written in on the
+    machine (:data:`LOW_LEVERS` when left out, ``none`` for ``low/ir``),
+    said in ``trace.low_levers`` and in the pack's provenance. Where it
+    keeps the bins the machine's pair cache is kept compact too
+    (``trace.pair_cache``, :data:`reverberate.accel.pairs.CACHE_LEVERS`):
+    every degree whole whatever the pack's levers, since a cache serves
+    every pack of its dwelling.
 
     ``low_engine``, ``low_scheme`` and ``low_ppw`` say what solves the low
     band and on which grid; the machine's command reads them in
@@ -144,6 +183,7 @@ def build_bundle(
     held = bundle / "trace"
     held.mkdir(parents=True, exist_ok=True)
     save_recipe(recipe, held / "recipe.json")
+    levers = levers_text(low_levers)
     priced = estimate(
         plan,
         rate_usd_per_hour=rate_usd_per_hour,
@@ -152,6 +192,7 @@ def build_bundle(
         low_ppw=low_ppw if low_engine == "lowband" else None,
         low_seconds=low_seconds,
         rays=None if assets.settings.rays.rays == RAYS_MEASURED else assets.settings.rays.rays,
+        low_levers=levers,
     )
     plan.save(held)
     (held / "plan.json").write_text(
@@ -242,7 +283,12 @@ def build_bundle(
         "code_version": code_version(repo or Path(__file__).resolve().parents[3]),
         "export_sha256": export or assets.export_sha256,
         "recipe_sha256": plan.recipe_sha256,
+        "low_levers": levers,
     }
+    if levers != "none":
+        from reverberate.accel.pairs import CACHE_LEVERS
+
+        campaign["trace"]["pair_cache"] = CACHE_LEVERS
     if check is not None:
         # What the machine's ``check`` stage does; left out, the profile decides
         # (:data:`reverberate.trace.run.CHECK_FULL` for a smoke run).

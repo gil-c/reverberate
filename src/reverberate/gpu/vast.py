@@ -54,6 +54,7 @@ __all__ = [
     "VastClient",
     "VastError",
     "cheapest",
+    "direct_address",
     "estimate_cost_usd",
     "ledger_total_usd",
     "account_identity",
@@ -73,6 +74,11 @@ SPEND_CEILING_USD = 1000.0
 
 #: Name of the spend ledger inside the runs directory.
 LEDGER_NAME = "gpu_spend.jsonl"
+
+#: The disk an offer's hourly price is stated with, GB, and the hours of the month its
+#: storage is priced by: Vast's own search prices 5 GB unless asked otherwise.
+OFFER_DISK_GB = 5.0
+HOURS_A_MONTH = 730.0
 
 _API = "https://console.vast.ai/api"
 _API_VERSION = "v0"
@@ -118,6 +124,15 @@ class Offer:
     reliability: float
     inet_down_mbps: float
     location: str
+    #: What the host says its line sends, Mbit/s: what a pack's way home is bounded by
+    #: once it does not go through the proxy. 0 when the API does not say.
+    inet_up_mbps: float = 0.0
+    #: What the host asks for a gigabyte of disk a month, USD (``storage_cost``). **An
+    #: offer's ``dph_total`` is not what the rental is billed**: it is priced with a few
+    #: gigabytes of disk, and the two whole scenes of 2026-10-05, rented with 219 GB,
+    #: were billed 1.382 USD/h for an offer of 1.284 and 0.797 for one of 0.543.
+    #: :meth:`billed_dph` adds the disk. 0 when the API does not say.
+    storage_usd_gb_month: float = 0.0
     #: The host behind the offer. One host is advertised as several offers, one
     #: per count of its cards, so a host to avoid is named by this and not by
     #: ``id``. 0 when the API does not say.
@@ -140,8 +155,21 @@ class Offer:
             reliability=float(raw.get("reliability2", 0.0)),
             inet_down_mbps=float(raw.get("inet_down", 0.0)),
             location=str(raw.get("geolocation") or "unknown"),
+            inet_up_mbps=float(raw.get("inet_up", 0.0) or 0.0),
+            storage_usd_gb_month=float(raw.get("storage_cost", 0.0) or 0.0),
             machine_id=int(raw.get("machine_id") or 0),
         )
+
+    def billed_dph(self, disk_gb: float) -> float:
+        """USD an hour with ``disk_gb`` of disk: the offer's hour and the disk's share of a month.
+
+        The offer's hour is taken to hold the :data:`OFFER_DISK_GB` an
+        offer is priced with; a month is 730 hours. An estimate until a
+        rental's own rate has been set against it: the instance, once it
+        exists, says what it bills.
+        """
+        more = max(0.0, float(disk_gb) - OFFER_DISK_GB)
+        return self.dph_total + self.storage_usd_gb_month * more / HOURS_A_MONTH
 
     def describe(self) -> str:
         """One line, in the shape section 13.1 wants stated before renting."""
@@ -173,6 +201,11 @@ class Instance:
     #: as ``loading``, and one is worth waiting twenty minutes for while the
     #: other is worth nothing at all. Empty when the API offers no message.
     status_msg: str = ""
+    #: The instance's own address and the host port its container's 22 is mapped to,
+    #: where it was created with direct ssh (:data:`RUNTYPE_DIRECT`) and the API gives
+    #: both: ``public_ipaddr`` and ``ports["22/tcp"][0]["HostPort"]``. ``None`` otherwise,
+    #: and ``ssh_host`` and ``ssh_port``, the proxy's, are then the only way in.
+    direct: tuple[str, int] | None = None
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Instance:
@@ -186,6 +219,7 @@ class Instance:
             gpu_name=str(raw.get("gpu_name", "")),
             start_date=float(start) if start else None,
             status_msg=" ".join(str(raw.get("status_msg") or "").split()),
+            direct=direct_address(raw),
         )
 
     def uptime_hours(self, now: float | None = None) -> float:
@@ -205,6 +239,37 @@ class Rental:
     deadline: float
     #: Process id of the detached watchdog.
     watchdog_pid: int
+
+
+#: How an instance is asked for (``runtype`` of the request that creates it). With the
+#: first, Vast maps the container's port 22 to a port of the host's own address, beside
+#: the proxy's: ``ssh -p <HostPort> root@<public_ipaddr>``. The words are Vast's own
+#: command line's for ``--ssh --direct`` (``ssh_direc``, without the t), and **no run of
+#: this project has created an instance with them yet**: :meth:`VastClient.create` asks
+#: again with the second where the first is refused.
+RUNTYPE_DIRECT = "ssh_direc ssh_proxy"
+RUNTYPE_PROXY = "ssh"
+
+
+def direct_address(raw: dict[str, Any]) -> tuple[str, int] | None:
+    """An instance's own address and its ssh port there, from the API's record; or ``None``.
+
+    The record of an instance created with direct ssh carries
+    ``public_ipaddr`` and, once its container is up, ``ports``, Docker's
+    own map: ``{"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40022"}]}``.
+    One without the mapping, or with a malformed one, has no direct
+    address and is reached through the proxy.
+    """
+    address = str(raw.get("public_ipaddr") or "").strip()
+    ports = raw.get("ports")
+    if not address or not isinstance(ports, dict):
+        return None
+    mapped: Any = ports.get("22/tcp")
+    try:
+        port = int(mapped[0]["HostPort"])
+    except (TypeError, KeyError, IndexError, ValueError):
+        return None
+    return (address, port) if port > 0 else None
 
 
 def search_query(
@@ -300,6 +365,27 @@ def read_ledger(path: Path | None = None) -> list[dict[str, Any]]:
     return entries
 
 
+def deadline_of(instance_id: int, entries: Iterable[dict[str, Any]] | None = None) -> float | None:
+    """When the watchdog of a rental destroys it, from this machine's ledger; ``None`` unknown.
+
+    A run resumed on its instance did not rent it and was not told its
+    cap: the ledger's ``rent`` entry has when and for how many hours.
+    """
+    import calendar
+
+    found = None
+    for entry in read_ledger() if entries is None else entries:
+        if entry.get("event") == "rent" and int(entry.get("instance_id", 0)) == int(instance_id):
+            found = entry
+    if found is None or not found.get("at") or not found.get("hours"):
+        return None
+    try:
+        rented = calendar.timegm(time.strptime(str(found["at"]), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+    return float(rented) + float(found["hours"]) * 3600.0
+
+
 def append_ledger(entry: dict[str, Any], path: Path | None = None) -> None:
     """Append one entry, with a UTC timestamp, creating the file if needed."""
     path = path or ledger_path()
@@ -361,6 +447,9 @@ class VastClient:
             )
         self._key = key
         self._timeout = timeout
+        #: Set once a request for direct ssh was refused and the plain one taken: said by
+        #: the caller, since every transfer of the run then goes through the proxy.
+        self.direct_refused = False
 
     @staticmethod
     def _ssl_context() -> ssl.SSLContext:
@@ -472,19 +561,31 @@ class VastClient:
         image: str,
         disk_gb: int = 60,
         onstart_cmd: str = "touch /root/.onstart_done; sleep infinity",
+        direct: bool = True,
     ) -> int:
-        """Rent ``offer_id`` and return the new instance id."""
-        payload = self.request(
-            "PUT",
-            f"/asks/{offer_id}/",
-            {
-                "client_id": "me",
-                "image": image,
-                "disk": disk_gb,
-                "runtype": "ssh",
-                "onstart": onstart_cmd,
-            },
-        )
+        """Rent ``offer_id`` and return the new instance id.
+
+        ``direct`` asks for the instance's port 22 on the host's own
+        address as well as through the proxy (:data:`RUNTYPE_DIRECT`): a
+        pack came home at 2 MB/s a stream through the proxy on a line that
+        carries 17 to 70. A request so worded that Vast refuses as
+        malformed (HTTP 400) is made again as it always was, and
+        ``direct_refused`` says so; any other refusal is the offer's.
+        """
+        body = {
+            "client_id": "me",
+            "image": image,
+            "disk": disk_gb,
+            "runtype": RUNTYPE_DIRECT if direct else RUNTYPE_PROXY,
+            "onstart": onstart_cmd,
+        }
+        try:
+            payload = self.request("PUT", f"/asks/{offer_id}/", body)
+        except VastError as error:
+            if not direct or error.status != 400:
+                raise
+            self.direct_refused = True
+            payload = self.request("PUT", f"/asks/{offer_id}/", {**body, "runtype": RUNTYPE_PROXY})
         if not payload.get("success"):
             raise VastError(f"vast refused to create an instance on offer {offer_id}")
         return int(payload["new_contract"])
@@ -634,7 +735,14 @@ def wait_for_ssh(
         if instance is None:
             raise VastError(f"instance {instance_id} vanished while starting")
         if instance.ssh_host and instance.status == "running":
-            machine = Machine(host=instance.ssh_host, port=instance.ssh_port, identity=identity)
+            # Commands go through the proxy, the way every run so far has gone; the
+            # instance's own address rides along for the transfers to try first.
+            machine = Machine(
+                host=instance.ssh_host,
+                port=instance.ssh_port,
+                identity=identity,
+                direct=instance.direct,
+            )
             try:
                 _run(machine.ssh_command("true"), what="ssh probe", timeout=30)
                 return machine

@@ -45,6 +45,7 @@ import os
 import shutil
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,8 @@ from reverberate.spatial.encode import EncoderSettings
 from reverberate.spatial.lowband import LOW_DURATION_S, LOW_RATE_HZ, pair_key, solve_fmax_hz
 
 __all__ = [
+    "CACHE_LEVERS",
+    "COMPACT_PAIR_BYTES",
     "KIND",
     "REFERENCE_FMAX_HZ",
     "SOLVER",
@@ -135,6 +138,22 @@ def encoder_record(order: int, fit_order: int, fmax_hz: float) -> dict[str, Any]
 # --------------------------------------------------------------------------
 
 
+#: The compact form a cache may keep its pairs in (:mod:`reverberate.render.compact`):
+#: every bin of the transform, in 16 bits with a scale a channel and 100 Hz. **Every
+#: bin**, up to the cache form's own 2 kHz, and not up to the solve's 1500 Hz: a cached
+#: pair holds 45 dB under its energy above 1500 Hz in the median and 32 dB in the worst
+#: of forty pairs of the first scene, and the pack's response is cut from it in time
+#: (the onset's window) before its masks, so what is dropped there comes back under
+#: 1414 Hz: -46 dB in the worst third octave of the stored response with the bins cut at
+#: 1500 Hz, -83 dB with all of them, on sixty pairs, and no onset moved (2026-10-05,
+#: ``docs/open-questions/low-band-compact.md``).
+CACHE_LEVERS = "bins,int16"
+#: A pair's file in that form, against 1 228 928 as samples: 2400 bins of 64 channels,
+#: two numbers of 16 bits each, and the scales.
+COMPACT_PAIR_BYTES = 621_446
+_PLAIN, _COMPACT = ".npy", ".npz"
+
+
 @dataclass
 class PairCache:
     """Responses by pair key under one directory, a grid's key at a time.
@@ -143,14 +162,26 @@ class PairCache:
     ``[channel, 4800]`` float32 in the cache form, and
     ``<root>/<voxel_low_key>/index.jsonl`` one line a pair: its key, the two
     positions, the centre the array really stood at, and how it was made.
+
+    **A pair may be kept compact**: ``<key>.npz`` in place of ``<key>.npy``,
+    the bins of its transform as :func:`reverberate.render.compact.encode`
+    keeps them (:data:`CACHE_LEVERS`), half the bytes. ``levers`` is the
+    form this cache *writes*; it *reads* either, pair by pair, so a cache
+    may hold both and a pair is the same pair in both: its key does not
+    say the form, and the compact one is within -80 dB of the other where
+    a pack reads it.
     """
 
     root: Path
     voxel_low_key: str
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    #: The levers new pairs are written with, as text; ``None`` writes the samples.
+    levers: str | None = None
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
+        if self.levers is not None:
+            self.levers = _cache_levers(self.levers)
 
     @classmethod
     def local(cls, voxel_low_key: str) -> PairCache:
@@ -164,7 +195,14 @@ class PairCache:
         return self.root / self.voxel_low_key
 
     def path(self, key: str) -> Path:
-        return self.directory / key[:2] / f"{key}.npy"
+        """The pair's file: the one that is there, else where this cache would write it."""
+        stem = self.directory / key[:2] / key
+        compact, plain = stem.with_suffix(_COMPACT), stem.with_suffix(_PLAIN)
+        if compact.is_file():
+            return compact
+        if plain.is_file():
+            return plain
+        return compact if self.levers else plain
 
     def has(self, key: str) -> bool:
         return self.path(key).is_file()
@@ -174,18 +212,53 @@ class PairCache:
         path = self.path(key)
         if not path.is_file():
             raise KeyError(f"no pair {key} under {self.directory}")
+        if path.suffix == _COMPACT:
+            return _read_compact(path)
         return np.asarray(np.load(path))
+
+    def first_channel(self, key: str) -> np.ndarray:
+        """Channel 0 of a pair, ``[1, sample]``, without the 63 others being read or made.
+
+        Of the samples the file is mapped and 19 kB of it read; of the
+        compact form the first degree's bins alone are transformed.
+        """
+        path = self.path(key)
+        if not path.is_file():
+            raise KeyError(f"no pair {key} under {self.directory}")
+        if path.suffix == _COMPACT:
+            return _read_compact(path, first_only=True)
+        return np.array(np.load(path, mmap_mode="r")[:1])
 
     def write(self, key: str, response: np.ndarray, record: dict[str, Any]) -> Path:
         """The response under its key, and its line in the index; the file appears whole."""
-        path = self.path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        partial = path.with_suffix(".partial.npy")
-        np.save(partial, np.asarray(response, dtype=np.float32))
+        stem = self.directory / key[:2] / key
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        if self.levers:
+            path = stem.with_suffix(_COMPACT)
+            partial = stem.with_suffix(".partial" + _COMPACT)
+            _write_compact(partial, np.asarray(response, dtype=np.float32), self.levers)
+        else:
+            path = stem.with_suffix(_PLAIN)
+            partial = stem.with_suffix(".partial" + _PLAIN)
+            np.save(partial, np.asarray(response, dtype=np.float32))
         partial.replace(path)
+        self._index(key, record)
+        return path
+
+    def adopt(self, key: str, source: Path, record: dict[str, Any]) -> Path:
+        """A pair's file from another cache, in the form it is in; its line in the index."""
+        source = Path(source)
+        path = (self.directory / key[:2] / key).with_suffix(source.suffix)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(".partial" + source.suffix)
+        shutil.copyfile(source, partial)
+        partial.replace(path)
+        self._index(key, record)
+        return path
+
+    def _index(self, key: str, record: dict[str, Any]) -> None:
         with self._lock, (self.directory / "index.jsonl").open("a") as handle:
             handle.write(json.dumps({"key": key, **record}, sort_keys=True) + "\n")
-        return path
 
     def records(self) -> dict[str, dict[str, Any]]:
         """The index, by key; a pair written twice keeps its last line."""
@@ -194,7 +267,11 @@ class PairCache:
         if index.is_file():
             for line in index.read_text().splitlines():
                 if line.strip():
-                    record = json.loads(line)
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        # An index copied while its campaign wrote it ends in half a line.
+                        continue
                     found[str(record["key"])] = record
         return found
 
@@ -202,9 +279,14 @@ class PairCache:
         """Every pair the store lacks, then the index; returns the keys sent."""
         sent = []
         for key in sorted(self.records()):
-            remote = f"{remote_prefix(self.voxel_low_key)}{key}.npy"
-            if self.has(key) and not store.exists(remote):
-                store.put_file(remote, self.path(key))
+            if not self.has(key):
+                continue
+            # Under the name of the form it is kept in; a pair the store has in the other
+            # form is the same pair and is not sent again.
+            names = [f"{remote_prefix(self.voxel_low_key)}{key}{suffix}" for suffix in _FORMS]
+            if not any(store.exists(name) for name in names):
+                path = self.path(key)
+                store.put_file(f"{remote_prefix(self.voxel_low_key)}{key}{path.suffix}", path)
                 sent.append(key)
         index = self.directory / "index.jsonl"
         if index.is_file():
@@ -213,12 +295,85 @@ class PairCache:
 
     def fetch(self, store: Any, key: str) -> bool:
         """One pair from the store into this cache; whether the store had it."""
-        remote = f"{remote_prefix(self.voxel_low_key)}{key}.npy"
-        if not store.exists(remote):
-            return False
-        self.path(key).parent.mkdir(parents=True, exist_ok=True)
-        store.get_file(remote, self.path(key))
-        return True
+        for suffix in _FORMS:
+            remote = f"{remote_prefix(self.voxel_low_key)}{key}{suffix}"
+            if store.exists(remote):
+                target = (self.directory / key[:2] / key).with_suffix(suffix)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                store.get_file(remote, target)
+                return True
+        return False
+
+
+_FORMS = (_COMPACT, _PLAIN)
+
+
+def _cache_levers(text: str) -> str | None:
+    """The levers a cache may be written with, as text; ``None`` for none.
+
+    The bins, in 32 bits or in 16. A degree let go or a response cut where
+    it has decayed is a choice of one pack's listening, and a cache serves
+    every pack of its dwelling.
+    """
+    from reverberate.render.compact import Levers
+
+    levers = Levers.parse(text)
+    if levers.off:
+        return None
+    if levers.degree_db or levers.decay_db:
+        raise ValueError(
+            "a pair cache keeps every degree whole: the degree and the decay are a pack's levers"
+        )
+    return "bins,int16" if levers.sample == "int16" else "bins"
+
+
+def _write_compact(path: Path, response: np.ndarray, levers: str) -> None:
+    from reverberate.render.compact import FORMAT, Levers, encode
+
+    made = encode(
+        response,
+        Levers.parse(levers),
+        rate_hz=LOW_RATE_HZ,
+        top_hz=LOW_RATE_HZ / 2.0,
+        sound_speed_m_s=343.0,
+    )
+    meta = {
+        "format": FORMAT,
+        "levers": levers,
+        "rate_hz": LOW_RATE_HZ,
+        "top_hz": LOW_RATE_HZ / 2.0,
+        "samples": int(response.shape[-1]),
+    }
+    with path.open("wb") as handle:
+        np.savez(
+            handle,
+            samples=made.samples,
+            scale=made.scale,
+            data=made.data,
+            meta=np.array(json.dumps(meta, sort_keys=True)),
+        )
+
+
+def _read_compact(path: Path, *, first_only: bool = False) -> np.ndarray:
+    """A compact pair as ``[channel, sample]`` float32; of ``first_only``, channel 0 alone."""
+    from reverberate.render.compact import FORMAT, Encoded, _bins, decode
+
+    with np.load(path) as held:
+        meta = json.loads(str(held["meta"]))
+        if meta.get("format") != FORMAT:
+            raise ValueError(f"{path.name} is {meta.get('format')!r}; this reader knows {FORMAT!r}")
+        lengths, scale, data = held["samples"], held["scale"], held["data"]
+    rate, top = float(meta["rate_hz"]), float(meta["top_hz"])
+    if first_only:
+        first, stop = _bins(int(lengths[0]), 0.0, top, rate)
+        lengths, scale, data = lengths[:1], scale[:1], data[: (stop - first) * 2]
+    return decode(
+        Encoded(samples=lengths, scale=scale, data=data),
+        first_hz=np.zeros(int(lengths.shape[0])),
+        top_hz=top,
+        rate_hz=rate,
+        samples=int(meta["samples"]),
+    )
 
 
 def remote_prefix(voxel_low_key: str) -> str:
@@ -245,13 +400,14 @@ def install_pairs(pulled: Path, *, publish: bool = False) -> dict[str, Any]:
                 # name: a response that does not read whole is not a pair.
                 try:
                     response = arrived.read(key)
-                except (ValueError, OSError, EOFError):
+                except (ValueError, OSError, EOFError, KeyError, zipfile.BadZipFile):
                     damaged.append(key)
                     continue
                 if response.ndim != 2 or not np.all(np.isfinite(response)):
                     damaged.append(key)
                     continue
-                cache.write(key, response, {k: v for k, v in record.items() if k != "key"})
+                # In the form it came in: a compact pair is not grown back on the laptop.
+                cache.adopt(key, arrived.path(key), {k: v for k, v in record.items() if k != "key"})
                 installed.append(key)
         if publish:
             from reverberate.store import shared_store

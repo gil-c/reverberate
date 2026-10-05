@@ -74,7 +74,8 @@ def test_a_trace_of_shorter_responses_writes_a_pack_of_the_same_shape(tmp_path: 
         def response(self, position: int, cell: int) -> np.ndarray:
             return super().response(position, cell)[:, : round(0.8 * LOW_RATE_HZ)]
 
-    trace, pairs, _ = traced(tmp_path, resting_recipe())
+    # ``low/ir`` as it was, read in the file itself: the samples, not their bins.
+    trace, pairs, _ = traced(tmp_path, resting_recipe(), low_levers="none")
     trace.engine = Short(pairs.sources, pairs.cells, tmp_path / "out", gain=pairs.gain)
     trace.check_mode = "read"
     trace.run()
