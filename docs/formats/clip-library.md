@@ -36,7 +36,7 @@ Stated once, here.
 | a voice | stored at an **active speech level of -26 dB re full scale** (`VOICE_ACTIVE_DBFS`), so 60 dB SPL at 1 m: a normal vocal effort (ISO 9921) |
 | a noise | stored at the long term level (RMS over the whole clip) its source has at 1 m on that scale: `level.spl_1m_db - 86` dB re full scale |
 | the engine | applies no normalisation: the source's `gain_db` and the interval's multiply the samples, and the free field gain is `1 / d`. A voice at `gain_db = 0` is therefore heard at 1 m at 60 dB SPL, if full scale of the output is read as 86 dB SPL |
-| `gain_db` of a recipe | a departure from the stored level: `-6` is a quiet voice (54 dB at 1 m), and a noise at `-12` is 12 dB under what its entry says |
+| `gain_db` of a recipe | a departure from the stored level: `-6` is a quiet voice (54 dB at 1 m), and a noise at `-12` is 12 dB under what its entry says. The generator draws a voice's from -6 to 0 and a noise's from -6 to +6, about its stored level |
 
 The **active speech level** is measured after ITU-T P.56, method B
 (`active_speech_level`): the envelope is the rectified signal through two

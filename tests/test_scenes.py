@@ -752,6 +752,11 @@ def test_the_parameters_tree_gives_the_parameters_back() -> None:
     assert Parameters.from_record(json.loads(json.dumps(record))) == Parameters()
     counts = [record["sources"][kind]["count"][0] for kind in ("near_voice", "far_voice", "noise")]
     assert sum(counts) == 14 and record["duration_s"] == 1200.0
+    # A noise is drawn about the level its clip is stored at, its source's at 1 m, and a
+    # voice at or under a normal effort: 12 dB under, the first scene's noises were not heard.
+    low, high = record["sources"]["noise"]["gain_db"]
+    assert low == -high and 3.0 <= high <= 9.0
+    assert record["sources"]["gain_db"][1] == 0.0
 
 
 # --------------------------------------------------------------------------
