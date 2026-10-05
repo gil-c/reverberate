@@ -56,6 +56,7 @@ __all__ = [
     "first_arrival_s",
     "at_pack_length",
     "mirror_omni",
+    "pair_anchor_s",
     "pair_low",
     "pair_omni",
     "pair_seam_db",
@@ -90,6 +91,42 @@ def at_pack_length(cached: Any, samples: int = LOW_SAMPLES) -> Any:
     return whole
 
 
+def pair_anchor_s(
+    aired_omni: Any, straight_s: float, *, lead_s: float, sound_speed_m_s: float
+) -> float:
+    """Where a pair's two bands are joined in pressure: the time its window is anchored on.
+
+    ``blend`` anchors the window on the response's loudest sample, "which
+    for a point with a direct path is the direct sound itself". In a
+    dwelling it is not: at 4 to 10 m the loudest sample of the band under
+    the crossover is an arrival 5 to 20 ms after the direct sound, and
+    which arrival it is changes from one solved position to the next, so
+    that the window of two neighbours 8 cm apart stood 10 to 45 ms apart
+    (the first whole scene, 2026-10-05). The anchor is therefore **the
+    response's own direct sound**: its first peak within
+    :data:`reverberate.trace.clock.SEARCH_S` of the straight line's time
+    (:func:`reverberate.trace.clock.read_direct`), where that peak is at
+    least :data:`reverberate.trace.clock.PRESENT_SHARE` of the loudest
+    sample; and the loudest sample where the response holds no such peak,
+    a pair in the shadow of a wall, whose first arrival is a bend the two
+    solvers do not share.
+
+    ``aired_omni`` is channel 0 with its air and before its masks, at
+    4 kHz, on the pack's clock (:func:`pair_omni`); ``straight_s`` the
+    distance between the pair's source position and its cell over the
+    sound speed. It needs nothing of the mirror, so a pair's row can be
+    made as soon as the pair is solved. On the pack's clock, seconds.
+    """
+    from reverberate.trace.clock import PRESENT_SHARE, read_direct
+
+    held = np.asarray(aired_omni, dtype=float)
+    heard = read_direct(held, straight_s, lead_s=lead_s, sound_speed_m_s=sound_speed_m_s)
+    trail = heard["direct_trail_s"]
+    if trail is not None and float(heard["direct_share"]) >= PRESENT_SHARE:
+        return float(straight_s) + float(trail)
+    return float(onset_s(held, LOW_RATE_HZ))
+
+
 def pair_low(
     cached: Any,
     crossover: Crossover,
@@ -98,9 +135,15 @@ def pair_low(
     sound_speed_m_s: float,
     lead_s: float = 0.0,
     unit_at_1m: float = 1.0,
+    straight_s: float | None = None,
     xp: Any = None,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     """A pair's response in the cache form as the pack keeps it.
+
+    With ``straight_s``, the pair's distance over the sound speed, the
+    masks' window is anchored on the response's direct sound
+    (:func:`pair_anchor_s`) and that anchor is the onset returned; without
+    it, on the loudest sample, as every pack before 2026-10-06 was written.
 
     The cache is on the geometric clock and on the field's scale. The pack
     is on the mirror's clock, ``lead_s`` later, so that the crossover's
@@ -119,8 +162,14 @@ def pair_low(
 
     aired = with_air(cached, LOW_RATE_HZ, atmosphere, sound_speed_m_s=sound_speed_m_s, xp=xp)
     aired = delayed(aired, LOW_RATE_HZ, lead_s, xp=xp)
-    onset = onset_s(aired[0], LOW_RATE_HZ, xp=xp)
-    stored = low_side(aired, LOW_RATE_HZ, crossover, xp=xp) / unit_at_1m
+    if straight_s is None:
+        onset = onset_s(aired[0], LOW_RATE_HZ, xp=xp)
+        stored = low_side(aired, LOW_RATE_HZ, crossover, xp=xp) / unit_at_1m
+    else:
+        onset = pair_anchor_s(
+            to_numpy(aired[0]), straight_s, lead_s=lead_s, sound_speed_m_s=sound_speed_m_s
+        )
+        stored = low_side(aired, LOW_RATE_HZ, crossover, onset=onset, xp=xp) / unit_at_1m
     return (
         np.asarray(to_numpy(stored), dtype=np.float32),
         float(onset),

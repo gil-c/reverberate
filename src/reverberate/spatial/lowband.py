@@ -253,6 +253,7 @@ def low_side(
     *,
     atmosphere: Atmosphere | None = None,
     sound_speed_m_s: float = SOUND_SPEED_M_S,
+    onset: float | None = None,
     xp: Any = None,
 ) -> Any:
     """The crossover's low side of a wave response, as ``blend`` takes it.
@@ -261,6 +262,9 @@ def low_side(
     form's 4 kHz. The part within the onset window of channel 0 goes through
     the pressure mask and the rest through the power mask
     (:meth:`Crossover.masks`), so the result is zero above the ramp's top.
+    The window is anchored on ``onset``, in seconds, and on the loudest
+    sample of channel 0 where none is given, which is ``blend``'s own rule
+    and is right where the loudest sample is the direct sound.
     With ``atmosphere`` the air's absorption is applied first
     (:func:`reverberate.audio.apply_air_absorption`); without, the response
     is taken as it is, which is right for one that already carries its air.
@@ -272,9 +276,8 @@ def low_side(
     samples = int(block.shape[-1])
     if atmosphere is not None:
         block = with_air(block, rate_hz, atmosphere, sound_speed_m_s=sound_speed_m_s, xp=xp)
-    together = xp.asarray(
-        _onset_window(onset_s(block[0], rate_hz, xp=xp), samples, rate_hz, crossover)
-    )
+    anchor = onset_s(block[0], rate_hz, xp=xp) if onset is None else float(onset)
+    together = xp.asarray(_onset_window(anchor, samples, rate_hz, crossover))
     power, _ = crossover.masks(samples, rate_hz, power=True)
     pressure, _ = crossover.masks(samples, rate_hz, power=False)
     spectrum = xp.fft.rfft(block * (1.0 - together), axis=-1) * xp.asarray(power)
