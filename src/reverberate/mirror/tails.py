@@ -326,6 +326,15 @@ class TailCache:
         self._hold(name, found)
         return found
 
+    def hold(self, keys: list[str], histogram: Histogram) -> None:
+        """A site's histogram over the cells of ``keys``, held as :meth:`site` would give it.
+
+        What was just traced over every cell of a site is the site's
+        histogram: reading its entries back from the disk took as long as a
+        fifth of the rays (0.09 s of 53 entries).
+        """
+        self._hold(hashlib.sha256("".join(keys).encode()).hexdigest(), histogram)
+
     def put(self, keys: list[str], histogram: Histogram) -> None:
         """A histogram over cells, kept a cell an entry under ``keys``, in the cells' order."""
         if len(keys) != histogram.energy.shape[0]:
@@ -451,8 +460,13 @@ def histograms(
                 stats=stats,
             )
             cache.put([keys[k] for k in absent], traced)
-            # With no cell there is nothing to keep, and the empty histogram is the answer.
-            found = cache.site(keys, counted=False) if keys else traced
+            # Traced over every cell (or over none: the empty histogram), what was traced
+            # is the answer; over some, the site is put together from its entries.
+            if len(absent) == len(keys):
+                found = traced
+                cache.hold(keys, traced)
+            else:
+                found = cache.site(keys, counted=False)
             if found is None:
                 raise RuntimeError("a histogram just traced is not in its cache")
         out.append(found)

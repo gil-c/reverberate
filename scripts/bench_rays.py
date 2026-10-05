@@ -264,7 +264,11 @@ def main() -> None:
     # ---- proof ------------------------------------------------------------------------------
     rays = replace(base, rays=counts[0])
     other = replace(rays, seed=rays.seed + 1)
-    identity = {"hits": 0, "energy_counts": 0, "moment_counts": 0, "sites": 0}
+    identity: dict[str, Any] = {"hits": 0, "energy_counts": 0, "moment_counts": 0, "sites": 0}
+    # Per site: the (cell, bin) whose crossings differ, and the crossings there are.
+    identity["sites_equal"] = 0
+    identity["crossings_that_differ_a_site"] = []
+    identity["crossings"] = 0
     measures: dict[str, list[dict[str, float]]] = {"single": [], "seed": []}
     escapes = dict.fromkeys(ways, 0)
     for number, site in enumerate(sites):
@@ -275,6 +279,11 @@ def main() -> None:
         again, _, _ = cast("tree", scene, site, cells, other, devices, held, grid)
         if "grid" in found:
             identity["sites"] += 1
+            apart = int(np.abs(found["tree"].hits - found["grid"].hits).sum())
+            same = apart == 0 and bool(np.array_equal(found["tree"].energy, found["grid"].energy))
+            identity["sites_equal"] += int(same)
+            identity["crossings_that_differ_a_site"].append(apart)
+            identity["crossings"] += int(found["grid"].hits.sum())
             identity["hits"] = max(
                 identity["hits"], int(np.abs(found["tree"].hits - found["grid"].hits).max())
             )

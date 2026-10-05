@@ -76,8 +76,9 @@ __all__ = [
     "trace_tree",
 ]
 
-#: ``grid`` or ``tree``: what the rays look their triangles up in. The grid is the present
-#: kernel, kept until a card has shown the tree's histograms equal; the answer is the same.
+#: ``tree`` or ``grid``: what the rays look their triangles up in. The tree, since a card
+#: showed its histograms the grid's (an RTX 3090 Ti, 2026-10-05: 20 sites of a storey,
+#: ``docs/open-questions/ray-tracer.md``); the grid's kernel stays, eighteen times slower.
 STRUCTURE_VARIABLE = "REVERBERATE_RAY_STRUCTURE"
 
 #: What a trace counts beside its histograms, in the order the C text writes them.
@@ -97,8 +98,8 @@ _KEPT = 1
 
 
 def structure(asked: str | None = None) -> str:
-    """The structure in use: ``asked``, else :data:`STRUCTURE_VARIABLE`, else the grid."""
-    named = asked or os.environ.get(STRUCTURE_VARIABLE) or "grid"
+    """The structure in use: ``asked``, else :data:`STRUCTURE_VARIABLE`, else the tree."""
+    named = asked or os.environ.get(STRUCTURE_VARIABLE) or "tree"
     if named not in ("grid", "tree"):
         raise ValueError(f"the rays' structure is 'grid' or 'tree', not {named!r}")
     return named
