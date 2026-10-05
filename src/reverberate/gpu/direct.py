@@ -254,22 +254,27 @@ def upgrade(
     if not keys:
         say("  direct route not taken: the machine showed no host key")
         return without
-    path = hostkeys.pin(keys, host, port, hostkeys.pinned_path(instance_id, directory))
-    pinned = PinnedMachine(
-        host=machine.host,
-        port=machine.port,
-        user=machine.user,
-        identity=machine.identity,
-        direct=(host, port),
-        control=machine.control,
-        known_hosts=path,
-    )
-    direct = pinned.directly()
-    assert direct is not None
+    try:
+        path = hostkeys.pin(keys, host, port, hostkeys.pinned_path(instance_id, directory))
+        pinned = PinnedMachine(
+            host=machine.host,
+            port=machine.port,
+            user=machine.user,
+            identity=machine.identity,
+            direct=(host, port),
+            control=machine.control,
+            known_hosts=path,
+        )
+        direct = pinned.directly()
+        if direct is None:
+            raise ValueError("no route came of the pinned file")
+    except Exception as error:  # noqa: BLE001 - a file that cannot be written is not a run lost
+        say(f"  direct route not taken: its keys could not be pinned ({str(error)[:80]})")
+        return without
     try:
         (probe or _run)(direct.ssh_command("true"), what="direct ssh probe", timeout=45, attempts=2)
-    except RemoteError as error:
-        if any(text in str(error) for text in _MISMATCH):
+    except Exception as error:  # noqa: BLE001 - whatever stood in the way, the proxy stands
+        if isinstance(error, RemoteError) and any(text in str(error) for text in _MISMATCH):
             say(
                 f"  DIRECT ROUTE REFUSED: {host}:{port} did not show the key the machine"
                 " holds; something stands on that path. The proxy is the route."

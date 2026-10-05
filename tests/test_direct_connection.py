@@ -203,6 +203,18 @@ class TestUpgrade:
         assert machine.direct is None and machine.directly() is None
         assert "host keys not read" in said[-1]
 
+    def test_a_file_that_cannot_be_written_costs_the_address_and_not_the_run(
+        self, tmp_path: Path
+    ) -> None:
+        in_the_way = tmp_path / "a file where the directory should be"
+        in_the_way.write_text("")
+        ssh, said = FakeSsh(ED), list[str]()
+        machine = direct.upgrade(
+            PROXY, 77, directory=in_the_way, say=said.append, run=ssh.run, probe=ssh.probe
+        )
+        assert machine.directly() is None and "could not be pinned" in said[-1]
+        assert ssh.probed == []
+
     def test_a_machine_that_shows_no_key_is_not_pinned(self, tmp_path: Path) -> None:
         ssh, said = FakeSsh(BANNER), list[str]()
         machine = upgraded(ssh, tmp_path, said)
