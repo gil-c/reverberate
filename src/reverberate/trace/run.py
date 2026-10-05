@@ -1770,6 +1770,7 @@ class Trace:
         counts = {
             "node_updates": self.planned.get("node_updates", 0.0),
             "pairs": self.planned.get("pairs", 0.0),
+            "launches": sum(1 for j in jobs if j.stage == "solve" and j.on != PARENT),
             "pair_s": PAIR_S if self.planned.get("node_updates") else 0.0,
             "sites": count["rays"],
             "site_s": (RAYS_SITE_S + int(self.tail_rows.size) * RAYS_SITE_CELL_S)

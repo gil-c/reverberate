@@ -152,8 +152,9 @@ def serve(
             _fault(faults, f"{stage}/{name}", tries)
             record = handler.run_job(stage, name, payload)
             link.send(("done", record, time.time() - started, _free_of(handler, spec)))
-        except MemoryError as error:
-            link.send(("memory", repr(error)[:400], time.time() - started))
+        except MemoryError:
+            # With where it was refused: the last line is the error, the lines before its place.
+            link.send(("memory", traceback.format_exc()[-3000:], time.time() - started))
         except Exception:  # noqa: BLE001 - sent to the queue's process, which decides
             link.send(("failed", traceback.format_exc(), time.time() - started))
 

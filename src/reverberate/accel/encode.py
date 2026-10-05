@@ -112,11 +112,18 @@ def prepare_band(
     xp: Any,
     chunk: int = CHUNK,
     wavenumber_of: Any = None,
+    reduce: Any = None,
 ) -> BandEncoder:
     """Everything of the fit that does not depend on the pressure, for one geometry.
 
     ``wavenumber_of`` gives the wavenumber of each bin's frequency where the
     grid is not the Cartesian one the settings' dispersion model describes.
+
+    ``reduce``, when given, is handed each chunk's weighted matrix and normal
+    matrix as it is made and they are not kept: a caller that turns them
+    into something smaller (the batched solver's operator) then never holds
+    every chunk at once, which on the grid to 1500 Hz was 3.4 GB beside the
+    1.8 GB it kept, and what a card under 8 GB could not prepare.
     """
     started = time.time()
     offsets = np.asarray(offsets, dtype=np.float64)
@@ -178,6 +185,11 @@ def prepare_band(
         normal = xp.matmul(xp.transpose(weighted_d, (0, 2, 1)), matrix_d)
         normal = normal + lam * eye[None, :, :]
         del matrix_d
+        if reduce is not None:
+            reduce(weighted_d, normal)
+            encoder.chunk_bins.append(int(bins.size))
+            del weighted_d, normal
+            continue
         encoder.weighted.append(weighted_d)
         encoder.normal.append(normal)
         encoder.chunk_bins.append(int(bins.size))

@@ -1,8 +1,11 @@
 # 0016, appendix: the whole trace on every card and every core of the machine it is given
 
-Status: phase one, 2026-10-05. Built and proved on the host's path (no card);
-the cards' figures are phase two's, and each is named as such where it is
-missing.
+Status: phase two, 2026-10-05. Built and proved on the host's path, then
+run and measured on a machine of 4 x RTX 3090 (instance 54299322, 32 threads
+of a Threadripper PRO 3975WX, 0.484 USD/h) and on the 38 lent cores of a host
+whose cards could not be opened (instance 54294466). **The section "Measured
+on cards" is the authority where it and a later section differ**: the later
+sections are phase one's, kept with what they expected.
 
 The first whole scene (1529 wave solves, 16 887 pairs) left a machine of
 eight cards and about seventy cores with one card and one core at work for
@@ -11,6 +14,205 @@ pack's rows were one process, and only the rays spread. This appendix is
 what replaces that: one queue for every stage, a process a card and a
 process a core, and what the wave solver needs to run on a small card or on
 several.
+
+## Measured on cards (phase two)
+
+### The whole trace through the queue
+
+A window of the realistic scene with its real low band (2 s where three
+sources move, 53 solved positions, 122 pairs, 12 tail sites; solves of
+0.3 s, `--low-seconds`, on the grid to 1500 Hz, 47.4 M reached nodes) ran
+end to end on the four cards at its first launch: four card workers, 26
+host workers, no job failed. `python -m reverberate.trace scaling --cards
+1,2,4 --low-batch 2`, the bundle whole at each count, 26 host workers each
+time:
+
+| cards | work wall s | ideal s | speed-up | solve wall | rays wall | solve work | serial fraction |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1596 | 1596 | 1.00 | 1422 | 139 | 1421 | |
+| 2 | 868 | 798 | 1.84 | 759 | 76 | 1495 (1.05) | 0.088 |
+| 4 | 489 | 399 | 3.26 | 414 | 42 | 1572 (1.11) | 0.075 |
+
+**The three counts wrote the same pack** (one digest): a card's worker
+gives the bits another card's gives, and the order the jobs end in changes
+nothing. The levelling and the rows ended with the last launch at every
+count (their wall is the solves'), the early trace in 16 s: **the stages
+that are not solves or rays no longer add to the wall**. What keeps four
+cards at 3.26 and not 4: the launches planned in the queue's process (22 s
+for the grid's cut) and each worker's own grid and fit before its first
+launch (33 s a worker, once), which are the serial 7 to 9 per cent of an
+eight minute run and are 2 minutes of a scene of hours; and 5 to 11 per
+cent more card seconds a solve as cards are added, measured while another
+measurement used the host's cores.
+
+So, to the owner's question: **on this window the wall goes as the cards
+to within the two minutes a run starts with**, and the rest hides under the
+solves.
+
+### The host's stages against the cores
+
+`trace scaling --workers ... --free-field --cpu`, histograms handed to
+every run. On the 4.4 GHz machine (16 cores of two threads, 30.7 lent), a
+window of 60 s of every source (8257 positions, 1894 pairs: 90 blocks of
+the early trace, 31 of the levelling):
+
+| workers | wall s | ideal s | speed-up | paths work s | level work s | rows work s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 826 | 826 | 1.00 | 392 | 338 | 52 |
+| 2 | 449 | 413 | 1.84 | 440 (1.12) | 359 (1.06) | 53 |
+| 4 | 246 | 207 | 3.36 | 504 (1.29) | 365 (1.08) | 58 |
+| 8 | 143 | 103 | 5.8 | 621 (1.58) | 383 (1.13) | 59 |
+| 16 | 101 | 52 | 8.2 | 966 (2.46) | 429 (1.27) | 64 |
+| 28 | 117 | 30 | 7.1 | 2050 (5.2) | 566 (1.67) | 76 |
+
+Same pack at every count. The card measurements above and below ran on
+the same machine during these counts, so the larger ones are pessimistic.
+On the other host (old Xeons, 38 lent cores, other tenants at a load of
+40), the laptop's window of 20 s (5 blocks of the levelling, 8 of the early
+trace: too few jobs past 8 workers): 203 s, 121, 77, 62, 60, 62 for 1, 2,
+4, 8, 16, 32 workers, the levelling's work within 6 per cent of one
+worker's at every count.
+
+**What bounds each curve.** The levelling and the rows scale as the cores
+do (13 per cent more work at 8 workers, 27 at 16) and lose only where two
+workers share a core. **The early trace does not**: its work is 1.6 times
+one worker's at 8 and 2.5 times at 16. Every worker prepares the mirror and
+the onsets' occupancy for itself and grows again the image trees and the
+distance fields of anchors another worker has, and its arrays are
+gigabytes: that is the stage to work on next (one preparation shared from a
+file; the trees kept by anchor on disk). A process a thread of a core is
+worse than a process a core, so the pool now counts cores
+(`resources.Machine.threads_a_core`): 15 host workers on that machine, not
+26.
+
+Against the first card machine's one process on one RTX 3090, the same
+60 s window's stages that are not solves: 182 s of early trace, 895 s of
+rays, 157 s of levelling and 19 s of write by its ledger, 1250 s one after
+the other. Through the queue with two of the cards and 28 workers: 450 s,
+all of it the rays (843 card seconds, 12 s a site, a site a card); the
+early trace took 92 s of it, the levelling 20, the rows 5, the write 7.
+
+### The prediction, calibrated
+
+A card's rate on the grid to 1500 Hz is 0.46 of its rate on the box of free
+air it measures at its start (1.72e10 node updates a second against 3.74e10
+on an RTX 3090, launches of 8): `resources.REFERENCE["solve_over_box"]`.
+A source of 1.2 s is then 90 s of an RTX 3090 (110 s on the RTX 3080 of the
+solver's own measurement). A launch costs 8.6 s besides its steps and a run
+55 s before its first step. With those the run of 1 card above is predicted
+at 1650 s and took 1596; before them, 1364.
+
+### What a card needs: 4 GB, proved
+
+`REVERBERATE_CARD_LIMIT_GB` holds every card of a run to that much (the
+pool refuses the rest). A window of solves of the full 1.2 s (23 positions,
+32 769 steps, records on the host) ran with every card held to **4 GB**:
+23 launches of one source, none parted, 3.18 to 3.44 GB at the fullest by
+`nvidia-smi`, the context included, 1.41e10 node updates a second against
+1.72e10 in launches of 8: **a card of 4 GB solves the grid to 1500 Hz at 82
+per cent of the rate a 24 GB card of its kind has.** Two faults had to go
+first, and both were paid by every card of every run before:
+
+- the fit's preparation held every chunk of its weighted matrices at once,
+  3.4 GB beside the 1.8 GB it keeps; each chunk is now solved as it is made
+  (`accel.encode.prepare_band(reduce=...)`), the same numbers;
+- each kept part was cut on the card from a block a chunk had just freed
+  and held the whole of that block: the 1.8 GB operator held 3.9 GB of the
+  card. The parts now wait on the host until the preparation ends: 1.84 GB
+  held for 1.84 GB used.
+
+Records on the host against records on the card, same launch, same card:
+2.74e10 against 2.70e10 node updates a second on the 17 M node room (the
+command below), the same bits. They cost nothing.
+
+### One solve over two cards
+
+`python -m reverberate.wave.lowband slabs --cards 0,1 --steps 2000`, a
+lossy room of 17 M nodes, two RTX 3090. **The records are the single
+solve's to the bit in every case.**
+
+| launch | planes cross | two cards against one | lost against twice one card |
+| --- | --- | --- | --- |
+| 4 sources | card to card | 1.71 | 14 % |
+| 4 sources | through the host | 1.50 | 25 % |
+| 1 source | card to card | 1.56 | 22 % |
+| 1 source | through the host | 1.12 | 44 % |
+| 8 sources | card to card | 1.76 | 12 % |
+
+1.68 MB cross a step for four sources. Phase one expected 7 to 15 per cent
+through the host and half of it card to card; it is 12 to 14 card to card
+and 25 through the host. It stays what it was meant to be, a way to hold a
+grid no card holds, and it is not wired into the trace.
+
+### What broke, and what was done
+
+1. **A host whose cards cannot be opened** (machine 152135: `nvidia-smi`
+   lists four cards, `cuInit` answers 999, `/dev/nvidia-uvm` cannot be
+   opened). The campaign took `numpy` in silence. Now `accel campaign`
+   opens the cards before anything else and stops with the reason unless
+   `--cpu` asked for the host; the driver asks `cuInit` with the cards'
+   memory before it pushes anything, and a host that fails is destroyed and
+   avoided as one whose cards are held; the host is in
+   `vast.KNOWN_BAD_HOSTS`.
+2. **The levelling waited for nearly every launch.** The launches were
+   ordered by their records' size, so a block of 64 neighbouring pairs had
+   its sources in launches all over the queue. They go in the positions'
+   order now.
+3. **The fit's memory**, above.
+4. **Workers a thread, not a core**, above.
+
+Nothing of the queue itself failed on cards: four contexts in four
+processes, the kernels compiled by each worker at the first run, a worker's
+core at 76 per cent while its card works.
+
+### The pack across machines
+
+The same bundle gives one pack on 1, 2 and 4 cards and on 1 to 32 workers
+of one machine. **It does not give the same pack on the laptop and on the
+rented host** (another processor and another numpy: 2.4.6 on arm64, 2.5.3
+on x86-64): the digest differs, as two transforms of two libraries differ
+in their last bits. What is promised is the machine, not the world.
+
+### The realistic scene, predicted with the queue
+
+The scene of twenty minutes on the bundle's grid: 1529 solves of 1.2 s,
+16 887 pairs, 202 tail sites over 53 cells, 62 751 positions.
+
+| | 8 x RTX 3090 24 GB (1.38 USD/h) | 4 x RTX 3090 24 GB (0.80 USD/h) |
+| --- | --- | --- |
+| solves, 90 s a source | 4.79 h | 9.58 h |
+| launches, start, fit (0.43 s a pair) | 0.31 h | 0.6 h |
+| rays, 18 s a site | 0.13 h | 0.26 h |
+| host stages: 6 450 core seconds of that Threadripper | under the solves | under the solves |
+| voxelise, plan, write, check | 0.08 h | 0.08 h |
+| **on the machine** | **5.3 h, 7.3 USD** | **10.5 h, 8.4 USD** |
+
+On 4 cards of 16 GB the hours are those of four cards at those cards' own
+rate, which no run here measured (the Tesla V100 are on the host that could
+not open them); 16 GB is four times what a solve needs.
+
+Against the code of before on the same eight cards (run A, still on its
+machine as this is written): its solves ended at 5.6 h, its early trace
+took 0.4 h, its rays began at 6.2 h and 8.57 USD with the levelling and the
+write still to come, about 7 h and 9.7 USD by its own ledger. **The queue
+removes what follows the solves, 1.3 to 1.7 h of eight cards and about a
+fifth of the bill, and adds nothing to the solves**: those were already a
+thread a card. What is left to gain on a scene is in the solves themselves
+(a card's rate, the solves counted) and in the pack's way home.
+
+### What still idles, and the next change
+
+- Cards: none while a launch waits. At a run's end the last launches of 8
+  sources leave cards idle for up to 12 minutes; launches of 4 would halve
+  it for 2 per cent more solving.
+- Cores: most of them, most of the run. The host's stages are 6 450 core
+  seconds against 4.8 hours of eight cards; a machine of a dozen cores does
+  them, and seventy cores are not needed.
+- The 22 s to 2 minutes at the start in which no card has a job: the plan
+  of the launches could follow the rays' jobs instead of preceding every
+  job.
+- The early trace's workers preparing the same things, above: the one
+  stage whose work grows with its workers.
 
 ## The design
 

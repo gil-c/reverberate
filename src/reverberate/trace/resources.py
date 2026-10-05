@@ -71,6 +71,11 @@ REFERENCE: dict[str, Any] = {
     #: boundary and its branches. Measured on 4 x RTX 3090 (instance 54299322, 2026-10-05):
     #: 1.72e10 node updates a second a card in launches of 8 against 3.74e10 on the box.
     "solve_over_box": 0.46,
+    #: Card seconds a launch besides its steps (the stepper and its drive made, the fit of
+    #: its cells), and seconds before a card's first launch steps (the launches planned,
+    #: the worker's own grid and fit): 8.6 and 55 on that machine.
+    "launch_s": 8.6,
+    "start_s": 55.0,
 }
 
 
@@ -123,6 +128,23 @@ def _smi() -> list[Card]:
     return cards
 
 
+def _threads_a_core() -> int:
+    """The threads of one core as ``/proc/cpuinfo`` says them (siblings over cores); 1 unknown."""
+    try:
+        with open("/proc/cpuinfo") as handle:
+            said = handle.read()
+    except OSError:
+        return 1
+    found: dict[str, int] = {}
+    for line in said.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip() in ("siblings", "cpu cores") and value.strip().isdigit():
+            found.setdefault(name.strip(), int(value))
+    if found.get("cpu cores") and found.get("siblings"):
+        return max(1, found["siblings"] // found["cpu cores"])
+    return 1
+
+
 @dataclass(frozen=True)
 class Machine:
     """The cards, the cores and the memory a trace may use."""
@@ -132,6 +154,8 @@ class Machine:
     ram_bytes: float = 0.0
     host_updates_per_s: float | None = None
     host_transform_s: float | None = None
+    #: Threads the host shows for each of its cores; 1 where it does not say.
+    threads_a_core: int = 1
 
     @classmethod
     def detect(cls, *, gpu: bool | None = None, devices: str | None = None) -> Machine:
@@ -159,7 +183,9 @@ class Machine:
             ]
         if gpu and not cards:
             raise RuntimeError("a card was asked for and this machine shows none")
-        return cls(tuple(cards), usable_cores(), host_memory_gb() * 1e9)
+        return cls(
+            tuple(cards), usable_cores(), host_memory_gb() * 1e9, threads_a_core=_threads_a_core()
+        )
 
     @classmethod
     def fake(
@@ -175,7 +201,13 @@ class Machine:
     def workers(self, host: int | None = None) -> list[WorkerSpec]:
         """The pool: a process a card, and ``host`` more (the cores the cards' leave)."""
         if host is None:
-            host = max(1, self.cores - len(self.cards)) if self.cards else max(1, self.cores - 1)
+            # A process a core, not a process a thread of a core: on 16 cores of two threads
+            # the host's stages took 101 s with 16 workers and 117 s with 28 (2026-10-05).
+            whole = max(1, int(self.cores / max(1, self.threads_a_core)))
+            # A card's process takes most of a thread while its card works: a core's second
+            # thread where there is one, a core of its own where there is not.
+            taken = len(self.cards) if self.threads_a_core < 2 else 0
+            host = max(1, whole - taken) if self.cards else max(1, whole - 1)
         specs = [
             WorkerSpec(index=k, card=card.index, free_bytes=card.free_bytes)
             for k, card in enumerate(self.cards)
@@ -214,6 +246,7 @@ class Machine:
         return {
             "cards": [card.record() for card in self.cards],
             "cores": self.cores,
+            "threads_a_core": self.threads_a_core,
             "ram_gb": round(self.ram_bytes / 1e9, 1),
             "host_updates_per_s": self.host_updates_per_s,
             "host_transform_s": self.host_transform_s,
@@ -316,6 +349,9 @@ def predict(
         rates = [float(machine.host_updates_per_s or REFERENCE["host_updates_per_s"])]
     held = max(1, len(machine.cards))
     solve_s = float(counts.get("node_updates", 0.0)) / max(sum(rates), 1e-9)
+    if solve_s > 0.0:
+        solve_s += float(counts.get("launches", 0)) * float(REFERENCE["launch_s"]) / held
+        solve_s += float(REFERENCE["start_s"])
     fit_s = float(counts.get("pairs", 0)) * float(counts.get("pair_s", 0.0)) / held
     rays_s = float(counts.get("sites", 0)) * float(counts.get("site_s", 0.0)) / held
     slow = 1.0

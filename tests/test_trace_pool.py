@@ -17,6 +17,7 @@ in slabs with a plane exchanged a cut a step.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ import pytest
 from reverberate.mirror.moving import MovingSettings, prepare, trace_early
 from reverberate.trace import run as run_module
 from reverberate.trace.pool import CARD, HOST, PARENT, Job, Pool, PoolError, WorkerSpec
-from reverberate.trace.resources import Machine, measure, predict
+from reverberate.trace.resources import REFERENCE, Machine, measure, predict
 from reverberate.trace.run import Trace, _blocks, _joined, pack_digest
 from reverberate.wave.lowband.problem import build_problem
 from reverberate.wave.lowband.scheme import CARTESIAN, FCC, Scheme
@@ -145,6 +146,9 @@ def test_a_machine_is_a_process_a_card_and_a_process_a_core_left() -> None:
     assert [w.card for w in held[:8]] == list(range(8)) and len(held) == 8 + 6
     assert all(w.card is None for w in held[8:])
     assert [w.card for w in Machine.fake((), cores=4).workers()] == [None] * 3
+    # A host of two threads a core: a process a core, the cards' on the second threads.
+    doubled = replace(Machine.fake((24.0,) * 4, cores=30), threads_a_core=2)
+    assert len(doubled.workers()) == 4 + 15
     assert len(Machine.fake((16.0,), cores=1).workers()) == 2
     said = measure(None, np, seconds=0.05)
     assert said["updates_per_s"] > 0 and said["transform_s"] > 0
@@ -168,7 +172,11 @@ def test_the_prediction_goes_as_the_cards_and_the_cores_it_is_given() -> None:
     eight = predict(
         counts, Machine.fake((24.0,) * 8, cores=14), host_workers=6, rate_usd_per_hour=1.38
     )
-    assert one["seconds"]["solve"] == pytest.approx(8 * eight["seconds"]["solve"], rel=1e-3)
+    # But for what every card waits through once before its first launch steps.
+    start = REFERENCE["start_s"]
+    assert one["seconds"]["solve"] - start == pytest.approx(
+        8 * (eight["seconds"]["solve"] - start), rel=1e-3
+    )
     assert eight["hours"] < one["hours"] / 7.0, "the host's stages hide under the solves"
     assert eight["usd"] == pytest.approx(eight["hours"] * 1.38, abs=0.01)
     assert eight["calibrated"], "the grid against the box, as a card measured it"
