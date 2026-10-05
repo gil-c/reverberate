@@ -197,7 +197,10 @@ error is -70 dB of each response's peak) and is a change of the format.
    in single precision with the integer histograms kept, which changes
    which rays hit and is a statistical identity to be measured, not a bit
    identity.
-2. **The pack's way home, 2 940 s** at the laptop's 8.1 MB/s.
+2. **The pack's way home, 2 940 s** at the laptop's 8.1 MB/s. (The first
+   whole scenes brought it at 2 MB/s a stream, 4.4 on four, through Vast's
+   proxy: the ledgers below. The pack is now written in 0.39 of the bytes
+   and fetched in chunks.)
 3. **The levelling and the early trace, 1 400 s each.** Both are bound by
    the host: a pair's levelling is a dozen small launches, and six threads
    give 2.2 times one. The mirror's render at a pair, batched over pairs
@@ -237,6 +240,122 @@ One pair, 1.2 MB, is all that is held, where a source's rows were 5.6 GB
 for 4586 pairs. The file is the same byte for byte
 (`tests/test_trace.py`). Whether it removes the 164 ms a pair is for the
 first whole trace to say: the reading above was not proven.
+
+## The first whole scenes: the real ledgers (2026-10-05)
+
+The scene of twenty minutes (hssd_0076, 14 sources, 1529 source positions,
+831 cells; 16 887 pairs by the plan, 18 219 on the validated grid's arrays
+and 15 187 on the coarser grid's) was traced twice, on the code of before
+the queue. Each run failed twice and was resumed twice on its machine.
+Seconds are the wall's, read in each run's own `campaign.log` and in this
+machine's rental ledger (`python -m reverberate.trace ledger --home H ...`
+prints the stages); USD are at the rate the rental was billed.
+
+**Scene A**: instance 54262814, 8 x RTX 3090 24 GB, 72 vCPU, California;
+offered at 1.284 USD/h and **billed 1.382** with its 219 GB of disk.
+
+| stage | seconds | cards working | USD | |
+| --- | --- | --- | --- | --- |
+| rental to the trace's first line | 489 | 0 | 0.19 | the instance answering, the engine built (3.6 min), the bundle pushed |
+| voxelise, plan, assign, three times | 246 | 0 | 0.09 | 108 s, then 70 and 68 s with the grid cached |
+| solve | 19 784 | 8 | 7.59 | 1600 solves in 304 launches: 141 160 card seconds of steps, 88.2 s a position, and 10 066 of fits; the cards busy 0.955 of the wall |
+| paths | 1 076 | 1 | 0.41 | one process |
+| rays | 1 436 | 8, a site at a time | 0.55 | 1 094 s for the 202 sites, 342 s reading the tails' tables again in the resume |
+| level | 1 417 | 1 | 0.54 | one process; ended by the clock's check |
+| write | 153 | 0 | 0.06 | 24.5 GB |
+| between attempts | 826 | 0 | 0.32 | 605 s after the first failure, 221 s after the second |
+| from the pack to the machine's end | 5 027 | 0 | 1.93 | below |
+| **billed** | **30 433** | | **11.68** | 8.45 h |
+
+**Scene B**, the same recipe at 7.2 points per wavelength: instance
+54273116, 4 x RTX 3090 24 GB, 36 vCPU, California; offered at 0.543 USD/h
+and **billed 0.797**.
+
+| stage | seconds | cards working | USD | |
+| --- | --- | --- | --- | --- |
+| rental to the trace's first line | 804 | 0 | 0.18 | the engine built in 8.3 min |
+| voxelise, plan, assign, three times | 659 | 0 | 0.15 | the plan is 3 minutes on this grid, each time |
+| solve | 14 745 | 4 | 3.26 | 1562 solves in 152 launches: 54 147 card seconds of steps, 34.7 s a position, and 3 166 of fits; busy 0.975 |
+| paths | 1 052 | 1 | 0.23 | |
+| rays | 1 625 | 4, a site at a time | 0.36 | 1 266 s, and 359 s reading the tables again |
+| level | 1 156 | 1 | 0.26 | ended by the same check |
+| write | 120 | 0 | 0.03 | 20.5 GB |
+| between attempts | 825 | 0 | 0.18 | |
+| from the pack to the machine's end | 3 905 | 0 | 0.86 | below |
+| **billed** | **24 872** | | **5.51** | 6.91 h |
+
+Besides, 0.27 USD of three hosts that never answered on ssh and were
+destroyed after seven minutes each.
+
+**The launches.** A launch held as many positions as its card held records
+for: one position heard at 84 cells, or fourteen heard at one. A position
+cost the same card seconds in either (86 to 92 s on scene A), so a
+launch's length went as its positions:
+
+| scene A, launches of | launches | pairs a launch | minutes a launch | fit, s a pair |
+| --- | --- | --- | --- | --- |
+| 1 position (first attempt) | 93 | 84 | 2.7 | 0.74 |
+| 2 to 4 | 61 | 65 | 4.1 to 6.6 | 0.74 to 0.48 |
+| 5 to 8 | 76 | 55 | 7.6 to 11.7 | 0.43 to 0.29 |
+| 9 to 12 | 64 | 34 | 13.4 to 17.7 | 0.33 to 0.27 |
+| 13 and 14 | 10 | 14 | 19.0 to 20.7 | 0.28 |
+
+The launches went by their records' size, so the last hour of each run
+was its longest launches: 25 launches of 18.8 minutes in the mean on scene
+A (319 positions heard at 498 cells), 14 of 18.5 minutes on scene B. They
+are not the positions heard at many cells, which were the first and the
+shortest; they are those heard at one or two, fourteen and thirty four to
+a launch. The cards then ended one by one with nothing left to give them:
+**555 s a card idle on scene A and 255 s on scene B**, 4 440 and 1 020 card
+seconds, 3 and 2 per cent of the solves. A prediction that divides the card
+seconds by the cards is short by that, half a launch a card, and by the 55 s
+before the first launch; the queue's launches of eight positions are 12
+minutes on this card and leave 6.
+
+**Predicted and billed.** At the rental the driver printed 7.16 h and 9.19
+USD for scene A and 5.56 h and 3.02 USD for scene B. They were billed 8.45 h
+and 11.68 USD, 6.91 h and 5.51 USD: 2.49 USD more each. Where it is, the
+seconds over the prediction at the rate billed:
+
+| cause | scene A | scene B |
+| --- | --- | --- |
+| the rate, on the seconds predicted: the disk's storage, which the offer's price did not hold | +0.70 | +1.41 |
+| the first failure (a launch refused its memory, half an hour in): the wait for the relaunch, the stages before the solves made again | +0.26 | +0.09 |
+| the second (the clock's check, after every solve): the wait, the stages again, the tails' tables read again | +0.24 | +0.27 |
+| from the pack to the machine's end, against the 2 940 s priced for its fetch | +0.80 | +0.21 |
+| the solves: the cards' idle end and the fits on scene A; on scene B the card itself, 34.7 s a position where 30 were priced | +0.28 | +0.42 |
+| the rays, a site over every card and not a site a card | +0.24 | +0.08 |
+| the early trace and the levelling faster than priced, the start slower | -0.03 | +0.01 |
+
+The three silent hosts, 0.27 USD, were other instances' bills.
+
+**From the pack to the machine's end** is what bringing 24.5 GB home
+through the proxy cost with the machine billing: the driver's own fetch
+at 2 MB/s, stopped; the pack rewritten on the machine as `bins,int16`
+(4 minutes, 9.51 and 8.07 GB); those fetched in chunks of 32 MB on four
+streams each, both at once, at 5.2 and 5.0 MB/s. Scene B's was home and
+verified in 30 minutes. Scene A's stopped at 252 chunks of 284 with a
+stream that brought nothing for ten minutes, and its pack left by another
+machine. **With the pack written compact by the trace and fetched in
+chunks from the first minute, that stage is 36 minutes and 0.83 USD on
+scene A's host, not 84 minutes and 1.93 USD.**
+
+**The prediction as it is now** (`trace.machines`, the queue, the pack as
+`bins,int16` through the proxy, the pair cache left), on the same hosts at
+the rates they billed: scene A 6.2 h and 8.6 USD, of which the solves 5.2 h
+and the fetch 40 minutes and 0.91 USD; scene B 5.3 h and 4.3 USD. Against
+the runs as they ran, without their failures and with the pack as samples:
+8.2 h and 11.3 USD for scene A, 7.1 h and 5.6 USD for scene B. No run has
+yet been made with the queue on a whole scene: the rays a site a card and
+the host's stages under the solves are the two terms that rest on the
+windows of the every card appendix alone.
+
+**What the disk cost.** The rental asked for 219 GB, a field campaign's
+sizing, and the traces used 53 GB (27 GB before the pack, 24.5 GB of
+pack). At what these two hosts ask for storage that is 0.10 and 0.25 USD
+an hour: 0.83 and 1.75 USD, the largest single difference on scene B. The
+offers are now priced with their disk; sizing the disk for a trace is not
+done.
 
 ## The command for the whole scene
 

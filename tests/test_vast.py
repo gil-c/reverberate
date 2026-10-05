@@ -573,3 +573,103 @@ class TestRentOne:
                 image="img",
                 remaining_usd=8.0,
             )
+
+
+# --------------------------------------------------------------------------
+# a way round the proxy
+# --------------------------------------------------------------------------
+
+
+class TestDirectSsh:
+    """A pack came home at 2 MB/s a stream through the proxy on a line that carries 17 to 70."""
+
+    RAW: dict[str, Any] = {
+        "id": 54262814,
+        "actual_status": "running",
+        "dph_total": 1.382,
+        "ssh_host": "ssh5.vast.ai",
+        "ssh_port": 22814,
+        "gpu_name": "RTX 3090",
+        "start_date": 1000.0,
+        "public_ipaddr": "203.0.113.7 ",
+        "ports": {"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40022"}]},
+    }
+
+    def test_an_instance_says_its_own_address_where_its_port_22_is_mapped(self) -> None:
+        from reverberate.wave.remote import Machine
+
+        instance = Instance.from_api(self.RAW)
+        assert instance.direct == ("203.0.113.7", 40022)
+        assert (instance.ssh_host, instance.ssh_port) == ("ssh5.vast.ai", 22814)
+        # Commands go through the proxy; the transfers are given the other way to try.
+        machine = Machine.from_instance(instance, identity=Path("/keys/id"))
+        assert (machine.host, machine.port) == ("ssh5.vast.ai", 22814)
+        direct = machine.directly()
+        assert direct is not None and (direct.host, direct.port) == ("203.0.113.7", 40022)
+        assert direct.identity == Path("/keys/id") and direct.directly() is None
+        # Created as every instance so far was, or not up yet: the proxy is the only way.
+        absent: tuple[dict[str, Any], ...] = (
+            {"ports": None},
+            {"ports": {}},
+            {"ports": {"22/tcp": []}},
+            {"ports": {"22/tcp": [{"HostPort": "x"}]}},
+            {"public_ipaddr": ""},
+        )
+        for missing in absent:
+            held = Instance.from_api({**self.RAW, **missing})
+            assert held.direct is None and Machine.from_instance(held).directly() is None
+
+    def test_an_instance_is_asked_for_with_direct_ssh_and_again_without_where_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(vast.API_KEY_ENV, "k")
+        sent: list[dict[str, Any]] = []
+        refuse: list[int | None] = []
+
+        def request(self: Any, method: str, path: str, body: Any = None, **kw: Any) -> Any:
+            sent.append(dict(body))
+            if refuse and body["runtype"] == vast.RUNTYPE_DIRECT:
+                raise VastError("PUT /asks/5/ failed: HTTP error", refuse[0])
+            return {"success": True, "new_contract": 77}
+
+        monkeypatch.setattr(vast.VastClient, "request", request)
+        client = vast.VastClient()
+        assert client.create(5, image="img") == 77
+        assert sent[-1]["runtype"] == "ssh_direc ssh_proxy" and not client.direct_refused
+        assert client.create(5, image="img", direct=False) == 77 and sent[-1]["runtype"] == "ssh"
+        # Refused as malformed: asked again as it always was, and said.
+        refuse.append(400)
+        sent.clear()
+        assert client.create(5, image="img") == 77
+        assert [body["runtype"] for body in sent] == ["ssh_direc ssh_proxy", "ssh"]
+        assert client.direct_refused
+        # Any other refusal is the offer's, and is not asked twice.
+        refuse[0] = 404
+        sent.clear()
+        with pytest.raises(VastError):
+            client.create(5, image="img")
+        assert len(sent) == 1
+
+    def test_an_offer_says_what_its_line_sends(self) -> None:
+        raw = {"id": 1, "inet_up": 812.5, "inet_down": 900.0, "geolocation": "Czechia, CZ"}
+        offer = Offer.from_api(raw)
+        assert offer.inet_up_mbps == 812.5 and offer.location == "Czechia, CZ"
+        assert Offer.from_api({"id": 1}).inet_up_mbps == 0.0
+        # And what its disk costs: an offer's hour is priced with 5 GB, a rental with its own.
+        dear = Offer.from_api({"id": 1, "dph_total": 0.543, "storage_cost": 0.85})
+        assert dear.billed_dph(219.0) == pytest.approx(0.543 + 0.85 * 214.0 / 730.0)
+        assert dear.billed_dph(219.0) == pytest.approx(0.79, abs=0.01)
+        assert dear.billed_dph(5.0) == dear.billed_dph(1.0) == 0.543
+        assert Offer.from_api({"id": 1, "dph_total": 0.5}).billed_dph(500.0) == 0.5
+
+    def test_a_resumed_rental_s_watchdog_is_read_in_the_ledger(self) -> None:
+        entries = [
+            {"event": "rent", "instance_id": 7, "at": "2026-10-05T05:35:30Z", "hours": 14.82},
+            {"event": "rent", "instance_id": 8, "at": "2026-10-05T06:00:00Z", "hours": 2.0},
+            {"event": "teardown", "instance_id": 8},
+        ]
+        deadline = vast.deadline_of(7, entries)
+        assert deadline is not None
+        assert time.strftime("%H:%M", time.gmtime(deadline)) == "20:24"
+        assert vast.deadline_of(9, entries) is None
+        assert vast.deadline_of(7, [{"event": "rent", "instance_id": 7, "at": "?"}]) is None

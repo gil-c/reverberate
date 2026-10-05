@@ -362,7 +362,8 @@ with the lead.
   `encode` takes a cached pair as it is (`top_hz` 1500, the solve's own
   limit, in place of the crossover's 1414), which is what would make the
   way home seven times shorter; that is the pair cache's file, another
-  lot's.
+  lot's. (Lot L15a placed the hook, `--low-levers`, and built the cache's
+  file: with `top_hz` 2000, see the last section.)
 
 ## What the data cannot settle
 
@@ -386,3 +387,20 @@ with the lead.
 5. **A pair cache kept this way.** The cache holds a pair before its masks
    and its air; the form applies to it as it is, and was measured on the
    stored form only.
+
+   **Measured since (lot L15a), and built.** Not with `top_hz` 1500. A
+   cached pair of the first scene holds 45 dB under its energy above
+   1500 Hz in the median and 32 dB in the worst of forty; `low/ir` is cut
+   from it in time, by the onset's window, before its masks, so what is
+   dropped above 1500 Hz comes back under 1414 Hz: with the bins cut at
+   1500 Hz the stored response differs from the plain pair's by -48 dB of
+   its energy in the worst pair, -46 dB in its worst third octave, and one
+   onset moved by a sample. With every bin to the cache form's 2 kHz
+   (2400 bins a channel, 621 kB a pair, a factor of 1.98 and not 2.64) it
+   differs by -88 dB, -83 dB in the worst third octave of sixty pairs, and
+   no onset moves; channel 0 alone, which the levelling reads, by -75 dB at
+   the worst. That is the form `accel.pairs.PairCache` writes where a
+   trace's bundle says so (`bins,int16`, never the decay or the degree: a
+   cache serves every pack of its dwelling), 5 ms a pair to write and 2 ms
+   to read on the laptop's core, 0.3 ms for channel 0. **Not yet run on a
+   machine.**

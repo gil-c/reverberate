@@ -19,6 +19,7 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -35,6 +36,7 @@ from reverberate.mirror.pipeline import MirrorSettings
 from reverberate.mirror.pipeline import trace as trace_lattice
 from reverberate.mirror.rays import RaySettings
 from reverberate.mirror.render import render_point
+from reverberate.render.compact import CompactIr
 from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.pack import read_pack
 from reverberate.scenes import (
@@ -61,8 +63,16 @@ from reverberate.spatial.translate import (
 from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
 from reverberate.trace.bundle import build_bundle
 from reverberate.trace.cli import main
-from reverberate.trace.driver import cost_records, describe, finish, launch, stamp_cost
-from reverberate.trace.engines import CardPairs, FreeFieldPairs
+from reverberate.trace.driver import (
+    cost_records,
+    describe,
+    finish,
+    launch,
+    machine_holds,
+    resume_command,
+    stamp_cost,
+)
+from reverberate.trace.engines import CardPairs, FreeFieldPairs, cache_levers
 from reverberate.trace.level import pair_low
 from reverberate.trace.plan import (
     ORIGIN_DENSE,
@@ -224,12 +234,18 @@ def resting_recipe() -> Recipe:
 
 
 def traced(
-    tmp: Path, recipe: Recipe, *, rays: int = 120, **engine: Any
+    tmp: Path, recipe: Recipe, *, rays: int = 120, low_levers: str | None = None, **engine: Any
 ) -> tuple[Trace, FreeFieldPairs, Plan]:
-    """The bundle of ``recipe`` and its trace, not yet run, on the free field engine."""
+    """The bundle of ``recipe`` and its trace, not yet run, on the free field engine.
+
+    ``low_levers`` is the bundle's: left out, the form a trace writes by
+    default, the bins in 16 bits, in the pack and in the pair cache.
+    """
     held = assets(rays)
     plan = make_plan(recipe, held.triangles)
-    build_bundle(tmp / "bundle", recipe, held, plan, allow_asset_mismatch=True)
+    build_bundle(
+        tmp / "bundle", recipe, held, plan, allow_asset_mismatch=True, low_levers=low_levers
+    )
     # The cache form: on the geometric clock and on the field's scale.
     pairs = FreeFieldPairs(
         plan.tracks.positions,
@@ -237,6 +253,8 @@ def traced(
         tmp / "out",
         **{"gain": FIELD_UNIT_AT_1M, **engine},
     )
+    # As the machine's command does: the form the pairs are kept in is the bundle's.
+    pairs.cache.levers = cache_levers(tmp / "bundle")
     trace = Trace(
         bundle=tmp / "bundle",
         out=tmp / "out",
@@ -755,6 +773,15 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert campaign["estimate"]["low_engine"] == "lowband"
     assert campaign["estimate"]["measured_on"] == "1 x RTX 3080 20 GB"
     assert not (tmp_path / "b" / "pairs").exists()
+    # The form the machine writes the pack in: the bins in 16 bits unless told, and said.
+    assert campaign["trace"]["low_levers"] == "bins,int16"
+    assert campaign["estimate"]["low_levers"] == "bins,int16"
+    assert "the pack's low band is written as bins,int16 (--low-levers)" in capsys.readouterr().out
+    assert main([*arguments, "--mirror", str(tmp_path / "mirror"), "--low-levers", "none"]) == 0
+    campaign = json.loads((tmp_path / "b" / "campaign.json").read_text())
+    assert campaign["trace"]["low_levers"] == "none" and "pair_cache" not in campaign["trace"]
+    assert "low_levers" not in campaign["estimate"]
+    assert "written as low/ir, the samples" in capsys.readouterr().out
     assert sorted(p.name for p in (tmp_path / "b" / "trace").iterdir()) == [
         "mirror",
         "plan.json",
@@ -765,6 +792,55 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     # A rental needs the storey's export, and says so before it asks for a machine.
     with pytest.raises(SystemExit, match="export"):
         launch(recipe, assets(), tmp_path / "h", say=lambda _: None)
+
+
+def test_a_run_left_on_its_machine_is_told_how_to_resume_and_what_the_machine_holds() -> None:
+    """Two scenes ended ``campaign.failed`` after their solves and the driver said one line."""
+    words = ["rent", "--recipe", "R with space.json", "--home", "H", "--mirror", "M"]
+    words += ["--gpus", "8", "--yes", "--max-hours", "10", "--instance", "7", "--plan-offers"]
+    # The same words, without what rents, on the instance the last line names.
+    assert resume_command(words) == (
+        "python -m reverberate.trace rent --recipe 'R with space.json' --home H --mirror M"
+        " --gpus 8 --max-hours 10 --instance {instance}"
+    )
+    asked: list[str] = []
+
+    def machine(answer: str) -> Any:
+        def run_on(_: Any, command: str, *, what: str, timeout: Any = None) -> str:
+            asked.append(command)
+            return answer
+
+        return run_on
+
+    # Scene A as it stood: every pair solved and levelled, no pack, stopped by the check.
+    lines = machine_holds(
+        "m",
+        {"pairs": 16887},
+        run_on=machine(
+            "pairs 18219\nearly 15\ntails 848\nlevel 18219\nrows 0\npack 0\n"
+            'failed RuntimeError("the low band and the mirror are not on one clock")\n'
+        ),
+    )
+    assert "/root/campaign/out" in asked[0] and "campaign.failed" in asked[0]
+    assert lines[0] == (
+        "on the machine: 18219 pairs solved (the plan counts 16887), 15 early tables,"
+        " 848 histograms, 18219 pairs levelled, 0 blocks of the pack's rows, no pack"
+    )
+    assert lines[1].startswith("a resume keeps all of it and makes again: the pack's write")
+    assert "solves" not in lines[1] and "not on one clock" in lines[2]
+    # A machine that died in its solves: what is missing is what a resume pays for.
+    lines = machine_holds(
+        "m", {"pairs": 16887}, run_on=machine("pairs 7831\nearly 0\ntails 0\nlevel 0\npack 0\n")
+    )
+    assert "the solves of about 9056 pairs; the early trace; the rays; the levelling" in lines[1]
+    assert len(lines) == 2
+    # Done, its pack on it: nothing but the fetch.
+    lines = machine_holds(
+        "m",
+        {"pairs": 4},
+        run_on=machine("pairs 4\nearly 3\ntails 9\nlevel 4\nrows 1\npack 9508553242\n"),
+    )
+    assert "a pack of 9.51 GB" in lines[0] and "nothing but the fetch" in lines[1]
 
 
 def test_the_cost_records_carry_the_rate_and_are_stamped_into_the_pack(tmp_path: Path) -> None:
@@ -1033,6 +1109,15 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     # The machine is told its engine, the pairs come home as the run lasts, the early
     # tables stay, and the offers are priced for this plan.
     assert seen["campaign_args"] == "--low-engine lowband" and seen["sync"] == ("pairs",)
+    # The driver is given what its last lines say of a machine it leaves rented.
+    assert seen["resume_command"] == "" and callable(seen["inventory"])
+    priced = seen["predict"](
+        SimpleNamespace(
+            gpu_name="RTX 3090", num_gpus=4, gpu_ram_gb=24.0, dph_total=0.8, cpu_cores=36.0
+        )
+    )
+    assert priced["queue"] and priced["seconds"]["transfer_pack"] > 0
+    assert campaign["trace"]["low_levers"] == "bins,int16"
     assert (
         seen["leave"] == ()
         and seen["also"] == ()
@@ -1134,7 +1219,8 @@ def test_the_low_band_is_written_a_pair_at_a_time_and_the_file_is_the_same(
         for source in pack.sources.values():
             assert source.low is not None
             ir = source.low.ir
-            assert ir.dtype == np.float32 and ir.chunks is None
+            # The default form: the bins in 16 bits, 78 dB under the response and more.
+            assert isinstance(ir, CompactIr) and ir.dtype == np.float32
             for row, key in enumerate(source.low.pair_key):
                 want = pair_low(
                     cache.read(key.decode()),
@@ -1144,7 +1230,7 @@ def test_the_low_band_is_written_a_pair_at_a_time_and_the_file_is_the_same(
                     lead_s=held.pack_lead_s,
                     unit_at_1m=FIELD_UNIT_AT_1M,
                 )[0]
-                assert np.array_equal(ir[row], np.asarray(want, dtype=np.float32))
+                assert np.abs(ir[row] - want).max() < 2e-4 * np.abs(want).max()
                 rows += 1
     assert rows > 0
     # The file: a table handed over a row at a time is, byte for byte, the table handed whole.
@@ -1167,6 +1253,111 @@ def test_the_low_band_is_written_a_pair_at_a_time_and_the_file_is_the_same(
     assert asked == list(range(7)), "each row asked once, in order: one pair is all that is held"
     with pytest.raises(ValueError, match="a row of"):
         PairRows((7, 64, 48), lambda index: table[index, :3])[0]
+
+
+def test_the_pack_and_the_pair_cache_are_compact_unless_told_and_say_which(
+    tmp_path: Path,
+) -> None:
+    """``--low-levers``: the bins in 16 bits by default, ``none`` for the samples as before."""
+    held = assets()
+    made: dict[str, Any] = {}
+    for name, levers in (("compact", None), ("plain", "none"), ("decay", "bins,int16,decay=60")):
+        trace, pairs, _ = traced(tmp_path / name, resting_recipe(), rays=16, low_levers=levers)
+        trace.check_mode = "read"
+        trace.run()
+        told = json.loads((tmp_path / name / "bundle" / "campaign.json").read_text())["trace"]
+        files = sorted(p.suffix for p in (tmp_path / name / "out" / "pairs").rglob("*.np[yz]"))
+        with read_pack(tmp_path / name / "out" / "pack.h5") as pack:
+            (source,) = pack.sources.values()
+            assert source.low is not None
+            made[name] = {
+                "told": told,
+                "files": set(files),
+                "ir": np.asarray(source.low.ir[:]),
+                "compact": isinstance(source.low.ir, CompactIr),
+                "provenance": pack.header.provenance,
+                "keys": [key.decode() for key in source.low.pair_key],
+                "bytes": (tmp_path / name / "out" / "pack.h5").stat().st_size,
+                "cache": pairs.cache,
+            }
+    compact, plain, decay = made["compact"], made["plain"], made["decay"]
+    # The bundle says the form, the machine writes it, the pack's provenance repeats it.
+    assert compact["told"]["low_levers"] == "bins,int16"
+    assert compact["told"]["pair_cache"] == "bins,int16"
+    assert compact["compact"] and compact["files"] == {".npz"}
+    assert compact["provenance"]["low_levers"]["sample"] == "int16"
+    assert compact["provenance"]["pair_cache"] == "bins,int16"
+    # ``none``: ``low/ir`` and a cache of samples, and a provenance that names no lever.
+    assert plain["told"]["low_levers"] == "none" and "pair_cache" not in plain["told"]
+    assert not plain["compact"] and plain["files"] == {".npy"}
+    assert "low_levers" not in plain["provenance"] and "pair_cache" not in plain["provenance"]
+    cache = plain["cache"]
+    for row, key in enumerate(plain["keys"]):
+        want = pair_low(
+            cache.read(key),
+            Crossover(),
+            Atmosphere(),
+            sound_speed_m_s=held.settings.sound_speed_m_s,
+            lead_s=held.pack_lead_s,
+            unit_at_1m=FIELD_UNIT_AT_1M,
+        )[0]
+        assert np.array_equal(plain["ir"][row], np.asarray(want, dtype=np.float32))
+    # One trace heard both ways: 70 dB and more under the response, in half the bytes.
+    assert compact["keys"] == plain["keys"]
+    error = np.abs(compact["ir"] - plain["ir"]).max() / np.abs(plain["ir"]).max()
+    assert error < 3e-4, error
+    assert compact["bytes"] < 0.6 * plain["bytes"]
+    # A pack's own levers never reach the cache, which serves every pack of its dwelling.
+    assert decay["told"]["low_levers"] == "bins,int16,decay=60"
+    assert decay["told"]["pair_cache"] == "bins,int16"
+    assert decay["provenance"]["low_levers"]["decay_db"] == 60.0
+    with pytest.raises(ValueError, match="keeps every degree whole"):
+        PairCache(tmp_path / "c", "grid", levers="bins,decay=60")
+
+
+def test_a_pair_cache_reads_both_forms_and_a_compact_pair_is_the_pair(tmp_path: Path) -> None:
+    source, cell = np.array([[0.6, 1.5, 0.8]]), np.array([[2.9, 1.6, 1.3]])
+    response = FreeFieldPairs(source, cell, tmp_path / "ff", gain=FIELD_UNIT_AT_1M).response(0, 0)
+    plain = PairCache(tmp_path / "cache", "grid")
+    compact = PairCache(tmp_path / "cache", "grid", levers="bins,int16")
+    plain.write("aa" + "0" * 62, response, {"solver": "s"})
+    compact.write("bb" + "0" * 62, response, {"solver": "s"})
+    assert plain.path("aa" + "0" * 62).suffix == ".npy"
+    assert compact.path("bb" + "0" * 62).suffix == ".npz"
+    # Either cache reads either pair: the form is the file's, not the reader's.
+    for cache in (plain, compact):
+        assert cache.has("aa" + "0" * 62) and cache.has("bb" + "0" * 62)
+        assert np.array_equal(cache.read("aa" + "0" * 62), response)
+        back = cache.read("bb" + "0" * 62)
+        assert back.shape == response.shape and back.dtype == np.float32
+        assert np.abs(back - response).max() < 1e-4 * np.abs(response).max()
+        for key in ("aa" + "0" * 62, "bb" + "0" * 62):
+            first = cache.first_channel(key)
+            assert first.shape == (1, response.shape[1])
+            assert np.array_equal(first[0], cache.read(key)[0])
+    assert (
+        compact.path("bb" + "0" * 62).stat().st_size
+        < 0.52 * plain.path("aa" + "0" * 62).stat().st_size
+    )
+    # Into the pack's stored form, the compact pair is the plain one to 80 dB.
+    stored = [
+        pair_low(
+            cache.read(key),
+            Crossover(),
+            Atmosphere(),
+            sound_speed_m_s=C,
+            lead_s=512 / FS,
+            unit_at_1m=FIELD_UNIT_AT_1M,
+        )
+        for cache, key in ((plain, "aa" + "0" * 62), (compact, "bb" + "0" * 62))
+    ]
+    assert stored[0][1] == stored[1][1], "the onset did not move"
+    assert np.abs(stored[0][0] - stored[1][0]).max() < 1e-4 * np.abs(stored[0][0]).max()
+    # A pair goes from cache to cache in the form it is in, and is installed so.
+    other = PairCache(tmp_path / "other", "grid")
+    other.adopt("bb" + "0" * 62, compact.path("bb" + "0" * 62), {"solver": "s"})
+    assert other.path("bb" + "0" * 62).suffix == ".npz"
+    assert other.records()["bb" + "0" * 62]["solver"] == "s"
 
 
 def test_another_low_grid_reuses_the_sources_early_tables_and_differs_by_one_key_alone(

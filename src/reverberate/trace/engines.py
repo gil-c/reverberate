@@ -25,7 +25,14 @@ from reverberate.spatial.field import monopole_coefficients
 from reverberate.spatial.lowband import LOW_RATE_HZ, LOW_SAMPLES, pair_key
 from reverberate.spatial.sh import degrees_of, scene_to_ambisonic
 
-__all__ = ["BatchedPairs", "CardPairs", "FreeFieldPairs", "PairsEngine", "build_engine"]
+__all__ = [
+    "BatchedPairs",
+    "CardPairs",
+    "FreeFieldPairs",
+    "PairsEngine",
+    "build_engine",
+    "cache_levers",
+]
 
 
 def build_engine(
@@ -42,6 +49,37 @@ def build_engine(
     worker's process builds the engine the run's own process built, from
     the same files, and nothing of it crosses a pipe.
     """
+    engine = _engine(told, bundle, out, gpu=gpu, pffdtd_dir=pffdtd_dir)
+    # The form the run's pairs are written in is the bundle's, in every process of the run.
+    engine.cache.levers = cache_levers(bundle)
+    return engine
+
+
+def cache_levers(bundle: Path) -> str | None:
+    """The form a bundle's run keeps its pair cache in (``trace.pair_cache``); ``None``: samples.
+
+    A bundle that does not say, one made before the cache had a compact
+    form, keeps the samples.
+    """
+    import json
+
+    from reverberate.accel.pairs import _cache_levers
+
+    spec = Path(bundle) / "campaign.json"
+    if not spec.is_file():
+        return None
+    told = dict(json.loads(spec.read_text()).get("trace") or {}).get("pair_cache")
+    return _cache_levers(str(told)) if told else None
+
+
+def _engine(
+    told: dict[str, Any],
+    bundle: Path,
+    out: Path,
+    *,
+    gpu: bool | None = None,
+    pffdtd_dir: Path | str = Path("/root/pffdtd"),
+) -> Any:
     kind = str(told.get("kind", "pffdtd"))
     if kind == "free-field":
         from reverberate.spatial.lowband import FIELD_UNIT_AT_1M

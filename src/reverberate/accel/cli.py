@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
             engine = None
             if args.low_engine == "lowband":
-                from reverberate.trace.engines import BatchedPairs
+                from reverberate.trace.engines import BatchedPairs, cache_levers
 
                 engine = BatchedPairs(
                     args.bundle / "pairs",
@@ -167,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
                     ppw=args.low_ppw,
                     batch=args.low_batch,
                 )
+                # The form the pairs are kept in is the bundle's, here as in every worker.
+                if getattr(engine, "cache", None) is not None:
+                    engine.cache.levers = cache_levers(args.bundle)
             run_trace(
                 args.bundle,
                 args.out,

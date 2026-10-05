@@ -16,6 +16,10 @@ between them:
 - :mod:`.level`: the three scalars nothing else computes, ``low/seam_db``,
   ``level/high_gain_db`` and ``level/onset_s``, which make the pack at rest
   the hybrid of :mod:`reverberate.mirror.hybrid`;
+- :mod:`.clock`: whether the two bands are on one clock and one scale, read
+  on each pair where the mirror puts its direct sound;
+- :mod:`.machines`: what a trace takes on an offered machine, its fetch
+  included, and what a run took against it;
 - :mod:`.assets`: the mirror of a dwelling as a trace reads it, and the
   recipe's asset keys;
 - :mod:`.engines`: where the pairs come from, the card's campaign or a
