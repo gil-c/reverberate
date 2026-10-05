@@ -55,6 +55,8 @@ HOME_ITEMS = (
     "pack.h5",
     "trace_report.json",
     "level.jsonl",
+    # What that pack was computed on (:mod:`reverberate.trace.computed`): the audit draws it.
+    "as_computed.npz",
 )
 
 
