@@ -14,7 +14,7 @@ typecheck:
 	mypy src tests
 
 test:
-	pytest --cov --cov-report=term-missing
+	pytest --cov --cov-report=term-missing --durations=40
 
 # The tests that need the HSSD download, excluded from the default run and from
 # CI because neither has it. They pin the room rules of ADR 0010 against the
