@@ -17,6 +17,7 @@ own choices, and two threads at once. ``verify`` stays the last word.
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import functools
 import hashlib
@@ -104,6 +105,7 @@ extern "C" void run_{name}(int grid_x, int grid_y, int threads, {declared})
         raise RuntimeError("no C++ compiler on this host")
     digest = hashlib.sha256((source + name).encode()).hexdigest()[:16]
     work = Path(tempfile.mkdtemp(prefix="lowband-hostkernel-"))
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
     text = work / f"{name}-{digest}.cpp"
     built = work / f"{name}-{digest}.so"
     text.write_text(_PREAMBLE + source + driver)
