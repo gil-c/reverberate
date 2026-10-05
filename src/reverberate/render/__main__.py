@@ -1,4 +1,4 @@
-"""``python -m reverberate.render``: time the engine, validate, compact or check a pack."""
+"""``python -m reverberate.render``: time the engine, validate, compact, relevel or check a pack."""
 
 from __future__ import annotations
 
@@ -42,6 +42,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     sealed = commands.add_parser("unseal", help="which variant each file of a blind set is")
     sealed.add_argument("key", type=Path, help="blind/key.sealed of a check of several packs")
+    level = commands.add_parser(
+        "relevel",
+        help="steady a pack's levelling scalar along what moves, IN PLACE; the trace's own "
+        "table is kept in the pack and --undo puts it back",
+    )
+    level.add_argument("pack", type=Path)
+    level.add_argument(
+        "--seconds", type=float, default=2.0, help="averaged over this long either side"
+    )
+    level.add_argument("--undo", action="store_true", help="put the trace's table back")
     sound = commands.add_parser("check", help="check a rendered scene's sound by measurement")
     sound.add_argument("pack", type=Path)
     sound.add_argument(
@@ -100,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.render.compact import Levers, compact_pack
 
         print(json.dumps(compact_pack(args.pack, args.out, Levers.parse(args.levers), say=print)))
+    elif args.command == "relevel":
+        from reverberate.render.relevel import relevel_pack
+
+        print(json.dumps(relevel_pack(args.pack, seconds=args.seconds, undo=args.undo), indent=1))
     elif args.command == "unseal":
         from reverberate.render.check.many import unseal
 

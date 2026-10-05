@@ -303,7 +303,7 @@ The responses, deduplicated:
 | `pair_cell` | int32 | `[pair]` | row of `/cells` |
 | `pair_key` | bytes, 64 | `[pair]` | the pair's key in the dwelling's cache |
 | `seam_db` | float32 | `[pair]` | `mirror.hybrid.seam_db` between the pair's wave response and the mirror rendered at the same pair, omnidirectional, before any levelling, both on the field's scale |
-| `onset_s` | float64 | `[pair]` | time of the loudest sample of channel 0 of the wave response at 48 kHz, on the pack's clock: for a pair with a direct path, its `d / c` plus `lead_s` |
+| `onset_s` | float64 | `[pair]` | where the pair's two bands are joined in pressure, on the pack's clock: the time of the response's own direct sound, `d / c` plus `lead_s` to what the solver's pulse trails by, and of its loudest sample where it holds no direct sound (below) |
 
 Both are read as `mirror.hybrid.blend` reads them, on the wave response
 **with its air and before its masks** (`spatial.lowband.with_air` of the
@@ -733,8 +733,8 @@ direct sound is then the signature's gain (+2.1 to +2.8 dB from 700 Hz to
 the validated field of hssd_0076 holds at 2.3 dB in the median (0.9 to
 4.1 from its first to its last decile): within 1 dB of `1 / d` in the
 median and as far from it as the pair's seam is from the median.
-`onset_s` is the step's smallest `delay_s` plus what the wave response's
-loudest sample trails the mirror's first arrival by, `lead_s` included:
+`onset_s` is the step's smallest `delay_s` plus what the anchor of the wave
+response trails the mirror's first arrival by, `lead_s` included:
 each pair's `low/onset_s` less the smallest delay of the mirror's paths at
 that pair
 (the direct path's where there is one, the diffracted onset's where the
@@ -742,6 +742,48 @@ pair is shadowed, the straight line's where the mirror finds nothing),
 under the same weighting. Neither is interpolated between steps on its own:
 each is read at the step and enters the path's gain there (see `early`),
 and the tail's.
+
+**Along a walk `high_gain_db` may be steadied**, an option that is off
+(`reverberate.render.relevel.steadied`): within every run of audible steps
+it is then the step's seam averaged, in decibels, under a raised cosine 2 s
+either side, and a source at rest before a head at rest keeps its pair's
+seam to the bit. Each pair is levelled on its own and the seams of two
+pairs 8 cm apart are not neighbours (+0.4 dB at the first decile of the
+first whole scene's 18 219 pairs, +3.4 dB at the ninth): a step's own seam
+made everything above the crossover of a walking source, or of a source the
+head walked past, go up and down by 1.7 to 2.4 dB within half a second in
+the top tenth of such half seconds and by 5 to 8 dB within a second at the
+worst. Steadied, the same tables move by 0.3 to 0.5 dB and by 1.2 to 3.6 dB.
+The trace writes each step's own seam;
+`python -m reverberate.render relevel PACK` steadies a pack's tables **in
+place**, keeps the trace's as `level/high_gain_db_traced` (a dataset a
+reader ignores) and `--undo` puts them back. `low/seam_db` is each pair's
+own, always. Nothing is decided: the owner hears a pack both ways first
+(`docs/open-questions/first-scene-defects.md`).
+
+**The anchor of a pair** (`reverberate.trace.level.pair_anchor_s`) is its
+own direct sound: the first peak of channel 0, with its air and before its
+masks, within 3 ms of the straight line's time between the pair's source
+position and its cell (`reverberate.trace.clock.read_direct`), where that
+peak is at least a fifth of the response's loudest sample; and the loudest
+sample where the response holds no such peak, a pair in the shadow of a
+wall. `mirror.hybrid.blend` anchors on the loudest sample, "which for a
+point with a direct path is the direct sound itself"; in a dwelling it is
+not. In the first whole scene (2026-10-05, 18 219 pairs, written before this
+rule) the loudest sample of a pair with a direct path came 2.5 ms after its
+direct sound in the median, 10.7 ms at the ninth decile and 51 ms at the
+worst, and which later arrival it was changed between two solved positions
+8 cm apart: over the scene the window of a walking source moved by more
+than 5 ms between two steps 95 to 442 times a source. What that did is
+small and is measured in `docs/open-questions/first-scene-defects.md`: the
+direct sound was inside the window either way, and what lay between it and
+the loudest sample was joined in pressure where it should have been joined
+in power: 0.1 to 1.4 dB missing in the third octave at 1 kHz over the first
+50 ms, on eight pairs 3.9 to 11.5 m apart, and nothing elsewhere. **A row of
+`low/ir` is stored with its masks taken on that anchor**, so a pack written
+before 2026-10-06 keeps the old one in its rows whatever its tables say;
+the anchor needs nothing of the mirror, so a row is still made as soon as
+its pair is solved.
 
 **At rest**, the source on a solved position and the head on a cell, a step
 reads one pair with weight one: `high_gain_db` is
