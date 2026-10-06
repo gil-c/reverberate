@@ -147,7 +147,9 @@ class TestNothingToRemove:
         recovered. It was also the pipeline's one non-deterministic step, since
         whether that decimation stayed closed decided the geometry and the
         answer differs between platforms."""
-        sphere = trimesh.creation.icosphere(subdivisions=4)
+        # Thirty centimetres across, a lamp: carved on the fine pitch and held against
+        # the coarse one, in a seventh of the time the metre across took at 6 mm.
+        sphere = trimesh.creation.icosphere(subdivisions=4, radius=0.15)
         _object_tree(tmp_path, sphere, sphere)
 
         result = _carve_uncached(tmp_path, "abc", sphere)

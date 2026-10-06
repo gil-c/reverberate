@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -672,6 +673,9 @@ def test_the_stems_add_up_to_the_mix_and_the_parts_to_the_stem() -> None:
         engine.render(sources=["s9"])
 
 
+#: What says how many threads the library's products take.
+THREADS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
 _CHILD = """
 import hashlib, sys
 import numpy as np
@@ -693,6 +697,9 @@ def test_two_processes_give_one_output() -> None:
         env={
             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
             "REVERBERATE_ENGINE": "reference",
+            # As many threads in the library's products as here: the CI holds them to one
+            # a process, and a child left to take every core did not write this digest.
+            **{name: os.environ[name] for name in THREADS if name in os.environ},
         },
     )
     assert child.stdout.strip() == here
@@ -828,6 +835,9 @@ def test_the_command_line_states_the_interpolators_error(
     assert printed["1 kHz to 20 kHz"]["error_db"] < -93.0
 
 
+# The benchmark is the tool that measures the engine, not the engine: a second of scene
+# rendered by a process started for it. The full workflow's.
+@pytest.mark.nightly
 def test_the_benchmark_times_processes_side_by_side() -> None:
     report: dict[str, Any] = {
         label: {"early": 0.1, "low": 0.1, "tail": 0.2, "total": 0.4} for label in ("rest", "moving")

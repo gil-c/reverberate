@@ -193,18 +193,83 @@ taken as it is written; the file removed afterwards.
 
 The same bytes whatever the processes and whenever, **on the laptop**:
 the two whole renders have one SHA-256 and the window of a minute has one
-with four processes and with eight. **Not shown on the CI's Linux**: there
-the test that holds a process started afresh to the test's own process
-passed once and failed twice on the digest, with the same code. A first
-guess (a single row or column sent through the library's vector kernels)
-was removed and the test failed again, so that was not it, or not all of
-it. The cause is not known. What is left to try: the flush-to-zero state
-of the threads that a long-lived process and a fresh one do not share
-(single precision reaches 1e-38 where double never reached 1e-308), and
-the count of threads the library's products take. The test holds the two
-to 1e-12 of the peak and its message measures the difference if it is
-more. Until this is closed, "the same bytes" is a property of one
-machine's processes, not of the engine. Neither whole
+with four processes and with eight. **Not on the CI's Linux, and it is not
+rounding.** The test that holds a process started afresh to the test's own
+process (`tests/test_render_fast.py::test_several_processes_write_the_file_one_engine_writes`)
+failed in four of the nine runs of the whole suite that held it between
+its arrival and 2026-10-06, two of them on branches that had not touched
+the engine and were run again until they passed. The test's tolerance is
+as it was, 1e-12 of the peak. It is marked `quarantine`: out of the run a
+pull request waits for, and run three times on every pull request by a job
+of its own that is red when it fails and holds nothing.
+
+What that job measured (lot L27, nine runs of the CI):
+
+- Alone in a process of its own, which then renders for the first time
+  itself, it fails in 18 runs of 31. After the other tests of its file,
+  when only the processes it starts are fresh, in 1 of 5; in the whole
+  suite, the same case, in the 4 of 9 above. So it is not what the tests
+  before it leave behind, and either side of the comparison can be the
+  one that is wrong: whichever renders for the first time.
+- The files differ in 15 to 29 frames of 14 400, all inside one step of
+  2 400 samples, on all 64 channels, by up to 6.6e31 of the peak, and by
+  not a number in two runs. That is memory read after it was given back,
+  not a sum rounded otherwise. The 1.196e-03 of the first report is the
+  same thing on a milder day, and came back to the digit.
+- With `MALLOC_PERTURB_` set, which fills memory as it is given back, it
+  fails in 6 runs of 7 and every frame of a step differs (2 400 of
+  2 400), and nothing else of
+  `tests/test_render_fast.py` or `tests/test_render_engine.py` fails.
+- The parts rendered alone by another fresh process are this process's
+  in most failures, and in two the early part is off by 1e13 and 1e28:
+  it is the early part, and it is a race.
+- The same test with each process it starts having loaded the C text and
+  made the delay table before its engine starts a thread
+  (`test_processes_readied_before_their_threads_write_the_file_one_engine_writes`,
+  which runs after the first and so in a process that has rendered)
+  passed 29 runs of 29, with and without `MALLOC_PERTURB_`. At one
+  failure in five with nothing readied, 29 passes by chance are one in
+  several hundred.
+- It is not that test's alone. Under one process a core every worker is a
+  fresh process, and in the first full run of four workers
+  `tests/test_render_seam.py::test_the_engine_takes_the_level_a_band_and_the_scalar_when_told`
+  failed on two renders of one pack that were not one, 3 337 samples of
+  921 600 apart from frame 57 on, the frames of the list above. Whichever
+  test renders first in a process is exposed, and one that holds its
+  render against nothing does not notice. `tests/conftest.py` now makes
+  the table before any test of a process, which keeps every test out of
+  the way of it and is to go when the defect does. The quarantine's job
+  runs without that file (`--noconftest`), so that its test stays as
+  exposed as it was measured; with it, 6 runs of 6 passed.
+
+The reading, from those and from the text: `render/native.py` makes the
+delay table on first use with no lock (`_table`), and `early_interval`
+gives the loop in C the table's address without keeping the table for the
+length of the call. In a fresh process the first run's intervals are
+rendered by threads, each finds no table and makes one, and the one stored
+last frees the one a loop in C is still reading, which the allocator hands
+to the next request. `_library` has the same shape (it says it has tried
+before it has built), which costs a thread one call through the numpy twin
+and nothing else. An engine with `workers=1`, which is what the mix's
+processes are given, starts no thread and is not exposed; an engine left
+at its default is, in the first run of every fresh process, on any
+machine whose allocator reuses the block at once. The remedy is three
+lines in `render/native.py` (a lock about the two first uses, and the
+table held in a name across the call); it is not made in the lot that
+found it, which was not to touch the engine, and when it is made the mark
+comes off the test. Until then "the same bytes" is a property of an engine
+on one thread or of a process that has rendered before.
+
+One more thing the same lot met, once: in the first run of the CI that
+held the libraries' products to one thread a process (`OMP_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS`), the reference engine's child, started with an
+environment of its own and so left to take four, did not write its
+parent's digest
+(`tests/test_render_engine.py::test_two_processes_give_one_output`, which
+had not failed before). The child is now given its parent's count and
+has passed since. If the count is the cause, as it looks, "the same bytes
+on any machine" needs it said, and no document says it yet.
+Neither whole
 render had the laptop to itself (other agents' jobs, and a photo analysis
 daemon at 180 per cent of a core during the first). The processor time,
 3 471 and 4 065 s, is 3.2 to 3.7 times the 1 100 s one fast core needs
