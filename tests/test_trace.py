@@ -325,6 +325,90 @@ def test_the_plan_is_deterministic_and_no_audible_step_is_without_cells() -> Non
     assert "USD" in text and f"{plan.pairs} pairs" in text
 
 
+def both_walk() -> Recipe:
+    """A second: a voice walks a metre of rail and the head a metre beside it."""
+    rail = {"id": "r", "a": "a", "b": "b", "points": [[0.6, 0.5], [0.6, 1.5]], "pitch_m": 0.08}
+    travel = {
+        "type": "travel",
+        "rail": "r",
+        "from": "a",
+        "to": "b",
+        "profile": "constant",
+        "start_s": 0.0,
+        "end_s": 1.0,
+        "facing": {"mode": "travel"},
+    }
+    return recipe_of(
+        1.0,
+        [station("a", 0.6, 0.5), station("b", 0.6, 1.5)],
+        [source("voice", "near_voice", [travel], 1.0)],
+        [(0.0, (1.6, 1.7, 0.6)), (1.0, (1.6, 1.7, 1.5))],
+        [rail],
+    )
+
+
+def test_the_pairs_are_counted_as_a_machine_makes_them_on_the_grid_s_nodes(tmp_path: Path) -> None:
+    """The first scene planned 16 887 pairs and made 18 219: no array stands on a cell asked."""
+    from reverberate.experiments.run import grid_step
+    from reverberate.spatial.lowband import solve_fmax_hz
+    from reverberate.trace import machines
+    from reverberate.trace.plan import as_made
+
+    recipe, held = both_walk(), assets()
+    plan = make_plan(recipe, held.triangles)
+    grid = plan.record["on_the_grid"]
+    step = grid_step(solve_fmax_hz(), 10.5)
+    assert grid["ppw"] == 10.5 and grid["step_m"] == pytest.approx(0.02179, abs=1e-5)
+    # The plan's own count is the rule on the cells asked, which the head's path passes
+    # through; the machine's is the rule on the centres its arrays got. Here they get the
+    # nearest nodes, and the trace's own stage counts what the plan said it would.
+    stood = np.rint(plan.cells.position / step) * step
+    assert 0.0 < np.linalg.norm(stood - plan.cells.position, axis=1).max() < step
+    trace, pairs, again = traced(tmp_path, recipe, centres=list(stood))
+    trace.assign(pairs.place())
+    assert again.record == plan.record
+    assert trace.report["pairs"]["all"] == grid["pairs"] == 34
+    assert [len(cells) for cells in trace.heard_at] == grid["cells_a_position"]
+    assert plan.pairs == plan.record["pairs"] == 33
+    # No step is exact any more: one is read from a single cell, the others from two.
+    assert plan.record["modes"] == {"exact": 3, "translated": 0, "fused": 18}
+    assert grid["modes"] == {"exact": 0, "translated": 1, "fused": 20}
+    assert grid["cells_without_an_array"] == 0 and grid["fallback_steps"] == 0
+    # What a run is priced by is the grid's count, and the plan says both.
+    seen = as_made(plan.record)
+    assert seen["pairs"] == 34 and seen["pairs_on_the_cells_asked"] == 33
+    assert seen["cells_a_position"] == grid["cells_a_position"] and as_made(seen) is seen
+    priced = estimate(plan, rate_usd_per_hour=0.4, low_levers="bins,int16")
+    assert priced["pairs"] == 34
+    assert priced["pair_cache_gb"] == pytest.approx(34 * 621_446 / 1e9, abs=0.006)
+    told = machines.predict(
+        plan.record, gpu_name="RTX 3090", num_gpus=1, gpu_ram_gb=24.0, dph_total=0.2
+    )
+    assert told is not None and told["work"]["fit_card_s"] == pytest.approx(34 * 0.29, abs=0.1)
+    text = describe(plan, priced)
+    assert f"low band: {plan.record['source_positions']} source positions, 33 pairs" in text
+    assert "on the grid's nodes (10.5 points, 21.8 mm): 34 pairs, the count this run is" in text
+    assert "0 steps stay exact of 3, 20 are fused from two cells for 18" in text
+    # A plan of before this count is priced as it was.
+    earlier = {k: v for k, v in plan.record.items() if k != "on_the_grid"}
+    assert as_made(earlier) is earlier
+    assert estimate(earlier, rate_usd_per_hour=0.4)["pairs"] == 33
+    # Another grid has other nodes, and a ball of twelve of its steps: another count.
+    coarse = make_plan(recipe, held.triangles, low_ppw=7.2).record
+    assert coarse["on_the_grid"]["ppw"] == 7.2 and coarse["on_the_grid"]["pairs"] == 33
+    assert coarse["on_the_grid"]["step_m"] == pytest.approx(0.031778, abs=1e-6)
+    assert coarse["pairs"] == 33 and coarse["modes"] == plan.record["modes"]
+    # The patch is heard from its source on any grid.
+    plain = make_plan(moving_recipe(), held.triangles).record
+    patched = make_plan(moving_recipe(), held.triangles, Profile(patch=True)).record
+    assert (
+        patched["on_the_grid"]["pairs"] - plain["on_the_grid"]["pairs"]
+        == patched["pairs"] - plain["pairs"]
+        == patched["pairs_of_the_patch"]
+        > 0
+    )
+
+
 def beside_the_path(distance_m: float) -> Recipe:
     """The head walks a metre in a second past a voice that stands ``distance_m`` from its path."""
     return recipe_of(

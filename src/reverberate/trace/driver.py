@@ -36,7 +36,14 @@ import h5py
 from reverberate.scenes import Recipe
 from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
 from reverberate.trace.bundle import build_bundle, levers_text
-from reverberate.trace.plan import RAYS_MEASURED, Plan, Profile, estimate, make_plan
+from reverberate.trace.plan import (
+    RAYS_MEASURED,
+    Plan,
+    Profile,
+    as_made,
+    estimate,
+    make_plan,
+)
 
 __all__ = [
     "cost_records",
@@ -84,6 +91,7 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
         f" fused {r['modes']['fused']}",
         f"low band: {r['source_positions']} source positions, {r['pairs']} pairs"
         + (f" ({r['pairs_of_the_patch']} of the patch)" if r["pairs_of_the_patch"] else ""),
+        *_on_the_grid(r),
         f"tail: {r['tail_sites']} sites over {r['tail_cells']} cells",
     ]
     if r["patch"] is not None:
@@ -110,6 +118,21 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
             f" {priced['non_solve_usd']:.3f} USD; check: {priced.get('check')}"
         )
     return "\n".join(lines)
+
+
+def _on_the_grid(record: dict[str, Any]) -> list[str]:
+    """The line that says how many pairs a machine makes of a plan's, and why they differ."""
+    grid = record.get("on_the_grid")
+    if not grid:
+        return []
+    without = int(grid["cells_without_an_array"])
+    return [
+        f"  on the grid's nodes ({grid['ppw']:g} points, {1000.0 * grid['step_m']:.1f} mm):"
+        f" {grid['pairs']} pairs, the count this run is priced by. No array stands on a cell"
+        f" asked: {grid['modes']['exact']} steps stay exact of {record['modes']['exact']},"
+        f" {grid['modes']['fused']} are fused from two cells for {record['modes']['fused']}"
+        + (f"; {without} cell(s) taken to get no array" if without else "")
+    ]
 
 
 #: Flags of ``trace rent`` that a resume does not repeat, and how many words follow each.
@@ -384,7 +407,13 @@ def launch(
     tables (brought home with ``fetch_early``) are not traced again.
     """
     home = Path(home)
-    plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=patch_centre_xz)
+    plan = make_plan(
+        recipe,
+        assets.triangles,
+        profile,
+        patch_centre_xz=patch_centre_xz,
+        low_ppw=low_ppw if low_engine == "lowband" else None,
+    )
     cast = int(assets.settings.rays.rays)
     rays = None if cast == RAYS_MEASURED else cast
     brought = (
@@ -503,7 +532,7 @@ def launch(
         max_hours=max_hours,
         # The offers are priced for the pairs still to solve: what is carried is not paid.
         predict=predictor(
-            _unsolved(plan.record, int(campaign.get("pairs_carried", 0))),
+            _unsolved(as_made(plan.record), int(campaign.get("pairs_carried", 0))),
             fetch_pairs=brought,
             check=check,
             low_engine=low_engine,
@@ -519,7 +548,7 @@ def launch(
         else None,
         resume_command=resume,
         relaunch=relaunch,
-        inventory=lambda machine: machine_holds(machine, plan.record),
+        inventory=lambda machine: machine_holds(machine, as_made(plan.record)),
         sync=("pairs",) if brought else (),
         **({} if sync_s is None else {"sync_s": sync_s}),
         plan_only=plan_offers,

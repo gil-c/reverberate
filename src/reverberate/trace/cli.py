@@ -593,7 +593,13 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.trace.driver import describe
         from reverberate.trace.plan import estimate, make_plan
 
-        plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=centre)
+        plan = make_plan(
+            recipe,
+            assets.triangles,
+            profile,
+            patch_centre_xz=centre,
+            low_ppw=args.low_ppw if args.low_engine == "lowband" else None,
+        )
         priced = estimate(
             plan,
             rate_usd_per_hour=_rate(args),

@@ -356,6 +356,8 @@ def predict(
     card = card_of(gpu_name)
     if card is None or low_engine != "lowband":
         return None
+    # The pairs as a machine makes them, where the plan counted them so.
+    record = plans.as_made(record)
     counts = [int(c) for c in record.get("cells_a_position", [])]
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
     window = batched.MEASURED_DURATION_S if low_seconds is None else float(low_seconds)
