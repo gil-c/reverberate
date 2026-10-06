@@ -29,10 +29,5 @@ jobs:
       - name: Install project
         run: uv pip install --system --compile-bytecode -r requirements-dev.txt
 
-      # One process a core, and the libraries' own pools one thread a process,
-      # as in the CI workflow and for its reason.
       - name: make test-full
-        env:
-          OMP_NUM_THREADS: 1
-          OPENBLAS_NUM_THREADS: 1
-        run: make test-full PYTEST_ADDOPTS="-n auto --dist loadfile"
+        run: make test-full

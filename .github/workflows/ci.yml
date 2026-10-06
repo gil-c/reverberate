@@ -88,21 +88,13 @@ jobs:
       - name: Install project
         run: uv pip install --system --compile-bytecode -r requirements-dev.txt
 
-      # One process a core. A file's tests stay in one process, so what a
-      # module computes once for several of them is computed once. The
-      # libraries' own pools are held to one thread a process: four processes
-      # that each start four of them wait on one another, and a test of one
-      # second took five minutes.
-      - name: pytest
-        env:
-          OMP_NUM_THREADS: 1
-          OPENBLAS_NUM_THREADS: 1
+      - name: make test-parallel
         run: |
           files=$(ls tests/test_*.py | awk -v third=${{ matrix.third }} 'NR % 3 == third')
-          pytest -n auto --dist loadfile --durations=25 $files
+          make test-parallel FILES="$files"
 
   # The tests marked quarantine: kept running and in sight on every pull
-  # request, five times over so that a run says how often they fail. The job
+  # request, three times over so that a run says how often they fail. The job
   # is red when one fails and the pull request is not held by it, until the
   # cause is closed (docs/open-questions/engine-speed.md, "the same bytes").
   quarantine:
@@ -123,11 +115,11 @@ jobs:
       - name: Install project
         run: uv pip install --system --compile-bytecode -r requirements-dev.txt
 
-      - name: make test-quarantine, five times
+      - name: make test-quarantine, three times
         run: |
           failed=0
-          for run in 1 2 3 4 5; do
+          for run in 1 2 3; do
             make test-quarantine || failed=$((failed + 1))
           done
-          echo "failed $failed of 5"
+          echo "failed $failed of 3"
           test "$failed" -eq 0

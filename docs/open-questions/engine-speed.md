@@ -225,6 +225,16 @@ a process of its own):
   (`test_processes_readied_before_their_threads_write_the_file_one_engine_writes`)
   passed 16 runs of 16, with and without `MALLOC_PERTURB_`.
 
+- It is not that test's alone. Under one process a core every worker is a
+  fresh process, and in the first full run of four workers
+  `tests/test_render_seam.py::test_the_engine_takes_the_level_a_band_and_the_scalar_when_told`
+  failed on two renders of one pack that were not one, 3 337 samples of
+  921 600 apart from frame 57 on, the frames of the list above. Whichever
+  test renders first in a process is exposed, and one that holds its
+  render against nothing does not notice. `tests/conftest.py` now makes
+  the table before any test of a process, which keeps every test but the
+  quarantined one out of the way of it and is to go when the defect does.
+
 The reading, from those and from the text: `render/native.py` makes the
 delay table on first use with no lock (`_table`), and `early_interval`
 gives the loop in C the table's address without keeping the table for the
