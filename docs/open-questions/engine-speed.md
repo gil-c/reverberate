@@ -203,10 +203,10 @@ as it was, 1e-12 of the peak. It is marked `quarantine`: out of the run a
 pull request waits for, and run three times on every pull request by a job
 of its own that is red when it fails and holds nothing.
 
-What that job measured (lot L27, eight runs of the CI):
+What that job measured (lot L27, nine runs of the CI):
 
 - Alone in a process of its own, which then renders for the first time
-  itself, it fails in 16 runs of 28. After the other tests of its file,
+  itself, it fails in 18 runs of 31. After the other tests of its file,
   when only the processes it starts are fresh, in 1 of 5; in the whole
   suite, the same case, in the 4 of 9 above. So it is not what the tests
   before it leave behind, and either side of the comparison can be the
