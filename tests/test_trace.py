@@ -1262,12 +1262,21 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     assert seen["campaign_args"] == "--low-engine lowband" and seen["sync"] == ("pairs",)
     # The driver is given what its last lines say of a machine it leaves rented.
     assert seen["resume_command"] == "" and callable(seen["inventory"])
-    priced = seen["predict"](
-        SimpleNamespace(
-            gpu_name="RTX 3090", num_gpus=4, gpu_ram_gb=24.0, dph_total=0.8, cpu_cores=36.0
-        )
-    )
+    card: dict[str, Any] = {"gpu_name": "RTX 3090", "num_gpus": 4, "gpu_ram_gb": 24.0}
+    card |= {"dph_total": 0.8, "cpu_cores": 36.0}
+    priced = seen["predict"](SimpleNamespace(**card))
     assert priced["queue"] and priced["seconds"]["transfer_pack"] > 0
+    # The batched solver opens nothing of PFFDTD: the machine is not made to build it.
+    assert seen["engine_build"] is False and not priced["engine_built"]
+    assert priced["seconds"]["start"] == 290.0
+    assert any(line.startswith("the machine does not build PFFDTD") for line in said)
+    assert not driver_module.needs_engine("lowband")
+    assert not driver_module.needs_engine("lowband", "cartesian", "--host-workers 4")
+    assert driver_module.needs_engine("pffdtd")
+    assert driver_module.needs_engine("lowband", "fcc")
+    # A flag handed to the machine's command overrules the bundle: it is read too.
+    assert driver_module.needs_engine("lowband", "cartesian", "--low-engine pffdtd")
+    assert driver_module.needs_engine("lowband", "cartesian", "--cpu --low-scheme fcc")
     # The disk is the plan's, the bundle as it was built in it, and not a field campaign's.
     sized = result["disk"]
     assert seen["disk_gb"] == sized["disk_gb"] == 24
@@ -1295,6 +1304,22 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     assert carried.has(other) and not carried.has(known) and seen["predict"] is None
     # PFFDTD writes its own outputs: its rental keeps the field campaign's disk.
     assert seen["disk_gb"] is None
+    # And the present engine is built, as is the batched solver's machine when told.
+    assert (
+        seen["engine_build"] is True and "the machine builds PFFDTD: this run asks for it" in said
+    )
+    launch(
+        recipe,
+        held,
+        tmp_path / "home_built",
+        models_from=export,
+        allow_asset_mismatch=True,
+        yes=True,
+        build_engine=True,
+        say=said.append,
+    )
+    assert seen["engine_build"] is True
+    assert seen["predict"](SimpleNamespace(**card))["seconds"]["start"] == 290.0 + 357.0
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)

@@ -220,6 +220,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="a run that failed twice on its machine is fetched and destroyed, not kept",
     )
     p.add_argument("--gpu", default="", help="only cards whose name contains this")
+    p.add_argument(
+        "--build-engine",
+        action="store_true",
+        help="build PFFDTD on the machine even for the batched solver, which opens none of it"
+        " (--low-engine pffdtd and --low-scheme fcc build it without being told)",
+    )
     p.add_argument("--avoid", type=int, nargs="*", default=[], metavar="ID")
     p.add_argument(
         "--line",
@@ -668,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         low_levers=args.low_levers,
         line=args.line,
         relaunch=args.relaunch,
+        build_engine=args.build_engine,
         # The same words again, on the machine this run leaves: what its last lines say.
         resume=resume_command(argv),
     )

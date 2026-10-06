@@ -1165,6 +1165,37 @@ class TestTheChoice:
         assert any("89 GB of disk" in line for line in rental["said"])
         assert all("disk_space>89 " in query for query in rental["client"].searched)
 
+    def test_the_engine_is_built_only_for_a_campaign_that_opens_it(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """PFFDTD was built on every rental, 216 and 498 s, for a solver that never ran it."""
+        built = run(rental)
+        assert "build machine-1" in rental["calls"] and "compiler" not in rental["calls"]
+        assert built["engine_built"] is True and built["outcome"] == "done"
+        assert any(line.startswith("engine built in") for line in rental["said"])
+        rental["calls"].clear()
+        rental["said"].clear()
+        rental["home"] = rental["home"].with_name("home_without")
+        plain = run(rental, engine_build=False)
+        calls = rental["calls"]
+        assert not any(call.startswith("build") for call in calls)
+        # What is left of the build: a C compiler asked for, then the interpreter as before.
+        assert calls.index("compiler") < calls.index("provision") < calls.index("launch")
+        assert plain["engine_built"] is False and plain["outcome"] == "done"
+        assert "engine not built: this campaign's solver does not open it" in rental["said"]
+        assert "command -v cc" in onebox.COMPILER_COMMAND
+        assert "build-essential" in onebox.COMPILER_COMMAND
+        # The prediction follows: the start without the build, and with it where it is asked.
+        on = {"gpu_name": "RTX 3090", "num_gpus": 8, "gpu_ram_gb": 24.0, "dph_total": 1.38}
+        without = machines.predict(RECORD, **on)
+        with_it = machines.predict(RECORD, **on, engine_build=True)
+        before = machines.predict(RECORD, **on, queue=False)
+        assert without is not None and with_it is not None and before is not None
+        assert without["seconds"]["start"] == 290.0 and not without["engine_built"]
+        assert with_it["seconds"]["start"] == before["seconds"]["start"] == 290.0 + 357.0
+        assert with_it["hours"] - without["hours"] == pytest.approx(357.0 / 3600.0, abs=1e-3)
+        assert machines.predictor(RECORD, engine_build=True)(SimpleNamespace(**on))["engine_built"]
+
     def test_the_offers_are_said_and_nothing_is_rented(self, rental: dict[str, Any]) -> None:
         rental["client"].offers = self.offers()
         record = run(

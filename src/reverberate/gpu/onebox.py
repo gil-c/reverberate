@@ -752,11 +752,38 @@ def rent(
     return machine, instance, ranked[len(ranked) - len(good) - 1]
 
 
-def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[str, float]:
-    """The engine built with its patches, the interpreter with cupy, the code, the bundle."""
+#: Where the engine is not built, the one thing of its build a campaign still wants: a C
+#: compiler, for the text the mirror's paths are sieved by. The image is expected to hold
+#: one; where it does not, the packages are installed, and a machine that cannot install
+#: them runs those paths on ``numpy`` and says so.
+COMPILER_COMMAND = (
+    "command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1"
+    " || (apt-get update -qq && apt-get install -y -qq build-essential >/dev/null)"
+    " || echo 'no C compiler could be installed'"
+)
+
+
+def provision_machine(
+    machine: Any, repo: Path, bundle: Path, say: Any, *, engine_build: bool = True
+) -> dict[str, Any]:
+    """The engine built with its patches, the interpreter with cupy, the code, the bundle.
+
+    ``engine_build`` false leaves PFFDTD out: packages, a clone, eight
+    patches, an interpreter of its own and four CUDA binaries, 216 and 498 s
+    on the two hosts of 2026-10-05
+    (``docs/open-questions/performance-audit.md``, section 7). A campaign
+    whose solver is ``wave.lowband`` on its Cartesian grid opens nothing of
+    it; the present engine and the face centred grid's voxeliser do.
+    """
     t0 = time.time()
-    build_s = provision(machine, repo / "scripts" / "build_pffdtd.sh", beside=engine_patches(repo))
-    say(f"engine built in {build_s / 60:.1f} min")
+    if engine_build:
+        build_s = provision(
+            machine, repo / "scripts" / "build_pffdtd.sh", beside=engine_patches(repo)
+        )
+        say(f"engine built in {build_s / 60:.1f} min")
+    else:
+        say("engine not built: this campaign's solver does not open it")
+        run_on(machine, COMPILER_COMMAND, what="compiler", timeout=900)
     run_on(
         machine, f"mkdir -p {REMOTE_SRC} {REMOTE_BUNDLE} {REMOTE_OUT} {REMOTE_DATA}", what="mkdir"
     )
@@ -780,7 +807,7 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
     rsync(machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", download=False)
     push_s = round(time.time() - t0, 1)
     say(f"bundle pushed in {push_s / 60:.1f} min")
-    return {"provision_s": provision_s, "push_s": push_s}
+    return {"provision_s": provision_s, "push_s": push_s, "engine_built": bool(engine_build)}
 
 
 def pairs_home(pulled: Path) -> int:
@@ -1216,8 +1243,12 @@ def run(
     inventory: Callable[[Any], list[str]] | None = None,
     relaunch: bool = False,
     disk_gb: int | None = None,
+    engine_build: bool = True,
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``engine_build`` false provisions the machine without PFFDTD
+    (:func:`provision_machine`): a campaign that does not run it.
 
     ``disk_gb`` is the disk asked of the rental where the caller sizes it
     from its own plan (a trace: :func:`reverberate.trace.machines.disk_need`);
@@ -1336,7 +1367,9 @@ def run(
                 record["avoided"] = sorted(avoided)
                 save()
                 try:
-                    record.update(provision_machine(machine, repo, bundle, say))
+                    record.update(
+                        provision_machine(machine, repo, bundle, say, engine_build=engine_build)
+                    )
                     break
                 except BaseException as error:
                     # A host that cannot be provisioned is not waited for: three rentals

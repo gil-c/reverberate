@@ -51,6 +51,7 @@ __all__ = [
     "finish",
     "launch",
     "machine_holds",
+    "needs_engine",
     "resume_command",
     "stamp_cost",
 ]
@@ -369,6 +370,7 @@ def launch(
     line: str = "proxy",
     resume: str = "",
     relaunch: bool = False,
+    build_engine: bool = False,
 ) -> dict[str, Any]:
     """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
 
@@ -400,6 +402,11 @@ def launch(
     watchdog's ``hours`` is taken from the prediction unless given.
     ``plan_offers`` builds the bundle, says the offers and their
     predictions, and rents nothing.
+
+    **PFFDTD is built on the machine only for a run that opens it**
+    (:func:`needs_engine`): the present engine, the face centred grid,
+    whose voxeliser is PFFDTD's, or ``build_engine``. The default solver's
+    rental starts without those minutes.
 
     ``low_scheme`` and ``low_ppw`` put the low band on another grid, whose
     pairs have their own keys; such a run has its own ``home``.
@@ -531,6 +538,13 @@ def launch(
     flags = f"--low-engine {low_engine}"
     if low_engine == "lowband" and (low_scheme != "cartesian" or low_ppw is not None):
         flags += f" --low-scheme {low_scheme}" + (f" --low-ppw {low_ppw:g}" if low_ppw else "")
+    built = build_engine or needs_engine(low_engine, low_scheme, campaign_args)
+    say(
+        "the machine builds PFFDTD: this run asks for it"
+        if built
+        else "the machine does not build PFFDTD: the batched solver on its Cartesian grid"
+        " opens none of it (--build-engine builds it all the same)"
+    )
     record = onebox.run(
         bundle,
         home,
@@ -560,6 +574,7 @@ def launch(
             rays=rays,
             low_levers=levers,
             line=line,
+            engine_build=built,
             # The disk the rental asks for is billed by the hour with the cards.
             disk_gb=float(sized["disk_gb"]) if sized is not None else _disk_gb(bundle),
         )
@@ -567,6 +582,7 @@ def launch(
         else None,
         resume_command=resume,
         relaunch=relaunch,
+        engine_build=built,
         # Sized from the plan; the present engine's rental keeps a field campaign's disk.
         disk_gb=None if sized is None else int(sized["disk_gb"]),
         inventory=lambda machine: machine_holds(machine, as_made(plan.record)),
@@ -586,6 +602,26 @@ def launch(
     if record.get("left_alive"):
         say(str(record["left_alive"]))
     return result
+
+
+def needs_engine(low_engine: str, low_scheme: str = "cartesian", campaign_args: str = "") -> bool:
+    """Whether a trace opens PFFDTD on its machine, and the rental must therefore build it.
+
+    The batched solver (``wave.lowband``) voxelises its Cartesian grid on
+    the card and steps by its own kernels. The present engine is PFFDTD
+    itself; the face centred grid is voxelised by PFFDTD's Python. A flag
+    handed to the machine's command overrules the bundle, so one that
+    names either asks for the build too.
+    """
+    words = shlex.split(campaign_args or "")
+    told = {
+        words[i]: words[i + 1]
+        for i in range(len(words) - 1)
+        if words[i] in ("--low-engine", "--low-scheme")
+    }
+    engine = told.get("--low-engine", low_engine)
+    scheme = told.get("--low-scheme", low_scheme)
+    return engine != "lowband" or scheme == "fcc"
 
 
 def _tree_gb(directory: Path) -> float:

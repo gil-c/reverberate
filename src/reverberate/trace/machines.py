@@ -6,8 +6,10 @@ pack is home. :func:`predict` prices that whole span on one offer, as the
 trace runs since it is **one queue over every card and every core**
 (``docs/adr/0016-appendix-every-card-every-core.md``):
 
-- **the start**: the instance answering, the engine built, the bundle
-  pushed, then the grid voxelised and the launches planned. No card works;
+- **the start**: the instance answering, the interpreter made, the
+  bundle pushed, and PFFDTD built where the run opens it
+  (:data:`ENGINE_BUILD_S`); then the grid voxelised and the launches
+  planned. No card works;
 - **the solves**, a launch a card: a source position's seconds on this kind
   of card (:data:`SOURCE_S`), a launch's own seconds, a pair's fit, over
   the cards; and **what the cards idle at the end**, half a launch each,
@@ -197,10 +199,16 @@ RAYS_SITE_S = 0.54
 #: are made once a machine (7.4 s on that window of 20 s), under the first solves.
 PATHS_JOB_S = 0.0019
 LEVEL_PAIR_S = 0.025
-#: From the rental to the trace's first line: the instance answering, its cards asked,
-#: the engine built, the interpreter made, the bundle pushed. 8.1 and 13.4 minutes on the
-#: two hosts of 2026-10-05, of which the build and the interpreter were 3.6 and 8.3.
-START_S = 630.0
+#: From the rental to the trace's first line **without the engine's build**: the
+#: instance answering, its cards asked, the interpreter made, the bundle pushed. The two
+#: hosts of 2026-10-05 took 489 and 804 s, their builds of PFFDTD 216 and 498 s of them:
+#: 273 and 306 s (``docs/open-questions/performance-audit.md``, sections 2 and 7, which
+#: counts 170 s of floor: ssh 109, wheels 45, push 15). **No rental has yet started
+#: without the build**: the figure is those two, less what they say the build took.
+START_S = 290.0
+#: What the build adds, for a run that asks for the present engine or for the face
+#: centred grid, whose voxeliser is PFFDTD's: the mean of those two hosts.
+ENGINE_BUILD_S = 357.0
 #: The grid voxelised, the arrays placed and the pairs assigned, before any launch: 108 s
 #: on the validated grid, 240 s at 7.2 points, whose arrays are half as large again.
 PREPARE_S = {10.5: 110.0, 7.2: 240.0}
@@ -418,6 +426,7 @@ def predict(
     launches: int | None = None,
     launch_sources: int | None = None,
     billed_dph: float | None = None,
+    engine_build: bool | None = None,
 ) -> dict[str, Any] | None:
     """Wall hours and USD of a plan's trace on one offer; ``None`` where it cannot be said.
 
@@ -441,6 +450,10 @@ def predict(
     more than once, and the early trace, the levelling and the write one
     after the other in one process. ``launches`` and ``launch_sources`` are
     then what that run's log says it planned.
+
+    ``engine_build`` says whether the rental builds PFFDTD before the
+    trace starts (:data:`ENGINE_BUILD_S`); left out, a run of before the
+    queue did and a run of today does not.
 
     ``None`` for a card with no row in :data:`CARDS`, for a card too small
     to hold one cell's records beside the grid, and for the present engine,
@@ -505,7 +518,9 @@ def predict(
         low = (work["solve_card_s"] + work["fit_card_s"]) / cards + tail
         low += float(REFERENCE["start_s"])
     prepare = PREPARE_S.get(round(ppw, 2), PREPARE_S[10.5])
-    seconds: dict[str, float] = {"start": START_S, "prepare": prepare, "low": low}
+    built = (not queue) if engine_build is None else bool(engine_build)
+    start = START_S + (ENGINE_BUILD_S if built else 0.0)
+    seconds: dict[str, float] = {"start": start, "prepare": prepare, "low": low}
     seconds["rays"] = work["rays_card_s"] / cards
     if queue:
         workers = max(1.0, min(float(cpu_cores) / 2.0, HOST_WORKERS_AT_MOST)) if cpu_cores else 16.0
@@ -523,7 +538,7 @@ def predict(
     home = float(base["pair_cache_gb"]) * 1e9 / rate if fetch_pairs else 0.0
     if synced and fetch_pairs:
         # Brought home while the machine works: only what the run leaves no time for.
-        home = max(0.0, home - (on_machine - START_S))
+        home = max(0.0, home - (on_machine - start))
     seconds["transfer_pairs"] = home
     total = float(sum(seconds.values()))
     billed = float(dph_total if billed_dph is None else billed_dph)
@@ -550,6 +565,7 @@ def predict(
         "line_measured": line_measured,
         "fetch_usd": round((seconds["transfer_pack"] + home) / 3600.0 * billed, 3),
         "queue": bool(queue),
+        "engine_built": built,
     }
 
 
