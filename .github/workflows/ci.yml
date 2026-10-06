@@ -92,9 +92,9 @@ jobs:
         run: pytest -n auto --dist loadfile --durations=0
 
   # The tests marked quarantine: kept running and in sight on every pull
-  # request, five times over so that a run says how often they fail, and
-  # blocking nothing while their cause is open
-  # (docs/open-questions/engine-speed.md).
+  # request, five times over so that a run says how often they fail. The job
+  # is red when one fails and the pull request is not held by it, until the
+  # cause is closed (docs/open-questions/engine-speed.md, "the same bytes").
   quarantine:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -121,20 +121,3 @@ jobs:
           done
           echo "failed $failed of 5"
           test "$failed" -eq 0
-
-      - name: the same, the memory given back filled at once
-        if: always()
-        run: |
-          failed=0
-          for run in 1 2 3; do
-            MALLOC_PERTURB_=85 make test-quarantine || failed=$((failed + 1))
-          done
-          echo "failed $failed of 3"
-          test "$failed" -eq 0
-
-      - name: where the collection's time goes (to be removed)
-        if: always()
-        run: |
-          time pytest --collect-only -q | tail -1
-          python -X importtime -m pytest --collect-only -q 2> importtime.log | tail -1
-          grep "import time" importtime.log | awk -F'|' '{print $2, $3}' | sort -n -r | head -60

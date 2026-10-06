@@ -76,8 +76,11 @@ def test_link_into_exposes_the_file_without_copying_it(tmp_path: Path) -> None:
 
 
 def write_glb(path: Path) -> None:
-    """A real GLB: the manifest now loads colliders to decimate them."""
-    mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    """A real GLB: the manifest now loads colliders to decimate them.
+
+    Thirty centimetres a side: the carve it goes through costs its volume in cells.
+    """
+    mesh = trimesh.creation.box(extents=(0.3, 0.3, 0.3))
     exported = mesh.export(file_type="glb")
     assert isinstance(exported, bytes)
     path.write_bytes(exported)

@@ -88,7 +88,9 @@ def test_rendering_is_deterministic_for_a_seed() -> None:
     tree = grow_tree(scene, SOURCE, IsmSettings(max_order=1))
     paths = paths_for(scene, tree, RECEIVER, IsmSettings(max_order=1))
     settings = RenderSettings(order=1, duration_s=0.3)
-    histogram = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(rays=300, duration_s=0.3))
+    # Sixty rays: the histogram is what the two renders are given, and what is held is
+    # that they are one, which no count of rays changes.
+    histogram = trace(scene, SOURCE, RECEIVER[None, :], RaySettings(rays=60, duration_s=0.3))
 
     def once() -> np.ndarray:
         response, record = render_point(

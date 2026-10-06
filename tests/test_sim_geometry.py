@@ -80,10 +80,14 @@ def test_floor_and_ceiling_get_different_absorption() -> None:
 
 
 def build_object_tree(root: Path) -> int:
-    """A minimal objects tree holding one dense collider."""
+    """A minimal objects tree holding one dense collider, thirty centimetres across.
+
+    The carve's cost goes as the object's volume in cells; a sphere of a metre
+    took 1.6 s of every test that places it and said nothing a lamp does not.
+    """
     directory = root / "objects" / "a"
     directory.mkdir(parents=True)
-    dense = trimesh.creation.icosphere(subdivisions=4)
+    dense = trimesh.creation.icosphere(subdivisions=4, radius=0.15)
     exported = dense.export(file_type="glb")
     assert isinstance(exported, bytes)
     (directory / "abc.glb").write_bytes(exported)

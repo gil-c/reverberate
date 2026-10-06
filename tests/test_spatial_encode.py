@@ -177,7 +177,10 @@ def test_the_filter_does_not_wrap_its_own_pre_ring_onto_the_end_of_the_record() 
     entire tail and sounded like a faint copy half a second late.
     """
     array = an_array()
-    samples = 2048
+    # A quarter of the 2048 samples this was first read on: the last eighth is then at
+    # -116 dB of the first where a circular transform leaves it within a few, and the
+    # fit is a quarter of the frequencies.
+    samples = 512
     pressure = np.zeros((array.count, samples))
     pressure[:, 0] = 1.0
 
