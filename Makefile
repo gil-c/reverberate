@@ -25,7 +25,7 @@ test-full:
 # The tests that do not give one result every run on the CI, kept running and
 # in sight in a job that blocks nothing until their cause is closed.
 test-quarantine:
-	pytest -m quarantine
+	pytest -m quarantine -v
 
 # The tests that need the HSSD download, excluded from the default run and from
 # CI because neither has it. They pin the room rules of ADR 0010 against the

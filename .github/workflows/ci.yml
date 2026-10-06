@@ -81,9 +81,15 @@ jobs:
         run: uv pip install --system -r requirements-dev.txt
 
       # One process a core. A file's tests stay in one process, so what a
-      # module computes once for several of them is computed once.
+      # module computes once for several of them is computed once. The
+      # libraries' own pools are held to one thread a process: four processes
+      # that each start four of them wait on one another, and a test of one
+      # second took five minutes.
       - name: pytest
-        run: pytest -n auto --dist loadfile --durations=25
+        env:
+          OMP_NUM_THREADS: 1
+          OPENBLAS_NUM_THREADS: 1
+        run: pytest -n auto --dist loadfile --durations=40
 
   # The tests marked quarantine: kept running and in sight on every pull
   # request, five times over so that a run says how often they fail, and
@@ -116,16 +122,12 @@ jobs:
           echo "failed $failed of 5"
           test "$failed" -eq 0
 
-      - name: after the tests of its file, five times
+      - name: the same, the memory given back filled at once
         if: always()
         run: |
           failed=0
-          for run in 1 2 3 4 5; do
-            pytest tests/test_render_fast.py -m "quarantine or not quarantine" -q || failed=$((failed + 1))
+          for run in 1 2 3; do
+            MALLOC_PERTURB_=85 make test-quarantine || failed=$((failed + 1))
           done
-          echo "failed $failed of 5"
+          echo "failed $failed of 3"
           test "$failed" -eq 0
-
-      - name: with the memory given and given back filled
-        if: always()
-        run: MALLOC_PERTURB_=85 pytest tests/test_render_fast.py tests/test_render_engine.py -m "quarantine or not quarantine" -q

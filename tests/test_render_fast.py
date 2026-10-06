@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -272,13 +273,14 @@ def test_a_mix_rendered_here_is_the_file_one_engine_writes_and_a_window_its_samp
     assert not list(tmp_path.glob("carriers-*"))
 
 
-# On the CI's Linux a fresh process and this one differ about one run in two, and why is
-# not known (docs/open-questions/engine-speed.md). The test is as it was, tolerance and
-# all; the mark takes it out of the run a pull request waits for and into a job of its
-# own, which runs it on every pull request and blocks none. What is rendered in this
-# process alone is the test above, which stays in the default run.
-@pytest.mark.quarantine
-def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> None:
+def _engine_readied(sources: int) -> Engine:
+    """:func:`_engine`, the C text loaded and the delay table made before a thread asks."""
+    native.available()
+    native._table()
+    return _engine(sources)
+
+
+def _fresh_processes_write_the_file(tmp_path: Path, factory: Callable[[], Engine]) -> None:
     engine = _engine(2)
     h = engine.pack.header
     one = write_signal(
@@ -291,7 +293,7 @@ def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> N
     # in the file it is and which part of the engine a fresh process renders otherwise.
     wanted = np.array(open_signal(tmp_path / "one").frames)
     for _ in range(3):
-        two = write_mix(tmp_path / "two", partial(_engine, 2), processes=2, scratch=tmp_path)
+        two = write_mix(tmp_path / "two", factory, processes=2, scratch=tmp_path)
         assert two["frames"] == one["frames"] and two["render"]["processes"] == 2
         made = np.array(open_signal(tmp_path / "two").frames)
         assert hashlib.sha256(made.tobytes()).hexdigest() == two["sha256"]
@@ -301,3 +303,24 @@ def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> N
             f"{_what_differs(made, wanted, 2)}"
         )
     assert not list(tmp_path.glob("carriers-*"))
+
+
+# On the CI's Linux a fresh process and this one differ in more than one run in two
+# (docs/open-questions/engine-speed.md has what was measured and the reading of it). The
+# test is as it was, tolerance and all; the mark takes it out of the run a pull request
+# waits for and into a job of its own, which runs it on every pull request and blocks
+# none. What is rendered in this process alone is the test above, in the default run.
+@pytest.mark.quarantine
+def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> None:
+    _fresh_processes_write_the_file(tmp_path, partial(_engine, 2))
+
+
+# The same, each process having loaded the C text and made the delay table before its
+# threads start: the reading of the failure above is that the threads of a fresh process
+# each make the table, and that the loop in C reads one that another thread's has
+# replaced. If this one holds where the other fails, that is where the remedy goes.
+@pytest.mark.quarantine
+def test_processes_readied_before_their_threads_write_the_file_one_engine_writes(
+    tmp_path: Path,
+) -> None:
+    _fresh_processes_write_the_file(tmp_path, partial(_engine_readied, 2))
