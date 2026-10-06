@@ -77,6 +77,7 @@ __all__ = [
     "actual",
     "against",
     "card_of",
+    "disk_need",
     "line_bytes_per_s",
     "predict",
     "predictor",
@@ -248,6 +249,98 @@ def line_bytes_per_s(
     if inet_up_mbps > 0.0:
         rate = min(rate, 0.8 * float(inet_up_mbps) * 1e6 / 8.0)
     return rate, False
+
+
+#: What a trace keeps on its machine's disk besides its pairs, its rows and its pack.
+#: A tail's histogram of one site at one cell, in double precision as the levelling reads
+#: it: 35 MB a site of 53 cells (``docs/open-questions/ray-tracer.md``; 7.1 GB for the
+#: first scene's 202 sites).
+TAIL_ENTRY_BYTES = 660_000
+#: The mirror's store, trees and distance fields, for a whole scene of a dwelling
+#: (``docs/runbook-rented-machines.md``, section 7).
+MIRROR_STORE_GB = 8.0
+#: The grid as voxelised and as computed, the early tables (0.27 GB for the first scene),
+#: the jobs' own files and the logs: one figure, not measured apart.
+DISK_REST_GB = 3.0
+#: The margin, stated: a quarter of what the run is counted to write, and what the
+#: machine holds before the run writes anything (the interpreter, the wheels, the code).
+DISK_MARGIN = 0.25
+DISK_SYSTEM_GB = 10.0
+
+
+def disk_need(
+    record: dict[str, Any],
+    *,
+    low_levers: str | None = None,
+    low_seconds: float | None = None,
+    bundle_gb: float = 0.0,
+) -> dict[str, Any]:
+    """The disk a trace of this plan asks of its rental, GB, and what it is made of.
+
+    The first whole scenes asked 219 GB, a field campaign's formula
+    (:func:`reverberate.gpu.onebox.campaign_need`), and used 53; a disk is
+    billed by the hour whether written or not (0.098 USD an hour of the
+    1.382 run A was billed). A trace's own disk is counted from its plan,
+    at the moment it holds the most, while the pack is written:
+
+    - ``pairs``: the pair cache, in the form the run keeps it;
+    - ``rows``: the pack's rows as the queue's jobs leave them for the
+      write, every pair as samples whatever the pack's form, removed once
+      the pack is checked;
+    - ``pack``: the pack, in the form it is written in;
+    - ``tails``: a histogram a tail site and tail cell;
+    - ``mirror_store``, ``bundle`` (as pushed, the pairs it carries in
+      it), and ``rest``.
+
+    To their sum are added :data:`DISK_MARGIN` of it and
+    :data:`DISK_SYSTEM_GB`. ``line`` says it as the plan's output does.
+    Only the batched solver's trace is sized so: PFFDTD writes its own
+    outputs, and its rental keeps the field campaign's formula.
+    """
+    record = plans.as_made(record)
+    base = plans.estimate(
+        record, rate_usd_per_hour=0.0, low_levers=low_levers, low_seconds=low_seconds
+    )
+    scene_pairs = int(record["pairs"]) - int(record.get("pairs_of_the_patch", 0))
+    histograms = int(record["tail_sites"]) * int(record["tail_cells"])
+    parts = {
+        "pairs": float(base["pair_cache_gb"]),
+        "rows": scene_pairs * plans.PAIR_BYTES / 1e9,
+        "pack": float(base["pack_gb"]),
+        "tails": histograms * TAIL_ENTRY_BYTES / 1e9,
+        "mirror_store": MIRROR_STORE_GB,
+        "bundle": float(bundle_gb),
+        "rest": DISK_REST_GB,
+    }
+    parts = {name: round(value, 2) for name, value in parts.items()}
+    counted = float(sum(parts.values()))
+    margin = DISK_MARGIN * counted
+    disk = int(-(-(counted + margin + DISK_SYSTEM_GB) // 1))
+    named = {
+        "pairs": "the pair cache",
+        "rows": "the pack's rows until it is checked",
+        "pack": f"the pack ({base.get('low_levers') or 'samples'})",
+        "tails": "the tails' histograms",
+        "mirror_store": "the mirror's store",
+        "bundle": "the bundle",
+        "rest": "the grid, the early tables and the logs",
+    }
+    line = (
+        f"disk: {disk} GB asked of the rental: "
+        + ", ".join(
+            f"{named[name]} {parts[name]:g}" for name in parts if name != "bundle" or parts[name]
+        )
+        + f"; {counted:.1f} GB counted, {DISK_MARGIN:.0%} more ({margin:.1f}) and"
+        f" {DISK_SYSTEM_GB:g} for the machine's own"
+    )
+    return {
+        "disk_gb": disk,
+        "parts_gb": parts,
+        "counted_gb": round(counted, 2),
+        "margin_gb": round(margin, 2),
+        "system_gb": DISK_SYSTEM_GB,
+        "line": line,
+    }
 
 
 def _plain(name: str) -> str:

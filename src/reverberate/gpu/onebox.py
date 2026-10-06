@@ -59,7 +59,7 @@ import shlex
 import time
 import traceback
 from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -1215,8 +1215,15 @@ def run(
     resume_command: str = "",
     inventory: Callable[[Any], list[str]] | None = None,
     relaunch: bool = False,
+    disk_gb: int | None = None,
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``disk_gb`` is the disk asked of the rental where the caller sizes it
+    from its own plan (a trace: :func:`reverberate.trace.machines.disk_need`);
+    left out, a field campaign's (:func:`campaign_need`). It is what the
+    offers are searched with, what the rental asks for and what it is
+    billed for.
 
     ``resume_command`` is the command that resumes this run on its
     machine, ``{instance}`` standing for the instance; ``inventory`` asks a
@@ -1263,6 +1270,9 @@ def run(
     home.mkdir(parents=True, exist_ok=True)
     record: dict[str, Any] = {"bundle": str(bundle), "started": time.time(), "watches": []}
     need = campaign_need(bundle)
+    if disk_gb is not None:
+        need = replace(need, disk_gb=int(disk_gb))
+    record["disk_gb"] = need.disk_gb
     say(f"need: {need.describe()}")
     if instance is None and not yes and not plan_only:
         say("nothing rented: pass --yes")

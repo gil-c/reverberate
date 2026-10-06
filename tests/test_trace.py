@@ -61,6 +61,7 @@ from reverberate.spatial.translate import (
     choose_cells,
     serving_radius_m,
 )
+from reverberate.trace import driver as driver_module
 from reverberate.trace.assets import (
     ALIGNED,
     PHYSICAL,
@@ -908,6 +909,9 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert main([*arguments, "--dry-run", "--smoke", "0.3", "--smoke-sources", "1"]) == 0
     printed = capsys.readouterr().out
     assert "dry run: nothing built, nothing rented" in printed
+    # The disk the rental would ask for, and what it is made of, before anything is built.
+    assert "  disk: " in printed and "GB asked of the rental: the pair cache" in printed
+    assert "25% more" in printed and "(the bundle is added once it is built)" in printed
     assert "cost at 0.4 USD/h" in printed and "sources: 1 (voice)" in printed
     assert "calibration_key" in printed and not (tmp_path / "h").exists()
     # The bundle alone: what the machine reads, and no pairs campaign without an export.
@@ -1264,6 +1268,11 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
         )
     )
     assert priced["queue"] and priced["seconds"]["transfer_pack"] > 0
+    # The disk is the plan's, the bundle as it was built in it, and not a field campaign's.
+    sized = result["disk"]
+    assert seen["disk_gb"] == sized["disk_gb"] == 24
+    assert sized["parts_gb"]["mirror_store"] == 8.0 and driver_module._tree_gb(home / "bundle") > 0
+    assert any(line.startswith("  disk: ") for line in said)
     assert campaign["trace"]["low_levers"] == "bins,int16"
     assert (
         seen["leave"] == ()
@@ -1284,6 +1293,8 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     )
     carried = PairCache(tmp_path / "home_pffdtd" / "bundle" / "pairs_cache", "key1500")
     assert carried.has(other) and not carried.has(known) and seen["predict"] is None
+    # PFFDTD writes its own outputs: its rental keeps the field campaign's disk.
+    assert seen["disk_gb"] is None
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)

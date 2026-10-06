@@ -245,6 +245,7 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "unverified": set(),
         "rented": [],
         "hours": [],
+        "disk": [],
         "home": tmp_path / "home",
         "bundle": a_bundle(tmp_path),
     }
@@ -256,6 +257,7 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         offer = offers.pop(0)
         script["rented"].append(offer.id)
         script["hours"].append(hours)
+        script["disk"].append(kw.get("disk_gb"))
         client.alive.add(1000 + offer.id)
         return f"machine-{offer.id}", 1000 + offer.id
 
@@ -1118,6 +1120,50 @@ class TestTheChoice:
         assert rental["rented"] == [chosen["offer"]] and record["offer"] == chosen["offer"]
         assert rental["hours"] == [record["cap_hours"]] and record["cap_hours"] > chosen["hours"]
         assert record["outcome"] == "done"
+
+    def test_the_disk_asked_is_the_plan_s_with_its_margin_said(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """The first scenes asked 219 GB, a field campaign's formula, and used 53."""
+        scene = {**RECORD, "source_positions": 1529, "pairs": 18_364, "cells_a_position": []}
+        need = machines.disk_need(scene, low_levers="bins,int16")
+        parts = need["parts_gb"]
+        # While the pack is written: the pair cache as it is kept, every pair's row as
+        # samples, the pack in its form, a histogram a (site, cell), the mirror's store.
+        assert parts["pairs"] == pytest.approx(18_364 * 621_446 / 1e9, abs=0.01)
+        assert parts["rows"] == pytest.approx(18_364 * 1_228_800 / 1e9, abs=0.01)
+        assert parts["pack"] == pytest.approx(
+            (18_364 * 439_080 + 202 * 53 * 286_000) / 1e9, abs=0.01
+        )
+        assert parts["tails"] == pytest.approx(202 * 53 * 660_000 / 1e9, abs=0.01)
+        assert parts["mirror_store"] == 8.0 and parts["rest"] == 3.0 and parts["bundle"] == 0.0
+        counted = sum(parts.values())
+        assert need["counted_gb"] == pytest.approx(counted, abs=0.01)
+        assert counted == pytest.approx(63.2, abs=0.1)
+        # The margin is stated: a quarter of what is counted, and ten for the machine's own.
+        assert need["margin_gb"] == pytest.approx(0.25 * counted, abs=0.01)
+        assert need["disk_gb"] == 89 and need["system_gb"] == 10.0
+        assert need["disk_gb"] >= counted + need["margin_gb"] + 10.0 > need["disk_gb"] - 1
+        line = need["line"]
+        assert line.startswith("disk: 89 GB asked of the rental: the pair cache 11.41,")
+        assert "the pack's rows until it is checked 22.57" in line
+        assert "the pack (bins,int16) 11.13" in line and "the bundle" not in line
+        assert "63.2 GB counted, 25% more (15.8) and 10 for the machine's own" in line
+        # The samples are more of both; a bundle that carries pairs is counted as pushed.
+        plain = machines.disk_need(scene, low_levers="none", bundle_gb=4.0)
+        assert plain["parts_gb"]["pairs"] == plain["parts_gb"]["rows"] > 22
+        assert plain["parts_gb"]["bundle"] == 4.0 and "the bundle 4" in plain["line"]
+        assert plain["disk_gb"] > need["disk_gb"] + 20
+        # A plan that counts its pairs on the grid is sized by that count.
+        counted_so = {**scene, "pairs": 16_887, "on_the_grid": {**scene, "ppw": 10.5}}
+        assert machines.disk_need(counted_so, low_levers="bins,int16") == need
+        assert machines.disk_need({**scene, "pairs": 16_887})["disk_gb"] < plain["disk_gb"]
+        # The rental is searched, asked and billed with it; left out, the field's formula.
+        field = onebox.campaign_need(rental["bundle"]).disk_gb
+        record = run(rental, disk_gb=need["disk_gb"])
+        assert record["disk_gb"] == 89 != field and rental["disk"] == [89]
+        assert any("89 GB of disk" in line for line in rental["said"])
+        assert all("disk_space>89 " in query for query in rental["client"].searched)
 
     def test_the_offers_are_said_and_nothing_is_rented(self, rental: dict[str, Any]) -> None:
         rental["client"].offers = self.offers()

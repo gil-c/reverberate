@@ -433,6 +433,20 @@ def launch(
     )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
+    from reverberate.trace.machines import disk_need
+
+    def disk(bundle_gb: float = 0.0) -> dict[str, Any] | None:
+        """The disk this run asks for; ``None`` with the present engine, sized as a field's."""
+        if low_engine != "lowband":
+            return None
+        return disk_need(
+            plan.record, low_levers=levers, low_seconds=low_seconds, bundle_gb=bundle_gb
+        )
+
+    sized = disk()
+    if sized is not None:
+        result["disk"] = sized
+        say("  " + sized["line"] + (" (the bundle is added once it is built)" if dry_run else ""))
     if dry_run:
         # The grid's key and the export's digest are known once the bundle holds the export.
         unknown = {"voxel_low_key"} | ({"export_sha256"} if not assets.export_sha256 else set())
@@ -504,6 +518,11 @@ def launch(
     from reverberate.gpu import onebox
     from reverberate.trace.machines import predictor
 
+    sized = disk(_tree_gb(bundle))
+    if sized is not None:
+        if sized["disk_gb"] != result["disk"]["disk_gb"]:
+            say(f"  with the bundle as built, {sized['parts_gb']['bundle']:g} GB: " + sized["line"])
+        result["disk"] = sized
     leave = () if brought else ("pairs",)
     if leave:
         say("the pair cache stays on the machine and goes with it: --fetch-pairs brings it home")
@@ -542,12 +561,14 @@ def launch(
             low_levers=levers,
             line=line,
             # The disk the rental asks for is billed by the hour with the cards.
-            disk_gb=_disk_gb(bundle),
+            disk_gb=float(sized["disk_gb"]) if sized is not None else _disk_gb(bundle),
         )
         if low_engine == "lowband"
         else None,
         resume_command=resume,
         relaunch=relaunch,
+        # Sized from the plan; the present engine's rental keeps a field campaign's disk.
+        disk_gb=None if sized is None else int(sized["disk_gb"]),
         inventory=lambda machine: machine_holds(machine, as_made(plan.record)),
         sync=("pairs",) if brought else (),
         **({} if sync_s is None else {"sync_s": sync_s}),
@@ -565,6 +586,12 @@ def launch(
     if record.get("left_alive"):
         say(str(record["left_alive"]))
     return result
+
+
+def _tree_gb(directory: Path) -> float:
+    """What a directory holds, GB: the bundle as it is pushed."""
+    held = sum(path.stat().st_size for path in Path(directory).rglob("*") if path.is_file())
+    return held / 1e9
 
 
 def _disk_gb(bundle: Path) -> float:
