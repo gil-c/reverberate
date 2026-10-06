@@ -427,6 +427,10 @@ python -m reverberate.trace rent --recipe R.json --home H $M --dry-run
 python -m reverberate.trace rent --recipe R.json --home H $M $X \
     --gpus 4 --max-hours 16 --max-dph 2.0 --plan-offers
 
+#    The hosts a pack comes home from the fastest, first: a preference, not a filter.
+python -m reverberate.trace rent --recipe R.json --home H $M $X \
+    --gpus 4 --max-hours 16 --max-dph 2.0 --prefer-region FR,GB --plan-offers
+
 #    With fewer solves: the same scene generated at another rail pitch, read from eight
 #    positions a step instead of two (docs/open-questions/rail-interpolation.md).
 python -m reverberate.trace rent --recipe R_12cm.json --home H $M --rail-positions 8 --dry-run
@@ -479,6 +483,9 @@ python -m reverberate.trace ledger --home H_full --gpu "RTX 3090" --gpus 8 --gpu
 | low band engine | the batched solver (`wave.lowband`) | `--low-engine pffdtd` |
 | low band grid | Cartesian, 10.5 points per wavelength: the validated one | `--low-ppw 7.2`, `--low-scheme fcc` |
 | the machine | the lowest predicted total USD among the offers predicted within `--max-hours` | `--gpus N`, `--gpu NAME`, `--max-dph`, `--avoid` |
+| the offers' order | by their predicted totals alone | `--prefer-region FR,GB`: the offers of those regions first, each region's by its totals, none left out |
+| the engine built on the machine | none: the batched solver on its Cartesian grid opens nothing of PFFDTD. `--low-engine pffdtd` and `--low-scheme fcc` build it without being told | `--build-engine` |
+| the disk asked of the rental | the plan's: the pair cache, the pack's rows, the pack, the tails' histograms, the mirror's store, the bundle, a quarter more and 10 GB; the plan's output says each. 89 GB for the first scene, where 219 were asked | with `--low-engine pffdtd`, a field campaign's formula |
 | the watchdog, `--hours` | the prediction times 1.5 (2 for a card not measured) and half an hour, the largest of the six offers that may be tried | `--hours H` |
 | the check | a smoke run renders on both modules (`full`); the whole scene reads the pack (`read`) | `--check` |
 | the pack's low band | `bins,int16`: the bins of each response under the crossover's top, in 16 bits; 78 dB under the response in the worst third octave measured, 0.357 of the bytes | `--low-levers none` (the samples), `--low-levers bins,int16,decay=60` (a listening variant, 0.14) |
@@ -551,17 +558,22 @@ A rental is billed from the moment it exists to the moment its pack is
 home. `trace.machines.predict` prices that whole span on an offer, as the
 trace runs since it is one queue over every card and every core:
 
-- **the start**, 10.5 minutes with no card working: the instance answering,
-  the engine built, the bundle pushed (8.1 and 13.4 minutes on the two hosts
-  of 2026-10-05), then the grid voxelised and the launches planned (1.8
+- **the start**, 4.8 minutes with no card working: the instance answering,
+  the interpreter made, the bundle pushed. The two hosts of 2026-10-05 took
+  8.1 and 13.4 minutes, of which 3.6 and 8.3 built an engine the default
+  solver never opens; it is no longer built for it, and **no rental has yet
+  started without it**: the figure is a subtraction. 6 minutes more where
+  PFFDTD is built. Then the grid voxelised and the launches planned (1.8
   minutes on the validated grid, 4.0 at 7.2 points per wavelength);
 - **the solves**, a launch a card: a source position's card seconds (below),
-  8.6 s a launch, a pair's fit (0.55 s on the validated grid, 0.21 at 7.2
+  8.6 s a launch, a pair's fit (0.29 s on the validated grid, 0.21 at 7.2
   points), over the cards; 55 s before the first launch steps; and **half a
   launch of idleness a card at the end**, since the last launches do not end
   together (555 s a card after launches of 20.7 minutes, 255 s after
   launches of 19.5);
-- **the rays**, a site a card, 18 s a site of 53 cells;
+- **the rays**, a site a card, 0.54 s a site through the tree
+  (`docs/open-questions/ray-tracer.md`; 9.7 s through the grid, as the two
+  whole scenes cast them);
 - **the host's stages** under the solves: they add to the wall only on a
   host of very few cores;
 - **the write and the check**;
@@ -574,17 +586,25 @@ trace runs since it is one queue over every card and every core:
 - **the rental's own rate**: an offer's `dph_total` is priced with 5 GB of
   disk, and the two scenes, rented with 219 GB, were billed 1.382 USD/h for
   an offer of 1.284 and 0.797 for one of 0.543. An offer that says what its
-  disk costs (`storage_cost`) is priced with the disk the run asks for.
+  disk costs (`storage_cost`) is priced with the disk the run asks for,
+  which is now the plan's (`trace.machines.disk_need`): 89 GB for the first
+  scene and 1.322 USD/h on that host.
+
+**The constants are of the code as it runs today**, read on one RTX 3090
+(`docs/open-questions/solver-boundary.md`, `ray-tracer.md`,
+`docs/adr/0016-appendix-every-card-every-core.md`). What the two whole
+scenes ran, the walls in eleven branches and the trace of before the queue,
+is kept beside them and prices a ledger of those runs alone.
 
 A source position of 1.2 s on the grid to 1500 Hz, in card seconds:
 
 | card | validated grid | 7.2 points | from |
 | --- | --- | --- | --- |
-| RTX 3090 | 88.0 | 34.6 | **measured**: 1505 positions on 8 cards and 1496 on 4, the two whole scenes of 2026-10-05; 90 s on 4 cards in launches of 8 |
-| RTX 3080 20 GB | 110 | 36 | **measured**: one card, 2026-10-05 |
-| A100 | 26 | 8.6 | the RTX 3080's over 4.2, **measured through the present engine** (15.9 s a position on 2 x A100 against 135 s) |
-| Tesla P100 | 149 | 49 | the RTX 3080's over 0.74, **measured through the present engine** |
-| any other card | 110 over its throughput | by the points to the power 2.96 | **estimate**, memory bandwidth (`trace.machines.CARDS`) |
+| RTX 3090 | 70.5 | 34.6 | **measured**: one card with the walls' seven branches, 2026-10-05 (88.0 with eleven, the first whole scene). At 7.2 points the figure is scene B's, with eleven branches, **not measured again with seven**: it errs long |
+| RTX 3080 20 GB | 88 | 43 | the RTX 3090's times 1.25, the two cards' throughputs as **measured** with eleven branches (110 and 88 s) |
+| A100 | 21 | 10 | the RTX 3080's over 4.2, **measured through the present engine** (15.9 s a position on 2 x A100 against 135 s) |
+| Tesla P100 | 119 | 58 | the RTX 3080's over 0.74, **measured through the present engine** |
+| any other card | 88 over its throughput | the RTX 3090's on that grid, by the throughputs; another grid by the points to the power 2.96 | **estimate**, memory bandwidth (`trace.machines.CARDS`) |
 
 An estimated card is marked `ESTIMATED` in the table of offers and its
 watchdog is given twice the prediction, not one and a half. A card with no
@@ -610,8 +630,28 @@ code divided one site over every card (1 094 and 1 266 s for the 202
 sites), the queue gives a site a card, and no whole scene has run it; and
 both runs read their tails' tables again in the resume that wrote the pack
 (342 and 359 s). The prediction of the queue for the next run of scene A
-on the same host: 6.2 h and 8.6 USD with the pack home, of which the solves
-are 5.2 h; on the four cards at 7.2 points, 5.3 h and 4.3 USD.
+on the same host: **5.0 h and 6.6 USD** with the pack home, of which the
+solves are 4.1 h and the fetch through the proxy 42 minutes; on the four
+cards at 7.2 points, 4.9 h and 3.1 USD. It was 6.1 h and 8.5 USD, and 5.1 h
+and 4.1 USD, before the constants were those of today's code, the disk the
+plan's and the engine's build left out. From a host in Europe, were its
+fetch priced directly (`--line direct`), 4.3 h and 5.7 USD.
+
+**The pairs are counted as the machine makes them.** The first scene's plan
+said 16 887 pairs and its machine made 18 219 (15 187 at 7.2 points). The
+plan's cells sit on the listener's rest places and on the samples of its
+path, so the rule read 140 992 audible steps from one cell, exactly. No
+array stands there: each stands on a node of the low band's grid, a median
+of 9 mm away, the rule runs again on those centres, and a step that was
+exact is fused from two cells: 109 582 fused steps where the plan had
+38 470, each asking for a second pair. The plan now runs the rule a second
+time on its cells moved to the nearest nodes of a lattice of the grid's
+step, a cell whose ball of twelve steps is not free taken to get no array
+(`trace.plan.on_the_grid`), prints that count under its own and prices by
+it: 18 364 on the validated grid (+0.8 per cent) and 14 791 at 7.2 points
+(-2.6 per cent). It stays an estimate: the lattice's origin is the
+voxeliser's (17 652 to 18 364 over three origins), and where the machine
+moves an array that does not fit is not the plan's to know.
 
 ### Bringing a run home
 
@@ -727,7 +767,8 @@ writing.
 | The pack, 24.5 GB, came home at 2 MB/s with the eight cards billing 1.38 USD/h | The same proxy, one stream; twelve streams were refused together and a stream that dropped lost its 2 GB part | The pack is written 9.5 GB, fetched first, in chunks of 32 MB that are kept, on four connections that are kept | in code, tested against a directory |
 | `trace FAILED: RuntimeError("the low band and the mirror are not on one clock: ... 13.21 ms in the median")` after 5.9 h, on both scenes | The check read the pairs' loudest samples; at 4 m and more those are a later arrival | The check reads the direct sound where the mirror puts it, its time and its level (`trace.clock`) | in code; on both scenes' own pairs it passes at every distance |
 | The driver's last line: "kept for inspection" | It did not know what the machine held or how it was called | The last lines: what is on the machine, what a resume makes again, the command, the hourly cost | in code |
-| A rental billed 0.797 USD/h for an offer of 0.543 | The offer's price holds 5 GB of disk and the rental asked for 219 GB, of which the trace used 53 | The offers are priced with their disk. **The disk asked for is still a field campaign's**: sizing it for a trace (the pack, its rows, the cache and a margin, about 90 GB) is not done | half in code |
+| A rental billed 0.797 USD/h for an offer of 0.543 | The offer's price holds 5 GB of disk and the rental asked for 219 GB, of which the trace used 53 | The offers are priced with their disk, and the disk asked for is the plan's (`trace.machines.disk_need`): 89 GB for that scene, each part and the margin said under the plan | in code; the parts are counted, not yet read on a machine's `df` |
+| Every rental spent 216 to 498 s building PFFDTD | `gpu.onebox.provision_machine` built it first, always; the batched solver opens none of it | Built only for `--low-engine pffdtd`, `--low-scheme fcc` or `--build-engine`; a C compiler is asked for in its place | in code; no rental has started without the build |
 
 ### Every card and every core (lot L13, phase one: not yet run on a card)
 
