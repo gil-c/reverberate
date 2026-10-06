@@ -336,7 +336,8 @@ def _report(document: dict[str, Any]) -> list[str]:
         "## The largest difference from the reference, dB",
         "",
         f"Over the sources and the third octaves, each side of the crossover"
-        f" ({document['crossover_hz']:g} Hz): under it the wave solve, over it the mirror.",
+        f" ({document['crossover_hz']:g} Hz): under its ramp the wave solve, over it the mirror."
+        " Early and late are cut at the reference's arrival in every pack.",
         "",
         "| variant | early, low | early, high | late, low | late, high | clips, low |"
         " clips, high |",

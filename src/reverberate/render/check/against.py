@@ -21,6 +21,14 @@ files and the numbers beside them, and judges nothing.
 A difference is the two grids' and the levelling's that follows from them:
 above the crossover the mirror is the same in both packs, and what remains
 there is the gain each pack's seam gave its high side.
+
+Both responses are cut at the same instant, the reference's arrival. The
+arrival is read on the whole response, and where the listener does not see
+the source it is the low band's, which the grid moves: on the first scene a
+hidden voice arrived 16.6 ms earlier on the coarse grid, and a cut that
+followed it moved 5 dB of the mirror, identical in both packs, from one side
+of the cut to the other. Each side of the crossover stops at the ramp's
+edge: the bands inside the ramp hold both the wave solve and the mirror.
 """
 
 from __future__ import annotations
@@ -53,12 +61,19 @@ FAINT_DB = -26.0
 
 
 def impulse_levels(
-    pack: ScenePack, source_id: str, step: int, settings: CheckSettings
+    pack: ScenePack,
+    source_id: str,
+    step: int,
+    settings: CheckSettings,
+    *,
+    arrival: int | None = None,
 ) -> dict[str, Any] | None:
     """Third octave levels of the response to an impulse through a source at ``step``.
 
     The omnidirectional channel of the whole response, cut ``EARLY_S``
-    after its arrival. ``None`` when the response is silent.
+    after its arrival, or after ``arrival`` (a sample of the response, as
+    ``arrival_sample`` gives it) when one is given: two packs are compared
+    on one cut. ``None`` when the response is silent.
     """
     h = pack.header
     rate, n = h.sample_rate_hz, h.step_samples
@@ -72,14 +87,16 @@ def impulse_levels(
     if not isinstance(full, np.ndarray) or not np.any(full[0]):
         return None
     w = np.asarray(full[0], dtype=float)
-    arrival = int(measure.envelope_arrival(w))
+    own = int(measure.envelope_arrival(w))
+    arrival = own if arrival is None else int(arrival)
     cut = arrival + int(EARLY_S * rate)
     early = _window(w, arrival - int(BEFORE_S * rate), cut)
     late = _window(w, cut, w.size)
     return {
         "step": int(step),
         "time_s": round(sample / rate, 3),
-        "arrival_s": round((arrival + lo - sample) / rate, 5),
+        "arrival_s": round((own + lo - sample) / rate, 5),
+        "arrival_sample": arrival,
         "early_db": measure.third_octave_db(early, rate),
         "late_db": measure.third_octave_db(late, rate),
         "whole_db": measure.third_octave_db(w, rate),
@@ -130,6 +147,7 @@ def difference(
     """For every source both packs hold: B less A per third octave, early, late and on the clips."""
     rate = a.header.sample_rate_hz
     crossover = float(a.crossover.cutoff_hz)
+    edge = 2.0 ** (max(float(a.crossover.width_octaves), 1.0 / 3.0) / 2.0)
     found: dict[str, Any] = {}
     need = int(np.ceil(1.4 / a.header.step_s))
     for name in stems_a:
@@ -141,7 +159,12 @@ def difference(
         if steps:
             step = steps[len(steps) // 2]
             settings.say(f"{name}: an impulse at {step * a.header.step_s:.2f} s through both packs")
-            one, other = (impulse_levels(pack, name, step, settings) for pack in (a, b))
+            one = impulse_levels(a, name, step, settings)
+            other = (
+                None
+                if one is None
+                else impulse_levels(b, name, step, settings, arrival=one["arrival_sample"])
+            )
             if one is not None and other is not None:
                 tops = {
                     "top_a": float(np.max(one["whole_db"])),
@@ -165,12 +188,12 @@ def difference(
                 ),
                 2,
             )
-        # The largest difference each side of the crossover: where the two packs can differ
-        # by their grids, and where they share the mirror.
+        # The largest difference each side of the crossover's ramp: where the two packs can
+        # differ by their grids, and where they share the mirror.
         record["worst_abs_db"] = {
             part: {
-                "under_the_crossover": _worst(values, 0.0, crossover / 2 ** (1 / 6)),
-                "over_the_crossover": _worst(values, crossover * 2 ** (1 / 6), 1e9),
+                "under_the_crossover": _worst(values, 0.0, crossover / edge),
+                "over_the_crossover": _worst(values, crossover * edge, 1e9),
             }
             for part, values in (
                 ("early", record.get("impulse", {}).get("early_db")),
