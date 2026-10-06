@@ -29,6 +29,7 @@ from reverberate.accel import pairs as pairs_module
 from reverberate.accel.pairs import PairCache
 from reverberate.audio import Atmosphere
 from reverberate.compute import Devices
+from reverberate.gpu import direct as direct_module
 from reverberate.metrics import octave_bank, octave_filter_rows
 from reverberate.mirror.geometry import write_derived
 from reverberate.mirror.hybrid import Crossover, blend, seam_db
@@ -71,7 +72,7 @@ from reverberate.trace.assets import (
     mismatched,
 )
 from reverberate.trace.bundle import build_bundle
-from reverberate.trace.cli import main
+from reverberate.trace.cli import build_parser, main
 from reverberate.trace.driver import (
     cost_records,
     describe,
@@ -909,6 +910,10 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert main([*arguments, "--dry-run", "--smoke", "0.3", "--smoke-sources", "1"]) == 0
     printed = capsys.readouterr().out
     assert "dry run: nothing built, nothing rented" in printed
+    # The regions to rent in first are the command's, as codes or names, several at once.
+    asked = build_parser().parse_args([*arguments, "--prefer-region", "FR,GB", "--build-engine"])
+    assert direct_module.regions(asked.prefer_region) == ("FR", "GB") and asked.build_engine
+    assert build_parser().parse_args(arguments).prefer_region == []
     # The disk the rental would ask for, and what it is made of, before anything is built.
     assert "  disk: " in printed and "GB asked of the rental: the pair cache" in printed
     assert "25% more" in printed and "(the bundle is added once it is built)" in printed
@@ -1266,6 +1271,8 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     card |= {"dph_total": 0.8, "cpu_cores": 36.0}
     priced = seen["predict"](SimpleNamespace(**card))
     assert priced["queue"] and priced["seconds"]["transfer_pack"] > 0
+    # No region is preferred unless one is named.
+    assert seen["prefer_regions"] == ()
     # The batched solver opens nothing of PFFDTD: the machine is not made to build it.
     assert seen["engine_build"] is False and not priced["engine_built"]
     assert priced["seconds"]["start"] == 290.0
@@ -1316,9 +1323,10 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
         allow_asset_mismatch=True,
         yes=True,
         build_engine=True,
+        prefer_regions=["FR", "GB"],
         say=said.append,
     )
-    assert seen["engine_build"] is True
+    assert seen["engine_build"] is True and seen["prefer_regions"] == ("FR", "GB")
     assert seen["predict"](SimpleNamespace(**card))["seconds"]["start"] == 290.0 + 357.0
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs

@@ -12,7 +12,8 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
-    [--line proxy|direct] [--allow-asset-mismatch] [--plan-offers] [--yes]
+    [--line proxy|direct] [--prefer-region FR,GB] [--build-engine]
+    [--allow-asset-mismatch] [--plan-offers] [--yes]
     [--instance ID [--relaunch]]
 
 ``--dry-run`` prints the plan and its cost and rents nothing. ``--plan-offers`` builds
@@ -227,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
         " (--low-engine pffdtd and --low-scheme fcc build it without being told)",
     )
     p.add_argument("--avoid", type=int, nargs="*", default=[], metavar="ID")
+    from reverberate.gpu import direct
+
+    # --prefer-region: the offers of the regions named first, each region's by its totals.
+    direct.add_arguments(p)
     p.add_argument(
         "--line",
         choices=("proxy", "direct"),
@@ -636,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(args.out)
         return 0
+    from reverberate.gpu import direct
     from reverberate.trace.driver import launch, resume_command
 
     result = launch(
@@ -675,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
         line=args.line,
         relaunch=args.relaunch,
         build_engine=args.build_engine,
+        prefer_regions=direct.regions(args.prefer_region),
         # The same words again, on the machine this run leaves: what its last lines say.
         resume=resume_command(argv),
     )

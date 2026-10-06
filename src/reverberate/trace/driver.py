@@ -371,6 +371,7 @@ def launch(
     resume: str = "",
     relaunch: bool = False,
     build_engine: bool = False,
+    prefer_regions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
 
@@ -407,6 +408,14 @@ def launch(
     (:func:`needs_engine`): the present engine, the face centred grid,
     whose voxeliser is PFFDTD's, or ``build_engine``. The default solver's
     rental starts without those minutes.
+
+    ``prefer_regions`` puts the offers of those regions first among those
+    priced, each region's by their totals (``--prefer-region FR``): a
+    preference and not a filter, for the hosts a pack comes home from the
+    fastest. Four streams brought 14 to 57 MB/s directly from a host in
+    France where the proxy brought 5 to 14 from the hosts measured
+    (``docs/open-questions/direct-connection.md``), and the offers' totals
+    are still priced through the proxy unless ``line`` is ``direct``.
 
     ``low_scheme`` and ``low_ppw`` put the low band on another grid, whose
     pairs have their own keys; such a run has its own ``home``.
@@ -583,6 +592,7 @@ def launch(
         resume_command=resume,
         relaunch=relaunch,
         engine_build=built,
+        prefer_regions=tuple(prefer_regions),
         # Sized from the plan; the present engine's rental keeps a field campaign's disk.
         disk_gb=None if sized is None else int(sized["disk_gb"]),
         inventory=lambda machine: machine_holds(machine, as_made(plan.record)),

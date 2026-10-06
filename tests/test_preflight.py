@@ -1186,7 +1186,8 @@ class TestTheChoice:
         assert "command -v cc" in onebox.COMPILER_COMMAND
         assert "build-essential" in onebox.COMPILER_COMMAND
         # The prediction follows: the start without the build, and with it where it is asked.
-        on = {"gpu_name": "RTX 3090", "num_gpus": 8, "gpu_ram_gb": 24.0, "dph_total": 1.38}
+        on: dict[str, Any] = {"gpu_name": "RTX 3090", "num_gpus": 8, "gpu_ram_gb": 24.0}
+        on["dph_total"] = 1.38
         without = machines.predict(RECORD, **on)
         with_it = machines.predict(RECORD, **on, engine_build=True)
         before = machines.predict(RECORD, **on, queue=False)
@@ -1195,6 +1196,67 @@ class TestTheChoice:
         assert with_it["seconds"]["start"] == before["seconds"]["start"] == 290.0 + 357.0
         assert with_it["hours"] - without["hours"] == pytest.approx(357.0 / 3600.0, abs=1e-3)
         assert machines.predictor(RECORD, engine_build=True)(SimpleNamespace(**on))["engine_built"]
+
+    def test_a_preferred_region_orders_the_offers_and_leaves_none_out(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """A pack came home at 14 to 57 MB/s from France, and at 5 to 14 through the proxy."""
+        offers = self.offers()
+        places = {2: "California, US", 3: "France, FR", 4: "Quebec, CA", 6: "France, FR"}
+        for offer in offers:
+            offer.location = places.get(offer.id, "Texas, US")  # type: ignore[attr-defined]
+        rental["client"].offers = offers
+        predict = machines.predictor(RECORD)
+        need = onebox.campaign_need(rental["bundle"])
+        said: list[str] = []
+        common: dict[str, Any] = {"max_dph": 3.0, "min_ram_gb": 60.0, "gpu": "", "say": said.append}
+        common |= {"hours": None, "predict": predict}
+        free = onebox.plan_rental(rental["client"], need, **common)
+        plain = [p.offer.id for p in free.priced]
+        assert not any("preferred" in line for line in said)
+        # France first, each region's offers by their totals; then the others, by theirs.
+        there = onebox.plan_rental(rental["client"], need, prefer_regions=["FR"], **common)
+        ranked = [p.offer.id for p in there.priced]
+        french = [i for i in plain if i in (3, 6)]
+        assert ranked == french + [i for i in plain if i not in (3, 6)]
+        assert sorted(ranked) == sorted(plain) and there.offers[0].id == french[0]
+        text = "\n".join(said)
+        assert f"preferred region(s) FR: offer {french[0]} (France, FR)," in text
+        assert f"the lowest total anywhere is offer {plain[0]} (" in text
+        assert "the lowest total first within a preferred region" in text
+        assert f"chosen: offer {french[0]}" in text
+        # The watchdog's cap is still the largest of the offers that may be tried.
+        assert there.hours == max(onebox.cap_hours(p) for p in there.priced)
+        # Several regions are tried in the order given, by a code or by a place's name.
+        two = onebox.plan_rental(rental["client"], need, prefer_regions=["quebec", "FR"], **common)
+        assert [p.offer.id for p in two.priced][:3] == [4, *french]
+        # A region no offer is in changes nothing, and says so; neither does the wall time.
+        said.clear()
+        none = onebox.plan_rental(rental["client"], need, prefer_regions=["JP"], **common)
+        assert [p.offer.id for p in none.priced] == plain
+        assert "  no offer in the preferred region(s) JP: the order is the totals' own" in said
+        within = onebox.plan_rental(
+            rental["client"], need, prefer_regions=["FR"], max_hours=14.0, **common
+        )
+        assert [p.offer.id for p in within.priced] == [3, 2, 4]
+        # A host that says it has no open port is reached through the proxy: not preferred.
+        offers[5].direct_ports = 0  # type: ignore[attr-defined]
+        closed = onebox.plan_rental(rental["client"], need, prefer_regions=["FR"], **common)
+        assert [p.offer.id for p in closed.priced] == [3, *[i for i in plain if i != 3]]
+        # Where the lowest total is in the region already, that is said and nothing moves.
+        said.clear()
+        same = onebox.plan_rental(
+            rental["client"], need, prefer_regions=[places.get(plain[0], "Texas")], **common
+        )
+        assert same.priced[0].offer.id == plain[0]
+        assert any("the lowest total is there already" in line for line in said)
+        # Without a prediction the cheapest hour of the region is first, and the run rents it.
+        common.pop("predict")
+        hourly = onebox.plan_rental(rental["client"], need, prefer_regions=["CA"], **common)
+        assert hourly.offers[0].id == 4 and len(hourly.offers) == len(free.offers) + 1
+        rental["home"] = rental["home"].with_name("home_fr")
+        record = run(rental, hours=None, predict=predict, prefer_regions=("FR",), gpus=2)
+        assert rental["rented"] == [3] and record["offer"] == 3 and record["outcome"] == "done"
 
     def test_the_offers_are_said_and_nothing_is_rented(self, rental: dict[str, Any]) -> None:
         rental["client"].offers = self.offers()
