@@ -836,11 +836,13 @@ class TestTheChoice:
         one, four = on(gpu_name="RTX 3080", num_gpus=1), on(gpu_name="RTX 3080", num_gpus=4)
         # A launch's records are on the host: a position is solved once whatever a card holds.
         assert one["solves"] == len(COUNTS) and one["extra_solves"] == 0 and one["measured"]
-        assert one["work"] == four["work"] and one["source_s"] == 110.0
+        # Today's code is measured on the RTX 3090: another card by the two throughputs.
+        unit = 70.5 * 1.25
+        assert one["work"] == four["work"] and one["source_s"] == round(unit, 1)
         assert one["launches"] == -(-len(COUNTS) // batched.LAUNCH_SOURCES)
         # The cards divide the solves, the fits and the rays; several idle half a launch
         # each at the end, where one card has no end to wait for.
-        tail = 0.5 * batched.LAUNCH_SOURCES * 110.0
+        tail = 0.5 * batched.LAUNCH_SOURCES * unit
         assert four["seconds"]["low"] == pytest.approx(
             (one["seconds"]["low"] - 55.0) / 4 + 55.0 + tail, abs=0.5
         )
@@ -852,14 +854,36 @@ class TestTheChoice:
         for stage in ("start", "prepare", "write", "check", "transfer_pack"):
             assert four["seconds"][stage] == one["seconds"][stage]
         assert one["hours"] == pytest.approx(sum(one["seconds"].values()) / 3600.0, abs=1e-3)
-        assert one["hours"] > 50 and four["hours"] < 0.3 * one["hours"]
+        assert one["hours"] > 40 and four["hours"] < 0.3 * one["hours"]
         assert one["usd"] == pytest.approx(one["hours"] * 0.14)
-        # The first whole scenes' own figures: 88 s a position on an RTX 3090, 34.6 s at 7.2.
+        # The code as it solves today, on one RTX 3090: 70.5 s a position with the walls'
+        # seven branches and 0.29 s a pair's fit (solver-boundary.md), 0.54 s a tail site
+        # through the tree (ray-tracer.md), 1.9 ms a position of the early trace and 25 ms
+        # a pair levelled on a core (the appendix of every card and every core).
         big = on(gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, dph_total=1.38)
-        assert big["source_s"] == 88.0 and big["measured"] and big["card"] == "RTX 3090"
+        assert big["source_s"] == 70.5 and big["measured"] and big["card"] == "RTX 3090"
+        pairs, launches = sum(COUNTS), -(-len(COUNTS) // batched.LAUNCH_SOURCES)
+        assert big["work"]["solve_card_s"] == pytest.approx(
+            len(COUNTS) * 70.5 + launches * 8.6, abs=0.1
+        )
+        assert big["work"]["fit_card_s"] == pytest.approx(pairs * 0.29, abs=0.1)
+        assert big["work"]["rays_card_s"] == pytest.approx(202 * 0.54, abs=0.1)
+        assert on(gpu_name="RTX 3090", num_gpus=8, rays=50_000)["work"][
+            "rays_card_s"
+        ] == pytest.approx(101 * 0.54, abs=0.1)
+        assert big["work"]["host_core_s"] == pytest.approx(
+            2.0 * ((45864 + pairs) * 0.0019 + pairs * (0.025 + 0.010)), abs=0.1
+        )
         assert on(gpu_name="RTX 3090", num_gpus=4, low_ppw=7.2)["source_s"] == 34.6
-        assert on(gpu_name="RTX 4090", num_gpus=4)["source_s"] == pytest.approx(110 / 1.3, abs=0.1)
+        # A card and a grid no run measured: from the RTX 3090's, the throughputs, the points.
+        assert on(gpu_name="RTX 4090", num_gpus=4)["source_s"] == pytest.approx(unit / 1.3, abs=0.1)
         assert not on(gpu_name="RTX 4090", num_gpus=4)["measured"]
+        assert on(gpu_name="RTX 3080", num_gpus=4, low_ppw=7.2)["source_s"] == pytest.approx(
+            34.6 * 1.25, abs=0.1
+        )
+        assert on(gpu_name="RTX 3090", num_gpus=4, low_ppw=9.0)["source_s"] == pytest.approx(
+            70.5 * (9.0 / 10.5) ** batched.PPW_EXPONENT, abs=0.1
+        )
         # The fetch is in the total, at the machine's rate: the form the pack is written in
         # is minutes of the rental, and the same pack costs a dearer machine more.
         plain = on(gpu_name="RTX 3090", num_gpus=8, dph_total=1.38, low_levers="none")
@@ -903,7 +927,7 @@ class TestTheChoice:
             "gpu_ram_gb": 80.0,
             "dph_total": 2.0,
         }
-        walked: dict[str, Any] = {**RECORD, "step_pairs": 458_640}
+        walked: dict[str, Any] = {**RECORD, "step_pairs": 4_586_400}
         few = machines.predict(walked, **fast, cpu_cores=2.0)
         many = machines.predict(walked, **fast, cpu_cores=64.0)
         assert few is not None and many is not None
@@ -924,6 +948,12 @@ class TestTheChoice:
         # The trace of before the queue: records on the card, one process after the solves.
         old = on(gpu_name="RTX 3080", num_gpus=1, queue=False)
         assert old["solves"] == 1711 and old["extra_solves"] == 65 and not old["queue"]
+        # And the code of those runs: eleven branches, the rays through the grid.
+        assert old["source_s"] == 110.0
+        ran = on(gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, queue=False)
+        assert ran["source_s"] == 88.0
+        assert ran["work"]["fit_card_s"] == pytest.approx(pairs * 0.55, abs=0.1)
+        assert ran["work"]["rays_card_s"] == pytest.approx(202 * (0.53 + 53 * 0.001), abs=0.1)
         assert old["seconds"]["paths"] > 0 and old["seconds"]["level"] > 0
         assert "host_beyond_the_cards" not in old["seconds"]
         # No figure, no price: an unknown card, a card too small, the present engine.
@@ -1046,19 +1076,19 @@ class TestTheChoice:
             (i for i in priced if priced[i] is not None),
             key=lambda i: priced[i]["usd"],
         )
-        # Within twenty hours the single card and the pair of cards are out, and so says the log.
+        # Within fourteen hours the single card and the pair of cards are out, and so says the log.
         said.clear()
         plan = onebox.plan_rental(
-            rental["client"], need, hours=None, predict=predict, max_hours=20.0, **common
+            rental["client"], need, hours=None, predict=predict, max_hours=14.0, **common
         )
         kept = [p.offer.id for p in plan.priced]
         assert kept == [2, 3, 4]
-        assert all(priced[i]["hours"] <= 20.0 for i in kept)
+        assert all(priced[i]["hours"] <= 14.0 for i in kept)
         first = plan.priced[0]
         assert first.usd == min(priced[i]["usd"] for i in kept)
         text = "\n".join(said)
         assert "1 offer(s) left out: a card the prediction has no figure for" in text
-        assert "2 offer(s) left out: predicted over the 20 h of wall time allowed" in text
+        assert "2 offer(s) left out: predicted over the 14 h of wall time allowed" in text
         assert f"chosen: offer {first.offer.id}" in text and "measured" in text
         assert "the fetch" in text
         # The watchdog is the largest cap of the offers that may be tried, margin stated.

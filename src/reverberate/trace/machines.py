@@ -30,12 +30,20 @@ the code of before the queue, their other stages one after the other;
 ``queue=False`` prices a run that way, which is what makes the comparison
 one of like with like.
 
-**What is measured and what is not.** A source position's seconds are
-measured on the RTX 3090 (88 s on the validated grid, 34.6 s at 7.2 points
-per wavelength, eight and four cards) and on the RTX 3080 (110 and 36 s).
-A card of another kind is priced through :data:`CARDS`, its throughput on
-a stencil bound by memory traffic over the RTX 3080's; a prediction on an
-estimated card says so, and its watchdog is given a larger margin.
+**What is measured and what is not.** The constants are of **the code as
+it runs today**, on one RTX 3090: 70.5 s a source position on the validated
+grid with the walls' seven branches and 0.29 s a pair's fit
+(``docs/open-questions/solver-boundary.md``), 0.54 s a tail site through
+the tree (``docs/open-questions/ray-tracer.md``), 1.9 ms a position of the
+early trace and 25 ms a pair levelled
+(``docs/adr/0016-appendix-every-card-every-core.md``). A card of another
+kind is priced from the RTX 3090's figure through :data:`CARDS`, its
+throughput on a stencil bound by memory traffic over the RTX 3080's; a
+prediction on an estimated card says so, and its watchdog is given a larger
+margin. What the two whole scenes ran, eleven branches and the trace of
+before the queue, is kept beside (:data:`SOURCE_S_AS_RUN`,
+:data:`FIT_S_AS_RUN`) and prices ``queue=False`` alone: a ledger is read
+against the code that made it (``docs/adr/0016-appendix-trace-cost.md``).
 
 **The table chooses an offer and nothing else.** Once on the machine the
 trace reads its cards and measures them (:mod:`reverberate.trace.resources`),
@@ -57,8 +65,14 @@ from reverberate.wave.lowband import pairs as batched
 
 __all__ = [
     "CARDS",
+    "FIT_S",
+    "FIT_S_AS_RUN",
+    "LEVEL_PAIR_S",
     "LINE",
+    "PATHS_JOB_S",
+    "RAYS_SITE_S",
     "SOURCE_S",
+    "SOURCE_S_AS_RUN",
     "Card",
     "actual",
     "against",
@@ -133,22 +147,55 @@ CARDS: tuple[Card, ...] = (
 )
 
 #: Card seconds of one source position of 1.2 s on the grid to 1500 Hz, by the card and
-#: the grid's points per wavelength, where a run measured them. The RTX 3090's are the two
-#: whole scenes of 2026-10-05: 132 393 card seconds for 1505 positions on 8 cards, 51 824
-#: for 1496 on 4 at 7.2 points. Between the two grids the RTX 3080 goes as the points to
-#: the power 2.96 and the RTX 3090 as 2.47: another card or grid is priced from the RTX
-#: 3080's 110 s, its throughput, and :data:`reverberate.wave.lowband.pairs.PPW_EXPONENT`.
+#: the grid's points per wavelength, **as the trace solves today**: the walls in seven
+#: branches (``wave.lowband.walls.DEFAULT_BRANCHES``). One RTX 3090, instance 54379263,
+#: 2026-10-05 (``docs/open-questions/solver-boundary.md``, section 2): 70.5 s where the
+#: eleven branches took 88.3 on the same card and grid. At 7.2 points the figure is scene
+#: B's, 51 824 card seconds for 1496 positions on 4 cards, **measured with eleven
+#: branches and not again with seven**: it errs long. Another card is priced from the RTX
+#: 3090's figure on the grid asked and the two throughputs; another grid from the
+#: validated one's and :data:`reverberate.wave.lowband.pairs.PPW_EXPONENT`.
 SOURCE_S: dict[tuple[str, float], float] = {
+    ("RTX 3090", 10.5): 70.5,
+    ("RTX 3090", 7.2): 34.6,
+}
+#: The same as the two whole scenes of 2026-10-05 ran it, eleven branches: 132 393 card
+#: seconds for 1505 positions on 8 RTX 3090, 51 824 for 1496 on 4 at 7.2 points
+#: (``docs/adr/0016-appendix-trace-cost.md``), and one RTX 3080 (instance 54201838).
+#: Between the two grids the RTX 3080 goes as the points to the power 2.96 and the RTX
+#: 3090 as 2.47. A ledger of those runs is read against these (``queue=False``).
+SOURCE_S_AS_RUN: dict[tuple[str, float], float] = {
     ("RTX 3080", 10.5): 110.0,
     ("RTX 3080", 7.2): 36.0,
     ("RTX 3090", 10.5): 88.0,
     ("RTX 3090", 7.2): 34.6,
 }
-#: Card seconds a pair's fit takes beside its launch's steps, where a run measured them:
-#: 10 065 s for the 18 219 pairs of the first scene on the validated grid (0.74 s a pair
-#: where a launch held one position heard at 84 cells, 0.27 s where it held twelve heard
-#: at two), 3 167 s for 15 187 pairs at 7.2 points.
-FIT_S: dict[tuple[str, float], float] = {("RTX 3090", 10.5): 0.55, ("RTX 3090", 7.2): 0.21}
+#: The card whose seconds another card's are taken from, by the two throughputs.
+_MEASURED_CARD = "RTX 3090"
+#: Card seconds a pair's fit takes beside its launch's steps: 0.29 s in a launch on the
+#: validated grid, the time chain, on that RTX 3090 (``solver-boundary.md``, section 2:
+#: 0.37 s alone, 0.07 s for the fit in its spectra, which is not the default); 3 167 s for
+#: 15 187 pairs at 7.2 points, scene B.
+FIT_S: dict[tuple[str, float], float] = {("RTX 3090", 10.5): 0.29, ("RTX 3090", 7.2): 0.21}
+#: The same as the first scene ran it: 10 065 s for its 18 219 pairs on the validated
+#: grid (0.74 s a pair where a launch held one position heard at 84 cells, 0.27 s where
+#: it held twelve heard at two).
+FIT_S_AS_RUN: dict[tuple[str, float], float] = {
+    ("RTX 3090", 10.5): 0.55,
+    ("RTX 3090", 7.2): 0.21,
+}
+#: Card seconds of a tail site of 100 000 rays through the tree, in double precision, the
+#: whole call with its counts brought home: 0.54 s on one RTX 3090, twenty sites
+#: (``docs/open-questions/ray-tracer.md``, *What a site costs*; 9.67 s through the grid,
+#: which is what the two whole scenes ran).
+RAYS_SITE_S = 0.54
+#: Host seconds of a (source, head) position of the early trace on one core, its store
+#: filled, and of a pair levelled (``docs/adr/0016-appendix-every-card-every-core.md``:
+#: 1.25 s for 630 positions and 7.0 s for 284 pairs, where they were 23 and 76 ms). **The
+#: store's fill is not in the first**: the trees, lists and distance fields of a dwelling
+#: are made once a machine (7.4 s on that window of 20 s), under the first solves.
+PATHS_JOB_S = 0.0019
+LEVEL_PAIR_S = 0.025
 #: From the rental to the trace's first line: the instance answering, its cards asked,
 #: the engine built, the interpreter made, the bundle pushed. 8.1 and 13.4 minutes on the
 #: two hosts of 2026-10-05, of which the build and the interpreter were 3.6 and 8.3.
@@ -225,17 +272,33 @@ def throughput_table() -> list[str]:
     ]
 
 
-def _a_source_s(card: Card, ppw: float, window_s: float) -> float:
-    """Card seconds of one source position on this card and grid."""
-    held = SOURCE_S.get((card.name, round(ppw, 2)))
-    if held is None:
-        grid = (ppw / batched.MEASURED_PPW) ** batched.PPW_EXPONENT
-        held = batched.SOLVE_S_AT_1500 * grid / card.throughput
+def _a_source_s(card: Card, ppw: float, window_s: float, *, as_run: bool = False) -> float:
+    """Card seconds of one source position on this card and grid.
+
+    Today's code unless ``as_run``, which is the code of the two whole
+    scenes of 2026-10-05 (:data:`SOURCE_S_AS_RUN`).
+    """
+    grid = (ppw / batched.MEASURED_PPW) ** batched.PPW_EXPONENT
+    if as_run:
+        held = SOURCE_S_AS_RUN.get((card.name, round(ppw, 2)))
+        if held is None:
+            held = batched.SOLVE_S_AT_1500 * grid / card.throughput
+    else:
+        held = SOURCE_S.get((card.name, round(ppw, 2)))
+        if held is None:
+            # The measured card's seconds on this grid, where a run read them, or on the
+            # validated one; then the two cards' throughputs.
+            known = card_of(_MEASURED_CARD)
+            assert known is not None
+            there = SOURCE_S.get((known.name, round(ppw, 2)))
+            if there is None:
+                there = SOURCE_S[(known.name, batched.MEASURED_PPW)] * grid
+            held = there * known.throughput / card.throughput
     return float(held) * window_s / batched.MEASURED_DURATION_S
 
 
-def _a_fit_s(card: Card, ppw: float) -> float:
-    held = FIT_S.get((card.name, round(ppw, 2)))
+def _a_fit_s(card: Card, ppw: float, *, as_run: bool = False) -> float:
+    held = (FIT_S_AS_RUN if as_run else FIT_S).get((card.name, round(ppw, 2)))
     return float(held) if held is not None else batched.PAIR_S / card.throughput
 
 
@@ -319,19 +382,26 @@ def predict(
         low_levers=low_levers,
     )
     planned = dict(base["seconds"])
-    source_s, fit_s = _a_source_s(card, ppw, window), _a_fit_s(card, ppw)
+    # A run of before the queue is priced with what that code took, stage by stage.
+    as_run = not queue
+    source_s = _a_source_s(card, ppw, window, as_run=as_run)
+    fit_s = _a_fit_s(card, ppw, as_run=as_run)
     a_launch = int(launch_sources or batched.LAUNCH_SOURCES)
     made = int(launches) if launches else -(-solves // a_launch)
     from reverberate.trace.resources import REFERENCE
 
+    cast = plans.RAYS_MEASURED if rays is None else int(rays)
     work = {
         "solve_card_s": solves * source_s + made * float(REFERENCE["launch_s"]),
         "fit_card_s": pairs * fit_s,
-        "rays_card_s": planned["rays"],
+        # Through the grid, as those runs cast them; through the tree since.
+        "rays_card_s": planned["rays"]
+        if as_run
+        else int(record["tail_sites"]) * RAYS_SITE_S * cast / plans.RAYS_MEASURED,
         "host_core_s": HOST_OVERHEAD
         * (
-            (int(record["step_pairs"]) + pairs) * float(REFERENCE["paths_job_s"])
-            + pairs * (float(REFERENCE["level_pair_s"]) + float(REFERENCE["row_pair_s"]))
+            (int(record["step_pairs"]) + pairs) * PATHS_JOB_S
+            + pairs * (LEVEL_PAIR_S + float(REFERENCE["row_pair_s"]))
         ),
     }
     tail = TAIL_LAUNCHES * min(a_launch, max(solves, 1)) * source_s if cards > 1 and solves else 0.0
