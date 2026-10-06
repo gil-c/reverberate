@@ -826,3 +826,22 @@ def test_two_packs_of_two_recipes_or_two_windows_are_refused(
             sources=["nobody"],
             say=lambda text: None,
         )
+
+
+def test_two_packs_are_cut_at_one_instant_the_reference_s_arrival(
+    two_packs: dict[str, Any],
+) -> None:
+    from reverberate.render.check import against
+
+    pack = two_packs["pack"]
+    settings = SETTINGS
+    own = against.impulse_levels(pack, "s1", 20, settings)
+    assert own is not None
+    # A cut given from outside is the one used, and the pack's own arrival is still told.
+    moved = own["arrival_sample"] + 480
+    other = against.impulse_levels(pack, "s1", 20, settings, arrival=moved)
+    assert other is not None
+    assert other["arrival_sample"] == moved and other["arrival_s"] == own["arrival_s"]
+    assert other["whole_db"] == pytest.approx(own["whole_db"])
+    same = against.impulse_levels(pack, "s1", 20, settings, arrival=own["arrival_sample"])
+    assert same is not None and same["early_db"] == pytest.approx(own["early_db"])
