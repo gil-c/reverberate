@@ -5,8 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# A pull request pushed again stops the run of the push before it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Three jobs side by side, so the wait is the longest of them and not their sum.
+# The coverage table and the tests marked nightly are the full workflow's
+# (full.yml): no threshold reads the table, so no pull request waits for it.
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +30,102 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install project
-        run: pip install -r requirements-dev.txt
+      - name: Install ruff
+        run: pip install "$(grep '^ruff' requirements-dev.txt)"
 
-      - name: make check
-        run: make check
+      - name: make lint
+        run: make lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements*.txt
+
+      - name: Install project
+        run: uv pip install --system -r requirements-dev.txt
+
+      # mypy checks again only what changed since the cache was written.
+      - uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ hashFiles('requirements*.txt', 'mypy.ini') }}-${{ github.sha }}
+          restore-keys: mypy-${{ hashFiles('requirements*.txt', 'mypy.ini') }}-
+
+      - name: make typecheck
+        run: make typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements*.txt
+
+      - name: Install project
+        run: uv pip install --system -r requirements-dev.txt
+
+      # One process a core. A file's tests stay in one process, so what a
+      # module computes once for several of them is computed once.
+      - name: pytest
+        run: pytest -n auto --dist loadfile --durations=25
+
+  # The tests marked quarantine: kept running and in sight on every pull
+  # request, five times over so that a run says how often they fail, and
+  # blocking nothing while their cause is open
+  # (docs/open-questions/engine-speed.md).
+  quarantine:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements*.txt
+
+      - name: Install project
+        run: uv pip install --system -r requirements-dev.txt
+
+      - name: make test-quarantine, five times
+        run: |
+          failed=0
+          for run in 1 2 3 4 5; do
+            make test-quarantine || failed=$((failed + 1))
+          done
+          echo "failed $failed of 5"
+          test "$failed" -eq 0
+
+      - name: after the tests of its file, five times
+        if: always()
+        run: |
+          failed=0
+          for run in 1 2 3 4 5; do
+            pytest tests/test_render_fast.py -m "quarantine or not quarantine" -q || failed=$((failed + 1))
+          done
+          echo "failed $failed of 5"
+          test "$failed" -eq 0
+
+      - name: with the memory given and given back filled
+        if: always()
+        run: MALLOC_PERTURB_=85 pytest tests/test_render_fast.py tests/test_render_engine.py -m "quarantine or not quarantine" -q

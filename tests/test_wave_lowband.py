@@ -859,10 +859,15 @@ class TestTheCampaign:
                 "20",
                 "--cells",
                 "1",
+                # The probe steps for as long as it is told, ten seconds unless told: a
+                # fifth of one is as many of the same steps as the test reads.
+                "--probe-s",
+                "0.2",
             ]
         )
         table = json.loads((machine["root"] / "cost" / "cost.json").read_text())
         assert code == 0 and [b["batch"] for b in table["batches"]] == [1, 2]
+        assert table["probe"]["steps"] > 0 and table["probe"]["updates_per_s"] > 0
         assert table["batches"][0]["usd_per_source"] > 0 and table["pair"]["card_s_per_pair"] > 0
 
 

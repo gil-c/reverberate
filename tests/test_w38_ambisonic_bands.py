@@ -132,6 +132,10 @@ def a_three_band_run(tmp_path: Path) -> Path:
     return out
 
 
+# Three encodings, each a wavenumber solved a frequency and a direction at a time: half a
+# minute on the CI. The encoder's own tests and the W10 report's run on every pull
+# request; the assembly of the three is the full workflow's.
+@pytest.mark.nightly
 def test_three_grids_assemble_into_one_drawable_run_that_points_at_the_source(
     tmp_path: Path,
 ) -> None:

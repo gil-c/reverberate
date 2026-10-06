@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
@@ -129,6 +130,29 @@ def a_solved_run(tmp_path: Path, *, samples: int = 2048) -> Path:
     return run
 
 
+ShortReport = tuple[dict[str, Any], dict[str, object]]
+
+
+@pytest.fixture(scope="module")
+def a_short_report(tmp_path_factory: pytest.TempPathFactory) -> ShortReport:
+    """A short run's report with no air and no grid, and what it rendered: read by four tests.
+
+    The report is made once; none of the four changes it.
+    """
+    run = a_solved_run(tmp_path_factory.mktemp("short"), samples=1024)
+    rendered: dict[str, object] = {}
+    report = room_report(
+        run,
+        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
+        air=None,
+        lowcut_hz=40.0,
+        yaws_deg=(0.0, 90.0),
+        filter_length=256,
+        rendered=rendered,
+    )
+    return report, rendered
+
+
 def test_the_report_reads_a_run_end_to_end_and_points_at_the_source(tmp_path: Path) -> None:
     """The whole path, on a run of a few kilobytes rather than of a gigabyte."""
     run = a_solved_run(tmp_path)
@@ -155,23 +179,15 @@ def test_the_report_reads_a_run_end_to_end_and_points_at_the_source(tmp_path: Pa
     assert set(report["binaural_decodes"]["sphere_magls"]["measures"]) == {"yaw_0", "yaw_90"}
 
 
-def test_skipping_air_absorption_is_recorded_as_an_omission(tmp_path: Path) -> None:
+def test_skipping_air_absorption_is_recorded_as_an_omission(a_short_report: ShortReport) -> None:
     """A response read without knowing this overstates its own treble by 38 per cent."""
-    run = a_solved_run(tmp_path, samples=1024)
-    report = room_report(
-        run,
-        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
-        air=None,
-        lowcut_hz=40.0,
-        yaws_deg=(0.0,),
-        filter_length=256,
-    )
+    report, _ = a_short_report
     assert report["air_absorption"]["applied"] is False
     assert "overstated" in report["air_absorption"]["why"]
 
 
 def test_the_theory_is_absent_rather_than_invented_when_the_grid_is_gone(
-    tmp_path: Path,
+    a_short_report: ShortReport,
 ) -> None:
     """A run fetched onto another machine still gets a report.
 
@@ -180,15 +196,7 @@ def test_the_theory_is_absent_rather_than_invented_when_the_grid_is_gone(
     cache entry. Without it there is no theory to quote, and quoting one from
     the mesh instead would describe a room the solver never simulated.
     """
-    run = a_solved_run(tmp_path, samples=1024)
-    report = room_report(
-        run,
-        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
-        air=None,
-        lowcut_hz=40.0,
-        yaws_deg=(0.0,),
-        filter_length=256,
-    )
+    report, _ = a_short_report
     assert report["room_geometry"] is None
     assert report["theory"] is None
 
@@ -206,17 +214,9 @@ def test_a_run_with_no_grid_and_no_low_cut_is_refused(tmp_path: Path) -> None:
         )
 
 
-def test_the_report_is_json_and_carries_no_infinities(tmp_path: Path) -> None:
+def test_the_report_is_json_and_carries_no_infinities(a_short_report: ShortReport) -> None:
     """A metric that could not be measured is null, never a number that looks like one."""
-    run = a_solved_run(tmp_path, samples=1024)
-    report = room_report(
-        run,
-        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
-        air=None,
-        lowcut_hz=40.0,
-        yaws_deg=(0.0,),
-        filter_length=256,
-    )
+    report, _ = a_short_report
     text = json.dumps(report)
     assert "Infinity" not in text
     assert "NaN" not in text
@@ -310,19 +310,9 @@ def test_the_ambisonic_wav_is_written_beside_the_ears(tmp_path: Path) -> None:
 
 
 def test_the_report_hands_back_what_it_rendered_so_nothing_is_encoded_twice(
-    tmp_path: Path,
+    a_short_report: ShortReport,
 ) -> None:
-    run = a_solved_run(tmp_path, samples=1024)
-    rendered: dict[str, object] = {}
-    room_report(
-        run,
-        EncoderSettings(order=1, fit_order=5, max_frequency_hz=4000.0),
-        air=None,
-        lowcut_hz=40.0,
-        yaws_deg=(0.0, 90.0),
-        filter_length=256,
-        rendered=rendered,
-    )
+    _, rendered = a_short_report
     assert isinstance(rendered["ambisonic"], Ambisonic)
     brirs = rendered["brirs"]
     assert isinstance(brirs, dict)
