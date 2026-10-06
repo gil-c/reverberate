@@ -269,7 +269,7 @@ def _cost(priced: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
         "rays_usd": float(priced["usd"]["rays"]),
         "source_positions": int(record["source_positions"]),
         "solves": int(priced["solves"]),
-        "pairs": int(record["pairs"]),
+        "pairs": int(priced.get("pairs", record["pairs"])),
         "rate_usd_per_hour": float(priced["billed_rate_usd_per_hour"]),
         "measured_on": str(priced["measured_on"]),
     }
@@ -299,7 +299,7 @@ def price(
     comes back beside the file the audit reads.
     """
     home = Path(home)
-    plans: dict[tuple[float | None, int, bool], dict[str, Any]] = {}
+    plans: dict[tuple[float | None, int, bool, float | None], dict[str, Any]] = {}
     recipes: dict[float | None, tuple[Recipe, dict[str, Any] | None]] = {None: (recipe, None)}
     records = []
     for variant in variants:
@@ -319,9 +319,12 @@ def price(
                 ),
             ),
         ):
-            key = (pitch, positions, part == "scene")
+            # The pairs are counted on the grid's nodes: another grid, another count.
+            ppw = variant.get("low_ppw")
+            ppw = None if ppw is None else float(ppw)
+            key = (pitch, positions, part == "scene", ppw)
             if key not in plans:
-                plans[key] = make_plan(mine, triangles, profile).record
+                plans[key] = make_plan(mine, triangles, profile, low_ppw=ppw).record
             cast = variant.get("rays")
             priced = estimate(
                 plans[key],

@@ -12,7 +12,8 @@ python -m reverberate.trace rent --recipe R.json --home H
     [--rate USD_PER_H] [--gpus N] [--max-hours H] [--hours H] [--max-dph D] [--gpu NAME]
     [--avoid ID ...] [--check full|read] [--no-fetch-pairs | --fetch-pairs]
     [--fetch-early] [--reuse-from HOME] [--publish-pairs] [--destroy-failed]
-    [--line proxy|direct] [--allow-asset-mismatch] [--plan-offers] [--yes]
+    [--line proxy|direct] [--prefer-region FR,GB] [--build-engine]
+    [--allow-asset-mismatch] [--plan-offers] [--yes]
     [--instance ID [--relaunch]]
 
 ``--dry-run`` prints the plan and its cost and rents nothing. ``--plan-offers`` builds
@@ -220,7 +221,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="a run that failed twice on its machine is fetched and destroyed, not kept",
     )
     p.add_argument("--gpu", default="", help="only cards whose name contains this")
+    p.add_argument(
+        "--build-engine",
+        action="store_true",
+        help="build PFFDTD on the machine even for the batched solver, which opens none of it"
+        " (--low-engine pffdtd and --low-scheme fcc build it without being told)",
+    )
     p.add_argument("--avoid", type=int, nargs="*", default=[], metavar="ID")
+    from reverberate.gpu import direct
+
+    # --prefer-region: the offers of the regions named first, each region's by its totals.
+    direct.add_arguments(p)
     p.add_argument(
         "--line",
         choices=("proxy", "direct"),
@@ -593,7 +604,13 @@ def main(argv: list[str] | None = None) -> int:
         from reverberate.trace.driver import describe
         from reverberate.trace.plan import estimate, make_plan
 
-        plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=centre)
+        plan = make_plan(
+            recipe,
+            assets.triangles,
+            profile,
+            patch_centre_xz=centre,
+            low_ppw=args.low_ppw if args.low_engine == "lowband" else None,
+        )
         priced = estimate(
             plan,
             rate_usd_per_hour=_rate(args),
@@ -624,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(args.out)
         return 0
+    from reverberate.gpu import direct
     from reverberate.trace.driver import launch, resume_command
 
     result = launch(
@@ -662,6 +680,8 @@ def main(argv: list[str] | None = None) -> int:
         low_levers=args.low_levers,
         line=args.line,
         relaunch=args.relaunch,
+        build_engine=args.build_engine,
+        prefer_regions=direct.regions(args.prefer_region),
         # The same words again, on the machine this run leaves: what its last lines say.
         resume=resume_command(argv),
     )

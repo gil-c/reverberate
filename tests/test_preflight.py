@@ -245,6 +245,7 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "unverified": set(),
         "rented": [],
         "hours": [],
+        "disk": [],
         "home": tmp_path / "home",
         "bundle": a_bundle(tmp_path),
     }
@@ -256,6 +257,7 @@ def rental(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         offer = offers.pop(0)
         script["rented"].append(offer.id)
         script["hours"].append(hours)
+        script["disk"].append(kw.get("disk_gb"))
         client.alive.add(1000 + offer.id)
         return f"machine-{offer.id}", 1000 + offer.id
 
@@ -836,11 +838,13 @@ class TestTheChoice:
         one, four = on(gpu_name="RTX 3080", num_gpus=1), on(gpu_name="RTX 3080", num_gpus=4)
         # A launch's records are on the host: a position is solved once whatever a card holds.
         assert one["solves"] == len(COUNTS) and one["extra_solves"] == 0 and one["measured"]
-        assert one["work"] == four["work"] and one["source_s"] == 110.0
+        # Today's code is measured on the RTX 3090: another card by the two throughputs.
+        unit = 70.5 * 1.25
+        assert one["work"] == four["work"] and one["source_s"] == round(unit, 1)
         assert one["launches"] == -(-len(COUNTS) // batched.LAUNCH_SOURCES)
         # The cards divide the solves, the fits and the rays; several idle half a launch
         # each at the end, where one card has no end to wait for.
-        tail = 0.5 * batched.LAUNCH_SOURCES * 110.0
+        tail = 0.5 * batched.LAUNCH_SOURCES * unit
         assert four["seconds"]["low"] == pytest.approx(
             (one["seconds"]["low"] - 55.0) / 4 + 55.0 + tail, abs=0.5
         )
@@ -852,14 +856,36 @@ class TestTheChoice:
         for stage in ("start", "prepare", "write", "check", "transfer_pack"):
             assert four["seconds"][stage] == one["seconds"][stage]
         assert one["hours"] == pytest.approx(sum(one["seconds"].values()) / 3600.0, abs=1e-3)
-        assert one["hours"] > 50 and four["hours"] < 0.3 * one["hours"]
+        assert one["hours"] > 40 and four["hours"] < 0.3 * one["hours"]
         assert one["usd"] == pytest.approx(one["hours"] * 0.14)
-        # The first whole scenes' own figures: 88 s a position on an RTX 3090, 34.6 s at 7.2.
+        # The code as it solves today, on one RTX 3090: 70.5 s a position with the walls'
+        # seven branches and 0.29 s a pair's fit (solver-boundary.md), 0.54 s a tail site
+        # through the tree (ray-tracer.md), 1.9 ms a position of the early trace and 25 ms
+        # a pair levelled on a core (the appendix of every card and every core).
         big = on(gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, dph_total=1.38)
-        assert big["source_s"] == 88.0 and big["measured"] and big["card"] == "RTX 3090"
+        assert big["source_s"] == 70.5 and big["measured"] and big["card"] == "RTX 3090"
+        pairs, launches = sum(COUNTS), -(-len(COUNTS) // batched.LAUNCH_SOURCES)
+        assert big["work"]["solve_card_s"] == pytest.approx(
+            len(COUNTS) * 70.5 + launches * 8.6, abs=0.1
+        )
+        assert big["work"]["fit_card_s"] == pytest.approx(pairs * 0.29, abs=0.1)
+        assert big["work"]["rays_card_s"] == pytest.approx(202 * 0.54, abs=0.1)
+        assert on(gpu_name="RTX 3090", num_gpus=8, rays=50_000)["work"][
+            "rays_card_s"
+        ] == pytest.approx(101 * 0.54, abs=0.1)
+        assert big["work"]["host_core_s"] == pytest.approx(
+            2.0 * ((45864 + pairs) * 0.0019 + pairs * (0.025 + 0.010)), abs=0.1
+        )
         assert on(gpu_name="RTX 3090", num_gpus=4, low_ppw=7.2)["source_s"] == 34.6
-        assert on(gpu_name="RTX 4090", num_gpus=4)["source_s"] == pytest.approx(110 / 1.3, abs=0.1)
+        # A card and a grid no run measured: from the RTX 3090's, the throughputs, the points.
+        assert on(gpu_name="RTX 4090", num_gpus=4)["source_s"] == pytest.approx(unit / 1.3, abs=0.1)
         assert not on(gpu_name="RTX 4090", num_gpus=4)["measured"]
+        assert on(gpu_name="RTX 3080", num_gpus=4, low_ppw=7.2)["source_s"] == pytest.approx(
+            34.6 * 1.25, abs=0.1
+        )
+        assert on(gpu_name="RTX 3090", num_gpus=4, low_ppw=9.0)["source_s"] == pytest.approx(
+            70.5 * (9.0 / 10.5) ** batched.PPW_EXPONENT, abs=0.1
+        )
         # The fetch is in the total, at the machine's rate: the form the pack is written in
         # is minutes of the rental, and the same pack costs a dearer machine more.
         plain = on(gpu_name="RTX 3090", num_gpus=8, dph_total=1.38, low_levers="none")
@@ -903,7 +929,7 @@ class TestTheChoice:
             "gpu_ram_gb": 80.0,
             "dph_total": 2.0,
         }
-        walked: dict[str, Any] = {**RECORD, "step_pairs": 458_640}
+        walked: dict[str, Any] = {**RECORD, "step_pairs": 4_586_400}
         few = machines.predict(walked, **fast, cpu_cores=2.0)
         many = machines.predict(walked, **fast, cpu_cores=64.0)
         assert few is not None and many is not None
@@ -924,6 +950,12 @@ class TestTheChoice:
         # The trace of before the queue: records on the card, one process after the solves.
         old = on(gpu_name="RTX 3080", num_gpus=1, queue=False)
         assert old["solves"] == 1711 and old["extra_solves"] == 65 and not old["queue"]
+        # And the code of those runs: eleven branches, the rays through the grid.
+        assert old["source_s"] == 110.0
+        ran = on(gpu_name="RTX 3090", num_gpus=8, gpu_ram_gb=24.0, queue=False)
+        assert ran["source_s"] == 88.0
+        assert ran["work"]["fit_card_s"] == pytest.approx(pairs * 0.55, abs=0.1)
+        assert ran["work"]["rays_card_s"] == pytest.approx(202 * (0.53 + 53 * 0.001), abs=0.1)
         assert old["seconds"]["paths"] > 0 and old["seconds"]["level"] > 0
         assert "host_beyond_the_cards" not in old["seconds"]
         # No figure, no price: an unknown card, a card too small, the present engine.
@@ -1046,19 +1078,19 @@ class TestTheChoice:
             (i for i in priced if priced[i] is not None),
             key=lambda i: priced[i]["usd"],
         )
-        # Within twenty hours the single card and the pair of cards are out, and so says the log.
+        # Within fourteen hours the single card and the pair of cards are out, and so says the log.
         said.clear()
         plan = onebox.plan_rental(
-            rental["client"], need, hours=None, predict=predict, max_hours=20.0, **common
+            rental["client"], need, hours=None, predict=predict, max_hours=14.0, **common
         )
         kept = [p.offer.id for p in plan.priced]
         assert kept == [2, 3, 4]
-        assert all(priced[i]["hours"] <= 20.0 for i in kept)
+        assert all(priced[i]["hours"] <= 14.0 for i in kept)
         first = plan.priced[0]
         assert first.usd == min(priced[i]["usd"] for i in kept)
         text = "\n".join(said)
         assert "1 offer(s) left out: a card the prediction has no figure for" in text
-        assert "2 offer(s) left out: predicted over the 20 h of wall time allowed" in text
+        assert "2 offer(s) left out: predicted over the 14 h of wall time allowed" in text
         assert f"chosen: offer {first.offer.id}" in text and "measured" in text
         assert "the fetch" in text
         # The watchdog is the largest cap of the offers that may be tried, margin stated.
@@ -1088,6 +1120,143 @@ class TestTheChoice:
         assert rental["rented"] == [chosen["offer"]] and record["offer"] == chosen["offer"]
         assert rental["hours"] == [record["cap_hours"]] and record["cap_hours"] > chosen["hours"]
         assert record["outcome"] == "done"
+
+    def test_the_disk_asked_is_the_plan_s_with_its_margin_said(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """The first scenes asked 219 GB, a field campaign's formula, and used 53."""
+        scene = {**RECORD, "source_positions": 1529, "pairs": 18_364, "cells_a_position": []}
+        need = machines.disk_need(scene, low_levers="bins,int16")
+        parts = need["parts_gb"]
+        # While the pack is written: the pair cache as it is kept, every pair's row as
+        # samples, the pack in its form, a histogram a (site, cell), the mirror's store.
+        assert parts["pairs"] == pytest.approx(18_364 * 621_446 / 1e9, abs=0.01)
+        assert parts["rows"] == pytest.approx(18_364 * 1_228_800 / 1e9, abs=0.01)
+        assert parts["pack"] == pytest.approx(
+            (18_364 * 439_080 + 202 * 53 * 286_000) / 1e9, abs=0.01
+        )
+        assert parts["tails"] == pytest.approx(202 * 53 * 660_000 / 1e9, abs=0.01)
+        assert parts["mirror_store"] == 8.0 and parts["rest"] == 3.0 and parts["bundle"] == 0.0
+        counted = sum(parts.values())
+        assert need["counted_gb"] == pytest.approx(counted, abs=0.01)
+        assert counted == pytest.approx(63.2, abs=0.1)
+        # The margin is stated: a quarter of what is counted, and ten for the machine's own.
+        assert need["margin_gb"] == pytest.approx(0.25 * counted, abs=0.01)
+        assert need["disk_gb"] == 89 and need["system_gb"] == 10.0
+        assert need["disk_gb"] >= counted + need["margin_gb"] + 10.0 > need["disk_gb"] - 1
+        line = need["line"]
+        assert line.startswith("disk: 89 GB asked of the rental: the pair cache 11.41,")
+        assert "the pack's rows until it is checked 22.57" in line
+        assert "the pack (bins,int16) 11.13" in line and "the bundle" not in line
+        assert "63.2 GB counted, 25% more (15.8) and 10 for the machine's own" in line
+        # The samples are more of both; a bundle that carries pairs is counted as pushed.
+        plain = machines.disk_need(scene, low_levers="none", bundle_gb=4.0)
+        assert plain["parts_gb"]["pairs"] == plain["parts_gb"]["rows"] > 22
+        assert plain["parts_gb"]["bundle"] == 4.0 and "the bundle 4" in plain["line"]
+        assert plain["disk_gb"] > need["disk_gb"] + 20
+        # A plan that counts its pairs on the grid is sized by that count.
+        counted_so = {**scene, "pairs": 16_887, "on_the_grid": {**scene, "ppw": 10.5}}
+        assert machines.disk_need(counted_so, low_levers="bins,int16") == need
+        assert machines.disk_need({**scene, "pairs": 16_887})["disk_gb"] < plain["disk_gb"]
+        # The rental is searched, asked and billed with it; left out, the field's formula.
+        field = onebox.campaign_need(rental["bundle"]).disk_gb
+        record = run(rental, disk_gb=need["disk_gb"])
+        assert record["disk_gb"] == 89 != field and rental["disk"] == [89]
+        assert any("89 GB of disk" in line for line in rental["said"])
+        assert all("disk_space>89 " in query for query in rental["client"].searched)
+
+    def test_the_engine_is_built_only_for_a_campaign_that_opens_it(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """PFFDTD was built on every rental, 216 and 498 s, for a solver that never ran it."""
+        built = run(rental)
+        assert "build machine-1" in rental["calls"] and "compiler" not in rental["calls"]
+        assert built["engine_built"] is True and built["outcome"] == "done"
+        assert any(line.startswith("engine built in") for line in rental["said"])
+        rental["calls"].clear()
+        rental["said"].clear()
+        rental["home"] = rental["home"].with_name("home_without")
+        plain = run(rental, engine_build=False)
+        calls = rental["calls"]
+        assert not any(call.startswith("build") for call in calls)
+        # What is left of the build: a C compiler asked for, then the interpreter as before.
+        assert calls.index("compiler") < calls.index("provision") < calls.index("launch")
+        assert plain["engine_built"] is False and plain["outcome"] == "done"
+        assert "engine not built: this campaign's solver does not open it" in rental["said"]
+        assert "command -v cc" in onebox.COMPILER_COMMAND
+        assert "build-essential" in onebox.COMPILER_COMMAND
+        # The prediction follows: the start without the build, and with it where it is asked.
+        on: dict[str, Any] = {"gpu_name": "RTX 3090", "num_gpus": 8, "gpu_ram_gb": 24.0}
+        on["dph_total"] = 1.38
+        without = machines.predict(RECORD, **on)
+        with_it = machines.predict(RECORD, **on, engine_build=True)
+        before = machines.predict(RECORD, **on, queue=False)
+        assert without is not None and with_it is not None and before is not None
+        assert without["seconds"]["start"] == 290.0 and not without["engine_built"]
+        assert with_it["seconds"]["start"] == before["seconds"]["start"] == 290.0 + 357.0
+        assert with_it["hours"] - without["hours"] == pytest.approx(357.0 / 3600.0, abs=1e-3)
+        assert machines.predictor(RECORD, engine_build=True)(SimpleNamespace(**on))["engine_built"]
+
+    def test_a_preferred_region_orders_the_offers_and_leaves_none_out(
+        self, rental: dict[str, Any]
+    ) -> None:
+        """A pack came home at 14 to 57 MB/s from France, and at 5 to 14 through the proxy."""
+        offers = self.offers()
+        places = {2: "California, US", 3: "France, FR", 4: "Quebec, CA", 6: "France, FR"}
+        for offer in offers:
+            offer.location = places.get(offer.id, "Texas, US")  # type: ignore[attr-defined]
+        rental["client"].offers = offers
+        predict = machines.predictor(RECORD)
+        need = onebox.campaign_need(rental["bundle"])
+        said: list[str] = []
+        common: dict[str, Any] = {"max_dph": 3.0, "min_ram_gb": 60.0, "gpu": "", "say": said.append}
+        common |= {"hours": None, "predict": predict}
+        free = onebox.plan_rental(rental["client"], need, **common)
+        plain = [p.offer.id for p in free.priced]
+        assert not any("preferred" in line for line in said)
+        # France first, each region's offers by their totals; then the others, by theirs.
+        there = onebox.plan_rental(rental["client"], need, prefer_regions=["FR"], **common)
+        ranked = [p.offer.id for p in there.priced]
+        french = [i for i in plain if i in (3, 6)]
+        assert ranked == french + [i for i in plain if i not in (3, 6)]
+        assert sorted(ranked) == sorted(plain) and there.offers[0].id == french[0]
+        text = "\n".join(said)
+        assert f"preferred region(s) FR: offer {french[0]} (France, FR)," in text
+        assert f"the lowest total anywhere is offer {plain[0]} (" in text
+        assert "the lowest total first within a preferred region" in text
+        assert f"chosen: offer {french[0]}" in text
+        # The watchdog's cap is still the largest of the offers that may be tried.
+        assert there.hours == max(onebox.cap_hours(p) for p in there.priced)
+        # Several regions are tried in the order given, by a code or by a place's name.
+        two = onebox.plan_rental(rental["client"], need, prefer_regions=["quebec", "FR"], **common)
+        assert [p.offer.id for p in two.priced][:3] == [4, *french]
+        # A region no offer is in changes nothing, and says so; neither does the wall time.
+        said.clear()
+        none = onebox.plan_rental(rental["client"], need, prefer_regions=["JP"], **common)
+        assert [p.offer.id for p in none.priced] == plain
+        assert "  no offer in the preferred region(s) JP: the order is the totals' own" in said
+        within = onebox.plan_rental(
+            rental["client"], need, prefer_regions=["FR"], max_hours=14.0, **common
+        )
+        assert [p.offer.id for p in within.priced] == [3, 2, 4]
+        # A host that says it has no open port is reached through the proxy: not preferred.
+        offers[5].direct_ports = 0  # type: ignore[attr-defined]
+        closed = onebox.plan_rental(rental["client"], need, prefer_regions=["FR"], **common)
+        assert [p.offer.id for p in closed.priced] == [3, *[i for i in plain if i != 3]]
+        # Where the lowest total is in the region already, that is said and nothing moves.
+        said.clear()
+        same = onebox.plan_rental(
+            rental["client"], need, prefer_regions=[places.get(plain[0], "Texas")], **common
+        )
+        assert same.priced[0].offer.id == plain[0]
+        assert any("the lowest total is there already" in line for line in said)
+        # Without a prediction the cheapest hour of the region is first, and the run rents it.
+        common.pop("predict")
+        hourly = onebox.plan_rental(rental["client"], need, prefer_regions=["CA"], **common)
+        assert hourly.offers[0].id == 4 and len(hourly.offers) == len(free.offers) + 1
+        rental["home"] = rental["home"].with_name("home_fr")
+        record = run(rental, hours=None, predict=predict, prefer_regions=("FR",), gpus=2)
+        assert rental["rented"] == [3] and record["offer"] == 3 and record["outcome"] == "done"
 
     def test_the_offers_are_said_and_nothing_is_rented(self, rental: dict[str, Any]) -> None:
         rental["client"].offers = self.offers()

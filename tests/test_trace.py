@@ -29,6 +29,7 @@ from reverberate.accel import pairs as pairs_module
 from reverberate.accel.pairs import PairCache
 from reverberate.audio import Atmosphere
 from reverberate.compute import Devices
+from reverberate.gpu import direct as direct_module
 from reverberate.metrics import octave_bank, octave_filter_rows
 from reverberate.mirror.geometry import write_derived
 from reverberate.mirror.hybrid import Crossover, blend, seam_db
@@ -61,6 +62,7 @@ from reverberate.spatial.translate import (
     choose_cells,
     serving_radius_m,
 )
+from reverberate.trace import driver as driver_module
 from reverberate.trace.assets import (
     ALIGNED,
     PHYSICAL,
@@ -70,7 +72,7 @@ from reverberate.trace.assets import (
     mismatched,
 )
 from reverberate.trace.bundle import build_bundle
-from reverberate.trace.cli import main
+from reverberate.trace.cli import build_parser, main
 from reverberate.trace.driver import (
     cost_records,
     describe,
@@ -323,6 +325,90 @@ def test_the_plan_is_deterministic_and_no_audible_step_is_without_cells() -> Non
     assert priced["total_s"] == pytest.approx(sum(priced["seconds"].values()), abs=0.5)
     text = describe(plan, priced)
     assert "USD" in text and f"{plan.pairs} pairs" in text
+
+
+def both_walk() -> Recipe:
+    """A second: a voice walks a metre of rail and the head a metre beside it."""
+    rail = {"id": "r", "a": "a", "b": "b", "points": [[0.6, 0.5], [0.6, 1.5]], "pitch_m": 0.08}
+    travel = {
+        "type": "travel",
+        "rail": "r",
+        "from": "a",
+        "to": "b",
+        "profile": "constant",
+        "start_s": 0.0,
+        "end_s": 1.0,
+        "facing": {"mode": "travel"},
+    }
+    return recipe_of(
+        1.0,
+        [station("a", 0.6, 0.5), station("b", 0.6, 1.5)],
+        [source("voice", "near_voice", [travel], 1.0)],
+        [(0.0, (1.6, 1.7, 0.6)), (1.0, (1.6, 1.7, 1.5))],
+        [rail],
+    )
+
+
+def test_the_pairs_are_counted_as_a_machine_makes_them_on_the_grid_s_nodes(tmp_path: Path) -> None:
+    """The first scene planned 16 887 pairs and made 18 219: no array stands on a cell asked."""
+    from reverberate.experiments.run import grid_step
+    from reverberate.spatial.lowband import solve_fmax_hz
+    from reverberate.trace import machines
+    from reverberate.trace.plan import as_made
+
+    recipe, held = both_walk(), assets()
+    plan = make_plan(recipe, held.triangles)
+    grid = plan.record["on_the_grid"]
+    step = grid_step(solve_fmax_hz(), 10.5)
+    assert grid["ppw"] == 10.5 and grid["step_m"] == pytest.approx(0.02179, abs=1e-5)
+    # The plan's own count is the rule on the cells asked, which the head's path passes
+    # through; the machine's is the rule on the centres its arrays got. Here they get the
+    # nearest nodes, and the trace's own stage counts what the plan said it would.
+    stood = np.rint(plan.cells.position / step) * step
+    assert 0.0 < np.linalg.norm(stood - plan.cells.position, axis=1).max() < step
+    trace, pairs, again = traced(tmp_path, recipe, centres=list(stood))
+    trace.assign(pairs.place())
+    assert again.record == plan.record
+    assert trace.report["pairs"]["all"] == grid["pairs"] == 34
+    assert [len(cells) for cells in trace.heard_at] == grid["cells_a_position"]
+    assert plan.pairs == plan.record["pairs"] == 33
+    # No step is exact any more: one is read from a single cell, the others from two.
+    assert plan.record["modes"] == {"exact": 3, "translated": 0, "fused": 18}
+    assert grid["modes"] == {"exact": 0, "translated": 1, "fused": 20}
+    assert grid["cells_without_an_array"] == 0 and grid["fallback_steps"] == 0
+    # What a run is priced by is the grid's count, and the plan says both.
+    seen = as_made(plan.record)
+    assert seen["pairs"] == 34 and seen["pairs_on_the_cells_asked"] == 33
+    assert seen["cells_a_position"] == grid["cells_a_position"] and as_made(seen) is seen
+    priced = estimate(plan, rate_usd_per_hour=0.4, low_levers="bins,int16")
+    assert priced["pairs"] == 34
+    assert priced["pair_cache_gb"] == pytest.approx(34 * 621_446 / 1e9, abs=0.006)
+    told = machines.predict(
+        plan.record, gpu_name="RTX 3090", num_gpus=1, gpu_ram_gb=24.0, dph_total=0.2
+    )
+    assert told is not None and told["work"]["fit_card_s"] == pytest.approx(34 * 0.29, abs=0.1)
+    text = describe(plan, priced)
+    assert f"low band: {plan.record['source_positions']} source positions, 33 pairs" in text
+    assert "on the grid's nodes (10.5 points, 21.8 mm): 34 pairs, the count this run is" in text
+    assert "0 steps stay exact of 3, 20 are fused from two cells for 18" in text
+    # A plan of before this count is priced as it was.
+    earlier = {k: v for k, v in plan.record.items() if k != "on_the_grid"}
+    assert as_made(earlier) is earlier
+    assert estimate(earlier, rate_usd_per_hour=0.4)["pairs"] == 33
+    # Another grid has other nodes, and a ball of twelve of its steps: another count.
+    coarse = make_plan(recipe, held.triangles, low_ppw=7.2).record
+    assert coarse["on_the_grid"]["ppw"] == 7.2 and coarse["on_the_grid"]["pairs"] == 33
+    assert coarse["on_the_grid"]["step_m"] == pytest.approx(0.031778, abs=1e-6)
+    assert coarse["pairs"] == 33 and coarse["modes"] == plan.record["modes"]
+    # The patch is heard from its source on any grid.
+    plain = make_plan(moving_recipe(), held.triangles).record
+    patched = make_plan(moving_recipe(), held.triangles, Profile(patch=True)).record
+    assert (
+        patched["on_the_grid"]["pairs"] - plain["on_the_grid"]["pairs"]
+        == patched["pairs"] - plain["pairs"]
+        == patched["pairs_of_the_patch"]
+        > 0
+    )
 
 
 def beside_the_path(distance_m: float) -> Recipe:
@@ -824,6 +910,13 @@ def test_a_dry_run_prints_the_plan_and_its_cost_and_rents_nothing(
     assert main([*arguments, "--dry-run", "--smoke", "0.3", "--smoke-sources", "1"]) == 0
     printed = capsys.readouterr().out
     assert "dry run: nothing built, nothing rented" in printed
+    # The regions to rent in first are the command's, as codes or names, several at once.
+    asked = build_parser().parse_args([*arguments, "--prefer-region", "FR,GB", "--build-engine"])
+    assert direct_module.regions(asked.prefer_region) == ("FR", "GB") and asked.build_engine
+    assert build_parser().parse_args(arguments).prefer_region == []
+    # The disk the rental would ask for, and what it is made of, before anything is built.
+    assert "  disk: " in printed and "GB asked of the rental: the pair cache" in printed
+    assert "25% more" in printed and "(the bundle is added once it is built)" in printed
     assert "cost at 0.4 USD/h" in printed and "sources: 1 (voice)" in printed
     assert "calibration_key" in printed and not (tmp_path / "h").exists()
     # The bundle alone: what the machine reads, and no pairs campaign without an export.
@@ -1174,12 +1267,28 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     assert seen["campaign_args"] == "--low-engine lowband" and seen["sync"] == ("pairs",)
     # The driver is given what its last lines say of a machine it leaves rented.
     assert seen["resume_command"] == "" and callable(seen["inventory"])
-    priced = seen["predict"](
-        SimpleNamespace(
-            gpu_name="RTX 3090", num_gpus=4, gpu_ram_gb=24.0, dph_total=0.8, cpu_cores=36.0
-        )
-    )
+    card: dict[str, Any] = {"gpu_name": "RTX 3090", "num_gpus": 4, "gpu_ram_gb": 24.0}
+    card |= {"dph_total": 0.8, "cpu_cores": 36.0}
+    priced = seen["predict"](SimpleNamespace(**card))
     assert priced["queue"] and priced["seconds"]["transfer_pack"] > 0
+    # No region is preferred unless one is named.
+    assert seen["prefer_regions"] == ()
+    # The batched solver opens nothing of PFFDTD: the machine is not made to build it.
+    assert seen["engine_build"] is False and not priced["engine_built"]
+    assert priced["seconds"]["start"] == 290.0
+    assert any(line.startswith("the machine does not build PFFDTD") for line in said)
+    assert not driver_module.needs_engine("lowband")
+    assert not driver_module.needs_engine("lowband", "cartesian", "--host-workers 4")
+    assert driver_module.needs_engine("pffdtd")
+    assert driver_module.needs_engine("lowband", "fcc")
+    # A flag handed to the machine's command overrules the bundle: it is read too.
+    assert driver_module.needs_engine("lowband", "cartesian", "--low-engine pffdtd")
+    assert driver_module.needs_engine("lowband", "cartesian", "--cpu --low-scheme fcc")
+    # The disk is the plan's, the bundle as it was built in it, and not a field campaign's.
+    sized = result["disk"]
+    assert seen["disk_gb"] == sized["disk_gb"] == 24
+    assert sized["parts_gb"]["mirror_store"] == 8.0 and driver_module._tree_gb(home / "bundle") > 0
+    assert any(line.startswith("  disk: ") for line in said)
     assert campaign["trace"]["low_levers"] == "bins,int16"
     assert (
         seen["leave"] == ()
@@ -1200,6 +1309,25 @@ def test_the_one_command_bundles_rents_and_brings_the_pack_home(
     )
     carried = PairCache(tmp_path / "home_pffdtd" / "bundle" / "pairs_cache", "key1500")
     assert carried.has(other) and not carried.has(known) and seen["predict"] is None
+    # PFFDTD writes its own outputs: its rental keeps the field campaign's disk.
+    assert seen["disk_gb"] is None
+    # And the present engine is built, as is the batched solver's machine when told.
+    assert (
+        seen["engine_build"] is True and "the machine builds PFFDTD: this run asks for it" in said
+    )
+    launch(
+        recipe,
+        held,
+        tmp_path / "home_built",
+        models_from=export,
+        allow_asset_mismatch=True,
+        yes=True,
+        build_engine=True,
+        prefer_regions=["FR", "GB"],
+        say=said.append,
+    )
+    assert seen["engine_build"] is True and seen["prefer_regions"] == ("FR", "GB")
+    assert seen["predict"](SimpleNamespace(**card))["seconds"]["start"] == 290.0 + 357.0
     pairs = json.loads((home / "bundle" / "pairs" / "campaign.json").read_text())
     assert pairs["kind"] == pairs_module.KIND and pairs["pairs"] == plan.pairs
     assert np.array_equal(np.load(home / "bundle" / "pairs" / "cells.npy"), plan.all_cells)

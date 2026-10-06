@@ -6,8 +6,10 @@ pack is home. :func:`predict` prices that whole span on one offer, as the
 trace runs since it is **one queue over every card and every core**
 (``docs/adr/0016-appendix-every-card-every-core.md``):
 
-- **the start**: the instance answering, the engine built, the bundle
-  pushed, then the grid voxelised and the launches planned. No card works;
+- **the start**: the instance answering, the interpreter made, the
+  bundle pushed, and PFFDTD built where the run opens it
+  (:data:`ENGINE_BUILD_S`); then the grid voxelised and the launches
+  planned. No card works;
 - **the solves**, a launch a card: a source position's seconds on this kind
   of card (:data:`SOURCE_S`), a launch's own seconds, a pair's fit, over
   the cards; and **what the cards idle at the end**, half a launch each,
@@ -30,12 +32,20 @@ the code of before the queue, their other stages one after the other;
 ``queue=False`` prices a run that way, which is what makes the comparison
 one of like with like.
 
-**What is measured and what is not.** A source position's seconds are
-measured on the RTX 3090 (88 s on the validated grid, 34.6 s at 7.2 points
-per wavelength, eight and four cards) and on the RTX 3080 (110 and 36 s).
-A card of another kind is priced through :data:`CARDS`, its throughput on
-a stencil bound by memory traffic over the RTX 3080's; a prediction on an
-estimated card says so, and its watchdog is given a larger margin.
+**What is measured and what is not.** The constants are of **the code as
+it runs today**, on one RTX 3090: 70.5 s a source position on the validated
+grid with the walls' seven branches and 0.29 s a pair's fit
+(``docs/open-questions/solver-boundary.md``), 0.54 s a tail site through
+the tree (``docs/open-questions/ray-tracer.md``), 1.9 ms a position of the
+early trace and 25 ms a pair levelled
+(``docs/adr/0016-appendix-every-card-every-core.md``). A card of another
+kind is priced from the RTX 3090's figure through :data:`CARDS`, its
+throughput on a stencil bound by memory traffic over the RTX 3080's; a
+prediction on an estimated card says so, and its watchdog is given a larger
+margin. What the two whole scenes ran, eleven branches and the trace of
+before the queue, is kept beside (:data:`SOURCE_S_AS_RUN`,
+:data:`FIT_S_AS_RUN`) and prices ``queue=False`` alone: a ledger is read
+against the code that made it (``docs/adr/0016-appendix-trace-cost.md``).
 
 **The table chooses an offer and nothing else.** Once on the machine the
 trace reads its cards and measures them (:mod:`reverberate.trace.resources`),
@@ -57,12 +67,19 @@ from reverberate.wave.lowband import pairs as batched
 
 __all__ = [
     "CARDS",
+    "FIT_S",
+    "FIT_S_AS_RUN",
+    "LEVEL_PAIR_S",
     "LINE",
+    "PATHS_JOB_S",
+    "RAYS_SITE_S",
     "SOURCE_S",
+    "SOURCE_S_AS_RUN",
     "Card",
     "actual",
     "against",
     "card_of",
+    "disk_need",
     "line_bytes_per_s",
     "predict",
     "predictor",
@@ -133,26 +150,65 @@ CARDS: tuple[Card, ...] = (
 )
 
 #: Card seconds of one source position of 1.2 s on the grid to 1500 Hz, by the card and
-#: the grid's points per wavelength, where a run measured them. The RTX 3090's are the two
-#: whole scenes of 2026-10-05: 132 393 card seconds for 1505 positions on 8 cards, 51 824
-#: for 1496 on 4 at 7.2 points. Between the two grids the RTX 3080 goes as the points to
-#: the power 2.96 and the RTX 3090 as 2.47: another card or grid is priced from the RTX
-#: 3080's 110 s, its throughput, and :data:`reverberate.wave.lowband.pairs.PPW_EXPONENT`.
+#: the grid's points per wavelength, **as the trace solves today**: the walls in seven
+#: branches (``wave.lowband.walls.DEFAULT_BRANCHES``). One RTX 3090, instance 54379263,
+#: 2026-10-05 (``docs/open-questions/solver-boundary.md``, section 2): 70.5 s where the
+#: eleven branches took 88.3 on the same card and grid. At 7.2 points the figure is scene
+#: B's, 51 824 card seconds for 1496 positions on 4 cards, **measured with eleven
+#: branches and not again with seven**: it errs long. Another card is priced from the RTX
+#: 3090's figure on the grid asked and the two throughputs; another grid from the
+#: validated one's and :data:`reverberate.wave.lowband.pairs.PPW_EXPONENT`.
 SOURCE_S: dict[tuple[str, float], float] = {
+    ("RTX 3090", 10.5): 70.5,
+    ("RTX 3090", 7.2): 34.6,
+}
+#: The same as the two whole scenes of 2026-10-05 ran it, eleven branches: 132 393 card
+#: seconds for 1505 positions on 8 RTX 3090, 51 824 for 1496 on 4 at 7.2 points
+#: (``docs/adr/0016-appendix-trace-cost.md``), and one RTX 3080 (instance 54201838).
+#: Between the two grids the RTX 3080 goes as the points to the power 2.96 and the RTX
+#: 3090 as 2.47. A ledger of those runs is read against these (``queue=False``).
+SOURCE_S_AS_RUN: dict[tuple[str, float], float] = {
     ("RTX 3080", 10.5): 110.0,
     ("RTX 3080", 7.2): 36.0,
     ("RTX 3090", 10.5): 88.0,
     ("RTX 3090", 7.2): 34.6,
 }
-#: Card seconds a pair's fit takes beside its launch's steps, where a run measured them:
-#: 10 065 s for the 18 219 pairs of the first scene on the validated grid (0.74 s a pair
-#: where a launch held one position heard at 84 cells, 0.27 s where it held twelve heard
-#: at two), 3 167 s for 15 187 pairs at 7.2 points.
-FIT_S: dict[tuple[str, float], float] = {("RTX 3090", 10.5): 0.55, ("RTX 3090", 7.2): 0.21}
-#: From the rental to the trace's first line: the instance answering, its cards asked,
-#: the engine built, the interpreter made, the bundle pushed. 8.1 and 13.4 minutes on the
-#: two hosts of 2026-10-05, of which the build and the interpreter were 3.6 and 8.3.
-START_S = 630.0
+#: The card whose seconds another card's are taken from, by the two throughputs.
+_MEASURED_CARD = "RTX 3090"
+#: Card seconds a pair's fit takes beside its launch's steps: 0.29 s in a launch on the
+#: validated grid, the time chain, on that RTX 3090 (``solver-boundary.md``, section 2:
+#: 0.37 s alone, 0.07 s for the fit in its spectra, which is not the default); 3 167 s for
+#: 15 187 pairs at 7.2 points, scene B.
+FIT_S: dict[tuple[str, float], float] = {("RTX 3090", 10.5): 0.29, ("RTX 3090", 7.2): 0.21}
+#: The same as the first scene ran it: 10 065 s for its 18 219 pairs on the validated
+#: grid (0.74 s a pair where a launch held one position heard at 84 cells, 0.27 s where
+#: it held twelve heard at two).
+FIT_S_AS_RUN: dict[tuple[str, float], float] = {
+    ("RTX 3090", 10.5): 0.55,
+    ("RTX 3090", 7.2): 0.21,
+}
+#: Card seconds of a tail site of 100 000 rays through the tree, in double precision, the
+#: whole call with its counts brought home: 0.54 s on one RTX 3090, twenty sites
+#: (``docs/open-questions/ray-tracer.md``, *What a site costs*; 9.67 s through the grid,
+#: which is what the two whole scenes ran).
+RAYS_SITE_S = 0.54
+#: Host seconds of a (source, head) position of the early trace on one core, its store
+#: filled, and of a pair levelled (``docs/adr/0016-appendix-every-card-every-core.md``:
+#: 1.25 s for 630 positions and 7.0 s for 284 pairs, where they were 23 and 76 ms). **The
+#: store's fill is not in the first**: the trees, lists and distance fields of a dwelling
+#: are made once a machine (7.4 s on that window of 20 s), under the first solves.
+PATHS_JOB_S = 0.0019
+LEVEL_PAIR_S = 0.025
+#: From the rental to the trace's first line **without the engine's build**: the
+#: instance answering, its cards asked, the interpreter made, the bundle pushed. The two
+#: hosts of 2026-10-05 took 489 and 804 s, their builds of PFFDTD 216 and 498 s of them:
+#: 273 and 306 s (``docs/open-questions/performance-audit.md``, sections 2 and 7, which
+#: counts 170 s of floor: ssh 109, wheels 45, push 15). **No rental has yet started
+#: without the build**: the figure is those two, less what they say the build took.
+START_S = 290.0
+#: What the build adds, for a run that asks for the present engine or for the face
+#: centred grid, whose voxeliser is PFFDTD's: the mean of those two hosts.
+ENGINE_BUILD_S = 357.0
 #: The grid voxelised, the arrays placed and the pairs assigned, before any launch: 108 s
 #: on the validated grid, 240 s at 7.2 points, whose arrays are half as large again.
 PREPARE_S = {10.5: 110.0, 7.2: 240.0}
@@ -203,6 +259,98 @@ def line_bytes_per_s(
     return rate, False
 
 
+#: What a trace keeps on its machine's disk besides its pairs, its rows and its pack.
+#: A tail's histogram of one site at one cell, in double precision as the levelling reads
+#: it: 35 MB a site of 53 cells (``docs/open-questions/ray-tracer.md``; 7.1 GB for the
+#: first scene's 202 sites).
+TAIL_ENTRY_BYTES = 660_000
+#: The mirror's store, trees and distance fields, for a whole scene of a dwelling
+#: (``docs/runbook-rented-machines.md``, section 7).
+MIRROR_STORE_GB = 8.0
+#: The grid as voxelised and as computed, the early tables (0.27 GB for the first scene),
+#: the jobs' own files and the logs: one figure, not measured apart.
+DISK_REST_GB = 3.0
+#: The margin, stated: a quarter of what the run is counted to write, and what the
+#: machine holds before the run writes anything (the interpreter, the wheels, the code).
+DISK_MARGIN = 0.25
+DISK_SYSTEM_GB = 10.0
+
+
+def disk_need(
+    record: dict[str, Any],
+    *,
+    low_levers: str | None = None,
+    low_seconds: float | None = None,
+    bundle_gb: float = 0.0,
+) -> dict[str, Any]:
+    """The disk a trace of this plan asks of its rental, GB, and what it is made of.
+
+    The first whole scenes asked 219 GB, a field campaign's formula
+    (:func:`reverberate.gpu.onebox.campaign_need`), and used 53; a disk is
+    billed by the hour whether written or not (0.098 USD an hour of the
+    1.382 run A was billed). A trace's own disk is counted from its plan,
+    at the moment it holds the most, while the pack is written:
+
+    - ``pairs``: the pair cache, in the form the run keeps it;
+    - ``rows``: the pack's rows as the queue's jobs leave them for the
+      write, every pair as samples whatever the pack's form, removed once
+      the pack is checked;
+    - ``pack``: the pack, in the form it is written in;
+    - ``tails``: a histogram a tail site and tail cell;
+    - ``mirror_store``, ``bundle`` (as pushed, the pairs it carries in
+      it), and ``rest``.
+
+    To their sum are added :data:`DISK_MARGIN` of it and
+    :data:`DISK_SYSTEM_GB`. ``line`` says it as the plan's output does.
+    Only the batched solver's trace is sized so: PFFDTD writes its own
+    outputs, and its rental keeps the field campaign's formula.
+    """
+    record = plans.as_made(record)
+    base = plans.estimate(
+        record, rate_usd_per_hour=0.0, low_levers=low_levers, low_seconds=low_seconds
+    )
+    scene_pairs = int(record["pairs"]) - int(record.get("pairs_of_the_patch", 0))
+    histograms = int(record["tail_sites"]) * int(record["tail_cells"])
+    parts = {
+        "pairs": float(base["pair_cache_gb"]),
+        "rows": scene_pairs * plans.PAIR_BYTES / 1e9,
+        "pack": float(base["pack_gb"]),
+        "tails": histograms * TAIL_ENTRY_BYTES / 1e9,
+        "mirror_store": MIRROR_STORE_GB,
+        "bundle": float(bundle_gb),
+        "rest": DISK_REST_GB,
+    }
+    parts = {name: round(value, 2) for name, value in parts.items()}
+    counted = float(sum(parts.values()))
+    margin = DISK_MARGIN * counted
+    disk = int(-(-(counted + margin + DISK_SYSTEM_GB) // 1))
+    named = {
+        "pairs": "the pair cache",
+        "rows": "the pack's rows until it is checked",
+        "pack": f"the pack ({base.get('low_levers') or 'samples'})",
+        "tails": "the tails' histograms",
+        "mirror_store": "the mirror's store",
+        "bundle": "the bundle",
+        "rest": "the grid, the early tables and the logs",
+    }
+    line = (
+        f"disk: {disk} GB asked of the rental: "
+        + ", ".join(
+            f"{named[name]} {parts[name]:g}" for name in parts if name != "bundle" or parts[name]
+        )
+        + f"; {counted:.1f} GB counted, {DISK_MARGIN:.0%} more ({margin:.1f}) and"
+        f" {DISK_SYSTEM_GB:g} for the machine's own"
+    )
+    return {
+        "disk_gb": disk,
+        "parts_gb": parts,
+        "counted_gb": round(counted, 2),
+        "margin_gb": round(margin, 2),
+        "system_gb": DISK_SYSTEM_GB,
+        "line": line,
+    }
+
+
 def _plain(name: str) -> str:
     return "".join(str(name).lower().split()).replace("_", "")
 
@@ -225,17 +373,33 @@ def throughput_table() -> list[str]:
     ]
 
 
-def _a_source_s(card: Card, ppw: float, window_s: float) -> float:
-    """Card seconds of one source position on this card and grid."""
-    held = SOURCE_S.get((card.name, round(ppw, 2)))
-    if held is None:
-        grid = (ppw / batched.MEASURED_PPW) ** batched.PPW_EXPONENT
-        held = batched.SOLVE_S_AT_1500 * grid / card.throughput
+def _a_source_s(card: Card, ppw: float, window_s: float, *, as_run: bool = False) -> float:
+    """Card seconds of one source position on this card and grid.
+
+    Today's code unless ``as_run``, which is the code of the two whole
+    scenes of 2026-10-05 (:data:`SOURCE_S_AS_RUN`).
+    """
+    grid = (ppw / batched.MEASURED_PPW) ** batched.PPW_EXPONENT
+    if as_run:
+        held = SOURCE_S_AS_RUN.get((card.name, round(ppw, 2)))
+        if held is None:
+            held = batched.SOLVE_S_AT_1500 * grid / card.throughput
+    else:
+        held = SOURCE_S.get((card.name, round(ppw, 2)))
+        if held is None:
+            # The measured card's seconds on this grid, where a run read them, or on the
+            # validated one; then the two cards' throughputs.
+            known = card_of(_MEASURED_CARD)
+            assert known is not None
+            there = SOURCE_S.get((known.name, round(ppw, 2)))
+            if there is None:
+                there = SOURCE_S[(known.name, batched.MEASURED_PPW)] * grid
+            held = there * known.throughput / card.throughput
     return float(held) * window_s / batched.MEASURED_DURATION_S
 
 
-def _a_fit_s(card: Card, ppw: float) -> float:
-    held = FIT_S.get((card.name, round(ppw, 2)))
+def _a_fit_s(card: Card, ppw: float, *, as_run: bool = False) -> float:
+    held = (FIT_S_AS_RUN if as_run else FIT_S).get((card.name, round(ppw, 2)))
     return float(held) if held is not None else batched.PAIR_S / card.throughput
 
 
@@ -262,6 +426,7 @@ def predict(
     launches: int | None = None,
     launch_sources: int | None = None,
     billed_dph: float | None = None,
+    engine_build: bool | None = None,
 ) -> dict[str, Any] | None:
     """Wall hours and USD of a plan's trace on one offer; ``None`` where it cannot be said.
 
@@ -286,6 +451,10 @@ def predict(
     after the other in one process. ``launches`` and ``launch_sources`` are
     then what that run's log says it planned.
 
+    ``engine_build`` says whether the rental builds PFFDTD before the
+    trace starts (:data:`ENGINE_BUILD_S`); left out, a run of before the
+    queue did and a run of today does not.
+
     ``None`` for a card with no row in :data:`CARDS`, for a card too small
     to hold one cell's records beside the grid, and for the present engine,
     whose price was fitted on one machine only.
@@ -293,6 +462,8 @@ def predict(
     card = card_of(gpu_name)
     if card is None or low_engine != "lowband":
         return None
+    # The pairs as a machine makes them, where the plan counted them so.
+    record = plans.as_made(record)
     counts = [int(c) for c in record.get("cells_a_position", [])]
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
     window = batched.MEASURED_DURATION_S if low_seconds is None else float(low_seconds)
@@ -319,19 +490,26 @@ def predict(
         low_levers=low_levers,
     )
     planned = dict(base["seconds"])
-    source_s, fit_s = _a_source_s(card, ppw, window), _a_fit_s(card, ppw)
+    # A run of before the queue is priced with what that code took, stage by stage.
+    as_run = not queue
+    source_s = _a_source_s(card, ppw, window, as_run=as_run)
+    fit_s = _a_fit_s(card, ppw, as_run=as_run)
     a_launch = int(launch_sources or batched.LAUNCH_SOURCES)
     made = int(launches) if launches else -(-solves // a_launch)
     from reverberate.trace.resources import REFERENCE
 
+    cast = plans.RAYS_MEASURED if rays is None else int(rays)
     work = {
         "solve_card_s": solves * source_s + made * float(REFERENCE["launch_s"]),
         "fit_card_s": pairs * fit_s,
-        "rays_card_s": planned["rays"],
+        # Through the grid, as those runs cast them; through the tree since.
+        "rays_card_s": planned["rays"]
+        if as_run
+        else int(record["tail_sites"]) * RAYS_SITE_S * cast / plans.RAYS_MEASURED,
         "host_core_s": HOST_OVERHEAD
         * (
-            (int(record["step_pairs"]) + pairs) * float(REFERENCE["paths_job_s"])
-            + pairs * (float(REFERENCE["level_pair_s"]) + float(REFERENCE["row_pair_s"]))
+            (int(record["step_pairs"]) + pairs) * PATHS_JOB_S
+            + pairs * (LEVEL_PAIR_S + float(REFERENCE["row_pair_s"]))
         ),
     }
     tail = TAIL_LAUNCHES * min(a_launch, max(solves, 1)) * source_s if cards > 1 and solves else 0.0
@@ -340,7 +518,9 @@ def predict(
         low = (work["solve_card_s"] + work["fit_card_s"]) / cards + tail
         low += float(REFERENCE["start_s"])
     prepare = PREPARE_S.get(round(ppw, 2), PREPARE_S[10.5])
-    seconds: dict[str, float] = {"start": START_S, "prepare": prepare, "low": low}
+    built = (not queue) if engine_build is None else bool(engine_build)
+    start = START_S + (ENGINE_BUILD_S if built else 0.0)
+    seconds: dict[str, float] = {"start": start, "prepare": prepare, "low": low}
     seconds["rays"] = work["rays_card_s"] / cards
     if queue:
         workers = max(1.0, min(float(cpu_cores) / 2.0, HOST_WORKERS_AT_MOST)) if cpu_cores else 16.0
@@ -358,7 +538,7 @@ def predict(
     home = float(base["pair_cache_gb"]) * 1e9 / rate if fetch_pairs else 0.0
     if synced and fetch_pairs:
         # Brought home while the machine works: only what the run leaves no time for.
-        home = max(0.0, home - (on_machine - START_S))
+        home = max(0.0, home - (on_machine - start))
     seconds["transfer_pairs"] = home
     total = float(sum(seconds.values()))
     billed = float(dph_total if billed_dph is None else billed_dph)
@@ -385,6 +565,7 @@ def predict(
         "line_measured": line_measured,
         "fetch_usd": round((seconds["transfer_pack"] + home) / 3600.0 * billed, 3),
         "queue": bool(queue),
+        "engine_built": built,
     }
 
 

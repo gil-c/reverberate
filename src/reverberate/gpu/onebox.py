@@ -58,8 +58,8 @@ import json
 import shlex
 import time
 import traceback
-from collections.abc import Callable, Collection
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ from reverberate import auth
 from reverberate.accel.bundle import HOME_ITEMS
 from reverberate.accel.lattice import sim_constants
 from reverberate.accel.solve import OUTPUT_SAMPLE_BYTES_PATCHED
-from reverberate.gpu import vast
+from reverberate.gpu import direct, vast
 from reverberate.gpu.homecoming import WORKERS, fastest, fetch_file, fetch_tree
 from reverberate.wave.remote import one_at_a_time, run_on
 from reverberate.wave.remote_voxelise import grid_shape_of, provision, rsync
@@ -593,6 +593,44 @@ def search_offers(client: Any, need: MachineNeed, *, min_gpus: int = 1) -> list[
     return offers
 
 
+def prefer(found: list[Any], regions: Sequence[str], say: Any, *, what: Any) -> list[Any]:
+    """``found`` with the offers of the preferred regions first; their own order within.
+
+    A preference and not a filter: no offer is dropped, and the order
+    given, the lowest total first, is kept among the offers of one region
+    and among those of none. A host is preferred for its line to the
+    laptop, so only where the transfer can go to it directly: an offer
+    that says it has no open port is ranked as any other. ``what`` says an
+    entry in a line; what the preference changes of the first choice is
+    said.
+    """
+    wanted = [word for word in regions if word.strip()]
+    if not wanted or not found:
+        return found
+
+    def offer_of(entry: Any) -> Any:
+        return getattr(entry, "offer", entry)
+
+    def rank(entry: Any) -> int:
+        offer = offer_of(entry)
+        if int(getattr(offer, "direct_ports", 1) or 0) <= 0:
+            return len(wanted)
+        return direct.region_rank(str(getattr(offer, "location", "") or ""), wanted)
+
+    ranked = sorted(found, key=rank)
+    named = ", ".join(wanted)
+    if rank(ranked[0]) == len(wanted):
+        say(f"  no offer in the preferred region(s) {named}: the order is the totals' own")
+    elif ranked[0] is not found[0]:
+        say(
+            f"  preferred region(s) {named}: {what(ranked[0])} goes first;"
+            f" the lowest total anywhere is {what(found[0])}"
+        )
+    else:
+        say(f"  preferred region(s) {named}: the lowest total is there already")
+    return ranked
+
+
 @dataclass
 class RentalPlan:
     """The offers to try, best first, the watchdog's cap, and why."""
@@ -627,8 +665,14 @@ def plan_rental(
     min_gpus: int = 1,
     predict: Callable[[Any], dict[str, Any] | None] | None = None,
     max_hours: float | None = None,
+    prefer_regions: Sequence[str] = (),
 ) -> RentalPlan:
     """Search, choose, and say the choice and its reasons; nothing is rented.
+
+    ``prefer_regions`` puts the offers of those regions first, in the
+    order given (:func:`prefer`: country codes or place names, as
+    :func:`reverberate.gpu.direct.region_rank` reads them); nothing is
+    left out for it.
 
     Without ``predict`` the cheapest hour that fits is first, as before.
     With it, each offer is priced for this run and the lowest predicted
@@ -654,6 +698,12 @@ def plan_rental(
         )
     if predict is None:
         cap = DEFAULT_HOURS if hours is None else float(hours)
+        good = prefer(
+            good,
+            prefer_regions,
+            say,
+            what=lambda o: f"offer {o.id} ({getattr(o, 'location', '')}, {o.dph_total:.3f} USD/h)",
+        )
         for offer in good[:OFFERS_SHOWN]:
             say("  " + offer.describe())
         say(f"  chosen by hourly price: no prediction of this run was given; cap {cap:g} h")
@@ -666,8 +716,21 @@ def plan_rental(
             if max_hours is not None
             else "no offer could be priced for this run"
         )
+    priced = prefer(
+        priced,
+        prefer_regions,
+        say,
+        what=lambda p: (
+            f"offer {p.offer.id} ({getattr(p.offer, 'location', '')}),"
+            f" {p.hours:.2f} h and {p.usd:.2f} USD"
+        ),
+    )
     shown = priced[:OFFERS_SHOWN]
-    say("  predicted for this run, the lowest total first (wall hours, USD, offer):")
+    say(
+        "  predicted for this run, the lowest total first"
+        + (" within a preferred region" if any(w.strip() for w in prefer_regions) else "")
+        + " (wall hours, USD, offer):"
+    )
     for found in shown:
         say("  " + found.line())
     first = shown[0]
@@ -752,11 +815,38 @@ def rent(
     return machine, instance, ranked[len(ranked) - len(good) - 1]
 
 
-def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[str, float]:
-    """The engine built with its patches, the interpreter with cupy, the code, the bundle."""
+#: Where the engine is not built, the one thing of its build a campaign still wants: a C
+#: compiler, for the text the mirror's paths are sieved by. The image is expected to hold
+#: one; where it does not, the packages are installed, and a machine that cannot install
+#: them runs those paths on ``numpy`` and says so.
+COMPILER_COMMAND = (
+    "command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1"
+    " || (apt-get update -qq && apt-get install -y -qq build-essential >/dev/null)"
+    " || echo 'no C compiler could be installed'"
+)
+
+
+def provision_machine(
+    machine: Any, repo: Path, bundle: Path, say: Any, *, engine_build: bool = True
+) -> dict[str, Any]:
+    """The engine built with its patches, the interpreter with cupy, the code, the bundle.
+
+    ``engine_build`` false leaves PFFDTD out: packages, a clone, eight
+    patches, an interpreter of its own and four CUDA binaries, 216 and 498 s
+    on the two hosts of 2026-10-05
+    (``docs/open-questions/performance-audit.md``, section 7). A campaign
+    whose solver is ``wave.lowband`` on its Cartesian grid opens nothing of
+    it; the present engine and the face centred grid's voxeliser do.
+    """
     t0 = time.time()
-    build_s = provision(machine, repo / "scripts" / "build_pffdtd.sh", beside=engine_patches(repo))
-    say(f"engine built in {build_s / 60:.1f} min")
+    if engine_build:
+        build_s = provision(
+            machine, repo / "scripts" / "build_pffdtd.sh", beside=engine_patches(repo)
+        )
+        say(f"engine built in {build_s / 60:.1f} min")
+    else:
+        say("engine not built: this campaign's solver does not open it")
+        run_on(machine, COMPILER_COMMAND, what="compiler", timeout=900)
     run_on(
         machine, f"mkdir -p {REMOTE_SRC} {REMOTE_BUNDLE} {REMOTE_OUT} {REMOTE_DATA}", what="mkdir"
     )
@@ -780,7 +870,7 @@ def provision_machine(machine: Any, repo: Path, bundle: Path, say: Any) -> dict[
     rsync(machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", download=False)
     push_s = round(time.time() - t0, 1)
     say(f"bundle pushed in {push_s / 60:.1f} min")
-    return {"provision_s": provision_s, "push_s": push_s}
+    return {"provision_s": provision_s, "push_s": push_s, "engine_built": bool(engine_build)}
 
 
 def pairs_home(pulled: Path) -> int:
@@ -1215,8 +1305,24 @@ def run(
     resume_command: str = "",
     inventory: Callable[[Any], list[str]] | None = None,
     relaunch: bool = False,
+    disk_gb: int | None = None,
+    engine_build: bool = True,
+    prefer_regions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Rent, check the cards are empty, provision, push, launch, watch, fetch, destroy.
+
+    ``prefer_regions`` orders the offers, those of the regions named first
+    (:func:`prefer`): a preference for the hosts whose line to this laptop
+    is the fastest, and not a filter.
+
+    ``engine_build`` false provisions the machine without PFFDTD
+    (:func:`provision_machine`): a campaign that does not run it.
+
+    ``disk_gb`` is the disk asked of the rental where the caller sizes it
+    from its own plan (a trace: :func:`reverberate.trace.machines.disk_need`);
+    left out, a field campaign's (:func:`campaign_need`). It is what the
+    offers are searched with, what the rental asks for and what it is
+    billed for.
 
     ``resume_command`` is the command that resumes this run on its
     machine, ``{instance}`` standing for the instance; ``inventory`` asks a
@@ -1263,6 +1369,9 @@ def run(
     home.mkdir(parents=True, exist_ok=True)
     record: dict[str, Any] = {"bundle": str(bundle), "started": time.time(), "watches": []}
     need = campaign_need(bundle)
+    if disk_gb is not None:
+        need = replace(need, disk_gb=int(disk_gb))
+    record["disk_gb"] = need.disk_gb
     say(f"need: {need.describe()}")
     if instance is None and not yes and not plan_only:
         say("nothing rented: pass --yes")
@@ -1300,6 +1409,7 @@ def run(
                     min_gpus=gpus,
                     predict=predict,
                     max_hours=max_hours,
+                    prefer_regions=prefer_regions,
                 )
                 record["offers"] = plan.record()
                 record["cap_hours"] = plan.hours
@@ -1326,7 +1436,9 @@ def run(
                 record["avoided"] = sorted(avoided)
                 save()
                 try:
-                    record.update(provision_machine(machine, repo, bundle, say))
+                    record.update(
+                        provision_machine(machine, repo, bundle, say, engine_build=engine_build)
+                    )
                     break
                 except BaseException as error:
                     # A host that cannot be provisioned is not waited for: three rentals

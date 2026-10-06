@@ -36,7 +36,14 @@ import h5py
 from reverberate.scenes import Recipe
 from reverberate.trace.assets import MirrorAssets, found_assets, mismatched
 from reverberate.trace.bundle import build_bundle, levers_text
-from reverberate.trace.plan import RAYS_MEASURED, Plan, Profile, estimate, make_plan
+from reverberate.trace.plan import (
+    RAYS_MEASURED,
+    Plan,
+    Profile,
+    as_made,
+    estimate,
+    make_plan,
+)
 
 __all__ = [
     "cost_records",
@@ -44,6 +51,7 @@ __all__ = [
     "finish",
     "launch",
     "machine_holds",
+    "needs_engine",
     "resume_command",
     "stamp_cost",
 ]
@@ -84,6 +92,7 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
         f" fused {r['modes']['fused']}",
         f"low band: {r['source_positions']} source positions, {r['pairs']} pairs"
         + (f" ({r['pairs_of_the_patch']} of the patch)" if r["pairs_of_the_patch"] else ""),
+        *_on_the_grid(r),
         f"tail: {r['tail_sites']} sites over {r['tail_cells']} cells",
     ]
     if r["patch"] is not None:
@@ -110,6 +119,21 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
             f" {priced['non_solve_usd']:.3f} USD; check: {priced.get('check')}"
         )
     return "\n".join(lines)
+
+
+def _on_the_grid(record: dict[str, Any]) -> list[str]:
+    """The line that says how many pairs a machine makes of a plan's, and why they differ."""
+    grid = record.get("on_the_grid")
+    if not grid:
+        return []
+    without = int(grid["cells_without_an_array"])
+    return [
+        f"  on the grid's nodes ({grid['ppw']:g} points, {1000.0 * grid['step_m']:.1f} mm):"
+        f" {grid['pairs']} pairs, the count this run is priced by. No array stands on a cell"
+        f" asked: {grid['modes']['exact']} steps stay exact of {record['modes']['exact']},"
+        f" {grid['modes']['fused']} are fused from two cells for {record['modes']['fused']}"
+        + (f"; {without} cell(s) taken to get no array" if without else "")
+    ]
 
 
 #: Flags of ``trace rent`` that a resume does not repeat, and how many words follow each.
@@ -346,6 +370,8 @@ def launch(
     line: str = "proxy",
     resume: str = "",
     relaunch: bool = False,
+    build_engine: bool = False,
+    prefer_regions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Plan, price, and unless ``dry_run``: bundle, rent, run, fetch, destroy, verify, finish.
 
@@ -378,13 +404,32 @@ def launch(
     ``plan_offers`` builds the bundle, says the offers and their
     predictions, and rents nothing.
 
+    **PFFDTD is built on the machine only for a run that opens it**
+    (:func:`needs_engine`): the present engine, the face centred grid,
+    whose voxeliser is PFFDTD's, or ``build_engine``. The default solver's
+    rental starts without those minutes.
+
+    ``prefer_regions`` puts the offers of those regions first among those
+    priced, each region's by their totals (``--prefer-region FR``): a
+    preference and not a filter, for the hosts a pack comes home from the
+    fastest. Four streams brought 14 to 57 MB/s directly from a host in
+    France where the proxy brought 5 to 14 from the hosts measured
+    (``docs/open-questions/direct-connection.md``), and the offers' totals
+    are still priced through the proxy unless ``line`` is ``direct``.
+
     ``low_scheme`` and ``low_ppw`` put the low band on another grid, whose
     pairs have their own keys; such a run has its own ``home``.
     ``reuse_from`` is the home of an earlier run of the recipe, whose early
     tables (brought home with ``fetch_early``) are not traced again.
     """
     home = Path(home)
-    plan = make_plan(recipe, assets.triangles, profile, patch_centre_xz=patch_centre_xz)
+    plan = make_plan(
+        recipe,
+        assets.triangles,
+        profile,
+        patch_centre_xz=patch_centre_xz,
+        low_ppw=low_ppw if low_engine == "lowband" else None,
+    )
     cast = int(assets.settings.rays.rays)
     rays = None if cast == RAYS_MEASURED else cast
     brought = (
@@ -404,6 +449,20 @@ def launch(
     )
     say(describe(plan, priced))
     result: dict[str, Any] = {"plan": plan.record, "estimate": priced}
+    from reverberate.trace.machines import disk_need
+
+    def disk(bundle_gb: float = 0.0) -> dict[str, Any] | None:
+        """The disk this run asks for; ``None`` with the present engine, sized as a field's."""
+        if low_engine != "lowband":
+            return None
+        return disk_need(
+            plan.record, low_levers=levers, low_seconds=low_seconds, bundle_gb=bundle_gb
+        )
+
+    sized = disk()
+    if sized is not None:
+        result["disk"] = sized
+        say("  " + sized["line"] + (" (the bundle is added once it is built)" if dry_run else ""))
     if dry_run:
         # The grid's key and the export's digest are known once the bundle holds the export.
         unknown = {"voxel_low_key"} | ({"export_sha256"} if not assets.export_sha256 else set())
@@ -475,6 +534,11 @@ def launch(
     from reverberate.gpu import onebox
     from reverberate.trace.machines import predictor
 
+    sized = disk(_tree_gb(bundle))
+    if sized is not None:
+        if sized["disk_gb"] != result["disk"]["disk_gb"]:
+            say(f"  with the bundle as built, {sized['parts_gb']['bundle']:g} GB: " + sized["line"])
+        result["disk"] = sized
     leave = () if brought else ("pairs",)
     if leave:
         say("the pair cache stays on the machine and goes with it: --fetch-pairs brings it home")
@@ -483,6 +547,13 @@ def launch(
     flags = f"--low-engine {low_engine}"
     if low_engine == "lowband" and (low_scheme != "cartesian" or low_ppw is not None):
         flags += f" --low-scheme {low_scheme}" + (f" --low-ppw {low_ppw:g}" if low_ppw else "")
+    built = build_engine or needs_engine(low_engine, low_scheme, campaign_args)
+    say(
+        "the machine builds PFFDTD: this run asks for it"
+        if built
+        else "the machine does not build PFFDTD: the batched solver on its Cartesian grid"
+        " opens none of it (--build-engine builds it all the same)"
+    )
     record = onebox.run(
         bundle,
         home,
@@ -503,7 +574,7 @@ def launch(
         max_hours=max_hours,
         # The offers are priced for the pairs still to solve: what is carried is not paid.
         predict=predictor(
-            _unsolved(plan.record, int(campaign.get("pairs_carried", 0))),
+            _unsolved(as_made(plan.record), int(campaign.get("pairs_carried", 0))),
             fetch_pairs=brought,
             check=check,
             low_engine=low_engine,
@@ -512,14 +583,19 @@ def launch(
             rays=rays,
             low_levers=levers,
             line=line,
+            engine_build=built,
             # The disk the rental asks for is billed by the hour with the cards.
-            disk_gb=_disk_gb(bundle),
+            disk_gb=float(sized["disk_gb"]) if sized is not None else _disk_gb(bundle),
         )
         if low_engine == "lowband"
         else None,
         resume_command=resume,
         relaunch=relaunch,
-        inventory=lambda machine: machine_holds(machine, plan.record),
+        engine_build=built,
+        prefer_regions=tuple(prefer_regions),
+        # Sized from the plan; the present engine's rental keeps a field campaign's disk.
+        disk_gb=None if sized is None else int(sized["disk_gb"]),
+        inventory=lambda machine: machine_holds(machine, as_made(plan.record)),
         sync=("pairs",) if brought else (),
         **({} if sync_s is None else {"sync_s": sync_s}),
         plan_only=plan_offers,
@@ -536,6 +612,32 @@ def launch(
     if record.get("left_alive"):
         say(str(record["left_alive"]))
     return result
+
+
+def needs_engine(low_engine: str, low_scheme: str = "cartesian", campaign_args: str = "") -> bool:
+    """Whether a trace opens PFFDTD on its machine, and the rental must therefore build it.
+
+    The batched solver (``wave.lowband``) voxelises its Cartesian grid on
+    the card and steps by its own kernels. The present engine is PFFDTD
+    itself; the face centred grid is voxelised by PFFDTD's Python. A flag
+    handed to the machine's command overrules the bundle, so one that
+    names either asks for the build too.
+    """
+    words = shlex.split(campaign_args or "")
+    told = {
+        words[i]: words[i + 1]
+        for i in range(len(words) - 1)
+        if words[i] in ("--low-engine", "--low-scheme")
+    }
+    engine = told.get("--low-engine", low_engine)
+    scheme = told.get("--low-scheme", low_scheme)
+    return engine != "lowband" or scheme == "fcc"
+
+
+def _tree_gb(directory: Path) -> float:
+    """What a directory holds, GB: the bundle as it is pushed."""
+    held = sum(path.stat().st_size for path in Path(directory).rglob("*") if path.is_file())
+    return held / 1e9
 
 
 def _disk_gb(bundle: Path) -> float:

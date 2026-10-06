@@ -74,11 +74,13 @@ __all__ = [
     "Profile",
     "SourceTrack",
     "Tracks",
+    "as_made",
     "assign",
     "busiest_window",
     "estimate",
     "listening_cells",
     "make_plan",
+    "on_the_grid",
     "pairs_of",
     "patch_cells",
     "read_arcs",
@@ -95,6 +97,10 @@ MERGE_M = 0.03
 #: The ball an array needs free of surfaces and of sources: twelve steps of
 #: the grid to 1500 Hz (``accel.pairs.OUTER_RADIUS_M``).
 ARRAY_RADIUS_M = 0.26
+#: That ball in steps of the low band's grid, whatever the grid.
+ARRAY_RADIUS_STEPS = 12
+#: The validated grid's points per wavelength: what a trace solves on unless told.
+LOW_PPW = 10.5
 #: A source slot's weight under this is no weight.
 WEIGHT_FLOOR = 1e-9
 #: The solved positions a source on a rail reads unless more are asked for: the two round
@@ -972,6 +978,96 @@ def patch_cells(
 
 # --------------------------------------------------------------------------
 # the plan
+def on_the_grid(
+    tracks: Tracks,
+    cells: np.ndarray,
+    triangles: np.ndarray,
+    *,
+    ppw: float | None = None,
+) -> dict[str, Any]:
+    """The pairs counted as a machine makes them: the arrays on the grid's nodes.
+
+    The plan's own cells sit on the listener's rest places and on the
+    samples of its path, to the millimetre, so the rule reads most steps
+    from one cell, exactly (``MODE_EXACT``). **No array stands there.** The
+    machine stands each array on a node of the low band's grid
+    (:meth:`reverberate.trace.run.Trace.assign`), a median of 9 mm from the
+    cell asked on the validated grid, and runs the rule again on those
+    centres: a step that was exact is then translated from one cell or
+    fused from two, and a fused step asks for a second pair. On the first
+    scene (hssd_0076, 831 cells) 140 992 steps were exact and 38 470 fused
+    by the plan, 66 and 109 582 on the machine: 16 887 pairs planned,
+    18 219 made.
+
+    Here the rule is run on each cell moved to the nearest node of a
+    lattice of the grid's step, and a cell whose ball of
+    :data:`ARRAY_RADIUS_STEPS` steps is not free of the mirror's surfaces
+    is taken to get no array, as on a coarser grid many do not. **The
+    lattice's origin is the voxeliser's and is not known to a plan**, nor
+    is where the machine moves an array that does not fit: the count is an
+    estimate, and the docstring of :func:`as_made` says how near it came on
+    the two grids of the first scene.
+    """
+    from reverberate.experiments.run import grid_step
+
+    points = LOW_PPW if ppw is None else float(ppw)
+    step = grid_step(solve_fmax_hz(), points)
+    cells = np.asarray(cells, dtype=float).reshape(-1, 3)
+    stood = np.rint(cells / step) * step
+    clearance = clearance_m(stood, triangles)
+    free = clearance >= ARRAY_RADIUS_STEPS * step
+    if not free.any():
+        free = np.ones(cells.shape[0], dtype=bool)
+    low, refused = assign(tracks, stood, clearance, usable=free)
+    heard_at = pairs_of(tracks, low)
+    modes = np.concatenate(
+        [low[name].mode[track.audible] for name, track in tracks.sources.items()]
+        or [np.zeros(0, dtype=np.uint8)]
+    )
+    return {
+        "ppw": points,
+        "step_m": round(step, 6),
+        "cells_without_an_array": int((~free).sum()),
+        "pairs": sum(len(c) for c in heard_at),
+        "cells_a_position": [len(c) for c in heard_at],
+        "modes": {
+            "exact": int((modes == MODE_EXACT).sum()),
+            "translated": int((modes == MODE_TRANSLATED).sum()),
+            "fused": int((modes == MODE_FUSED).sum()),
+        },
+        "fallback_steps": len(refused),
+    }
+
+
+def as_made(record: dict[str, Any]) -> dict[str, Any]:
+    """A plan's record with its pairs counted as a machine makes them (:func:`on_the_grid`).
+
+    ``pairs`` and ``cells_a_position`` become the grid's, and
+    ``pairs_on_the_cells_asked`` keeps what they were. A record without
+    that count, an earlier plan's or one already read so, is returned as
+    it is: what a run is priced by, and what its disk is sized by, read a
+    record through this.
+
+    On the first scene the cells asked count 16 887 pairs on any grid. The
+    grid's count is 18 364 for the 18 219 a machine made on the validated
+    grid (+0.8 per cent, where the plan was 7.3 short; 17 652 to 18 364
+    over three origins of the lattice) and 14 791 for the 15 187 made at
+    7.2 points (-2.6 per cent, where the plan was 11 over; 158 cells taken
+    to get no array where 95 got none).
+    """
+    grid = record.get("on_the_grid")
+    if not grid:
+        return record
+    rest = {name: value for name, value in record.items() if name != "on_the_grid"}
+    return {
+        **rest,
+        "pairs": int(grid["pairs"]),
+        "cells_a_position": [int(c) for c in grid["cells_a_position"]],
+        "pairs_on_the_cells_asked": int(record["pairs"]),
+        "low_ppw_counted": float(grid["ppw"]),
+    }
+
+
 # --------------------------------------------------------------------------
 
 
@@ -1025,8 +1121,16 @@ def make_plan(
     profile: Profile | None = None,
     *,
     patch_centre_xz: tuple[float, float] | None = None,
+    low_ppw: float | None = None,
 ) -> Plan:
-    """The plan of ``recipe``: deterministic, and free of any file but those it is given."""
+    """The plan of ``recipe``: deterministic, and free of any file but those it is given.
+
+    ``low_ppw`` is the low band's grid where it is not the validated one:
+    the record's ``on_the_grid`` counts the pairs on that grid's nodes
+    (:func:`on_the_grid`), which is what a run is priced by. The plan's own
+    cells, modes and ``pairs`` are the rule on the cells asked, whatever
+    the grid.
+    """
     profile = profile or Profile()
     triangles = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
     tracks = tracks_of(recipe, profile)
@@ -1058,6 +1162,11 @@ def make_plan(
         or [np.zeros(0, dtype=np.uint8)]
     )
     whole = low_band_source_positions(recipe)
+    grid = on_the_grid(tracks, cells.position, triangles, ppw=low_ppw)
+    if patch is not None:
+        # The patch's cells are heard from its source on any grid.
+        grid["cells_a_position"][patch.source] += int(patch.cells.shape[0])
+        grid["pairs"] += int(patch.cells.shape[0])
     record = {
         "recipe_sha256": recipe_sha256(recipe),
         "dwelling": recipe.dwelling.name,
@@ -1081,6 +1190,9 @@ def make_plan(
         # What a card's record memory is counted against: a position heard at more cells
         # than a card holds records for is solved more than once.
         "cells_a_position": [len(c) for c in heard_at],
+        # The same two as a machine makes them, its arrays on the grid's nodes: what a run
+        # is priced by (:func:`as_made`).
+        "on_the_grid": grid,
         "pairs_of_the_patch": 0 if patch is None else int(patch.cells.shape[0]),
         "tail_sites": len(used),
         "tail_cells": int(receivers.size),
@@ -1161,6 +1273,9 @@ def estimate(
     another kind moves the rays most: their kernel is double precision,
     which a consumer card computes many times slower than its single.
 
+    The pairs are counted as a machine makes them, its arrays on the
+    grid's nodes (:func:`as_made`); ``pairs`` says the count priced.
+
     ``fetch_pairs`` prices the pair cache's way home, which is as long as
     the pack's; ``check`` is ``full`` or ``read``, a smoke run's default
     being the first and the whole scene's the second. A plan's record is
@@ -1174,7 +1289,7 @@ def estimate(
         raise ValueError(f"unknown low band engine {low_engine!r}")
     pairs_estimate = engines[low_engine]
 
-    record = plan.record if isinstance(plan, Plan) else plan
+    record = as_made(plan.record if isinstance(plan, Plan) else plan)
     positions, pairs = int(record["source_positions"]), int(record["pairs"])
     scene_pairs = pairs - int(record.get("pairs_of_the_patch", 0))
     solves = positions
@@ -1240,6 +1355,7 @@ def estimate(
         "pack_gb": round(pack_bytes / 1e9, 2),
         "pair_cache_gb": round(pair_bytes / 1e9, 2),
         "pairs_fetched": bool(fetch_pairs),
+        "pairs": pairs,
         "check": check,
         "low": low,
         "low_engine": low_engine,
