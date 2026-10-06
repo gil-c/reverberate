@@ -6,7 +6,6 @@ name: Full
 on:
   push:
     branches: [main, clarify-simulator]
-  pull_request:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

@@ -203,10 +203,10 @@ as it was, 1e-12 of the peak. It is marked `quarantine`: out of the run a
 pull request waits for, and run five times on every pull request by a job
 of its own that is red when it fails and holds nothing.
 
-What that job measured (lot L27, three runs of the CI, the test alone in
-a process of its own):
+What that job measured (lot L27, six runs of the CI, the test alone in a
+process of its own):
 
-- It fails in 10 runs of 15, so it is not what the tests before it leave
+- It fails in 16 runs of 28, so it is not what the tests before it leave
   behind.
 - The files differ in 15 to 29 frames of 14 400, all inside one step of
   2 400 samples, on all 64 channels, by up to 6.6e31 of the peak, and by
@@ -223,7 +223,7 @@ a process of its own):
 - The same test with each process having loaded the C text and made the
   delay table before its engine starts a thread
   (`test_processes_readied_before_their_threads_write_the_file_one_engine_writes`)
-  passed 16 runs of 16, with and without `MALLOC_PERTURB_`.
+  passed 29 runs of 29, with and without `MALLOC_PERTURB_`.
 
 - It is not that test's alone. Under one process a core every worker is a
   fresh process, and in the first full run of four workers

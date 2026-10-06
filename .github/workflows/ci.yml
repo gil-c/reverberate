@@ -90,7 +90,7 @@ jobs:
 
       - name: make test-parallel
         run: |
-          files=$(ls tests/test_*.py | awk -v third=${{ matrix.third }} 'NR % 3 == third')
+          files=$(ls tests/test_*.py | awk -v third=${{ matrix.third }} 'NR % 3 == third' | tr '\n' ' ')
           make test-parallel FILES="$files"
 
   # The tests marked quarantine: kept running and in sight on every pull

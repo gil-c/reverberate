@@ -666,6 +666,26 @@ stack again. Remedies in the order of their gain: a parallel runner
 the traces' fixtures shared a session. Not done here: every other lot is
 editing tests.
 
+**Done since (lot L27).** A pull request now waits for lint, types and the
+tests side by side: the tests in three jobs of a file in three, each one
+process a core (`make test-parallel`), with no coverage table, which no
+threshold ever read. Read in that lot's CI: 1 min 40 s from the push to
+the last of them where the one job took 10 min 18 s, and 31, 41 and 71 s
+of `pytest` in the three where it took 492 s. The table and the tests
+marked `nightly` are `make test-full`, in a workflow of its own after
+every merge and every night (2 min 31 s). In one process on this laptop
+the default run is 117 s of tests where it was 176 s: the cost probe of
+the low band no longer waits its ten seconds, the scheme's wavenumber is
+solved once a grid and a session, the objects carved in passing are thirty
+centimetres across, and the three-band assembly and the benchmark's own
+test are the full workflow's. No test was deleted: none was found that
+holds a path no longer there, and the ten strict `xfail` of the chain
+audit take 0.6 s together. What a runner costs is not steady, one and a
+half times from one run to the next, which is why the tests are in
+three. The two of `test_mirror_rays.py` above were shortened with the
+tracer and take 0.04 s each. Left: the traces' fixtures a session and the
+whole reports of `tests/test_w10_render.py`.
+
 ## 9. The ranked plan
 
 The owner's two first; then by USD and wall time a unit of effort. The
