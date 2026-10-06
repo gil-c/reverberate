@@ -14,13 +14,13 @@ the function itself calls it with arguments of its own and so runs it.
 process makes the delay table from several threads at once, and a loop in C
 can be left reading a table another thread's has replaced
 (``docs/open-questions/engine-speed.md``, "the same bytes"). That is a defect
-of the engine and it has a test of its own, which starts processes that never
-read this file: ``test_several_processes_write_the_file_one_engine_writes``,
-marked ``quarantine`` and run by a job of its own. Every other test is kept
-out of its way here, since under one process a core each worker is a fresh
-process and whichever test renders first in it would fail one run in a few
-for a reason that is not its own (it did: ``tests/test_render_seam.py``, in
-the first full run of four workers). To be removed with the defect.
+of the engine and it has a test of its own:
+``test_several_processes_write_the_file_one_engine_writes``, marked
+``quarantine`` and run by a job of its own without this file. Every other test
+is kept out of its way here, since under one process a core each worker is a
+fresh process and whichever test renders first in it would fail one run in a
+few for a reason that is not its own (it did: ``tests/test_render_seam.py``,
+in the first full run of four workers). To be removed with the defect.
 """
 
 from __future__ import annotations

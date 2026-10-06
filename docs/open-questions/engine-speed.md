@@ -200,14 +200,17 @@ failed in four of the nine runs of the whole suite that held it between
 its arrival and 2026-10-06, two of them on branches that had not touched
 the engine and were run again until they passed. The test's tolerance is
 as it was, 1e-12 of the peak. It is marked `quarantine`: out of the run a
-pull request waits for, and run five times on every pull request by a job
+pull request waits for, and run three times on every pull request by a job
 of its own that is red when it fails and holds nothing.
 
-What that job measured (lot L27, six runs of the CI, the test alone in a
-process of its own):
+What that job measured (lot L27, eight runs of the CI):
 
-- It fails in 16 runs of 28, so it is not what the tests before it leave
-  behind.
+- Alone in a process of its own, which then renders for the first time
+  itself, it fails in 16 runs of 28. After the other tests of its file,
+  when only the processes it starts are fresh, in 1 of 5; in the whole
+  suite, the same case, in the 4 of 9 above. So it is not what the tests
+  before it leave behind, and either side of the comparison can be the
+  one that is wrong: whichever renders for the first time.
 - The files differ in 15 to 29 frames of 14 400, all inside one step of
   2 400 samples, on all 64 channels, by up to 6.6e31 of the peak, and by
   not a number in two runs. That is memory read after it was given back,
@@ -220,11 +223,13 @@ process of its own):
 - The parts rendered alone by another fresh process are this process's
   in most failures, and in two the early part is off by 1e13 and 1e28:
   it is the early part, and it is a race.
-- The same test with each process having loaded the C text and made the
-  delay table before its engine starts a thread
-  (`test_processes_readied_before_their_threads_write_the_file_one_engine_writes`)
-  passed 29 runs of 29, with and without `MALLOC_PERTURB_`.
-
+- The same test with each process it starts having loaded the C text and
+  made the delay table before its engine starts a thread
+  (`test_processes_readied_before_their_threads_write_the_file_one_engine_writes`,
+  which runs after the first and so in a process that has rendered)
+  passed 29 runs of 29, with and without `MALLOC_PERTURB_`. At one
+  failure in five with nothing readied, 29 passes by chance are one in
+  several hundred.
 - It is not that test's alone. Under one process a core every worker is a
   fresh process, and in the first full run of four workers
   `tests/test_render_seam.py::test_the_engine_takes_the_level_a_band_and_the_scalar_when_told`
@@ -232,8 +237,10 @@ process of its own):
   921 600 apart from frame 57 on, the frames of the list above. Whichever
   test renders first in a process is exposed, and one that holds its
   render against nothing does not notice. `tests/conftest.py` now makes
-  the table before any test of a process, which keeps every test but the
-  quarantined one out of the way of it and is to go when the defect does.
+  the table before any test of a process, which keeps every test out of
+  the way of it and is to go when the defect does. The quarantine's job
+  runs without that file (`--noconftest`), so that its test stays as
+  exposed as it was measured; with it, 6 runs of 6 passed.
 
 The reading, from those and from the text: `render/native.py` makes the
 delay table on first use with no lock (`_table`), and `early_interval`

@@ -33,9 +33,10 @@ test-full:
 	$(PARALLEL) -m "not slow and not quarantine" --cov --cov-report=term-missing --durations=40
 
 # The tests that do not give one result every run on the CI, kept running and
-# in sight in a job that blocks nothing until their cause is closed.
+# in sight in a job that blocks nothing until their cause is closed. Without
+# tests/conftest.py, which keeps the other tests out of the way of that cause.
 test-quarantine:
-	pytest -m quarantine -v
+	pytest -m quarantine -v --noconftest
 
 # The tests that need the HSSD download, excluded from the default run and from
 # CI because neither has it. They pin the room rules of ADR 0010 against the
