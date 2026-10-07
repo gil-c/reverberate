@@ -740,6 +740,80 @@ onset moves. A cache reads either form pair by pair, a pair's key does not
 say its form, and a pair goes from cache to cache, to the bundle and to
 the store in the form it is in.
 
+### The fastest way a host has (lot L35: not yet run on a machine)
+
+What bounds a pack's way home, what was weighed and what each figure rests
+on are in `docs/open-questions/direct-connection.md`, "The pack's way
+home". In short: the proxy is out of the path; ssh's cipher is ten times
+faster than any line; what bounds a far host is one connection's window,
+and `sshd` refuses many connections; from Europe four streams already
+reach nine tenths of the laptop's line. So:
+
+- **a rental asks its host for one port more** (8443 of the instance, on
+  a port of the host's choosing). Where the host maps it, the fetch starts
+  `gpu/rangeserver.py` on the machine over the pinned ssh connection: the
+  run's output folder alone, to read, over TLS, to the bearer of a token
+  made for that start. The laptop believes the one certificate it read
+  back over ssh. The pack then comes in ranges on sixteen connections,
+  thirty-two while doubling them still brings a sixth more, and is
+  verified against the SHA-256 the machine says over ssh, as before;
+- **where the host maps no port, or the server does not start**, the log
+  says why in one line and the pack comes by ssh at the instance's own
+  address, on four connections that may become eight; then through the
+  proxy on four; then by `rsync`. Each way goes on from the chunks the one
+  before brought;
+- **the pack does not wait for the watcher**: the machine is asked every
+  20 s, on a kept connection, whether `pack.h5` is written and whether the
+  campaign has ended. A pack that came early is not fetched again
+  (`pulled/pack.h5.home.json` says which file of the machine it is);
+- **the bundle goes up beside the provisioning**, at the instance's own
+  address;
+- **an offer must say it sends 200 Mbit/s** (`inet_up`).
+
+**At the start of a rental, measure the host** (two minutes, some hundreds
+of megabytes, nothing rented or destroyed; the driver goes on beside it):
+
+```sh
+python -m reverberate.gpu.transfer_bench --instance N
+```
+
+It writes a file of random bytes on the machine, reads it by every way
+for five seconds each (the proxy; direct ssh on 1, 4 and 8 connections,
+with two ciphers, on one shared connection; `rsync`; HTTPS on 1 to 32
+connections; then the way up), prints the table and keeps its verdict
+beside the instance's pinned keys
+(`<runs>/known_hosts/instance_N.transfer.json`). The driver's fetch reads
+it: the ways in the order of what each brought on that host, each starting
+on the count of connections it was the fastest on, ssh with the cipher
+that won if one did. Without it the order is HTTPS, direct ssh, the proxy.
+The laptop's own line, to read the table against:
+`python -m reverberate.experiments.w47_direct_connection line`.
+
+How the table reads:
+
+| what it shows | what bounds the host |
+| --- | --- |
+| one stream far under four, and sixteen ranges over four | a connection's window: a far host. More connections are the remedy and HTTPS has them |
+| a rate that stops growing with the connections, under the laptop's line | the machine's line, whatever its offer said |
+| the same, at the laptop's line | the laptop |
+| two ciphers that differ | a processor, the machine's or the laptop's |
+| HTTPS "not open" | the host maps no port, or the image lacks `python3` or `openssl`: the line says which. ssh is the way |
+
+**What a pack of 9.5 GB takes**, at 1.38 USD/h: 36 minutes and 0.83 USD
+at the proxy's 4.4 MB/s; 7.9 minutes and 0.18 USD at 20 MB/s; 3.2 minutes
+and 0.07 USD at 50; 1.6 minutes and 0.04 USD at 100, which is more than
+the laptop's line has carried from anywhere. Beside the line: the laptop's
+own digest of the file (10 s), and up to 20 s before the end is
+seen, where it was up to 300. The pack's 16 bit payload does not deflate
+(15.53 bits of information in 16, measured on scene B's), so the bytes are
+what they are.
+
+**Not seen on a machine**: every rate of this section; that a host maps
+the port every time it is asked; the looks every 20 s beside a run of
+hours. Tried on 127.0.0.1, against a range server and an `sshd` of the
+laptop's own with a line slowed and cut on purpose: the tests'
+`test_transfer.py`, and the figures of `direct-connection.md`.
+
 ### When a run fails after its solves
 
 Both scenes ended `campaign.failed` after five hours of solves, stopped by

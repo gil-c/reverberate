@@ -89,6 +89,9 @@ __all__ = [
 HOMECOMING_PORT = 8443
 #: Where the server's own files are on the machine: beside the run, never inside what it serves.
 REMOTE_SERVE = "/root/.rv-serve"
+#: The interpreter a provisioned machine holds, where the system has none
+#: (:data:`reverberate.gpu.onebox.ACCEL_PYTHON`, which imports this module).
+ACCEL_PYTHON = "/root/accel-venv/bin/python"
 #: The server ends itself after this long whatever happens to the laptop, s.
 SERVE_LIFETIME_S = 12 * 3600.0
 #: A connection of a range that brings nothing for this long is lost, s.
@@ -257,7 +260,9 @@ def _serve_script(root: str, port: int, where: str, lifetime_s: float, extra: st
         f"set -e; umask 077; mkdir -p {shlex.quote(where)}; cd {shlex.quote(where)};"
         ' if [ -f pid ]; then kill "$(cat pid)" 2>/dev/null || true; rm -f pid; fi;'
         " IFS= read -r token; printf '%s' \"$token\" > token; unset token; cat > rangeserver.py;"
-        " command -v python3 >/dev/null 2>&1 || { echo 'no python3 on the machine' >&2; exit 3; };"
+        # The system's interpreter, or the one the provisioning made.
+        f" py=$(command -v python3 || ls {ACCEL_PYTHON} 2>/dev/null || true);"
+        " [ -n \"$py\" ] || { echo 'no python3 on the machine' >&2; exit 3; };"
         " command -v openssl >/dev/null 2>&1 || { echo 'no openssl on the machine' >&2; exit 3; };"
         # An RSA key: the one kind every TLS library a machine may hold shakes hands with
         # (a key on a curve was refused by Python 3.9 on LibreSSL 2.8, tried on 127.0.0.1).
@@ -265,7 +270,7 @@ def _serve_script(root: str, port: int, where: str, lifetime_s: float, extra: st
         " -keyout key.pem -out cert.pem -days 30 -subj /CN=rv-homecoming >/dev/null 2>&1"
         " || { echo 'openssl made no certificate' >&2; exit 3; };"
         # Detached with every stream of its own, so that the ssh session ends without it.
-        " ( $(command -v setsid || true) python3 rangeserver.py"
+        ' ( $(command -v setsid || true) "$py" rangeserver.py'
         f" --root {shlex.quote(root)} --port {int(port)}"
         " --cert cert.pem --key key.pem --token-file token --pid-file pid"
         f" --lifetime {float(lifetime_s):g} --forget --quiet {extra}"

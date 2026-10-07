@@ -36,6 +36,13 @@ trying again at once are what it was refusing.
 **A direct connection is tried first** (:func:`fastest`) where the
 instance says it has one, and the proxy is what is fallen back on.
 
+**The ranges need not come over ssh.** :mod:`reverberate.gpu.transfer`
+reads them over HTTPS from a server it starts on the machine
+(:class:`~reverberate.gpu.transfer.HttpsTransport`), and says how many
+workers work at a time (``lanes``): what this module keeps whatever the
+way is the chunks, their ledger, the pauses, and the file's SHA-256 against
+the machine's at the end.
+
 Nothing here knows Vast or a trace: a machine is addressed over ssh, and
 :class:`Transport` is the four things asked of it, which the tests answer
 from a directory.
