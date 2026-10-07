@@ -1,0 +1,96 @@
+/* The components' own look, and the page's frame for a small application. */
+:root {
+  --ground: #f5f5f2;
+  --card: #ffffff;
+  --ink: #1c1f24;
+  --soft: #646b76;
+  --line: #dcdcd6;
+  --accent: #1f6feb;
+  --accent-ink: #ffffff;
+  --bad: #b3261e;
+  --good: #1a7f47;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); }
+main.p-page { max-width: 1080px; margin: 0 auto; padding: 20px 20px 48px; display: grid; gap: 14px; }
+.p-page h1 { font-size: 18px; margin: 0; }
+.p-page h2 { font-size: 13px; margin: 0 0 8px; color: var(--soft); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.p-page header p { margin: 2px 0 0; color: var(--soft); }
+.p-card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.p-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.p-row + .p-row { margin-top: 10px; }
+.p-note { color: var(--soft); font-size: 12.5px; }
+.p-note.bad, .p-bad { color: var(--bad); }
+.p-said { color: var(--soft); font-variant-numeric: tabular-nums; min-width: 4.5em; }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--ground); color: var(--soft); }
+
+.p-button { font: inherit; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.p-button:hover { border-color: var(--soft); }
+.p-button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.p-button:disabled { opacity: 0.45; cursor: default; }
+.p-button.p-small { padding: 2px 8px; font-size: 12.5px; }
+.p-button.p-big { padding: 10px 18px; font-size: 15px; font-weight: 600; min-width: 7.5em; }
+.p-seg { display: inline-flex; }
+.p-seg .p-button { border-radius: 0; margin-left: -1px; }
+.p-seg .p-button:first-child { border-radius: 7px 0 0 7px; margin-left: 0; }
+.p-seg .p-button:last-child { border-radius: 0 7px 7px 0; }
+
+/* The transport. */
+.p-play { min-width: 5em; font-weight: 600; }
+.p-time { font-variant-numeric: tabular-nums; color: var(--soft); min-width: 7.5em; }
+.p-bar { position: relative; flex: 1; min-width: 200px; height: 22px; background: var(--ground); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; touch-action: none; overflow: hidden; }
+.p-cursor { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.p-region { position: absolute; top: 0; bottom: 0; background: rgba(31, 111, 235, 0.22); border-left: 1px solid var(--accent); border-right: 1px solid var(--accent); pointer-events: none; }
+.p-field { display: inline-flex; align-items: center; gap: 8px; }
+.p-field > span:first-child { color: var(--soft); }
+.p-level { width: 150px; }
+.p-clip { color: var(--bad); font-weight: 600; min-width: 6.5em; }
+.p-head { margin-left: 8px; }
+.p-dial { width: 58px; height: 58px; cursor: grab; touch-action: none; border-radius: 50%; outline-offset: 2px; }
+.p-dial.off { opacity: 0.35; pointer-events: none; }
+.p-dial svg { width: 100%; height: 100%; display: block; }
+.p-dial-rim { fill: var(--ground); stroke: var(--line); stroke-width: 2; }
+.p-dial-front { stroke: var(--soft); stroke-width: 3; }
+.p-dial-skull { fill: #e9e6df; stroke: var(--ink); stroke-width: 2; }
+.p-dial-nose { fill: var(--accent); }
+.p-dial-ear { fill: var(--ink); }
+
+/* The sonogram. */
+.p-sonogram { display: grid; gap: 8px; }
+.p-sono-panel { display: grid; grid-template-columns: 38px 1fr; grid-template-rows: auto 130px; column-gap: 4px; }
+.p-sono-label { grid-column: 2; font-weight: 600; font-size: 12.5px; margin-bottom: 2px; }
+.p-sono-axis { position: relative; grid-column: 1; grid-row: 2; font-size: 10.5px; color: var(--soft); }
+.p-sono-axis span { position: absolute; right: 2px; transform: translateY(50%); white-space: nowrap; }
+.p-sono-plot { position: relative; grid-column: 2; grid-row: 2; cursor: crosshair; touch-action: none; border-radius: 4px; overflow: hidden; }
+.p-sono-plot canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+.p-sono-plot .p-cursor { background: #ffffff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.p-sono-plot .p-region { background: rgba(255, 255, 255, 0.18); border-color: #ffffff; }
+.p-sono-legend { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--soft); margin-left: 42px; }
+.p-sono-legend canvas { width: 180px; height: 10px; border-radius: 3px; }
+
+/* Numbers a third octave. */
+.p-bands { width: 100%; height: auto; display: block; }
+.p-bands .p-grid { stroke: var(--line); stroke-width: 1; }
+.p-bands .p-zero { stroke: var(--soft); stroke-width: 1; }
+.p-bands .p-mark { stroke: var(--soft); stroke-width: 1; stroke-dasharray: 4 3; }
+.p-bands .p-tick { font-size: 11px; fill: var(--soft); }
+.p-bands-key { display: flex; gap: 14px; font-size: 12.5px; color: var(--soft); margin: 2px 0 0 44px; flex-wrap: wrap; }
+.p-bands-key i { display: inline-block; width: 12px; height: 3px; margin-right: 5px; vertical-align: middle; }
+
+/* The track list. */
+.p-track-rows { display: grid; gap: 4px; margin-bottom: 10px; }
+.p-track { display: grid; grid-template-columns: 14px 6.5em auto auto minmax(120px, 1fr) 4.5em 90px; align-items: center; gap: 8px; }
+.p-track.silent .p-name, .p-track.silent .p-said { opacity: 0.45; }
+.p-chip { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.p-chip.noise { border-radius: 2px; transform: rotate(45deg); }
+.p-solo.on { background: #e0a100; border-color: #e0a100; }
+.p-mute.on { background: var(--bad); border-color: var(--bad); }
+.p-fader { width: 100%; }
+.p-meter-box { height: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.p-meter { display: block; height: 100%; width: 0; background: var(--good); }
+
+/* The scene. */
+.p-scene { position: relative; width: 100%; height: 420px; border-radius: 8px; overflow: hidden; }
+.p-scene canvas { display: block; width: 100%; height: 100%; }
