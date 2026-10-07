@@ -58,9 +58,10 @@ MB = 1e6
 REMOTE = "/root/.rv-bench"
 REMOTE_FILE = f"{REMOTE}/out/bench.bin"
 #: The ciphers ssh is measured with beside its own choice: the two with authentication
-#: built in, of which one leans on the processor's AES and the other does not, and the
-#: plain counter mode.
-CIPHERS = ("aes128-gcm@openssh.com", "chacha20-poly1305@openssh.com", "aes128-ctr")
+#: built in, of which one leans on the processor's AES and the other does not. The plain
+#: counter mode was the slowest of the three on 127.0.0.1 and is left out: a row is five
+#: seconds of a rented machine.
+CIPHERS = ("aes128-gcm@openssh.com", "chacha20-poly1305@openssh.com")
 #: How much faster a way must be to be put before one with fewer moving parts.
 WORTH = 1.10
 

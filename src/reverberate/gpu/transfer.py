@@ -483,6 +483,9 @@ class HttpsTransport:
                         break
                     handle.write(buffer[:got])
                     came += got
+                    if came > count:
+                        # More than was asked for is not a range of the file.
+                        raise RemoteError(f"range of {remote}: more than {count} bytes came")
                     if time.time() - began > limit:
                         raise ConnectionLost(f"a chunk did not come in {limit:g} s", None)
             if came < promised:

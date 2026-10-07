@@ -214,6 +214,24 @@ class TestWhatIsServed:
             assert running.ask(method, "/pack.h5")[0] == 501
 
     @needs_openssl
+    def test_a_connection_past_those_it_has_room_for_is_closed_unanswered(
+        self, running: Running
+    ) -> None:
+        running.server._room = threading.BoundedSemaphore(1)
+        held = transfer._Pinned(running.served, 5.0)
+        held.request("GET", rangeserver.PING, headers={"Authorization": f"Bearer {TOKEN}"})
+        assert held.getresponse().status == 204
+        with pytest.raises((OSError, http.client.HTTPException)):
+            running.ask("GET", rangeserver.PING)
+        held.close()
+        for _ in range(100):
+            if running.server._room.acquire(blocking=False):
+                running.server._room.release()
+                break
+            time.sleep(0.01)
+        assert running.ask("GET", rangeserver.PING)[0] == 204
+
+    @needs_openssl
     def test_another_certificate_is_refused_and_plain_http_is_not_spoken(
         self, running: Running, tmp_path: Path
     ) -> None:
@@ -814,6 +832,48 @@ class TestTheRental:
         assert "inet_up" not in vast.search_query()
         assert "inet_up>200" in vast.search_query(min_inet_up_mbps=200).split()
         assert onebox.MIN_INET_UP_MBPS == 200
+
+    def test_the_bundle_goes_up_beside_the_provisioning_and_past_the_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        started = threading.Event()
+        fail: list[str] = []
+
+        def rsync(machine: Any, sources: list[str], target: str, **given: Any) -> None:
+            calls.append(f"{machine} -> {target}")
+            if target == onebox.REMOTE_BUNDLE + "/":
+                started.set()
+                if machine in fail:
+                    raise ConnectionLost("Connection refused")
+
+        def run_on(machine: Any, command: str, *, what: str, timeout: Any = None) -> str:
+            if what == "provision":
+                # The bundle is on its way before the interpreter is made.
+                assert started.wait(5.0)
+            calls.append(what)
+            return ""
+
+        monkeypatch.setattr(onebox, "rsync", rsync)
+        monkeypatch.setattr(onebox, "run_on", run_on)
+        monkeypatch.setattr(onebox, "fastest", lambda machine, say=None: "direct")
+        said: list[str] = []
+        told = onebox.provision_machine(
+            "proxy", tmp_path, tmp_path, said.append, engine_build=False
+        )
+        assert "direct -> /root/campaign/bundle/" in calls and "push_waited_s" in told
+        assert "direct -> /root/reverberate/" in calls
+        assert calls.index("mkdir") < calls.index("direct -> /root/campaign/bundle/")
+        # A direct way up that fails goes through the proxy, and says so.
+        calls.clear()
+        fail.append("direct")
+        onebox.provision_machine("proxy", tmp_path, tmp_path, said.append, engine_build=False)
+        assert "proxy -> /root/campaign/bundle/" in calls
+        assert any("the direct way up failed" in line for line in said)
+        # A bundle that does not go up at all is the provisioning's failure.
+        fail.append("proxy")
+        with pytest.raises(ConnectionLost):
+            onebox.provision_machine("proxy", tmp_path, tmp_path, said.append, engine_build=False)
 
     def test_the_pinned_machine_carries_the_ports_to_its_direct_route(self, tmp_path: Path) -> None:
         import base64

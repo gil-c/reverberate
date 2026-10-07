@@ -11,6 +11,12 @@ fallback, and the homecoming of `gpu.homecoming` takes the direct route
 first. Written for lot L16 of ADR 0016. The measurements are
 `python -m reverberate.experiments.w47_direct_connection offers | line | measure`.
 
+Lot L35 (2026-10-07) adds the last section but one, "The pack's way home":
+what bounds the rate, the range server that is now in the code, and the
+bench that measures every way on a host. **No machine was rented for it**:
+what it says is reasoned from the measurements of this note, or measured
+on 127.0.0.1 and on the pack of the first scene as it lies on the laptop.
+
 ## The answer
 
 A rented machine can be reached at its host's own address, and it is worth
@@ -148,7 +154,7 @@ be the default once it has been seen on more hosts.
 | --- | --- |
 | `rsync` over direct ssh | In the code: `rsync` is given the route's own shell (`direct.rsync_shell`). 21 MB came in 2.3 s directly and 8.6 s through the proxy from France |
 | one kept connection (`ControlMaster`) | Kept **one a worker**, as `homecoming` does. A command on a kept connection costs 0.12 s (France) or 0.36 s (North Carolina) against 0.7 to 2.9 s. Four streams on **one** shared connection carried as much as four connections from France (45 MB/s) and little over half from North Carolina (12 against 21): on a long path one TCP connection is one window |
-| HTTPS with byte ranges | Built for the measurement only (`w47`): nginx on a mapped port, a certificate made on the machine for the host's address and read back through ssh, the only one `curl` is told to believe (`--cacert`), a token made for the run. Without the token it answers 403; with the system's certificates alone `curl` refuses it. One stream is twice ssh's (16 to 26 MB/s against 6 to 15); four ranges are 39 to 40 MB/s, which four ssh streams reach once they are up. Not put in the code: at four streams it brings nothing ssh does not, and it is a daemon, a port and a secret more. Worth returning to if more than four streams are wanted, since it does not pass through `MaxStartups` |
+| HTTPS with byte ranges | Built for the measurement only (`w47`): nginx on a mapped port, a certificate made on the machine for the host's address and read back through ssh, the only one `curl` is told to believe (`--cacert`), a token made for the run. Without the token it answers 403; with the system's certificates alone `curl` refuses it. One stream is twice ssh's (16 to 26 MB/s against 6 to 15); four ranges are 39 to 40 MB/s, which four ssh streams reach once they are up. Left out of the code by lot L16: at four streams it brings nothing ssh does not, and it is a daemon, a port and a secret more. **In the code since lot L35**, for more than four streams, since it does not pass through `MaxStartups`: without nginx or any package, and with what it may do written down ("The pack's way home", below) |
 | WireGuard, Tailscale | Not built. Either needs a private key or an account's token on the rented machine, which its owner can read and then use to join the laptop's network: the opposite of lending nothing. A container is not usually given a tunnel device, and an overlay adds nothing to a TCP port that is already open |
 
 ## What each route carried

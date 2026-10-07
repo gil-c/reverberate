@@ -21,7 +21,10 @@ What it is allowed, all of it:
   believes that one alone;
 - **for a time**: it ends itself at ``--lifetime``, and where ``--forget``
   is given it removes the key's and the token's files once they are read,
-  so that neither stays on the disk.
+  so that neither stays on the disk;
+- **to so many at once** (:data:`MAX_CONNECTIONS`): a connection past them
+  is closed unanswered, and one that does not finish its handshake in
+  :data:`HANDSHAKE_S` is closed too.
 
 ``--limit-stream``, ``--limit-total``, ``--drop-after`` and ``--drops`` are
 for the tests and the bench on 127.0.0.1: a line that carries so much a
@@ -48,6 +51,11 @@ from urllib.parse import unquote, urlsplit
 BLOCK = 1 << 20
 #: A connection that says nothing for this long is closed, s.
 IDLE_S = 120.0
+#: A handshake that is not finished in this long is closed, s.
+HANDSHAKE_S = 15.0
+#: Connections at once: a fetch opens thirty-two at most, and a stranger who opens
+#: more than this holds no thread and no memory of the machine's.
+MAX_CONNECTIONS = 96
 #: The path that answers 204 to the token's bearer and serves nothing: is the way open.
 PING = "/.ping"
 
@@ -234,6 +242,7 @@ class Server(ThreadingHTTPServer):
         self.drop_after = int(drop_after)
         self.drops = int(drops)
         self._cuts = threading.Lock()
+        self._room = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.quiet = quiet
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -264,19 +273,25 @@ class Server(ThreadingHTTPServer):
         return self.socket.accept()
 
     def finish_request(self, request: Any, client_address: Any) -> None:
-        request.settimeout(IDLE_S)
-        try:
-            secured = self.context.wrap_socket(request, server_side=True)
-        except (OSError, ssl.SSLError):
+        if not self._room.acquire(blocking=False):
             return
         try:
-            super().finish_request(secured, client_address)
-        except (OSError, ssl.SSLError):
-            # A client that left in the middle of a body: its own affair.
-            pass
+            request.settimeout(HANDSHAKE_S)
+            try:
+                secured = self.context.wrap_socket(request, server_side=True)
+            except (OSError, ssl.SSLError):
+                return
+            secured.settimeout(IDLE_S)
+            try:
+                super().finish_request(secured, client_address)
+            except (OSError, ssl.SSLError):
+                # A client that left in the middle of a body: its own affair.
+                pass
+            finally:
+                with contextlib.suppress(OSError):
+                    secured.close()
         finally:
-            with contextlib.suppress(OSError):
-                secured.close()
+            self._room.release()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         return

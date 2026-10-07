@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import threading
 import time
 import traceback
 from collections.abc import Callable, Collection, Sequence
@@ -862,8 +863,33 @@ def provision_machine(
     (``docs/open-questions/performance-audit.md``, section 7). A campaign
     whose solver is ``wave.lowband`` on its Cartesian grid opens nothing of
     it; the present engine and the face centred grid's voxeliser do.
+
+    **The bundle goes up while the machine is provisioned**, not after: it
+    is the laptop's line that carries it (4 to 10 MB/s measured, so 215 MB
+    are half a minute and the 3.2 GB of a bundle that carries its pairs
+    five to thirteen), and the machine's packages and wheels come down
+    another. Both go past the proxy where the machine has an address of its
+    own, which carried the laptop's 10 MB/s where the proxy carried 3 to 5.
+    ``push_s`` is what the bundle took, of which only what outlasted the
+    provisioning was waited for (``push_waited_s``).
     """
     t0 = time.time()
+    run_on(
+        machine, f"mkdir -p {REMOTE_SRC} {REMOTE_BUNDLE} {REMOTE_OUT} {REMOTE_DATA}", what="mkdir"
+    )
+    way = fastest(machine, say=say)
+    pushed: dict[str, Any] = {}
+
+    def push_bundle() -> None:
+        began = time.time()
+        try:
+            push(way, machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", say)
+        except BaseException as error:  # noqa: BLE001 - raised below, where it is waited for
+            pushed["error"] = error
+        pushed["seconds"] = round(time.time() - began, 1)
+
+    pushing = threading.Thread(target=push_bundle, daemon=True, name="bundle push")
+    pushing.start()
     if engine_build:
         build_s = provision(
             machine, repo / "scripts" / "build_pffdtd.sh", beside=engine_patches(repo)
@@ -872,9 +898,6 @@ def provision_machine(
     else:
         say("engine not built: this campaign's solver does not open it")
         run_on(machine, COMPILER_COMMAND, what="compiler", timeout=900)
-    run_on(
-        machine, f"mkdir -p {REMOTE_SRC} {REMOTE_BUNDLE} {REMOTE_OUT} {REMOTE_DATA}", what="mkdir"
-    )
     rsync(
         machine,
         [str(repo / "requirements-remote.txt"), str(repo / "scripts" / "provision_accel.sh")],
@@ -888,17 +911,25 @@ def provision_machine(
         what="provision",
         timeout=3600,
     )
-    # Past the proxy where the machine has an address of its own: the proxy carried 3 to 5
-    # MB/s from the laptop where the direct route carried the laptop's own 10.
-    way = fastest(machine, say=say)
     push(way, machine, [str(repo / "src"), str(repo / "scripts")], REMOTE_SRC + "/", say)
     provision_s = round(time.time() - t0, 1)
     say(f"provisioned in {provision_s / 60:.1f} min")
     t0 = time.time()
-    push(way, machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", say)
-    push_s = round(time.time() - t0, 1)
-    say(f"bundle pushed in {push_s / 60:.1f} min")
-    return {"provision_s": provision_s, "push_s": push_s, "engine_built": bool(engine_build)}
+    pushing.join()
+    if "error" in pushed:
+        raise pushed["error"]
+    push_s = float(pushed["seconds"])
+    waited_s = round(time.time() - t0, 1)
+    say(
+        f"bundle pushed in {push_s / 60:.1f} min, beside the provisioning:"
+        f" {waited_s / 60:.1f} min of it waited for"
+    )
+    return {
+        "provision_s": provision_s,
+        "push_s": push_s,
+        "push_waited_s": waited_s,
+        "engine_built": bool(engine_build),
+    }
 
 
 def push(way: Any, machine: Any, sources: list[str], destination: str, say: Any) -> None:
