@@ -40,7 +40,7 @@ function label(text, colour) {
   context.textBaseline = "middle";
   context.fillText(text, 128 + 4, 33);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
-  sprite.scale.set(1.2, 0.3, 1);
+  sprite.scale.set(1.6, 0.4, 1);
   sprite.renderOrder = 2;
   return sprite;
 }

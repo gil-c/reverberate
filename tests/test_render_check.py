@@ -859,6 +859,39 @@ def test_order_seven_is_kept_beside_the_ears_with_clicks_and_noise_when_asked(
         )
 
 
+def test_the_comparator_writes_its_folder_from_packs_and_plays_it(
+    two_packs: dict[str, Any], tmp_path: Path
+) -> None:
+    import argparse
+
+    from reverberate.apps import compare
+    from reverberate.apps.compare.__main__ import _written
+
+    asked = argparse.Namespace(
+        packs=[two_packs["a"], two_packs["b"]],
+        names=["ref", "loud"],
+        window=[0.0, 2.5],
+        sources=None,
+        signals=["clips"],
+        out=tmp_path / "written",
+        measured_head=tmp_path / "none.sofa",
+    )
+    folder = _written(asked)
+    server, kit, media = compare.build(folder, tmp_path / "decoders", measured_head=tmp_path / "x")
+    assert kit.variants == ("ref", "loud") and set(kit.sets) == {"clips"}
+    # One source: it is the mix, in order 7, and the second pack is twice the first.
+    assert list(kit.sets["clips"]) == ["mix"]
+    one, two = (kit.library.item(kit.sets["clips"]["mix"][name]) for name in ("ref", "loud"))
+    assert one.kind == "ambisonic" and one.frames == 120000
+    quiet = kit.library.frames(one.id, 0, one.frames)
+    assert np.allclose(kit.library.frames(two.id, 0, one.frames), 2.0 * quiet, atol=1e-6)
+    told = server.handle("GET", "/api/kit").json()
+    assert told["window_s"] == [0.0, 2.5] and len(told["head"]["yaw_deg"]) == 51
+    clips = told["differences"]["by_variant"]["loud"]["s1"]["clips"]
+    assert [v for v in clips if v is not None][0] == pytest.approx(6.02, abs=0.02)
+    assert media.results == tmp_path / "written_listening"
+
+
 def test_packs_of_another_scene_are_refused_and_of_another_rail_pitch_are_not(
     two_packs: dict[str, Any], tmp_path: Path
 ) -> None:

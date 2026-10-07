@@ -44,7 +44,11 @@ const [from, to] = kit.window_s || [0, 0];
 $("what").textContent =
   `${kit.variants.length} renders of one scene, ${from} s to ${to} s. ` +
   `The reference is ${kit.variants[0]}. ` +
-  (kit.head_name ? `Order 7 is decoded with ${kit.head_name}.` : "");
+  (kit.items.some((item) => item.kind === "ambisonic")
+    ? kit.head_name
+      ? `Order 7 is decoded with ${kit.head_name}.`
+      : "No measured head on this server: order 7 cannot be decoded."
+    : "The folder holds two ears only: the head is the scene's own.");
 
 const variantsOf = () => kit.sets[signal][track] || kit.sets[signal][Object.keys(kit.sets[signal])[0]];
 const rows = () => kit.variants.map((name) => itemOf[variantsOf()[name]]);
