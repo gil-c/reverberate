@@ -1228,7 +1228,12 @@ def trace_early(
     starts = np.concatenate([[0], np.cumsum(counts)])
     step_job = np.full(steps, -1, dtype=np.int64)
     step_job[heard] = job_of
-    step_count = np.where(step_job >= 0, counts[np.maximum(step_job, 0)], 0)
+    # A source no step hears, somebody who walks by in silence, has no job and no row.
+    step_count = (
+        np.where(step_job >= 0, counts[np.maximum(step_job, 0)], 0)
+        if counts.size
+        else np.zeros(steps, dtype=np.int64)
+    )
     offsets = np.concatenate([[0], np.cumsum(step_count)]).astype(np.int64)
     total = int(offsets[-1])
     step_of = np.repeat(np.arange(steps), step_count)

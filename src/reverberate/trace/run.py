@@ -110,6 +110,7 @@ from reverberate.render.pack import (
     PackWriter,
     Source,
     Tail,
+    band_map,
     default_fusion,
     read_pack,
     tail_seed,
@@ -125,8 +126,10 @@ from reverberate.render.seam import (
     taper_of,
 )
 from reverberate.scenes import canonical_bytes, load_recipe
+from reverberate.scenes.recipe import LISTENER
 from reverberate.spatial.lowband import FIELD_UNIT_AT_1M, LOW_RATE_HZ
 from reverberate.spatial.translate import clearance_m
+from reverberate.trace import mirror_only
 from reverberate.trace.assets import (
     ALIGNED,
     MirrorAssets,
@@ -834,7 +837,9 @@ class Trace:
         self.store = Store(Path(os.environ.get(STORE_VARIABLE) or self.out / "mirror_store"))
         self.ms = prepare(self.assets.catalogue, settings, MovingSettings(), store=self.store)
         self._spent("paths", "prepare", t0)
-        heads = np.concatenate([self.tracks.listener, self.cells])
+        # The head where the cells read it and where it is with its sway: one array, the
+        # same values, in a recipe of version 1.
+        heads = np.concatenate([self.tracks.listener, self.tracks.heard_from, self.cells])
         # Half a metre round the heads, out to the next quarter metre: the arrays' centres
         # are a grid's nodes, and a region that followed them to the millimetre would give
         # every low grid its own tables of the same sources (:data:`REGION_STEP_M`).
@@ -855,6 +860,9 @@ class Trace:
             tracks = self.tracks
             every = [tracks.listener, self.cells, tracks.positions]
             every += [track.position for track in tracks.sources.values()]
+            # The mouths and the head as the early trace reads them, sways and all.
+            every += [track.mouth for track in tracks.sources.values() if track.mouth is not None]
+            every += [] if tracks.head is None else [tracks.head]
             t0 = time.time()
             self._onset_field = onset_field(
                 self.assets.catalogue,
@@ -866,7 +874,13 @@ class Trace:
         return self._onset_field
 
     def _table_inputs(self, name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """A table's sources, heads and audible steps: a source's, or the pairs' at rest."""
+        """A table's sources, heads and audible steps: a source's, or the pairs' at rest.
+
+        A source's is traced from where it is and heard from where the head
+        is, their sways added (``scene-recipe.md``, version 2): the band
+        above the crossover follows the body. The pairs at rest are the
+        low band's own places, a solved position and a cell.
+        """
         tracks = self.tracks
         if name == PAIRS_TABLE:
             rows = np.asarray(self.pairs, dtype=np.int64).reshape(-1, 2)
@@ -876,7 +890,7 @@ class Trace:
                 np.ones(rows.shape[0], dtype=bool),
             )
         track = tracks.sources[name]
-        return track.position, tracks.listener, np.asarray(track.audible, dtype=bool)
+        return track.traced_from, tracks.heard_from, np.asarray(track.audible, dtype=bool)
 
     def _block_path(self, name: str, block: int) -> Path:
         return self.out / "jobs" / "paths" / f"{name}.{block}.npz"
@@ -994,6 +1008,24 @@ class Trace:
 
     def _paths_report(self) -> None:
         self.report["paths"] = dict(self._paths_records)
+        # A step that is heard and holds no arrival at all, not even a diffracted onset:
+        # the mirror finds no way from the source to the head. A source outside the
+        # dwelling's shell or inside a closed solid is silent so (a fixture stands by
+        # its object and nothing checks it against the mirror's surfaces); said, and the
+        # pack is written.
+        unheard: dict[str, int] = {}
+        for name, table in self.early.items():
+            heard = np.asarray(self.tracks.sources[name].audible, dtype=bool)
+            none = int((np.diff(np.asarray(table.offsets))[heard] == 0).sum())
+            if none:
+                unheard[name] = none
+        self.report["steps_without_an_arrival"] = unheard
+        if unheard and self.worker is None:
+            self.journal.say(
+                "paths: NO ARRIVAL at some audible steps: "
+                + ", ".join(f"{name} ({count})" for name, count in sorted(unheard.items()))
+                + "; the mirror finds no way from the source to the head"
+            )
         records = [r for key, r in self.pool.done.items() if key.startswith("paths/")]
         for name in ("fields", "fields_read"):
             self.report["distance_" + name] = int(sum(int(r.get(name, 0)) for r in records))
@@ -1031,7 +1063,7 @@ class Trace:
             at_rest.setdefault(self.owner[pair], []).append(j)
         for name, track in tracks.sources.items():
             sites = tail_sites_of(self.recipe, track)
-            rows = {int(r) for r in sites_read(track.position, sites, track.audible)}
+            rows = {int(r) for r in sites_read(track.tail_from, sites, track.audible)}
             if at_rest.get(name):
                 # The pairs' own tails, the source on its solved positions: the levelling's.
                 solved = tracks.positions[[self.pairs[j][0] for j in at_rest[name]]]
@@ -1143,11 +1175,14 @@ class Trace:
         self._prepared()
         self._tails()
         track = self.tracks.sources[source]
+        attach = self.recipe.source(source).attach
         t0 = time.time()
+        # Where the source stands without its sway, and a carried one where its carrier
+        # does: the late part needs neither to 8 cm.
         held = tail_table(
             self.ms,
             self.assets.settings,
-            track.position,
+            track.tail_from,
             self.tracks.listener,
             tail_sites_of(self.recipe, track),
             self.cells[self.tail_rows],
@@ -1155,6 +1190,8 @@ class Trace:
             devices=self._ray_devices(),
             cache=self.tail_cache,
             xp=np,
+            # The wearer's own voice and steps: cast from where the head and its cells are.
+            at_the_head=attach is not None and attach.to == LISTENER,
         ).pack()
         held["hist_cell"] = self.tail_rows[held["hist_cell"]].astype(np.int32)
         target = self.out / "jobs" / "tails" / f"{source}.npz"
@@ -1691,6 +1728,12 @@ class Trace:
         onset = np.array([r["anchor_s"] for r in self.levels], dtype=float)
         trail = np.array([r["anchor_s"] - r["first_s"] for r in self.levels], dtype=float)
         row_of = {pair: j for j, pair in enumerate(self.pairs)}
+        lead = float(self.assets.pack_lead_s)
+        alone = [name for name, track in tracks.sources.items() if not track.low]
+        if alone:
+            # Said in the provenance too: which sources hold no band of the wave solver.
+            provenance["mirror_only"] = alone
+            header = replace(header, provenance=provenance)
         with PackWriter(
             partial,
             header,
@@ -1725,6 +1768,59 @@ class Trace:
         ) as writer:
             for number, (name, track) in enumerate(tracks.sources.items(), start=1):
                 self.journal.set_status(source=name, job=f"{number}/{len(tracks.sources)}")
+                source = recipe.source(name)
+                says = mirror_only.said(
+                    recipe,
+                    source,
+                    near=self.profile.mirror_only,
+                    glazing=str(self.told.get("glazing") or mirror_only.GLAZING),
+                )
+                early, late = self.early[name].pack(), dict(self.tail[name])
+                if not says.get("direct", True):
+                    early = mirror_only.without_direct(early)
+                if says.get("band_gain_db"):
+                    early, late = mirror_only.coloured(
+                        early, late, says["band_gain_db"], band_map(header.bands_hz, bank)
+                    )
+                # Where the source is, its sway added: what its arrivals were traced from.
+                mouth = track.traced_from
+                if not track.low:
+                    # THE MIRROR ALONE: no pair and no seam. Its arrivals and its late part
+                    # are the whole band, at the level the bands above the crossover of
+                    # every source stand at; the crossover is not applied to it.
+                    level = np.where(track.audible, base_db + constant, 0.0).astype(np.float32)
+                    first = np.array(
+                        [
+                            first_arrival_s(self.early[name], int(step)) if heard else 0.0
+                            for step, heard in enumerate(track.audible)
+                        ]
+                    )
+                    writer.add_source(
+                        Source(
+                            id=name,
+                            kind=source.kind,
+                            subtype=source.subtype or "",
+                            position=mouth,
+                            yaw_deg=track.yaw_deg.astype(np.float32),
+                            audible=track.audible,
+                            early=Early(**early),
+                            tail=Tail(**late),
+                            low=None,
+                            level=Level(
+                                high_gain_db=level,
+                                onset_s=first + np.where(track.audible, lead, 0.0),
+                                band_gain_db=band_levels(
+                                    level, track.audible, base_db + constant, shares
+                                ),
+                            ),
+                            directivity_model=source.directivity.model,
+                            directivity_enabled=bool(source.directivity.enabled),
+                            gain_db=float(source.gain_db),
+                            tail_seed=tail_seed(recipe.seed, name),
+                            **says,
+                        )
+                    )
+                    continue
                 chosen = self.low[name]
                 steps = tracks.steps
                 pair = np.full((steps, 2, 2), -1, dtype=np.int32)
@@ -1767,17 +1863,16 @@ class Trace:
                     early=self.early[name],
                     alignment_gain=self.assets.pack_gain,
                 )
-                source = recipe.source(name)
                 writer.add_source(
                     Source(
                         id=name,
                         kind=source.kind,
                         subtype=source.subtype or "",
-                        position=track.position,
+                        position=mouth,
                         yaw_deg=track.yaw_deg.astype(np.float32),
                         audible=track.audible,
-                        early=Early(**self.early[name].pack()),
-                        tail=Tail(**self.tail[name]),
+                        early=Early(**early),
+                        tail=Tail(**late),
                         low=Low(
                             ir=ir,
                             pair_position=tracks.positions[
@@ -1810,6 +1905,7 @@ class Trace:
                         directivity_enabled=bool(source.directivity.enabled),
                         gain_db=float(source.gain_db),
                         tail_seed=tail_seed(recipe.seed, name),
+                        **says,
                     )
                 )
         partial.replace(target)
@@ -1875,10 +1971,9 @@ class Trace:
             name, track = next(iter(self.tracks.sources.items()))
             heard = np.flatnonzero(track.audible)[:400]
             if heard.size:
-                host = trace_early(self.ms, track.position[heard], self.tracks.listener[heard])
-                card = trace_early(
-                    self.ms, track.position[heard], self.tracks.listener[heard], xp=self.xp
-                )
+                mouth, head = track.traced_from[heard], self.tracks.heard_from[heard]
+                host = trace_early(self.ms, mouth, head)
+                card = trace_early(self.ms, mouth, head, xp=self.xp)
                 a, b = host.pack(), card.pack()
                 same = all(
                     np.array_equal(a[k], b[k]) for k in ("offsets", "path_id", "order", "kind")

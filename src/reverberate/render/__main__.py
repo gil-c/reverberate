@@ -1,4 +1,8 @@
-"""``python -m reverberate.render``: time the engine; validate, compact, scale or check a pack."""
+"""``python -m reverberate.render``: time the engine; validate, compact, scale or check a pack.
+
+``labels PACK [OUT]`` writes what each stem of a pack is, interval by
+interval (:mod:`reverberate.render.labels`); ``mix`` writes it beside the mix.
+"""
 
 from __future__ import annotations
 
@@ -61,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     whole.add_argument("--clips", type=Path, help="the clip libraries; <data root>/clips unless")
     whole.add_argument("--manifest", type=Path, help="the library a placeholder is stood in from")
     whole.add_argument("--scratch", type=Path, help="where the sources' noise is kept meanwhile")
+    label = commands.add_parser(
+        "labels",
+        help="what each stem of a pack is, interval by interval: kind, role, effort, level; "
+        "written to OUT, or to <pack>.labels.json beside the pack",
+    )
+    label.add_argument("pack", type=Path)
+    label.add_argument("out", type=Path, nargs="?")
     join = commands.add_parser(
         "seam",
         help="give a pack its level a band above the crossover, the tapered join, IN PLACE: "
@@ -219,6 +230,14 @@ def main(argv: list[str] | None = None) -> int:
             say=lambda text: print(text, flush=True),
         )
         print(json.dumps(header["render"], indent=1))
+        from reverberate.render.labels import labels_path, write_labels
+
+        # Beside the mix: what each of its stems is, interval by interval.
+        print(write_labels(labels_path(args.out), args.pack))
+    elif args.command == "labels":
+        from reverberate.render.labels import labels_path, write_labels
+
+        print(write_labels(args.out or labels_path(args.pack.with_suffix("")), args.pack))
     elif args.command == "relevel":
         from reverberate.render.relevel import relevel_pack
 

@@ -482,6 +482,7 @@ def tail_scale(
     rate: float,
     receiver_radius_m: float,
     xp: Any = np,
+    at_the_head: bool = False,
 ) -> np.ndarray:
     """``[cell, bank band]``: what turns each cell's histogram energy into the response's.
 
@@ -495,6 +496,16 @@ def tail_scale(
     have: the spreading and the sphere's share both go as the distance
     squared, so that scale is the pulse's energy times four over the
     radius squared, wherever the cell stands.
+
+    ``at_the_head`` is for a source the listener carries, the wearer's own
+    voice, whose tail is cast from the head's centre, where a cell stands:
+    **a cell whose sphere holds the source** then takes the scale of a cell
+    beyond it. Every ray crosses such a sphere as it leaves, so the sphere's
+    share of the direct sound is whole and says nothing, and ``1 / d`` has
+    no bound there (an array stands a centimetre from the place asked: 27
+    dB too much); what comes back to the sphere later is counted as at any
+    other cell. No other source comes within a sphere's radius of a cell:
+    rule 8 keeps a mouth 0.50 m from the head.
     """
     position = np.asarray(position, dtype=float).reshape(3)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
@@ -511,7 +522,8 @@ def tail_scale(
         )
     )
     heard = histogram.hits.sum(axis=1) > 0
-    own = ~cut & heard
+    inside = (distance < receiver_radius_m) & bool(at_the_head)
+    own = ~cut & heard & ~inside
     expected = receiver_radius_m**2 / (4.0 * np.maximum(distance, 1.05 * receiver_radius_m) ** 2)
     # The direct path's gain is its spreading alone, the same in every band.
     amplitude = 1.0 / np.maximum(distance, 1e-12)
@@ -519,6 +531,7 @@ def tail_scale(
     beyond = 4.0 / receiver_radius_m**2 * band_pulse_energy(rate)[: len(picks)]
     fallback = np.median(scale[own], axis=0) if bool(own.any()) else beyond
     scale[~own] = fallback
+    scale[inside] = beyond
     return np.asarray(scale, dtype=float)
 
 
@@ -590,12 +603,14 @@ def tail_table(
     cache: TailCache | None = None,
     xp: Any = np,
     say: Any = None,
+    at_the_head: bool = False,
 ) -> TailTable:
     """One source's tail along its trajectory and the listener's.
 
     Rays are traced, or read from ``cache``, from the sites an audible step
     reads and from no other; a histogram is stored once however many steps
-    read it.
+    read it. ``at_the_head``: the source is carried by the listener, and its
+    sites are the head's own places (:func:`tail_scale`).
     """
     source = np.atleast_2d(np.asarray(source, dtype=float))
     listener = np.atleast_2d(np.asarray(listener, dtype=float))
@@ -639,6 +654,7 @@ def tail_table(
             rate=rate,
             receiver_radius_m=settings.rays.receiver_radius_m,
             xp=xp,
+            at_the_head=at_the_head,
         )
         for site, histogram in by_site.items()
     }

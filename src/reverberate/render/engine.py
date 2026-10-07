@@ -26,7 +26,8 @@ to the rounding of single precision and not to the bit.
 Three parts are summed per source, as ``scene-pack.md`` orders them:
 :mod:`.early` (the arrivals above the crossover), :mod:`.tail` (the late
 part) and :mod:`.low` (the band under it); ``parts`` renders any of them
-alone, which is how the benchmark splits its time. The sources are summed
+alone, which is how the benchmark splits its time. A source the mirror
+renders alone has the first two and no crossover: they are its whole band. The sources are summed
 in the pack's order. The signal is in the scene's fixed frame: the head's
 rotation is the decoder's.
 """
@@ -134,7 +135,11 @@ class SourceRenderer:
         base = track.scaled(10.0 ** (source.gain_db / 20.0))
         m = pack.mirror
         high = base.high(m.signature, m.lowcut_hz, m.lowcut_order)
-        if h.has_low:
+        # A SOURCE THE MIRROR RENDERS ALONE (``scene-pack.md``): no ``low`` group in a pack
+        # that has them. The crossover is not applied to it: its arrivals and its late
+        # part are the whole band, as a pack without a low band renders every source.
+        crossed = h.has_low and source.crossed
+        if crossed:
             # Over the onset the two sides are joined in pressure, after it in power.
             press = high.masked(mask_kernel(pack.crossover, h.sample_rate_hz, False))
             tail_mask = mask_kernel(pack.crossover, h.sample_rate_hz, True)
@@ -161,7 +166,7 @@ class SourceRenderer:
                 band_gain_db=bands,
             )
         }
-        if h.has_low:
+        if crossed:
             factor = int(round(h.sample_rate_hz / h.low_sample_rate_hz))
             taps = band_filter(h.sample_rate_hz, h.low_sample_rate_hz, pack.crossover.band_hz()[1])
             self.parts["low"] = low_part(

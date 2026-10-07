@@ -22,12 +22,25 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
+from scipy.signal import butter, sosfiltfilt
 
+from reverberate.compute import Devices
+from reverberate.mirror.moving import MovingSettings, prepare, trace_early
+from reverberate.mirror.moving_onset import onset_field
+from reverberate.mirror.render import band_pulse_energy
+from reverberate.mirror.tails import TailCache, histograms, tail_scale
+from reverberate.render.engine import Engine, RenderSettings
+from reverberate.render.labels import labels, labels_path, write_labels
+from reverberate.render.pack import KIND_DIRECT, PackError, band_map, read_pack, validate
 from reverberate.scenes import Recipe, cost, low_band_source_positions, wave_band
 from reverberate.scenes.kinematics import FLOOR_SOURCE_HEIGHT_M
+from reverberate.scenes.levels import VOICE_REFERENCE_DB
+from reverberate.trace import mirror_only
 from reverberate.trace.plan import (
     NO_SURFACES,
     SOURCE_CLEARANCE_STEPS,
@@ -37,7 +50,7 @@ from reverberate.trace.plan import (
     tail_sites_of,
     tracks_of,
 )
-from test_trace import CLIP, assets, dwell, station
+from test_trace import CLIP, assets, dwell, station, traced
 
 DURATION = 1.5
 #: The sources of the scene the mirror renders alone, and those the wave solver answers.
@@ -57,7 +70,9 @@ def fixture(name: str, x: float, y: float, z: float, thing: str) -> dict[str, An
     }
 
 
-def interval(start: float, end: float, voiced: bool = False, gain: float = 0.0) -> dict[str, Any]:
+def interval(
+    start: float, end: float, voiced: bool = False, gain: float = 0.0, effort: str = "normal"
+) -> dict[str, Any]:
     made: dict[str, Any] = {
         "start_s": start,
         "end_s": end,
@@ -66,7 +81,7 @@ def interval(start: float, end: float, voiced: bool = False, gain: float = 0.0) 
         "gain_db": gain,
     }
     if voiced:
-        made.update(effort="normal", event="turn")
+        made.update(effort=effort, event="turn")
     return made
 
 
@@ -124,7 +139,8 @@ def v2_tree() -> dict[str, Any]:
         "talker_1",
         "voice",
         segments=[dwell("a", 0.0, DURATION)],
-        activity=[interval(0.0, 0.9, voiced=True, gain=2.0)],
+        # A raised voice: 58 dB its own, 5 dB more for the turn, the clip stored at 60.
+        activity=[interval(0.0, 0.9, voiced=True, gain=5.0, effort="raised")],
         level=58.0,
         gain=-2.0,
         sway=sway,
@@ -374,3 +390,276 @@ def test_more_positions_a_step_leave_a_source_of_the_mirror_alone_without_any() 
     assert own.rail_slot is not None and np.all(own.rail_slot == -1)
     assert own.rail_weight is not None and not own.rail_weight.any()
     assert not own.low and all(tracks.sources[name].low for name in SOLVED)
+
+
+# --------------------------------------------------------------------------
+# the mirror where version 2 puts a source: by a surface, on the floor, at the head
+# --------------------------------------------------------------------------
+
+
+def test_what_the_mirror_gives_a_source_by_a_surface_on_it_and_behind_it() -> None:
+    """Nothing breaks: near a surface is that surface's reflection, behind one is silence."""
+    held = assets()
+    ms = prepare(held.catalogue, held.settings, MovingSettings())
+    head = np.array([[1.5, 1.7, 2.0]])
+
+    def heard(point: list[float]) -> tuple[Any, float]:
+        source = np.array([point])
+        onsets = onset_field(held.catalogue, np.concatenate([source, head]), sound_speed_m_s=C)
+        table = trace_early(ms, source, head, onsets=onsets)
+        rays = histograms(
+            held.catalogue, held.settings, source, head, devices=Devices.host(1), cache=TailCache()
+        )[0]
+        return table, float(rays.energy.sum())
+
+    # A footstep, 5 cm above the floor: its direct sound, and the floor's reflection 8 cm
+    # of path behind it, at nearly its level. That comb is the floor's and is right.
+    step, late = heard([1.2, FLOOR_SOURCE_HEIGHT_M, 0.8])
+    first = np.sort(step.delay_s)[:2] * C
+    assert (step.kind == KIND_DIRECT).sum() == 1 and late > 0.0
+    assert first[0] == pytest.approx(np.linalg.norm([0.3, 1.65, 1.2]), abs=1e-9)
+    assert 0.05 < first[1] - first[0] < 0.10
+    # A fixture 0.25 m from a wall is a source like any other.
+    fixture_table, _ = heard([0.25, 1.4, 1.5])
+    assert fixture_table.path_id.size > 30
+    # On a surface: that surface's own image is lost, and the rays that leave into it.
+    on_floor, lost = heard([1.2, 0.0, 0.8])
+    assert 0 < on_floor.path_id.size < step.path_id.size and 0.0 < lost < 0.6 * late
+    # Behind a surface, outside the shell: no arrival and no late part. Not an error: a
+    # trace says it of the steps it happens to (``steps_without_an_arrival``).
+    outside, nothing = heard([-0.2, 1.4, 1.5])
+    assert outside.path_id.size == 0 and nothing == 0.0
+    # And a source no step hears has a table and no row in it.
+    silent = trace_early(ms, np.array([[1.2, 1.7, 0.8]]), head, audible=np.array([False]))
+    assert silent.path_id.size == 0 and silent.offsets.tolist() == [0, 0]
+
+
+def test_the_tail_of_a_source_at_the_head_is_on_the_scale_of_a_cell_beyond_it() -> None:
+    """The wearer's own voice: cast from the head, where a cell stands a centimetre away."""
+    held = assets()
+    ms = prepare(held.catalogue, held.settings, MovingSettings())
+    head = np.array([1.5, 1.7, 2.0])
+    cells = np.array([[1.509, 1.7, 2.0], [1.5, 1.7, 2.6]])
+    rays = histograms(held.catalogue, held.settings, head[None, :], cells, devices=Devices.host(1))[
+        0
+    ]
+    radius = held.settings.rays.receiver_radius_m
+    given: dict[str, Any] = {"rate": 48000.0, "receiver_radius_m": radius}
+    beyond = band_pulse_energy(48000.0)[:8] * 4.0 / radius**2
+    at_head = tail_scale(ms, head, cells, rays, at_the_head=True, **given)
+    np.testing.assert_allclose(at_head[0], beyond)
+    np.testing.assert_allclose(at_head[1], beyond)
+    # As any other source's it would be read on a direct sound of ``1 / d`` at 9 mm.
+    other = tail_scale(ms, head, cells, rays, **given)
+    assert np.allclose(other[0] / beyond, (1.05 * radius / 0.009) ** 2)
+
+
+# --------------------------------------------------------------------------
+# the trace: recipe to pack
+# --------------------------------------------------------------------------
+
+C = 343.2
+FS = 48000
+
+
+@pytest.fixture(scope="module")
+def made(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """The scene traced once, on ``numpy``, a monopole in free air where a card would solve."""
+    tmp = tmp_path_factory.mktemp("v2")
+    trace, _, plan = traced(tmp, v2_recipe())
+    # The pack's structure is read back; the engine's two modules are another test's.
+    trace.check_mode = "read"
+    trace.run()
+    return {"trace": trace, "plan": plan, "pack": tmp / "out" / "pack.h5"}
+
+
+def test_the_pack_says_what_version_2_says_of_every_source(made: dict[str, Any]) -> None:
+    with read_pack(made["pack"], deep=True) as pack:
+        assert pack.header.has_low and pack.header.has_tail
+        assert sorted(pack.header.provenance["mirror_only"]) == sorted(MIRROR_ONLY)
+        # Every step that is heard holds an arrival.
+        assert made["trace"].report["steps_without_an_arrival"] == {}
+        said = {
+            name: (s.kind, s.subtype, s.mirror_only_because, s.carried_by, s.carried_at)
+            for name, s in pack.sources.items()
+        }
+        assert said == {
+            "own_voice": ("own_voice", "", "carried", "listener", "mouth"),
+            "street_closed": ("noise", "outside", "closed opening", "", ""),
+            "street_open": ("noise", "outside", "", "", ""),
+            "talker_1": ("voice", "", "", "", ""),
+            "talker_1_body": ("noise", "body", "carried", "talker_1", "mouth"),
+            "tap": ("noise", "appliance", "", "", ""),
+            "walker": ("voice", "", "", "", ""),
+            "walker_steps": ("noise", "steps", "carried", "walker", "floor"),
+        }
+        for name, source in pack.sources.items():
+            # A source of the mirror alone has no band of the wave solver, and says so.
+            assert source.mirror_only == (name in MIRROR_ONLY) == (source.low is None)
+            assert source.crossed == (name not in MIRROR_ONLY)
+            assert source.tail is not None
+            assert source.direct == (name != "own_voice")
+        assert pack.sources["talker_1"].level_spl_1m_db == 58.0
+        assert pack.sources["street_closed"].level_spl_1m_db == 34.0
+        opened = pack.sources["street_open"]
+        assert (opened.opening_object, opened.opening_state) == ("window_9", "open")
+        assert not opened.band_gain_db and opened.low is not None
+        assert pack.sources["street_closed"].opening_state == "closed"
+        # Who is never heard has a group and nothing in it.
+        assert pack.sources["walker"].early.path_id.size == 0
+        # A pack that hides a low band, or its absence, is refused.
+        own = pack.sources["own_voice"]
+        with pytest.raises(PackError, match="mirror_only and the low group disagree"):
+            validate(
+                replace(pack, sources={**pack.sources, "own_voice": replace(own, low=opened.low)})
+            )
+        with pytest.raises(PackError, match="mirror_only and the low group disagree"):
+            validate(
+                replace(pack, sources={**pack.sources, "street_open": replace(opened, low=None)})
+            )
+
+
+def test_the_mirror_follows_the_mouth_and_the_head_and_the_low_band_does_not(
+    made: dict[str, Any],
+) -> None:
+    tracks = made["plan"].tracks
+    with read_pack(made["pack"]) as pack:
+        talker, track = pack.sources["talker_1"], tracks.sources["talker_1"]
+        # The pack holds the head where the low band is moved to, and the mouth where it is.
+        assert np.array_equal(pack.listener.position, tracks.listener)
+        assert np.array_equal(talker.position, track.mouth)
+        assert talker.low is not None
+        # The solved position is the station, to the millimetre: the sway asked no solve.
+        assert np.allclose(talker.low.pair_position, [0.6, 1.7, 0.8], atol=1e-9)
+        # The direct sound of every step is the mouth to the head, sways and all.
+        early = talker.early
+        swayed, held = [], []
+        for step in np.flatnonzero(talker.audible):
+            rows = early.rows(int(step))
+            direct = np.flatnonzero(early.kind[rows] == KIND_DIRECT)
+            assert direct.size == 1
+            swayed.append(np.linalg.norm(track.mouth[step] - tracks.head[step]) / C)
+            held.append(np.linalg.norm(track.position[step] - tracks.listener[step]) / C)
+            assert early.delay_s[rows][direct[0]] == pytest.approx(swayed[-1], abs=1e-9)
+        # Which is not where the low band reads them: 3 cm between the two, 0.1 ms.
+        assert 2e-5 < np.abs(np.asarray(swayed) - np.asarray(held)).max() < 2e-4
+
+
+def test_the_wearers_voice_is_the_rooms_answer_and_a_closed_window_its_glazing(
+    made: dict[str, Any],
+) -> None:
+    trace = made["trace"]
+    with read_pack(made["pack"]) as pack:
+        own = pack.sources["own_voice"]
+        direct = own.early.kind == KIND_DIRECT
+        # The direct path's row is there, at 0.10 m and at no gain; the room's are whole.
+        assert direct.sum() == own.audible.sum() and not own.early.gain[direct].any()
+        assert np.allclose(own.early.delay_s[direct], np.hypot(0.09, 0.05) / C, atol=1e-9)
+        assert (own.early.gain[~direct] > 0.0).any()
+        # Its tail is cast from the head's centre, where a cell stands: on a finite scale.
+        assert own.tail is not None and np.all(np.isfinite(own.tail.scale))
+        assert own.tail.scale.max() < 10.0 * pack.sources["tap"].tail.scale.max()  # type: ignore[union-attr]
+        # A closed window: the glazing's index a band, about what it takes from traffic.
+        closed = pack.sources["street_closed"]
+        colour = np.asarray(closed.band_gain_db)
+        assert colour == pytest.approx([4.06, 8.06, 0.06, -9.94, -11.94, -5.94, -5.94])
+        bare = trace.early["street_closed"].pack()["gain"]
+        assert np.allclose(closed.early.gain, bare * 10.0 ** (colour / 20.0), rtol=1e-6)
+        assert closed.tail is not None
+        picks = band_map(pack.header.bands_hz, pack.header.bank)
+        assert np.allclose(
+            closed.tail.scale, trace.tail["street_closed"]["scale"] * 10.0 ** (colour[picks] / 10.0)
+        )
+    assert mirror_only.traffic_reduction_db("double") == pytest.approx(25.06, abs=0.01)
+    assert mirror_only.traffic_reduction_db("single") == pytest.approx(25.73, abs=0.01)
+    assert mirror_only.pane_gain_db("single")[:3] == pytest.approx([8.73, 5.73, -0.27])
+    with pytest.raises(ValueError, match="a glazing is one of"):
+        mirror_only.pane_gain_db("triple")
+
+
+# --------------------------------------------------------------------------
+# the engine: pack to stems
+# --------------------------------------------------------------------------
+
+
+def _band(signal: np.ndarray, low_hz: float, high_hz: float) -> float:
+    """The energy of ``signal`` between two frequencies."""
+    sos = butter(6, [low_hz, high_hz], btype="bandpass", fs=FS, output="sos")
+    return float(np.sum(sosfiltfilt(sos, signal) ** 2))
+
+
+def test_a_stem_of_the_mirror_alone_is_whole_under_the_crossover(made: dict[str, Any]) -> None:
+    """No hole under 1 kHz: the mirror's own low octave bands, with no crossover on them."""
+    with read_pack(made["pack"]) as pack:
+        samples = 10 * pack.header.step_samples
+        dry = np.random.default_rng(3).standard_normal(pack.header.samples)
+        engine = Engine(
+            pack,
+            {"talker_1": dry, "talker_1_body": dry},
+            settings=RenderSettings(workers=1, directivity=False),
+        )
+        # The breath is at the talker's mouth: the same paths as the voice's.
+        # The voice's own gain is -2 dB and the breath's none: taken out of the voice's.
+        own = 10.0 ** (2.0 / 20.0)
+        alone = engine.stem("talker_1_body", 0, samples, parts=("early",))[0]
+        crossed = own * engine.stem("talker_1", 0, samples, parts=("early",))[0]
+        wave = own * engine.stem("talker_1", 0, samples, parts=("low",))[0]
+        assert "low" not in engine.source("talker_1_body").parts
+    low, high = (250.0, 700.0), (5600.0, 11000.0)
+    # From 4 kHz up a pair's own seam is not applied: the two are one mirror at one level.
+    assert _band(alone, *high) == pytest.approx(_band(crossed, *high), rel=1e-3)
+    # Under the crossover the crossed source's arrivals are masked away, 20 dB and more,
+    # and its wave band stands there; the source of the mirror alone keeps its own.
+    assert _band(crossed, *low) < 0.01 * _band(alone, *low)
+    assert _band(wave, *low) > 30.0 * _band(crossed, *low)
+    # What it keeps is on the scale of the band a solve would have given. The solve here
+    # is a monopole in free air and the mirror's is the box, whose walls give back 7 dB:
+    # over the free field, and by less than 10 dB.
+    assert 1.0 < _band(alone, *low) / _band(wave, *low) < 10.0
+
+
+def test_the_level_is_applied_once_and_the_labels_come_out_beside_the_stems(
+    made: dict[str, Any], tmp_path: Path
+) -> None:
+    said = write_labels(labels_path(tmp_path / "scene.f32"), made["pack"])
+    assert said == tmp_path / "scene.labels.json"
+    document = json.loads(said.read_text())
+    with read_pack(made["pack"]) as pack:
+        assert document == json.loads(json.dumps(labels(pack)))
+        assert [s["id"] for s in document["sources"]] == list(pack.sources)
+        by_id = {s["id"]: s for s in document["sources"]}
+        talker = by_id["talker_1"]
+        # The training label: what the voice is to the listener, by interval.
+        assert [(r["role"], r.get("group")) for r in talker["roles"]] == [
+            ("conversation", "g1"),
+            ("outside", None),
+        ]
+        turn = talker["activity"][0]
+        assert (turn["effort"], turn["event"], turn["role"], turn["group"]) == (
+            "raised",
+            "turn",
+            "conversation",
+            "g1",
+        )
+        assert (talker["low_band"], talker["stem"]) == ("wave", "whole")
+        assert (by_id["own_voice"]["low_band"], by_id["own_voice"]["stem"]) == ("mirror", "room")
+        assert by_id["walker_steps"]["attach"]["at"] == "floor"
+        assert by_id["street_closed"]["opening"] == {"object": "window_8", "state": "closed"}
+        assert document["listener"]["conversation"][0]["group"] == "g1"
+        # THE LEVEL. The source is 58 dB at 1 m and the turn 5 dB over it: 63, said once.
+        assert (talker["level_spl_1m_db"], turn["level_spl_1m_db"]) == (58.0, 63.0)
+        # The engine lays the source's gain and the interval's on the clip as stored, a
+        # voice at 60 dB: 63 - 60, and no more. ``level_spl_1m_db`` is nobody's gain.
+        clip = 0.01 * np.random.default_rng(5).standard_normal(2 * FS)
+        steps = 10 * pack.header.step_samples
+        settings = RenderSettings(workers=1, directivity=False)
+        from_recipe = Engine(pack, clips=lambda _: (clip, float(FS)), settings=settings)
+        laid = np.zeros(pack.header.samples)
+        laid[: int(0.9 * FS)] = clip[: int(0.9 * FS)]
+        by_hand = Engine(pack, {"talker_1": laid}, settings=settings)
+        heard = from_recipe.stem("talker_1", 4800, steps)[0]
+        unit = by_hand.stem("talker_1", 4800, steps)[0]
+    applied_db = 10.0 * np.log10(np.sum(heard**2) / np.sum(unit**2))
+    # ``by_hand`` holds the source's own gain of -2 dB already: the interval's 5 are left.
+    assert applied_db == pytest.approx(5.0, abs=0.01)
+    assert turn["level_spl_1m_db"] - VOICE_REFERENCE_DB == pytest.approx(-2.0 + 5.0)

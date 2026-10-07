@@ -427,7 +427,12 @@ def test_a_trace_is_asked_at_7_2_points_unless_told_and_10_5_is_the_reference() 
         "pairs_of_the_patch": 0,
         "profile": {},
     }
-    one = {"gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram_gb": 24.0, "dph_total": 0.173}
+    one: dict[str, Any] = {
+        "gpu_name": "RTX 3090",
+        "num_gpus": 1,
+        "gpu_ram_gb": 24.0,
+        "dph_total": 0.173,
+    }
     coarse = machines.predict(record, low_ppw=7.2, **one)
     fine = machines.predict(record, low_ppw=10.5, **one)
     assert coarse is not None and fine is not None
