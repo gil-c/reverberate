@@ -35,6 +35,7 @@ import argparse
 import contextlib
 import hmac
 import os
+import socketserver
 import ssl
 import sys
 import threading
@@ -237,8 +238,17 @@ class Server(ThreadingHTTPServer):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(certificate, key)
+        # An old TLS library offers no curve for the key exchange unless told one.
+        with contextlib.suppress(AttributeError, ValueError, ssl.SSLError):
+            context.set_ecdh_curve("prime256v1")
         self.context = context
         super().__init__(address, Handler)
+
+    def server_bind(self) -> None:
+        # The parent's asks the resolver for this host's name, which nothing here reads
+        # and which took five seconds on a host whose address has no name.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = str(self.server_address[0]), self.server_address[1]
 
     def cut(self) -> bool:
         """Whether one more body is to be cut: ``drops`` of them are, then none."""

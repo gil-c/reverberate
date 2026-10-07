@@ -100,11 +100,11 @@ SSH_DIRECT = "direct ssh"
 SSH_PROXY = "proxy ssh"
 
 #: Workers a way starts with and the most it grows to (:class:`Lanes`). Ranges over HTTPS
-#: pass no ``sshd``: eight to start, thirty-two at most. Direct ssh starts with the four
+#: pass no ``sshd``: sixteen to start, thirty-two at most. Direct ssh starts with the four
 #: that were measured and may reach eight, one connection opened at a time: what refused
 #: twelve streams was twelve handshakes at once (``MaxStartups 10:30:100``), not twelve
 #: sessions. The proxy keeps its four: more brought little and were refused together.
-LANES = {HTTPS: (8, 32), SSH_DIRECT: (WORKERS, 8), SSH_PROXY: (WORKERS, WORKERS)}
+LANES = {HTTPS: (16, 32), SSH_DIRECT: (WORKERS, 8), SSH_PROXY: (WORKERS, WORKERS)}
 
 
 # --------------------------------------------------------------------------
@@ -116,12 +116,18 @@ class Lanes:
     """How many workers of a transfer may work at once, found as it goes.
 
     A transfer starts with ``start`` workers. Each time a window has
-    passed (``window_s``, and two chunks a worker at least), the bytes a
+    passed (``window_s``, and a chunk a worker at least), the bytes a
     second it brought are compared with what the count before it brought:
-    ``gain`` times more or better, and half as many workers again are
-    added, up to ``most``; less, and the count before is gone back to and
-    kept. A connection that fails takes the count back by a quarter and
-    ends the climb: the host said it has too many.
+    ``gain`` times more or better, and the count is doubled, up to
+    ``most``; less, and the climb ends, on the count before where the new
+    one brought less. A connection that fails takes the count back by a
+    quarter, never under ``least``, and ends the climb: the host said it
+    has too many. Failures of one window are one failure: four streams cut
+    in the same second are one event, not four.
+
+    Bytes are counted when a chunk is whole, so a window is a coarse
+    measure: what is asked of it is whether twice the connections still
+    bring clearly more, not what they bring.
     """
 
     def __init__(
@@ -143,6 +149,7 @@ class Lanes:
         self._since = clock()
         self._bytes = 0
         self._chunks = 0
+        self._failed_at: float | None = None
         #: The count before this one and the rate it brought, while the climb lasts.
         self._before: tuple[int, float] | None = None
         self.settled = self.allowed >= self.most
@@ -161,7 +168,7 @@ class Lanes:
             now = self._clock()
             if self.settled or now - self._since < self.window_s:
                 return
-            if self._chunks < 2 * self.allowed:
+            if self._chunks < self.allowed:
                 return
             rate = self._bytes / max(now - self._since, 1e-9)
             self.history.append((self.allowed, rate))
@@ -172,16 +179,20 @@ class Lanes:
                 self.settled = True
             else:
                 self._before = (self.allowed, rate)
-                self.allowed = min(self.most, self.allowed + max(1, self.allowed // 2))
+                self.allowed = min(self.most, 2 * self.allowed)
                 self.settled = self.allowed == self._before[0]
             self._since, self._bytes, self._chunks = now, 0, 0
 
     def failed(self) -> None:
         """A connection was lost or refused: fewer of them, and no more are added."""
         with self._lock:
-            self.allowed = max(self.least, self.allowed - max(1, self.allowed // 4))
+            now = self._clock()
             self.settled = True
-            self._since, self._bytes, self._chunks = self._clock(), 0, 0
+            if self._failed_at is not None and now - self._failed_at < self.window_s:
+                return
+            self._failed_at = now
+            self.allowed = max(self.least, self.allowed - max(1, self.allowed // 4))
+            self._since, self._bytes, self._chunks = now, 0, 0
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +216,13 @@ class Served:
     def fingerprint(self) -> str:
         """The SHA-256 of the certificate, in hexadecimal."""
         return hashlib.sha256(ssl.PEM_cert_to_DER_cert(self.certificate)).hexdigest()
+
+    def path(self, remote: str) -> str:
+        """The URL's path for the machine's file ``remote``, which is under the folder served."""
+        inside = posixpath.relpath(posixpath.normpath(remote), posixpath.normpath(self.root))
+        if inside.startswith(".."):
+            raise RemoteError(f"{remote} is not under the folder that is served")
+        return "/" + quote(inside)
 
     def context(self) -> ssl.SSLContext:
         """A TLS context that believes this certificate and no other authority."""
@@ -241,13 +259,17 @@ def _serve_script(root: str, port: int, where: str, lifetime_s: float, extra: st
         " IFS= read -r token; printf '%s' \"$token\" > token; unset token; cat > rangeserver.py;"
         " command -v python3 >/dev/null 2>&1 || { echo 'no python3 on the machine' >&2; exit 3; };"
         " command -v openssl >/dev/null 2>&1 || { echo 'no openssl on the machine' >&2; exit 3; };"
-        " openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes"
+        # An RSA key: the one kind every TLS library a machine may hold shakes hands with
+        # (a key on a curve was refused by Python 3.9 on LibreSSL 2.8, tried on 127.0.0.1).
+        " openssl req -x509 -newkey rsa:2048 -nodes"
         " -keyout key.pem -out cert.pem -days 30 -subj /CN=rv-homecoming >/dev/null 2>&1"
         " || { echo 'openssl made no certificate' >&2; exit 3; };"
-        f" nohup python3 rangeserver.py --root {shlex.quote(root)} --port {int(port)}"
+        # Detached with every stream of its own, so that the ssh session ends without it.
+        " ( $(command -v setsid || true) python3 rangeserver.py"
+        f" --root {shlex.quote(root)} --port {int(port)}"
         " --cert cert.pem --key key.pem --token-file token --pid-file pid"
         f" --lifetime {float(lifetime_s):g} --forget --quiet {extra}"
-        " > log 2>&1 < /dev/null &"
+        " > log 2>&1 < /dev/null & );"
         " n=0; while [ ! -f pid ] && [ $n -lt 80 ]; do sleep 0.1; n=$((n + 1)); done;"
         " [ -f pid ] || { echo 'the range server did not start:' >&2; tail -c 400 log >&2;"
         " exit 4; };"
@@ -293,6 +315,7 @@ def serve(
     extra: str = "",
     ask: Callable[[Any, str, bytes], str] | None = None,
     ping: bool = True,
+    ending: Callable[..., None] | None = None,
 ) -> Served:
     """Start the range server on ``machine`` for the folder ``root``; where it answers.
 
@@ -308,7 +331,9 @@ def serve(
     ended first: one token is good at a time. Raises
     :class:`reverberate.wave.remote.RemoteError` where the way is not open
     (no mapped port, no ``python3``, no ``openssl``, a port that does not
-    answer from here), which the caller takes as "not this way".
+    answer from here), which the caller takes as "not this way"; a server
+    that started and cannot be reached is ended before that is said
+    (``ending``, :func:`stop` unless a test hands another).
     """
     from reverberate.gpu.direct import DirectMachine
 
@@ -321,18 +346,23 @@ def serve(
         _serve_script(root, port, where, lifetime_s, extra),
         token.encode() + b"\n" + source,
     )
-    certificate = _certificate_in(said)
-    outside = host_port or dict(getattr(machine, "mapped", ()) or ()).get(int(port))
-    if not outside:
-        for line in said.splitlines():
-            word = line.partition("mapped ")[2].strip()
-            if line.startswith("mapped ") and word.isdigit():
-                outside = int(word)
-    if not outside:
-        raise RemoteError(f"the host maps no port to the instance's {port}")
-    served = Served(str(machine.host), int(outside), token, certificate, root)
-    if ping:
-        _ping(served)
+    try:
+        certificate = _certificate_in(said)
+        outside = host_port or dict(getattr(machine, "mapped", ()) or ()).get(int(port))
+        if not outside:
+            for line in said.splitlines():
+                word = line.partition("mapped ")[2].strip()
+                if line.startswith("mapped ") and word.isdigit():
+                    outside = int(word)
+        if not outside:
+            raise RemoteError(f"the host maps no port to the instance's {port}")
+        served = Served(str(machine.host), int(outside), token, certificate, root)
+        if ping:
+            _ping(served)
+    except Exception:
+        # Nothing is left listening that nobody will read from.
+        (ending or stop)(machine, where=where)
+        raise
     return served
 
 
@@ -411,10 +441,7 @@ class HttpsTransport:
         self.control.files(remote_dir, names, target, worker, timeout)
 
     def _path(self, remote: str) -> str:
-        inside = posixpath.relpath(posixpath.normpath(remote), posixpath.normpath(self.served.root))
-        if inside.startswith(".."):
-            raise RemoteError(f"{remote} is not under the folder that is served")
-        return "/" + quote(inside)
+        return self.served.path(remote)
 
     def _connection(self, worker: int) -> _Pinned:
         with self._lock:
@@ -446,15 +473,21 @@ class HttpsTransport:
                 if response.status in (401, 403, 404, 416):
                     raise RemoteError(f"range of {remote}: the server answered {response.status}")
                 raise ConnectionLost(f"range of {remote}: status {response.status}", None)
+            promised = int(response.getheader("Content-Length") or 0)
             buffer = memoryview(bytearray(1 << 20))
+            came = 0
             with target.open("wb") as handle:
                 while True:
                     got = response.readinto(buffer)
                     if not got:
                         break
                     handle.write(buffer[:got])
+                    came += got
                     if time.time() - began > limit:
                         raise ConnectionLost(f"a chunk did not come in {limit:g} s", None)
+            if came < promised:
+                # Cut in the middle of its body: the connection is not one to ask again on.
+                raise ConnectionLost(f"range of {remote}: {came} bytes of {promised} came", None)
         except ssl.SSLCertVerificationError as error:
             self._drop(worker)
             raise RemoteError(
@@ -499,7 +532,10 @@ class Way:
         if self.most <= self.start and self.transport is None:
             # As it always was: so many workers, all of them at work.
             return {"workers": self.start}
-        given: dict[str, Any] = {"lanes": Lanes(self.start, self.most)}
+        # Never fewer than the four a fetch always had, whatever fails.
+        given: dict[str, Any] = {
+            "lanes": Lanes(self.start, self.most, least=min(self.start, WORKERS))
+        }
         if self.transport is not None:
             given["transport"] = self.transport()
         return given

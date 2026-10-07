@@ -494,7 +494,12 @@ def fetch_file(
         resumed = len(done)
         say(
             f"  {Path(remote).name}: {size / 1e9:.2f} GB in {count} chunks of"
-            f" {chunk_bytes / 2**20:g} MB, {workers} streams"
+            f" {chunk_bytes / 2**20:g} MB,"
+            + (
+                f" {workers} streams"
+                if lanes is None or lanes.allowed >= workers
+                else f" {lanes.allowed} streams, {workers} at most"
+            )
             + (f"; {resumed} chunks already home" if resumed else "")
         )
         # The machine reads its file once for the digest while the chunks come.
