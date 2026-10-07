@@ -10,9 +10,88 @@ from reverberate.scenes.kinematics import (
     rail_length,
     source_state,
 )
+from reverberate.scenes.levels import conversation_snr, in_conversation
 from reverberate.scenes.recipe import Dwell, Recipe, Rise, Travel, canonical_bytes, recipe_sha256
 
-__all__ = ["describe", "low_band_positions"]
+__all__ = ["describe", "gaze_share", "low_band_positions"]
+
+
+def gaze_share(recipe: Recipe) -> float:
+    """Of the time somebody else of the conversation holds the floor, the share looked at.
+
+    Who holds the floor is the voice of the listener's conversation whose
+    turn started last; the listener looks at it while an interval of its
+    ``gaze`` is a ``talker``'s and names that voice. Read every 50 ms.
+    ``nan`` where nobody of the conversation ever talks.
+    """
+    grid = np.arange(0.0, recipe.duration_s, 0.05)
+    holder = np.full(grid.size, -1, dtype=np.int64)
+    turns = sorted(
+        (interval.start_s, interval.end_s, number)
+        for number, source in enumerate(recipe.sources)
+        if source.kind == "voice"
+        for interval, inside in zip(
+            source.activity,
+            in_conversation(source, np.array([a.start_s for a in source.activity])),
+            strict=True,
+        )
+        if inside and interval.event == "turn"
+    )
+    for start, end, number in turns:
+        holder[(grid >= start) & (grid < end)] = number
+    looked = np.full(grid.size, -2, dtype=np.int64)
+    index = {source.id: number for number, source in enumerate(recipe.sources)}
+    for interval in recipe.listener.gaze:
+        if interval.mode == "talker" and interval.target in index:
+            looked[(grid >= interval.start_s) & (grid < interval.end_s)] = index[interval.target]
+    talking = holder >= 0
+    return float((looked[talking] == holder[talking]).mean()) if talking.any() else float("nan")
+
+
+def _second(recipe: Recipe) -> list[str]:
+    """What a recipe of version 2 says beyond the first: the scene, the levels, the gaze."""
+    scene = recipe.scene
+    assert scene is not None
+    lines = []
+    ratios = np.array([row[2] for row in conversation_snr(recipe)])
+    heard = (
+        f"least {ratios.min():.1f} dB, median {np.median(ratios):.1f} dB over {ratios.size} turns"
+        if ratios.size
+        else "no turn"
+    )
+    lines.append(
+        f"  calmness {scene.calmness:g}; the conversation over the noise at the listener, in free "
+        f"field: {heard} (floor {scene.snr_floor_db:g} dB)"
+    )
+    said = [a for s in recipe.sources if s.kind in ("voice", "own_voice") for a in s.activity]
+    efforts = [
+        f"{sum(a.effort == name for a in said)} {name}"
+        for name in sorted({a.effort or "" for a in said})
+    ]
+    events = [
+        f"{sum(a.event == name for a in said)} {name}"
+        for name in ("turn", "backchannel", "laughter")
+    ]
+    lines.append(f"  voice intervals: {', '.join(events)}; efforts: {', '.join(efforts) or 'none'}")
+    spans = ", ".join(
+        f"{m.group or 'nobody'} {m.start_s:.0f} to {m.end_s:.0f} s"
+        for m in recipe.listener.conversation
+    )
+    changes = sum(len(s.roles) - 1 for s in recipe.sources if s.kind == "voice")
+    lines.append(
+        f"  the listener talks with: {spans}; {changes} change(s) of role among the voices"
+    )
+    modes: dict[str, float] = {}
+    for interval in recipe.listener.gaze:
+        modes[interval.mode] = modes.get(interval.mode, 0.0) + interval.end_s - interval.start_s
+    shares = ", ".join(
+        f"{name} {100 * t / recipe.duration_s:.0f} %" for name, t in sorted(modes.items())
+    )
+    lines.append(
+        f"  gaze: on the talker {100 * gaze_share(recipe):.0f} % of the time somebody else of the "
+        f"conversation talks; of the scene: {shares}"
+    )
+    return lines
 
 
 def low_band_positions(recipe: Recipe, rail_positions: int = 2) -> dict[str, int]:
@@ -79,7 +158,7 @@ def describe(recipe: Recipe, rail_positions: int = 2) -> str:
     )
     spoken = moving = 0.0
     for source in recipe.sources:
-        if source.kind == "noise":
+        if source.kind in ("noise", "media_voice"):
             continue
         for interval in source.activity:
             spoken += interval.end_s - interval.start_s
@@ -95,18 +174,26 @@ def describe(recipe: Recipe, rail_positions: int = 2) -> str:
     )
     if recipe.generator is not None:
         lines.append(f"  generator {recipe.generator.name} {recipe.generator.version}")
+    if recipe.schema_version >= 2:
+        lines += _second(recipe)
 
     frames = recipe.listener.keyframes
     walked = sum(
         float(np.hypot(b.position[0] - a.position[0], b.position[2] - a.position[2]))
         for a, b in zip(frames[:-1], frames[1:], strict=True)
     )
+    # A rest names its station; in version 2 a standing spot is named too, and is no seat.
+    station_kind = {station.id: station.kind for station in recipe.stations}
     seated = sum(
         b.t_s - a.t_s
         for a, b in zip(frames[:-1], frames[1:], strict=True)
-        if a.station is not None and a.station == b.station
+        if a.station is not None
+        and a.station == b.station
+        and station_kind.get(a.station) != "stand"
     )
-    seats = sorted({frame.station for frame in frames if frame.station is not None})
+    seats = sorted(
+        {f.station for f in frames if f.station and station_kind.get(f.station) != "stand"}
+    )
     lines.append(
         f"listener: {len(frames)} keyframes, {walked:.1f} m walked, "
         f"{100 * seated / duration:.0f} % seated, seats {', '.join(seats) or 'none'}"

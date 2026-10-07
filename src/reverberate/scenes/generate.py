@@ -303,6 +303,14 @@ class ClipEntry:
     utterances: tuple[tuple[float, float], ...] = ()
     #: Whether the clip's end runs into its start without a seam.
     loop: bool = False
+    #: What the second generator reads (:mod:`reverberate.scenes.social`). The level at
+    #: 1 m the file holds, the manifest's ``level.spl_1m_db``; ``None``: not said. The
+    #: vocal effort a voice's clip was spoken at, and what it is: a ``turn``, a
+    #: ``backchannel`` or ``laughter``. A library that says neither holds read speech
+    #: at a normal effort, which is what ``clarify_v1`` is.
+    spl_1m_db: float | None = None
+    effort: str = "normal"
+    event: str = "turn"
 
 
 @dataclass(frozen=True)
@@ -371,10 +379,20 @@ def load_clip_library(path: Path) -> ClipLibrary:
                 str(item.get("speaker", "")),
                 tuple((float(a), float(b)) for a, b in item.get("utterances", ())),
                 bool(item.get("loop", False)),
+                _stored_level(item),
+                str(item.get("effort", "normal")),
+                str(item.get("event", "turn")),
             )
             for item in items
         )
     )
+
+
+def _stored_level(item: dict[str, Any]) -> float | None:
+    """The level at 1 m a clip's entry states, in dB SPL, where it states one."""
+    level = item.get("level")
+    stated = level.get("spl_1m_db") if isinstance(level, dict) else item.get("spl_1m_db")
+    return None if stated is None else float(stated)
 
 
 class _Voice:

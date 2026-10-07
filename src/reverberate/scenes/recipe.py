@@ -1,7 +1,12 @@
 """The scene recipe as typed values: parsing, the canonical form, the identity.
 
-The format is ``docs/formats/scene-recipe.md``, version 1, and this module is
-its reader and its writer. Three things are decided here and nowhere else:
+The format is ``docs/formats/scene-recipe.md`` and this module is its reader
+and its writer, of version 1 and of version 2: a recipe keeps the version it
+was written in, and a version 1 recipe has the bytes and the identity it
+always had. Version 2 adds who talks with whom and what the wearer says
+himself, the small movements that cost nothing, the levels, and the sources
+that are fixed to an object; every key it adds is refused in a version 1
+recipe. Three things are decided here and nowhere else:
 
 - **Parsing is strict.** A key the format does not name, a missing key or a
   value of another type is refused with rule 1. A float written as an integer
@@ -29,26 +34,34 @@ from typing import Any
 __all__ = [
     "SCHEMA",
     "SCHEMA_VERSION",
+    "SCHEMA_VERSIONS",
     "Activity",
     "Assets",
     "Atmosphere",
+    "Attach",
     "Clip",
     "Directivity",
     "Dwell",
     "Dwelling",
     "Facing",
+    "Gaze",
     "GeneratorRecord",
     "Heights",
     "Keyframe",
     "Listener",
+    "Membership",
+    "Opening",
     "Output",
     "Rail",
     "Recipe",
     "RecipeError",
     "Rise",
+    "Role",
+    "Scene",
     "Segment",
     "Source",
     "Station",
+    "Sway",
     "Travel",
     "canonical_bytes",
     "decimals_of",
@@ -61,12 +74,37 @@ __all__ = [
 ]
 
 SCHEMA = "reverberate.scene-recipe"
-SCHEMA_VERSION = 1
+#: The version a recipe is written in today, and the versions that are read.
+SCHEMA_VERSION = 2
+SCHEMA_VERSIONS = (1, 2)
 
 STATION_KINDS = ("stand", "seat", "waypoint")
 HEIGHTS = ("standing", "seated")
 SOURCE_KINDS = ("near_voice", "far_voice", "noise")
 NOISE_SUBTYPES = ("appliance", "television", "music", "water", "street", "other")
+
+# Version 2. A ``fixture`` is where a fixed source stands, on or by an object, at a
+# height of its own; nobody walks to it.
+STATION_KINDS_V2 = (*STATION_KINDS, "fixture")
+HEIGHTS_V2 = (*HEIGHTS, "fixed")
+#: Distance is no role: a voice is a voice, and what it is to the listener is said by
+#: interval (:class:`Role`). The wearer's own voice and a programme's are kinds apart.
+SOURCE_KINDS_V2 = ("voice", "own_voice", "media_voice", "noise")
+VOICE_KINDS_V2 = ("voice", "own_voice")
+SUBTYPES_V2 = {
+    "media_voice": ("television", "radio"),
+    "noise": ("appliance", "music", "water", "other", "body", "steps", "outside"),
+}
+ROLES = ("conversation", "outside")
+#: Vocal efforts, quietest first (ISO 9921, annex A, and a whisper under them).
+EFFORTS = ("whisper", "relaxed", "normal", "raised", "loud")
+EVENTS = ("turn", "backchannel", "laughter")
+GAZE_MODES = ("talker", "glance", "reading", "away", "event", "walk")
+SWAY_AXES = ("x", "y", "z", "yaw")
+ATTACH_POINTS = ("mouth", "floor")
+OPENING_STATES = ("open", "closed")
+#: The name an attachment gives the listener; no source may take it.
+LISTENER = "listener"
 PROFILES = ("constant", "smoothstep")
 FACING_MODES = ("fixed", "travel", "listener")
 STATION_ID = re.compile(r"[a-z0-9_]+")
@@ -280,7 +318,7 @@ class Station:
     object: str | None = None
 
     @classmethod
-    def from_dict(cls, value: Any, where: str) -> Station:
+    def from_dict(cls, value: Any, where: str, version: int = 1) -> Station:
         d = _keys(
             value,
             where,
@@ -293,9 +331,9 @@ class Station:
         x, y, z = _vector(d["position"], f"{where}.position", 3)
         return cls(
             ident,
-            _str(d["kind"], f"{where}.kind", STATION_KINDS),
+            _str(d["kind"], f"{where}.kind", STATION_KINDS if version == 1 else STATION_KINDS_V2),
             (x, y, z),
-            _str(d["height"], f"{where}.height", HEIGHTS),
+            _str(d["height"], f"{where}.height", HEIGHTS if version == 1 else HEIGHTS_V2),
             _str(d["room"], f"{where}.room"),
             _float(d["facing_yaw_deg"], f"{where}.facing_yaw_deg"),
             _str(d["object"], f"{where}.object") if "object" in d else None,
@@ -442,7 +480,7 @@ class Rise:
 Segment = Dwell | Travel | Rise
 
 
-def _segment(value: Any, where: str) -> Segment:
+def _segment(value: Any, where: str, version: int = 1) -> Segment:
     if not isinstance(value, dict):
         raise _shape(f"{where} is not an object")
     kind = _str(value.get("type"), f"{where}.type", ("dwell", "travel", "rise"))
@@ -454,7 +492,7 @@ def _segment(value: Any, where: str) -> Segment:
             raise _shape(f"{where}.facing follows a rail's tangent, and a dwell is on none")
         return Dwell(
             _str(d["station"], f"{where}.station"),
-            _str(d["height"], f"{where}.height", HEIGHTS),
+            _str(d["height"], f"{where}.height", HEIGHTS if version == 1 else HEIGHTS_V2),
             _float(d["start_s"], f"{where}.start_s"),
             _float(d["end_s"], f"{where}.end_s"),
             facing,
@@ -496,10 +534,16 @@ class Activity:
     clip: Clip
     clip_offset_s: float
     gain_db: float
+    #: Version 2, a voice's interval only: the vocal effort the turn is spoken at, and
+    #: what the interval is, a turn, an acknowledgement or a laugh.
+    effort: str | None = None
+    event: str | None = None
 
     @classmethod
-    def from_dict(cls, value: Any, where: str) -> Activity:
-        d = _keys(value, where, ("start_s", "end_s", "clip", "clip_offset_s", "gain_db"))
+    def from_dict(cls, value: Any, where: str, voiced: bool = False) -> Activity:
+        """``voiced``: a voice's interval of a version 2 recipe, which says effort and event."""
+        said = ("effort", "event") if voiced else ()
+        d = _keys(value, where, ("start_s", "end_s", "clip", "clip_offset_s", "gain_db", *said))
         c = _keys(d["clip"], f"{where}.clip", ("library", "name", "sha256"))
         return cls(
             _float(d["start_s"], f"{where}.start_s"),
@@ -511,16 +555,23 @@ class Activity:
             ),
             _float(d["clip_offset_s"], f"{where}.clip_offset_s"),
             _float(d["gain_db"], f"{where}.gain_db"),
+            _str(d["effort"], f"{where}.effort", EFFORTS) if voiced else None,
+            _str(d["event"], f"{where}.event", EVENTS) if voiced else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "start_s": self.start_s,
             "end_s": self.end_s,
             "clip": self.clip.to_dict(),
             "clip_offset_s": self.clip_offset_s,
             "gain_db": self.gain_db,
         }
+        if self.effort is not None:
+            out["effort"] = self.effort
+        if self.event is not None:
+            out["event"] = self.event
+        return out
 
 
 @dataclass(frozen=True)
@@ -533,6 +584,146 @@ class Directivity:
 
 
 @dataclass(frozen=True)
+class Sway:
+    """One sinusoid of a small movement about where somebody is.
+
+    ``amplitude * sin(2 pi t / period_s + phase)`` along a scene axis, in
+    metres, or about the up axis, in degrees for ``yaw``. A sum of a few of
+    them whose periods share no multiple never repeats and swells and fades,
+    which is what a body at rest does. It costs nothing under the crossover:
+    the low band is read from where the source is without it.
+    """
+
+    axis: str
+    amplitude: float
+    period_s: float
+    phase_deg: float
+
+    @classmethod
+    def from_dict(cls, value: Any, where: str, axes: tuple[str, ...] = SWAY_AXES) -> Sway:
+        if not isinstance(value, dict):
+            raise _shape(f"{where} is not an object")
+        axis = _str(value.get("axis"), f"{where}.axis", axes)
+        size = "amplitude_deg" if axis == "yaw" else "amplitude_m"
+        d = _keys(value, where, ("axis", size, "period_s", "phase_deg"))
+        return cls(
+            axis,
+            _float(d[size], f"{where}.{size}"),
+            _float(d["period_s"], f"{where}.period_s"),
+            _float(d["phase_deg"], f"{where}.phase_deg"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        size = "amplitude_deg" if self.axis == "yaw" else "amplitude_m"
+        return {
+            "axis": self.axis,
+            size: self.amplitude,
+            "period_s": self.period_s,
+            "phase_deg": self.phase_deg,
+        }
+
+
+def _sways(value: Any, where: str, axes: tuple[str, ...] = SWAY_AXES) -> tuple[Sway, ...]:
+    return tuple(
+        Sway.from_dict(item, f"{where}[{index}]", axes)
+        for index, item in enumerate(_list(value, where))
+    )
+
+
+@dataclass(frozen=True)
+class Role:
+    """What a voice is to the listener over an interval: the training label.
+
+    ``conversation``: a member of the group the listener talks with.
+    ``outside``: anybody else. ``group`` names the group the voice talks in,
+    whichever the role; left out, the voice is in none.
+    """
+
+    start_s: float
+    end_s: float
+    role: str
+    group: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: Any, where: str) -> Role:
+        d = _keys(value, where, ("start_s", "end_s", "role"), ("group",))
+        return cls(
+            _float(d["start_s"], f"{where}.start_s"),
+            _float(d["end_s"], f"{where}.end_s"),
+            _str(d["role"], f"{where}.role", ROLES),
+            _str(d["group"], f"{where}.group") if "group" in d else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"start_s": self.start_s, "end_s": self.end_s, "role": self.role}
+        if self.group is not None:
+            out["group"] = self.group
+        return out
+
+
+@dataclass(frozen=True)
+class Attach:
+    """A source that is carried: by the listener, or by another source.
+
+    ``at`` ``"mouth"``: where its carrier's mouth is, or, on the listener,
+    ``offset_m`` from the centre of the head in the head's own frame
+    (front, left, up). ``"floor"``: under its carrier, 5 cm above the floor,
+    at the footfall nearest to it, the footfalls standing every ``stride_m``
+    along the way walked. Its yaw is its carrier's turned by
+    ``yaw_offset_deg``. A carried source has no segments of its own.
+    """
+
+    to: str
+    at: str
+    yaw_offset_deg: float = 0.0
+    offset_m: tuple[float, float, float] | None = None
+    stride_m: float | None = None
+
+    @classmethod
+    def from_dict(cls, value: Any, where: str) -> Attach:
+        if not isinstance(value, dict):
+            raise _shape(f"{where} is not an object")
+        to = _str(value.get("to"), f"{where}.to")
+        at = _str(value.get("at"), f"{where}.at", ATTACH_POINTS)
+        extra: tuple[str, ...] = ()
+        if at == "floor":
+            extra = ("stride_m",)
+        elif to == LISTENER:
+            extra = ("offset_m",)
+        d = _keys(value, where, ("to", "at", "yaw_offset_deg", *extra))
+        offset = None
+        if "offset_m" in d:
+            x, y, z = _vector(d["offset_m"], f"{where}.offset_m", 3)
+            offset = (x, y, z)
+        return cls(
+            to,
+            at,
+            _float(d["yaw_offset_deg"], f"{where}.yaw_offset_deg"),
+            offset,
+            _float(d["stride_m"], f"{where}.stride_m") if "stride_m" in d else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"to": self.to, "at": self.at, "yaw_offset_deg": self.yaw_offset_deg}
+        if self.offset_m is not None:
+            out["offset_m"] = list(self.offset_m)
+        if self.stride_m is not None:
+            out["stride_m"] = self.stride_m
+        return out
+
+
+@dataclass(frozen=True)
+class Opening:
+    """The window or outer door a noise of outside comes in by, open or closed."""
+
+    object: str
+    state: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"object": self.object, "state": self.state}
+
+
+@dataclass(frozen=True)
 class Source:
     id: str
     kind: str
@@ -542,9 +733,19 @@ class Source:
     segments: tuple[Segment, ...]
     activity: tuple[Activity, ...]
     subtype: str | None = None
+    # Version 2.
+    #: The level at 1 m, in dB SPL, of what the source emits at an interval gain of
+    #: zero, the source's ``gain_db`` included: for a voice its active speech level.
+    level_spl_1m_db: float | None = None
+    sway: tuple[Sway, ...] = ()
+    roles: tuple[Role, ...] = ()
+    attach: Attach | None = None
+    opening: Opening | None = None
 
     @classmethod
-    def from_dict(cls, value: Any, where: str) -> Source:
+    def from_dict(cls, value: Any, where: str, version: int = 1) -> Source:
+        if version != 1:
+            return cls._from_dict_v2(value, where)
         d = _keys(
             value,
             where,
@@ -578,6 +779,71 @@ class Source:
             subtype=subtype,
         )
 
+    @classmethod
+    def _from_dict_v2(cls, value: Any, where: str) -> Source:
+        d = _keys(
+            value,
+            where,
+            (
+                "id",
+                "kind",
+                "directivity",
+                "gain_db",
+                "level_spl_1m_db",
+                "turn_rate_deg_s",
+                "segments",
+                "activity",
+                "sway",
+            ),
+            ("subtype", "roles", "attach", "opening"),
+        )
+        kind = _str(d["kind"], f"{where}.kind", SOURCE_KINDS_V2)
+        subtype = None
+        if kind in SUBTYPES_V2:
+            if "subtype" not in d:
+                raise _shape(f"{where} is a {kind} and lacks 'subtype'")
+            subtype = _str(d["subtype"], f"{where}.subtype", SUBTYPES_V2[kind])
+        elif "subtype" in d:
+            raise _shape(f"{where}.subtype is given for a {kind}, which has none")
+        if ("roles" in d) != (kind == "voice"):
+            raise _shape(f"{where}: a voice says its roles, and no other kind does")
+        pattern = _keys(d["directivity"], f"{where}.directivity", ("model", "enabled"))
+        opening = None
+        if "opening" in d:
+            o = _keys(d["opening"], f"{where}.opening", ("object", "state"))
+            opening = Opening(
+                _str(o["object"], f"{where}.opening.object"),
+                _str(o["state"], f"{where}.opening.state", OPENING_STATES),
+            )
+        voiced = kind in VOICE_KINDS_V2
+        return cls(
+            id=_str(d["id"], f"{where}.id"),
+            kind=kind,
+            directivity=Directivity(
+                _str(pattern["model"], f"{where}.directivity.model"),
+                _bool(pattern["enabled"], f"{where}.directivity.enabled"),
+            ),
+            gain_db=_float(d["gain_db"], f"{where}.gain_db"),
+            turn_rate_deg_s=_float(d["turn_rate_deg_s"], f"{where}.turn_rate_deg_s"),
+            segments=tuple(
+                _segment(item, f"{where}.segments[{index}]", 2)
+                for index, item in enumerate(_list(d["segments"], f"{where}.segments"))
+            ),
+            activity=tuple(
+                Activity.from_dict(item, f"{where}.activity[{index}]", voiced)
+                for index, item in enumerate(_list(d["activity"], f"{where}.activity"))
+            ),
+            subtype=subtype,
+            level_spl_1m_db=_float(d["level_spl_1m_db"], f"{where}.level_spl_1m_db"),
+            sway=_sways(d["sway"], f"{where}.sway"),
+            roles=tuple(
+                Role.from_dict(item, f"{where}.roles[{index}]")
+                for index, item in enumerate(_list(d.get("roles", []), f"{where}.roles"))
+            ),
+            attach=Attach.from_dict(d["attach"], f"{where}.attach") if "attach" in d else None,
+            opening=opening,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "id": self.id,
@@ -590,6 +856,16 @@ class Source:
         }
         if self.subtype is not None:
             out["subtype"] = self.subtype
+        if self.level_spl_1m_db is not None:
+            # Version 2: every key of it, said or empty.
+            out["level_spl_1m_db"] = self.level_spl_1m_db
+            out["sway"] = [component.to_dict() for component in self.sway]
+            if self.kind == "voice":
+                out["roles"] = [role.to_dict() for role in self.roles]
+            if self.attach is not None:
+                out["attach"] = self.attach.to_dict()
+            if self.opening is not None:
+                out["opening"] = self.opening.to_dict()
         return out
 
 
@@ -631,26 +907,124 @@ class Keyframe:
 
 
 @dataclass(frozen=True)
-class Listener:
-    keyframes: tuple[Keyframe, ...]
-    interpolation: str = "linear"
+class Membership:
+    """The group the listener talks in over an interval; none where ``group`` is left out."""
+
+    start_s: float
+    end_s: float
+    group: str | None = None
 
     @classmethod
-    def from_dict(cls, value: Any) -> Listener:
-        d = _keys(value, "listener", ("interpolation", "keyframes"))
+    def from_dict(cls, value: Any, where: str) -> Membership:
+        d = _keys(value, where, ("start_s", "end_s"), ("group",))
         return cls(
-            tuple(
-                Keyframe.from_dict(item, f"listener.keyframes[{index}]")
-                for index, item in enumerate(_list(d["keyframes"], "listener.keyframes"))
-            ),
-            _str(d["interpolation"], "listener.interpolation", ("linear",)),
+            _float(d["start_s"], f"{where}.start_s"),
+            _float(d["end_s"], f"{where}.end_s"),
+            _str(d["group"], f"{where}.group") if "group" in d else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {"start_s": self.start_s, "end_s": self.end_s}
+        if self.group is not None:
+            out["group"] = self.group
+        return out
+
+
+@dataclass(frozen=True)
+class Gaze:
+    """What the listener's head was turned to over an interval, as the generator meant it.
+
+    A record for the audit, not a rule of the movement: the head is the
+    keyframes'. ``target`` is a source's id where the mode has one.
+    """
+
+    start_s: float
+    end_s: float
+    mode: str
+    target: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: Any, where: str) -> Gaze:
+        d = _keys(value, where, ("start_s", "end_s", "mode"), ("target",))
+        return cls(
+            _float(d["start_s"], f"{where}.start_s"),
+            _float(d["end_s"], f"{where}.end_s"),
+            _str(d["mode"], f"{where}.mode", GAZE_MODES),
+            _str(d["target"], f"{where}.target") if "target" in d else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"start_s": self.start_s, "end_s": self.end_s, "mode": self.mode}
+        if self.target is not None:
+            out["target"] = self.target
+        return out
+
+
+@dataclass(frozen=True)
+class Listener:
+    keyframes: tuple[Keyframe, ...]
+    interpolation: str = "linear"
+    # Version 2; ``None`` in a version 1 recipe, which has none of the three.
+    sway: tuple[Sway, ...] | None = None
+    conversation: tuple[Membership, ...] = ()
+    gaze: tuple[Gaze, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: Any, version: int = 1) -> Listener:
+        more = () if version == 1 else ("sway", "conversation", "gaze")
+        d = _keys(value, "listener", ("interpolation", "keyframes", *more))
+        frames = tuple(
+            Keyframe.from_dict(item, f"listener.keyframes[{index}]")
+            for index, item in enumerate(_list(d["keyframes"], "listener.keyframes"))
+        )
+        interpolation = _str(d["interpolation"], "listener.interpolation", ("linear",))
+        if version == 1:
+            return cls(frames, interpolation)
+        return cls(
+            frames,
+            interpolation,
+            _sways(d["sway"], "listener.sway", ("x", "y", "z")),
+            tuple(
+                Membership.from_dict(item, f"listener.conversation[{index}]")
+                for index, item in enumerate(_list(d["conversation"], "listener.conversation"))
+            ),
+            tuple(
+                Gaze.from_dict(item, f"listener.gaze[{index}]")
+                for index, item in enumerate(_list(d["gaze"], "listener.gaze"))
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "interpolation": self.interpolation,
             "keyframes": [keyframe.to_dict() for keyframe in self.keyframes],
         }
+        if self.sway is not None:
+            out["sway"] = [component.to_dict() for component in self.sway]
+            out["conversation"] = [interval.to_dict() for interval in self.conversation]
+            out["gaze"] = [interval.to_dict() for interval in self.gaze]
+        return out
+
+
+@dataclass(frozen=True)
+class Scene:
+    """Version 2: how calm the scene is, and the floor its speech is held above.
+
+    ``calmness`` runs from 0, as lively as a home gets, to 1, nearly silent.
+    ``snr_floor_db`` is the least speech to noise ratio, in free field at
+    the listener, any turn of the listener's conversation may have: rule 16.
+    """
+
+    calmness: float
+    snr_floor_db: float
+
+    @classmethod
+    def from_dict(cls, value: Any) -> Scene:
+        d = _keys(value, "scene", ("calmness", "snr_floor_db"))
+        return cls(_float(d["calmness"], "scene.calmness"), _float(d["snr_floor_db"], "scene.snr"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"calmness": self.calmness, "snr_floor_db": self.snr_floor_db}
 
 
 @dataclass(frozen=True)
@@ -708,14 +1082,23 @@ class Recipe:
     output: Output = Output()
     atmosphere: Atmosphere = Atmosphere()
     heights: Heights = Heights()
+    #: The version the recipe is written in. A recipe made without saying is of the
+    #: first, so that what made version 1 recipes makes them still.
+    schema_version: int = 1
+    #: Version 2 only.
+    scene: Scene | None = None
 
     @classmethod
     def from_dict(cls, value: Any) -> Recipe:
-        d = _keys(value, "the recipe", _TOP)
+        if not isinstance(value, dict):
+            raise _shape("the recipe is not an object")
+        version = value.get("schema_version")
+        if type(version) is not int or version not in SCHEMA_VERSIONS:
+            read = " or ".join(str(v) for v in SCHEMA_VERSIONS)
+            raise _shape(f"schema_version is {version!r}, expected {read}")
+        d = _keys(value, "the recipe", _TOP if version == 1 else (*_TOP, "scene"))
         if d["schema"] != SCHEMA:
             raise _shape(f"schema is {d['schema']!r}, expected {SCHEMA!r}")
-        if d["schema_version"] != SCHEMA_VERSION or type(d["schema_version"]) is not int:
-            raise _shape(f"schema_version is {d['schema_version']!r}, expected {SCHEMA_VERSION}")
         seed = _int(d["seed"], "seed")
         if not 0 <= seed < 2**53:
             raise _shape(f"seed {seed} is outside 0 <= seed < 2^53")
@@ -725,7 +1108,7 @@ class Recipe:
             seed=seed,
             duration_s=_float(d["duration_s"], "duration_s"),
             stations=tuple(
-                Station.from_dict(item, f"stations[{index}]")
+                Station.from_dict(item, f"stations[{index}]", version)
                 for index, item in enumerate(_list(d["stations"], "stations"))
             ),
             rails=tuple(
@@ -733,20 +1116,29 @@ class Recipe:
                 for index, item in enumerate(_list(d["rails"], "rails"))
             ),
             sources=tuple(
-                Source.from_dict(item, f"sources[{index}]")
+                Source.from_dict(item, f"sources[{index}]", version)
                 for index, item in enumerate(_list(d["sources"], "sources"))
             ),
-            listener=Listener.from_dict(d["listener"]),
+            listener=Listener.from_dict(d["listener"], version),
             generator=None if d["generator"] is None else GeneratorRecord.from_dict(d["generator"]),
             output=Output.from_dict(d["output"]),
             atmosphere=Atmosphere.from_dict(d["atmosphere"]),
             heights=Heights.from_dict(d["heights"]),
+            schema_version=version,
+            scene=None if version == 1 else Scene.from_dict(d["scene"]),
         )
 
     def to_dict(self) -> dict[str, Any]:
+        if self.schema_version == 1:
+            return self._tree()
+        if self.scene is None or self.listener.sway is None:
+            raise _shape("a version 2 recipe says its scene and its listener's sway")
+        return {**self._tree(), "scene": self.scene.to_dict()}
+
+    def _tree(self) -> dict[str, Any]:
         return {
             "schema": SCHEMA,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "dwelling": self.dwelling.to_dict(),
             "assets": self.assets.to_dict(),
             "seed": self.seed,

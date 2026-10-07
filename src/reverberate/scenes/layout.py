@@ -20,6 +20,13 @@ floor the validation checks, which is the free floor itself.
 
 Heights are distances above the storey's floor, which is not assumed to be at
 ``y = 0``: every position is written ``floor_y_m + height``.
+
+**Fixtures** are the objects a fixed source belongs to, for recipes of
+version 2: a television, a washing machine, a counter, a shower, a window.
+They are what the export labels and no more (:data:`FIXTURE_CATEGORIES`),
+each with the point in the air next to it that a source is put at. They are
+kept beside the stations, in :attr:`Layout.fixtures`, and are no part of the
+graph: nobody walks to one, and the first generator never sees them.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ from reverberate.scenes.recipe import Dwelling, Heights, Rail, Station
 __all__ = [
     "RAIL_MARGIN_M",
     "RAIL_PITCH_M",
+    "Fixture",
     "Floor",
     "Layout",
     "LayoutSettings",
@@ -82,6 +90,42 @@ SEAT_CATEGORIES = {
 }
 
 
+#: The categories of HSSD a fixed source may belong to. ``window`` and ``outer_door``
+#: are not HSSD's: its openings carry no category, and are told apart by whether they
+#: reach the floor.
+FIXTURE_CATEGORIES = (
+    "tv",
+    "washing_machine_and_dryer",
+    "kitchen_counter",
+    "counter",
+    "shower",
+    "toilet",
+    "piano",
+    "desk",
+    "table",
+    "shelf",
+    "nightstand",
+    "window",
+    "outer_door",
+)
+
+#: A fixed source stands this far in front of a panel, or above a piece of furniture.
+FIXTURE_STANDOFF_M = 0.25
+FIXTURE_ABOVE_M = 0.15
+
+
+@dataclass(frozen=True)
+class Fixture:
+    """An object a fixed source belongs to, and where that source is put."""
+
+    name: str
+    category: str
+    #: ``(x, y, z)`` of the emitting point, in the air next to the object.
+    position: tuple[float, float, float]
+    #: The way the object faces the room, a unit ``(x, z)``, or ``None``.
+    front: tuple[float, float] | None = None
+
+
 @dataclass(frozen=True)
 class Room:
     """A room of ADR 0010: its name and its outline in ``(x, z)``."""
@@ -114,6 +158,8 @@ class Floor:
     rooms: tuple[Room, ...]
     #: Footprints of the seating, by instance name.
     objects: tuple[SeatObject, ...] = ()
+    #: What a fixed source may belong to (version 2).
+    fixtures: tuple[Fixture, ...] = ()
 
     def __post_init__(self) -> None:
         grown = self.free.buffer(FLOOR_TOLERANCE_M)
@@ -182,6 +228,9 @@ class Layout:
     #: For every seat, the point of the free floor one steps from to sit down.
     access: dict[str, tuple[float, float]]
     settings: LayoutSettings = field(default_factory=LayoutSettings)
+    #: A station of kind ``fixture`` for each of the floor's fixtures, for recipes of
+    #: version 2. Not among :attr:`stations`: no rail reaches one.
+    fixtures: tuple[Station, ...] = ()
 
     @property
     def walk_area(self) -> Any:
@@ -562,7 +611,34 @@ def build_layout(
         rails=tuple(sorted(rails, key=lambda rail: rail.id)),
         access=access,
         settings=settings,
+        fixtures=_fixture_stations(floor),
     )
+
+
+def _fixture_stations(floor: Floor) -> tuple[Station, ...]:
+    """A station for each fixture: where its source stands, and the way it faces."""
+    out = []
+    for item in sorted(floor.fixtures, key=lambda entry: entry.name):
+        x, z = _round((item.position[0], item.position[2]))
+        room = floor.room_of(x, z)
+        if room is None and floor.rooms:
+            here = Point(x, z)
+            room = min(floor.rooms, key=lambda r: (float(r.polygon.distance(here)), r.name)).name
+        yaw = 0.0
+        if item.front is not None:
+            yaw = round(float(yaw_of_direction(item.front[0], item.front[1])), 2) + 0.0
+        out.append(
+            Station(
+                _slug(item.name),
+                "fixture",
+                (x, round(float(item.position[1]), 3) + 0.0, z),
+                "fixed",
+                room or "",
+                yaw,
+                item.name,
+            )
+        )
+    return tuple(out)
 
 
 def _rail(
@@ -639,13 +715,83 @@ def load_hssd_floor(hssd_root: Path, scene_id: str) -> Floor:
                 front=(float(front[0] / norm), float(front[2] / norm)) if norm > 1e-6 else None,
             )
         )
+    fixtures = []
+    ceiling = float(storey.ceiling_height)
+    for index, instance in enumerate(instances):
+        found_category = category_for_template(hssd_root, instance.template_name)
+        category = found_category or "unknown"
+        bounds = None
+        if found_category is None:
+            bounds = _opening_bounds(hssd_root, instance)
+            if bounds is not None:
+                # A door reaches the floor; a window does not.
+                low = float(bounds[0][1]) - float(storey.floor_height)
+                category = "window" if low > 0.3 else "outer_door"
+        if category not in FIXTURE_CATEGORIES:
+            continue
+        if bounds is None:
+            base = obstacle_collider(hssd_root, instance.template_name)
+            if base is None:
+                continue
+            mesh = base.copy()
+            mesh.apply_transform(instance.transform_matrix())
+            bounds = np.asarray(mesh.bounds, dtype=float)
+        found = _fixture_point(category, bounds, storey.walkable, ceiling)
+        if found is not None:
+            fixtures.append(Fixture(f"{category}_{index}", category, found[0], found[1]))
     return Floor(
         floor_y_m=float(storey.floor_height),
         free=free,
         walkable=storey.walkable,
         rooms=tuple(Room(room.name, room.polygon) for room in rooms),
         objects=tuple(objects),
+        fixtures=tuple(fixtures),
     )
+
+
+def _opening_bounds(hssd_root: Path, instance: Any) -> np.ndarray | None:
+    """The box of a door or a window in the scene's frame, or ``None`` for anything else."""
+    import trimesh
+
+    from reverberate.geometry.hssd_assets import resolve_asset
+
+    asset = resolve_asset(hssd_root / "objects", instance.template_name)
+    glb = hssd_root / "objects" / "openings" / f"{instance.template_name}.glb"
+    if asset is None or not glb.exists():
+        return None
+    mesh = trimesh.load(glb, force="mesh")
+    mesh.apply_transform(instance.transform_matrix())
+    return np.asarray(mesh.bounds, dtype=float)
+
+
+def _fixture_point(
+    category: str, bounds: np.ndarray, walkable: Any, ceiling: float
+) -> tuple[tuple[float, float, float], tuple[float, float] | None] | None:
+    """Where the source of an object stands, and the way it faces: in the air next to it.
+
+    A panel, a television or an opening, has its source a little in front
+    of it on the side that is inside the dwelling and further from a wall;
+    anything else has it a little above its top.
+    """
+    low, high = np.asarray(bounds[0], dtype=float), np.asarray(bounds[1], dtype=float)
+    centre = 0.5 * (low + high)
+    if category in ("tv", "window", "outer_door"):
+        thin = 0 if high[0] - low[0] < high[2] - low[2] else 2
+        reach = 0.5 * float(high[thin] - low[thin]) + FIXTURE_STANDOFF_M
+        best = None
+        for side in (1.0, -1.0):
+            at = centre.copy()
+            at[thin] += side * reach
+            here = Point(float(at[0]), float(at[2]))
+            if not walkable.covers(here):
+                continue
+            clear = float(walkable.boundary.distance(here))
+            if best is None or clear > best[0]:
+                front = (side, 0.0) if thin == 0 else (0.0, side)
+                best = (clear, (float(at[0]), float(at[1]), float(at[2])), front)
+        return None if best is None else (best[1], best[2])
+    top = min(float(high[1]) + FIXTURE_ABOVE_M, ceiling - 0.3)
+    return (float(centre[0]), top, float(centre[2])), None
 
 
 def load_hssd_layout(

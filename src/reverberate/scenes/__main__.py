@@ -3,8 +3,9 @@
 python -m reverberate.scenes generate --dwelling hssd_0076 --seed N --out recipe.json
     [--duration S] [--parameters PARAMETERS.json] [--assets ASSETS.json]
     [--clips CLIPS.json | --placeholder-clips] [--placeholder-assets] [--hssd-root DIR]
+    [--preset quiet|medium|lively] [--calmness C]
 python -m reverberate.scenes validate recipe.json [--hssd-root DIR] [--no-floor]
-python -m reverberate.scenes describe recipe.json
+python -m reverberate.scenes describe recipe.json [--rail-positions N] [--cost]
 python -m reverberate.scenes clips fetch [--manifest MANIFEST.json] [--root DIR] [--jobs N]
 python -m reverberate.scenes clips check [--manifest MANIFEST.json] [--root DIR]
 python -m reverberate.scenes clips curate --selection SELECTION.json --out MANIFEST.json
@@ -16,6 +17,11 @@ check`` measures them, one row a clip, and fails on a limit; ``clips curate``
 makes a manifest from a selection. The manifest is ``clarify_v1`` of this
 package unless one is named. ``fetch`` and ``curate`` read the bucket; no
 other command opens the network.
+
+``generate`` writes a recipe of version 1, the first generator's, unless a
+preset or a calmness is given, or parameters that are the second
+generator's: then it writes version 2, a conversation, three minutes long
+unless ``--duration`` says (``reverberate.scenes.social``).
 
 ``generate`` and ``validate`` read the dwelling's geometry from the HSSD
 download, ``<data root>/raw/hssd-hab`` unless ``--hssd-root`` says otherwise.
@@ -30,6 +36,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from reverberate.scenes import clips as clip_library
 from reverberate.scenes.describe import describe
@@ -41,6 +48,7 @@ from reverberate.scenes.generate import (
 )
 from reverberate.scenes.layout import load_hssd_floor, load_hssd_layout
 from reverberate.scenes.recipe import Assets, RecipeError, load_recipe, save_recipe
+from reverberate.scenes.social import SocialParameters, generate_social
 from reverberate.scenes.validate import FLOOR_RULES, validate
 
 #: The library the first scene plays.
@@ -74,6 +82,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="write asset keys that match nothing; no trace will accept the recipe",
     )
     p.add_argument("--hssd-root", type=Path, default=None)
+    p.add_argument(
+        "--preset",
+        choices=("quiet", "medium", "lively"),
+        default=None,
+        help="a recipe of version 2, by the second generator: who talks with whom; "
+        "three minutes unless --duration says",
+    )
+    p.add_argument(
+        "--calmness",
+        type=float,
+        default=None,
+        help="version 2: from 0, lively, to 1, nearly silent; the preset's unless said",
+    )
 
     p = sub.add_parser("validate", help="check a recipe against the format's rules")
     p.add_argument("recipe", type=Path)
@@ -88,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         metavar="N",
         help="count the low band's positions as a trace of this --rail-positions solves them",
+    )
+    p.add_argument(
+        "--cost",
+        action="store_true",
+        help="what the trace is predicted to take, counted from the recipe (scenes.cost)",
     )
 
     p = sub.add_parser("clips", help="the library of dry clips: fetch, check, curate")
@@ -162,7 +188,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "clips":
         return _clips(args)
     if args.command == "describe":
-        print(describe(load_recipe(args.recipe), args.rail_positions))
+        recipe = load_recipe(args.recipe)
+        print(describe(recipe, args.rail_positions))
+        if args.cost:
+            from reverberate.scenes import cost
+
+            counted = cost.counts(recipe)
+            print(
+                f"to trace: {counted['source_positions']} source positions, {counted['cells']} "
+                f"cells over {counted['path_m']} m walked, about {counted['pairs']} pairs"
+            )
+            for cards, rate in ((1, 0.173), (8, 1.382)):
+                priced = cost.predict(counted, num_gpus=cards, dph_total=rate)
+                print(
+                    f"  {cards} x RTX 3090 at {rate} USD an hour: {priced['hours']:.2f} h, "
+                    f"{priced['usd']:.2f} USD, {priced['solve_usd']:.2f} of it the wave solves"
+                )
         return 0
 
     if args.command == "validate":
@@ -185,9 +226,19 @@ def main(argv: list[str] | None = None) -> int:
         print("valid" if not found else f"{len(found)} violation(s)")
         return 1 if found else 0
 
-    parameters = Parameters()
-    if args.parameters is not None:
-        parameters = Parameters.from_record(json.loads(args.parameters.read_text()))
+    record = None if args.parameters is None else json.loads(args.parameters.read_text())
+    # The second generator: asked for by a preset, or by parameters that are its own.
+    social = args.preset is not None or args.calmness is not None
+    social = social or (record is not None and "calmness" in record)
+    parameters: Parameters | SocialParameters
+    if social:
+        parameters = SocialParameters.preset(args.preset or "medium")
+        if record is not None:
+            parameters = SocialParameters.from_record(record)
+        if args.calmness is not None:
+            parameters = replace(parameters, calmness=args.calmness)
+    else:
+        parameters = Parameters() if record is None else Parameters.from_record(record)
     if args.duration is not None:
         parameters = replace(parameters, duration_s=args.duration)
     assets = None
@@ -197,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     layout = load_hssd_layout(_hssd_root(args.hssd_root), args.dwelling)
     print(layout.summary())
     try:
-        recipe = generate(
+        draw: Any = generate_social if isinstance(parameters, SocialParameters) else generate
+        recipe = draw(
             layout,
             parameters,
             args.seed,

@@ -11,6 +11,10 @@ trace reads them, both through the functions below.
 - :mod:`.validate`: the numbered rules.
 - :mod:`.layout`: a storey's stations and rails.
 - :mod:`.generate`: a recipe from ranges and a seed, deterministic.
+- :mod:`.social`: the second generator, of recipes of version 2: who talks
+  with whom, the wearer's own voice, movement that costs no wave solve.
+- :mod:`.levels`: levels in free field, vocal effort, speech over noise.
+- :mod:`.cost`: what a recipe will cost to trace, counted from the recipe.
 - :mod:`.describe`: a recipe in words.
 - :mod:`.clips`: the library of dry clips the generator names: its manifest,
   and the files built from the bucket, digests checked
@@ -53,6 +57,7 @@ from reverberate.scenes.kinematics import (
     source_state,
 )
 from reverberate.scenes.layout import (
+    Fixture,
     Floor,
     Layout,
     LayoutSettings,
@@ -72,15 +77,23 @@ from reverberate.scenes.recipe import (
     recipe_sha256,
     save_recipe,
 )
+from reverberate.scenes.social import (
+    SOCIAL_GENERATOR_VERSION,
+    SocialParameters,
+    generate_social,
+    placeholder_social_clips,
+)
 from reverberate.scenes.validate import Violation, check, validate, validate_text
 
 __all__ = [
     "AUDIBLE_TAIL_S",
     "GENERATOR_NAME",
     "GENERATOR_VERSION",
+    "SOCIAL_GENERATOR_VERSION",
     "YAW_STEP_S",
     "ClipEntry",
     "ClipLibrary",
+    "Fixture",
     "Floor",
     "GenerationError",
     "Layout",
@@ -92,6 +105,7 @@ __all__ = [
     "Room",
     "SeatObject",
     "LowBandPositions",
+    "SocialParameters",
     "SourceState",
     "Violation",
     "audible_steps",
@@ -100,6 +114,7 @@ __all__ = [
     "check",
     "describe",
     "generate",
+    "generate_social",
     "listener_state",
     "load_clip_library",
     "load_hssd_floor",
@@ -110,6 +125,7 @@ __all__ = [
     "parse_recipe",
     "placeholder_assets",
     "placeholder_clips",
+    "placeholder_social_clips",
     "quantise",
     "rail_arc_lengths",
     "rail_length",

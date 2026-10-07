@@ -111,6 +111,7 @@ Each clip:
 | `utterances` | array of `[start_s, end_s]` | for a voice: where the clip may be cut. In order, none overlapping, each end in a silence |
 | `level` | object | `measure` (`"active"`, `"heard"` or `"rms"`), `spl_1m_db`, and what the file measures: `rms_dbfs`, `peak_dbfs`, for a noise levelled on what is heard `heard_dbfs`, for a voice `active_dbfs` and `activity`, and for a clip of sentences `source_floor_dbfs` and `source_decay_db` (below) |
 | `licence`, `credit` | string | of this clip: the dataset's, or the clip's own where the dataset gives one a clip |
+| `effort`, `event` | string, optional | for a voice, read by the second generator (`scenes.social`): the vocal effort the clip was spoken at (`whisper`, `relaxed`, `normal`, `raised`, `loud`; `normal` where left out) and what it is (`turn`, `backchannel`, `laughter`; `turn` where left out). `clarify_v1` says neither: read sentences at a normal effort |
 | `what` | string | what is heard, and where it comes from |
 | `origin` | object | what the file is made of |
 
@@ -181,6 +182,15 @@ faded: a programme's segment, a piece of music.
 
 A recipe's interval is therefore never longer than its clip, and a noise
 that runs twenty minutes is as many intervals as it takes clips.
+
+The second generator (`--preset`, recipes of version 2) reads the same
+manifest. A noise's `subtype` may then also be `radio`, `body`, `steps` or
+`outside` (`street` serves for `outside`; `television` is a programme's
+voice), and it uses `level.spl_1m_db` to bring each clip to the level its
+source has. What it would schedule and the library does not hold, it
+leaves out and names under the recipe's `generator.parameters.left_out`:
+with `clarify_v1`, acknowledgements, laughter, a person's noises and
+footsteps (`docs/open-questions/recipes-v2.md`).
 
 The engine fades an interval in and out over 5 ms, a raised cosine inside
 the interval's own length (`reverberate.render.dry.EDGE_FADE_S`). For a
