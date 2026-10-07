@@ -32,6 +32,18 @@ the code of before the queue, their other stages one after the other;
 ``queue=False`` prices a run that way, which is what makes the comparison
 one of like with like.
 
+**The grid.** A trace solves at 7.2 points a wavelength unless told
+(:data:`reverberate.trace.plan.LOW_PPW`, the owner's ear of 2026-10-07);
+the validated grid's 10.5 is the reference, ``--low-ppw 10.5``. A record
+that names no grid (``low_ppw`` ``None``) is the reference's, as every
+run's before that date: the command line and
+:func:`reverberate.scenes.cost.predict` name the grid they ask for, so
+:func:`predict` is never left to guess. At 7.2 points one RTX 3090 takes
+34.6 s a source position and 0.21 s a pair's fit (:data:`SOURCE_S`,
+:data:`FIT_S`; scene B of 2026-10-05, with eleven branches, so it errs
+long), and the grid's preparation 240 s where the validated one's is 110
+(:data:`PREPARE_S`).
+
 **What is measured and what is not.** The constants are of **the code as
 it runs today**, on one RTX 3090: 70.5 s a source position on the validated
 grid with the walls' seven branches and 0.29 s a pair's fit

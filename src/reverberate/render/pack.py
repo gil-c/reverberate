@@ -322,6 +322,86 @@ class Source:
     directivity_enabled: bool = False
     gain_db: float = 0.0
     tail_seed: int = 0
+    # What a recipe of version 2 says of a source, carried to whoever reads the pack
+    # (``scene-pack.md``, "What version 2 adds to a source"). Each is an attribute of
+    # the source's group, written only where it says something: a pack of a version 1
+    # recipe holds none of them.
+    #: The mirror renders the source alone: no ``low`` group in a pack that has them,
+    #: and the crossover is not applied to it.
+    mirror_only: bool = False
+    #: Why, where it is so: ``"carried"``, ``"closed opening"`` or ``"near a surface"``.
+    mirror_only_because: str = ""
+    #: Whether ``early`` holds the direct path. False for a source at the listener's own
+    #: mouth: its direct sound is the device stage's, and the pack holds the room's answer.
+    direct: bool = True
+    #: The recipe's ``level_spl_1m_db``; ``None`` where it says none. A label: nothing
+    #: applies it.
+    level_spl_1m_db: float | None = None
+    #: The recipe's ``attach``: ``to`` and ``at``; empty for a source that is not carried.
+    carried_by: str = ""
+    carried_at: str = ""
+    #: The recipe's ``opening``: the object, and ``"open"`` or ``"closed"``.
+    opening_object: str = ""
+    opening_state: str = ""
+    #: ``[band]``, dB: a colour the trace laid on the source, in ``early/gain`` and in
+    #: ``tail/scale`` already; empty for none. A closed window's transmission.
+    band_gain_db: tuple[float, ...] = ()
+    #: What that colour is, in words.
+    band_gain_of: str = ""
+
+    @property
+    def crossed(self) -> bool:
+        """Whether the crossover is applied: the source has a band under it of the wave solver."""
+        return self.low is not None
+
+
+#: The attributes of a source that say what version 2 adds, and what each is when absent.
+_SOURCE_SAYS: dict[str, Any] = {
+    "mirror_only": False,
+    "mirror_only_because": "",
+    "direct": True,
+    "level_spl_1m_db": None,
+    "carried_by": "",
+    "carried_at": "",
+    "opening_object": "",
+    "opening_state": "",
+    "band_gain_db": (),
+    "band_gain_of": "",
+}
+
+
+def _said(source: Source) -> dict[str, Any]:
+    """The version 2 attributes of ``source`` that are not what their absence means."""
+    said: dict[str, Any] = {}
+    for name, absent in _SOURCE_SAYS.items():
+        value = getattr(source, name)
+        if name == "level_spl_1m_db":
+            if value is not None:
+                said[name] = float(value)
+        elif name == "band_gain_db":
+            if len(value):
+                said[name] = np.asarray(value, dtype=np.float64)
+        elif value != absent:
+            said[name] = value
+    return said
+
+
+def _says(attrs: Any) -> dict[str, Any]:
+    """The version 2 attributes read from a source's group, absent ones as they mean."""
+    found: dict[str, Any] = {}
+    for name, absent in _SOURCE_SAYS.items():
+        if name not in attrs:
+            continue
+        value = attrs[name]
+        if isinstance(absent, bool):
+            found[name] = bool(value)
+        elif isinstance(absent, str):
+            found[name] = _text(value)
+        elif absent is None:
+            found[name] = float(value)
+        else:
+            found[name] = tuple(float(v) for v in np.asarray(value).ravel())
+    return found
 
 
 @dataclass(frozen=True)
@@ -576,6 +656,8 @@ class PackWriter:
         group.attrs["directivity_enabled"] = bool(source.directivity_enabled)
         group.attrs["gain_db"] = float(source.gain_db)
         group.attrs["tail_seed"] = np.uint64(source.tail_seed)
+        for name, value in _said(source).items():
+            group.attrs[name] = value
         _write_group(group, _SOURCE, source)
         _write_group(group.create_group("early"), _EARLY, source.early)
         _write_group(group.create_group("level"), _LEVEL, source.level)
@@ -752,6 +834,7 @@ def read_pack(path: Path, *, check: bool = True, deep: bool = False) -> ScenePac
                 directivity_enabled=bool(group.attrs["directivity_enabled"]),
                 gain_db=float(group.attrs["gain_db"]),
                 tail_seed=int(group.attrs["tail_seed"]),
+                **_says(group.attrs),
                 **_read_group(group, _SOURCE),
                 early=Early(**_read_group(group["early"], _EARLY)),
                 level=Level(
@@ -899,7 +982,16 @@ def validate(pack: ScenePack, *, deep: bool = False) -> None:
         _shapes(where, _SOURCE, source, local)
         _shapes(f"{where}/early", _EARLY, source.early, local)
         _shapes(f"{where}/level", _LEVEL, source.level, local)
-        _need((source.low is not None) == h.has_low, f"{where}: has_low and the low group disagree")
+        # A source the mirror renders alone has no ``low`` group and says so; every other
+        # source of a pack has one exactly when the pack does.
+        _need(
+            (source.low is not None) == (h.has_low and not source.mirror_only),
+            f"{where}: has_low, mirror_only and the low group disagree",
+        )
+        _need(
+            not source.band_gain_db or len(source.band_gain_db) == len(h.bands_hz),
+            f"{where}: band_gain_db has not one value per band",
+        )
         _need(
             (source.tail is not None) == h.has_tail,
             f"{where}: has_tail and the tail group disagree",

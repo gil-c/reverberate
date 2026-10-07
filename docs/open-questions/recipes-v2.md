@@ -2,8 +2,13 @@
 
 Date: 2026-10-07
 
-Status: **the recipe side is written and tested; no engine was changed and
-nothing was rented.** Written for lot L30 of ADR 0016, after the owner
+Status: **the recipe side is written and tested (lot L30), and the trace
+and the engine honour it (lot L36, section 8); nothing was rented, and no
+recipe of version 2 has run on a card.** Sections 1 to 7 are lot L30's, as
+it wrote them, at the grid of 10.5 points and with the closed window and
+the footsteps under the crossover; section 8 says what was decided since
+and what the three examples are predicted to cost now. Written for lot L30
+of ADR 0016, after the owner
 listened to the first scene. The format is
 [`scene-recipe.md`](../formats/scene-recipe.md), "Version 2"; the generator is
 `reverberate.scenes.social`, the rules `reverberate.scenes.validate` (12 to
@@ -345,3 +350,110 @@ ignores every sway. In order of need:
    `clip-library.md`.
 9. **The published figures** of section 3 marked as from memory are to be
    checked, the floor transfer offset's law above all.
+
+## 8. Decided, and what the engines do now (lot L36)
+
+Date: 2026-10-07. Nothing was rented: every figure below is a count of a
+plan or a prediction of `trace.machines`, and what was run was run on the
+laptop with a monopole in free air where a card would solve.
+
+**The decisions on section 7**, the owner's and the orchestrator's:
+
+1. *The sway is held under the crossover.* The low band, the listening
+   cells and the tail read `position`; the mirror's early trace is cast
+   from `mouth` and heard at `head`.
+2. *The own voice: the mirror alone.* No solve; the direct sound is the
+   device stage's; a stem of its own, which holds the room's answer.
+3. *Footsteps, and whatever else a person carries: the mirror alone.* No
+   low band position.
+4. *The floor of speech to noise stays 0 dB*, and 5. *nobody talks on the
+   move.*
+
+And one more: **the wave grid is 7.2 points a wavelength unless told**
+(`trace.plan.LOW_PPW`); the owner compared it by ear with the validated
+grid's 10.5 and hears no difference. `--low-ppw 10.5` is the reference.
+
+**What section 6 asked, and what was done.**
+
+| | asked | done |
+| --- | --- | --- |
+| 1 | the plan on a source without segments | `trace.plan`: a carried source reads no solved position; a fixture is a station at its own height; `scenes.cost.counts` is the plan itself, made without the dwelling's surfaces, so the two cannot disagree |
+| 2 | the mirror at `mouth` and `head` | the early trace's sources and heads are those; the pack's `listener/position` stays the head without its sway, which the engine needs for nothing else (`scene-pack.md`, `/listener`) |
+| 3 | the own voice | the mirror alone; its direct path kept at no gain; its tail cast from the head's centre on the scale of a cell beyond the head |
+| 4 | a fixture by a surface | a solved position under three steps of the grid from a surface is found by the plan and its source given to the mirror, before any rental; a point deep in a solid is still the solver's to refuse |
+| 5 | a footstep | the mirror alone, from 5 cm above the floor; its tail its walker's; a hop is a path that ends and one that starts |
+| 6 | `kind`, `subtype`, `roles`, `opening.state` | attributes of the pack's source, and `render labels`, a document beside the stems |
+| 7 | the page | not done: `viz/scene_api.py` still draws segments |
+| 8 | `level_spl_1m_db` | carried as a label; held to be nobody's gain by a test |
+
+On the first scene the recipe's cost now counts what its plan counted:
+1529 positions, 831 cells and 16 895 pairs, where the plan with the
+dwelling has 16 887 and the count of section 1 had 15 731 (9 s on the
+laptop).
+
+One format changed for it, [`scene-pack.md`](../formats/scene-pack.md): a
+source may have no `low` group in a pack that has them, and says so
+(`mirror_only`), and the attributes of "What version 2 adds to a source".
+A pack of a version 1 recipe is what it was.
+
+**A window.** Open: the source at the opening's fixture, solved, one
+position, as section 2 counted it. Closed: the pane, one source of the
+mirror alone with the glazing's sound reduction index a band (EN 12758,
+about `R_w + C_tr`), so a closed window now asks no solve. What both leave
+out is in the pack's document.
+
+**The three examples, as a trace of today plans them** on hssd_0076 with
+its mirror's surfaces, the same recipes to the digest (`b1891312`,
+`355c68f2`, `aff157fa`), on one RTX 3090 at 0.173 USD an hour:
+
+| | quiet, seed 2 | medium, seed 5 | lively, seed 2 |
+| --- | --- | --- | --- |
+| sources, of which the mirror's alone | 4: the own voice, the closed window | 8: the own voice | 14: the own voice, the closed window |
+| source positions | 2 | 7 | 13 |
+| cells | 1 | 119 | 1 |
+| pairs asked; as made on the grid at 7.2 points | 2; 2 | 559; 452 | 13; 13 |
+| tail sites by tail cells | 4 by 1 | 8 by 20 | 15 by 1 |
+| positions of the early trace, sways and all | 7 219 | 14 774 | 26 077 |
+| predicted, 7.2 points | 666 s, **0.032 USD** | 1 077 s, **0.052 USD** | 1 068 s, **0.051 USD** |
+| the same at 10.5 points | 608 s, 0.029 USD | 1 295 s, 0.062 USD | 1 406 s, 0.068 USD |
+
+The medium example's 1 077 s are 290 of the rental's start, 240 of the
+grid's preparation, 401 of its seven solves and their fits, 4 of rays, 6 of
+write and check, and 136 for a pack of 0.24 GB to come home. Read with
+these:
+
+- **The lively example lost a position** (14 in section 5): its closed
+  window. The quiet one lost one too.
+- **A scene of two solves is not cheaper on the coarser grid.** The
+  grid's preparation is 240 s at 7.2 points where it is 110 s at 10.5
+  (`trace.machines.PREPARE_S`, the arrays half as large again), and two
+  solves save 72 s. From about five solves the coarser grid wins.
+- **119 cells are asked and 26 are taken to get no array at 7.2 points**:
+  an array's ball of twelve steps is 0.38 m there, 0.26 m at 10.5, and the
+  listener walks through doorways. The plan counts 452 pairs for it; the
+  count without the dwelling, `scenes.cost`, is 565. A step whose cell has
+  no array reads the next one, translated further.
+- **Every audible step is a position of the early trace** now that a body
+  sways: 1.9 ms each on a rented host's core (4.8 ms on the laptop,
+  measured on the quiet example: 7 219 in 35 s), under the solves.
+
+**What was run.** The quiet example from its recipe to a pack, on the
+laptop, on the dwelling's own mirror with 2 000 rays a site and a monopole
+in free air for its two solves: 1.2 minutes; every audible step holds an
+arrival; its stems render, the wearer's own at 56 dB SPL for a voice of
+57 dB at 1 m, the talker's at 55 dB. A scene of every kind of source, in
+the walled box of the tests, from its recipe to its stems
+(`tests/test_trace_v2.py`).
+
+**What no card has verified**: the wave solver on a fixture's position
+(the solver's own refusal is the last guard); the rays cast from a head on
+a card, where a cell's sphere holds the source; the 7.2 grid's 26 cells
+without an array as a machine really places them; and every second above.
+The first trace of a version 2 recipe should check in full
+(`--check full`: the engine on the host against the card).
+
+**Left to do**: the scene page (item 7); a family of patterns for a
+person's noises; a hemisphere for a pane and an opening; the solve a rest
+for the own voice, if the room's answer is heard to lack its low end
+(section 4); the standards' figures of the glazings, to be read from the
+standards.

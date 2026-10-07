@@ -39,6 +39,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -630,6 +631,12 @@ TREE_ARRAYS: tuple[tuple[str, Any, int], ...] = (
 )
 
 _state: dict[str, Any] = {"off": 0, "library": None, "why": None, "tried": False}
+#: Held by whoever builds the library, the first time it is asked for, and by whoever
+#: turns the text off or on. The threads of a process's first trace all ask at once:
+#: without it the first said it had tried before it had built, and the others were
+#: told there was no library and went on with the ``numpy`` twin (the defect of
+#: :mod:`reverberate.render.native`, found there on the CI's Linux).
+_FIRST = threading.Lock()
 
 
 def _as(array: Any, dtype: Any) -> np.ndarray:
@@ -747,11 +754,15 @@ def library() -> ctypes.CDLL | None:
     if _state["off"] or os.environ.get("REVERBERATE_NO_NATIVE"):
         return None
     if not _state["tried"]:
-        _state["tried"] = True
-        try:
-            _state["library"] = _build()
-        except OSError as error:
-            _state["why"] = str(error)
+        with _FIRST:
+            if not _state["tried"]:
+                try:
+                    _state["library"] = _build()
+                except OSError as error:
+                    _state["why"] = str(error)
+                # Said last: until then another thread waits here and does not go on
+                # without the library.
+                _state["tried"] = True
     found: ctypes.CDLL | None = _state["library"]
     return found
 
@@ -774,12 +785,17 @@ def why_not() -> str | None:
 
 @contextlib.contextmanager
 def disabled() -> Iterator[None]:
-    """The ``numpy`` twin for the length of a block: what the tests hold the text against."""
-    _state["off"] += 1
+    """The ``numpy`` twin for the length of a block: what the tests hold the text against.
+
+    For the whole process, every thread of it, and counted: blocks nest.
+    """
+    with _FIRST:
+        _state["off"] += 1
     try:
         yield
     finally:
-        _state["off"] -= 1
+        with _FIRST:
+            _state["off"] -= 1
 
 
 class Held:

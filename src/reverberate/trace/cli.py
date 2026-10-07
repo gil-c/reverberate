@@ -127,8 +127,9 @@ def _plan_arguments(p: argparse.ArgumentParser) -> None:
         "--low-ppw",
         type=float,
         default=None,
-        help="the batched solver's points per wavelength; left out, the validated grid's 10.5."
-        " Another grid's pairs have their own keys, and its run its own --home",
+        help="the batched solver's points per wavelength; left out, 7.2 (trace.plan.LOW_PPW),"
+        " which the owner compared by ear with the validated grid's 10.5: `--low-ppw 10.5` is"
+        " the reference. A grid's pairs have their own keys, and its run its own --home",
     )
     p.add_argument(
         "--low-seconds",
@@ -513,8 +514,23 @@ def _variants(args: argparse.Namespace, recipe: Any, assets: Any) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command's words read, and the grid a trace is asked on unless told.
+
+    ``--low-ppw`` left out is :data:`reverberate.trace.plan.LOW_PPW` for the
+    batched solver, said by name from here on so that the plan, the bundle
+    and the machine's command all hold it; PFFDTD keeps the bundle's grid.
+    """
     args = build_parser().parse_args(argv)
+    if getattr(args, "low_engine", None) == "lowband" and getattr(args, "low_ppw", 0.0) is None:
+        from reverberate.trace.plan import LOW_PPW
+
+        args.low_ppw = LOW_PPW
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse(argv)
     if args.command == "run":
         from reverberate.trace.engines import build_engine
         from reverberate.trace.run import Trace

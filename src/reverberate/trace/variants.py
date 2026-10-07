@@ -1,10 +1,12 @@
 """A named set of cost variants of one scene, to be judged by ear on one excerpt.
 
 The reference trace of a scene is the Cartesian grid at 10.5 points per
-wavelength, rails every 8 cm read from two positions, a low response of
-1.2 s and 100 000 rays. Each of those may be made cheaper by an option that
-changes the result; a **variant** is a name and the options it takes. A
-**set** is a small JSON file of them (``trace/sets/listening_v1.json``):
+wavelength (which a trace takes only when told since 2026-10-07: the
+command of every variant names its grid), rails every 8 cm read from two
+positions, a low response of 1.2 s and 100 000 rays. Each of those may be
+made cheaper by an option that changes the result; a **variant** is a name
+and the options it takes. A **set** is a small JSON file of them
+(``trace/sets/listening_v1.json``):
 
 .. code-block:: json
 
@@ -52,7 +54,14 @@ from reverberate.render.pack import STEP_S
 from reverberate.render.variant import VARIANT_FILE, read_variant
 from reverberate.scenes import Recipe, save_recipe
 from reverberate.scenes.recipe import canonical_bytes, recipe_sha256
-from reverberate.trace.plan import RAYS_MEASURED, Profile, estimate, make_plan, tracks_of
+from reverberate.trace.plan import (
+    RAYS_MEASURED,
+    REFERENCE_PPW,
+    Profile,
+    estimate,
+    make_plan,
+    tracks_of,
+)
 
 __all__ = [
     "DEFAULT_SET",
@@ -250,8 +259,9 @@ def command(
     ]
     if variant.get("low_scheme") != FLAGS["low_scheme"]:
         words.append(f"--low-scheme {variant.get('low_scheme')}")
-    if variant.get("low_ppw") is not None:
-        words.append(f"--low-ppw {float(variant.get('low_ppw')):g}")
+    # A variant that names no grid is on the reference's, which the command line no
+    # longer takes unless told (``trace.plan.LOW_PPW``): it is said by name.
+    words.append(f"--low-ppw {float(variant.get('low_ppw') or REFERENCE_PPW):g}")
     if variant.get("low_seconds") is not None:
         words.append(f"--low-seconds {float(variant.get('low_seconds')):g}")
     if int(variant.get("rail_positions")) != FLAGS["rail_positions"]:

@@ -17,6 +17,9 @@ import ctypes
 import multiprocessing
 import shutil
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -367,3 +370,38 @@ def test_the_air_s_frames_taken_at_once_are_the_frames_taken_one_by_one(
             ),
             a_frame_at_a_time(signals, rate, frame, start_s),
         )
+
+
+def test_the_threads_of_a_first_trace_are_given_one_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every thread that asks for the text while it is being built waits and is given it.
+
+    A thread that asked while another built was told there was none, and
+    traced on the ``numpy`` twin: the defect ``render.native`` had. The
+    build is made slow here, so that every thread asks before the first has
+    finished; it is a sentinel, so that no compiler is asked for.
+    """
+    made = {"library": 0}
+    held = object()
+
+    def slow_build() -> Any:
+        made["library"] += 1
+        time.sleep(0.05)
+        return held
+
+    monkeypatch.delenv("REVERBERATE_NO_NATIVE", raising=False)
+    monkeypatch.setattr(native, "_build", slow_build)
+    for name, fresh in (("off", 0), ("tried", False), ("library", None), ("why", None)):
+        monkeypatch.setitem(native._state, name, fresh)
+    threads = 8
+    together = threading.Barrier(threads)
+
+    def first_use(_: int) -> Any:
+        together.wait()
+        return native.library()
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        got = list(pool.map(first_use, range(threads)))
+    assert made == {"library": 1}
+    assert all(found is held for found in got)

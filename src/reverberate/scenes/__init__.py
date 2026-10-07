@@ -55,6 +55,7 @@ from reverberate.scenes.kinematics import (
     sample_times,
     seat_rail_heights,
     source_state,
+    wave_band,
 )
 from reverberate.scenes.layout import (
     Fixture,
@@ -137,4 +138,5 @@ __all__ = [
     "source_state",
     "validate",
     "validate_text",
+    "wave_band",
 ]
