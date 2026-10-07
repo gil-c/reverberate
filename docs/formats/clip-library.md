@@ -251,6 +251,84 @@ being the catalogue's name. It finds the catalogue's rows, measures, sets
 the gains and the cuts, and writes the utterances. The selection of
 `clarify_v1` is kept beside its manifest.
 
+## Screening
+
+A noise that holds speech is two sources under one name: the voice in it
+has no place of its own in the scene and no clean reference, and a model
+trained on it is taught to remove some speech with the machine
+([`clip-library-audit.md`](../open-questions/clip-library-audit.md)). A
+library's noises therefore go through a screen
+(`reverberate.scenes.screen`) before a scene plays them. The screen makes a
+**screened library**: a library of noises under a name of its own, read
+beside the library that holds the voices.
+
+It is two steps, because the detectors are no part of this project's
+requirements.
+
+```
+<own environment>/python scripts/clip_speech_detect.py --manifest M --root DIR --kind noise --out D.json
+python -m reverberate.scenes.screen screen --manifest M --detections D.json --library NAME --out MANIFEST
+    [--root DIR] [--out-root DIR] [--dry-run]
+python -m reverberate.scenes.screen rebuild --manifest MANIFEST [--root DIR] [--out-root DIR]
+```
+
+**The detections** (`"schema": "reverberate.clip-detections"`,
+`schema_version` 1) hold, for each clip by its name, `duration_s` (what was
+heard of it: the screen refuses a clip heard in part) and what three
+detectors found:
+
+| key | detector | what |
+| --- | --- | --- |
+| `vad` | Silero VAD | `frame_s` and `speech`, the probability of speech in each frame of 32 ms |
+| `tags` | the Audio Spectrogram Transformer trained on AudioSet | windows of 10 s every 5 s, `{start_s, end_s, scores}`: the scores of the voice, sung, music and programme classes |
+| `words` | Whisper `small` | `language` and `segments`, each `{start_s, end_s, text, no_speech, log_probability, compression, words}` with `words` as `[start_s, end_s, probability, word]` |
+
+**The rules** (`screen.Rules`, written whole in the manifest) say what
+counts as speech and what a clip may lose. In short: a *passage* is where
+the detectors found speech, with 0.3 s on either side, two passages nearer
+than 1 s being one; then
+
+| a clip | becomes | its file |
+| --- | --- | --- |
+| with no passage | `kept` | the source's, byte for byte |
+| that is a programme (its subtype is `television`, or the tagger hears television or radio) or a song (music with a sung class), or music with a voice | `routed` to `media_voice` | the source's, byte for byte |
+| with passages, of which at least 5 s and a quarter remain | `cut` | the pieces between the passages, each at least 2 s, joined by equal power crossfades of 0.25 s; a looping clip is closed again the same way; the mean removed; brought back to the level its entry states, by the entry's own `measure` |
+| of which less would remain | `rejected` | none |
+
+The screened manifest is a clip library's, with:
+
+| key | meaning |
+| --- | --- |
+| `screen.source_library` | the library that was screened |
+| `screen.detectors` | the detectors, as the detections name them |
+| `screen.rules` | every rule's value |
+| `screen.rejected` | the clips that are not in the library: `name`, `subtype`, `duration_s` and the record below |
+
+and on each clip a `screen` record:
+
+| key | meaning |
+| --- | --- |
+| `action` | `"kept"`, `"cut"`, `"routed"` (or `"rejected"`, in `screen.rejected`) |
+| `reason` | why, in a few words |
+| `route` | `"media_voice"`, on a clip that is routed |
+| `source` | `{library, name, sha256}` of the file it was screened from |
+| `evidence` | what each detector said on its own, as shares of the clip's time: `vad_share`, `tag_share`, `word_share`, the count `words`, and `speech_share`, the passages' |
+| `passages` | the speech found, `[start_s, end_s]` of the source file |
+| `pieces`, `crossfade_s`, `gain_db` | for a clip that is cut: what is kept of the source file, how the pieces are joined, and the gain that restores its level |
+
+A clip that is cut has its own `sha256`, `bytes`, `duration_s` and `level`;
+its `origin` is still the source's, which says where the source file comes
+from. So **`clips fetch` does not make a screened library**: it makes the
+source, and `screen rebuild` makes the screened files from the source's
+files and the `screen` records, with no detector, and refuses a file whose
+digest is not the manifest's. `clips check` holds a screened library to the
+same limits as any other.
+
+**Media voice** is not yet a subtype of the recipe
+([`scene-recipe.md`](scene-recipe.md) knows `television` and `music`): a
+routed clip keeps the subtype it had, and `screen.route` says what it is.
+When the recipe gains the class, the route is what fills it.
+
 ## `clarify_v1`
 
 Cut out of the audio library the sibling project keeps on the same bucket,

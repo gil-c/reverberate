@@ -160,6 +160,14 @@ class Words:
             condition_on_previous_text=False,
             vad_filter=False,
             beam_size=1,
+            # One decoding, no second try at a higher temperature: on five
+            # minutes of a kitchen the retries took five times the clip's
+            # length, to write nothing the first try had not.
+            temperature=0.0,
+            # And a bound on what thirty seconds may hold: speech is under a
+            # hundred tokens there, the syllable repeated on a noise fills
+            # the window's 448 and takes its time to.
+            max_new_tokens=128,
         )
         # On a noise the recogniser writes anyway: one syllable a hundred
         # times, or the thanks that end a video. What tells such a segment
@@ -248,13 +256,13 @@ def main() -> None:
             row["words"] = words(mono)
         done[key] = row
         heard += mono.size / RATE_HZ
+        _write(args.out, done, args)
         if number % 10 == 0 or number + 1 == len(items):
             print(
                 f"{number + 1}/{len(items)} {key}: {heard / 60:.1f} min heard in "
                 f"{(time.time() - began) / 60:.1f} min",
                 flush=True,
             )
-            _write(args.out, done, args)
     _write(args.out, done, args)
 
 

@@ -40,9 +40,12 @@ def _detection(
     tags: dict[str, float] | None = None,
     tagged: list[tuple[float, float]] | None = None,
     segments: list[dict[str, Any]] = (),  # type: ignore[assignment]
+    faint: float = 0.1,
 ) -> dict[str, Any]:
     """A clip's detections: the voice detector on in ``vad``, the tagger's
-    ``tags`` in the windows that meet ``tagged`` (all of them when ``None``)."""
+    ``tags`` in the windows that meet ``tagged`` (all of them when ``None``).
+    Every window gives speech the score ``faint`` at least: what a tagger
+    says of a noise in which someone may be speaking, far under a yes."""
     frames = [0.02] * int(duration / FRAME_S)
     for a, b in vad:
         for k in range(int(a / FRAME_S), min(int(b / FRAME_S) + 1, len(frames))):
@@ -51,7 +54,8 @@ def _detection(
     while start < max(duration - 10.0, 0.0) + 1e-9:
         end = min(start + 10.0, duration)
         on = tagged is None or any(a < end and b > start for a, b in tagged)
-        windows.append({"start_s": start, "end_s": end, "scores": dict(tags or {}) if on else {}})
+        scores = {"Speech": faint, **(tags or {})} if on else {"Speech": faint}
+        windows.append({"start_s": start, "end_s": end, "scores": scores})
         start += 5.0
     return {
         "duration_s": duration,
@@ -99,6 +103,21 @@ def test_a_word_the_recogniser_is_sure_of_is_speech_where_the_voice_detector_hea
     found = screen.passages(_detection(60.0, segments=[said]))
     assert len(found) == 1
     assert found[0][0] < 20.0 and found[0][1] > 21.0
+
+
+def test_a_voice_detector_or_a_recogniser_alone_is_not_believed() -> None:
+    # A piano's note sets the voice detector off, and a recogniser writes a
+    # video's credits over a fugue with every sign of being sure. Where
+    # the tagger hears no voice at all, neither is speech.
+    note = _detection(30.0, vad=[(10.0, 10.4)], faint=0.0)
+    assert screen.passages(note) == []
+    assert screen.evidence(note)["vad_share"] > 0.0
+    credits = _segment([(2.0, 9.0, "subtitles"), (9.0, 28.0, "2021")])
+    assert screen.passages(_detection(30.0, segments=[credits], faint=0.0)) == []
+    # A word stands on the voice detector's weak yes where the tagger is silent.
+    quiet = _detection(30.0, segments=[_segment([(20.0, 20.5, "hello")])], faint=0.0)
+    quiet["vad"]["speech"][int(20.2 / FRAME_S)] = 0.2
+    assert len(screen.passages(quiet)) == 1
 
 
 @pytest.mark.parametrize(

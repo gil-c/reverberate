@@ -114,6 +114,11 @@ class Rules:
     word_no_speech: float = 0.6
     word_log_probability: float = -1.0
     word_compression: float = 2.4
+    #: The second opinion a run of the voice detector and a word need: the
+    #: tagger's score of a voice class in a window over them, or, for a
+    #: word, the voice detector's probability about it.
+    second_tag: float = 0.05
+    second_vad: float = 0.1
     #: Kept on either side of what was detected, seconds.
     pad_s: float = 0.3
     #: Two passages nearer than this are one, seconds.
@@ -227,14 +232,39 @@ def _union(spans: Sequence[tuple[float, float]], gap: float = 0.0) -> list[tuple
 def passages(detection: Mapping[str, Any], rules: Rules = RULES) -> list[tuple[float, float]]:
     """Where a clip holds speech, ``(start_s, end_s)``, in order and apart.
 
-    The union of what the three detectors found. The voice detector and the
-    words give the times of a voice in the foreground. A window the tagger
-    calls speech is taken whole only where the other two found nothing in
-    it: that is a murmur of many voices, which has no edges to find; where
-    they found a voice, its own edges stand.
+    What the three detectors found, each held to a second opinion. The
+    voice detector fires on a piano's note and the recogniser writes a
+    video's credits over a fugue; neither does so where the tagger hears
+    any voice at all. So a run of the voice detector and a word count where
+    the tagger's window gives a voice class ``second_tag`` at least, a
+    score far under the one at which it would call the window speech by
+    itself; a word also counts where the voice detector reached
+    ``second_vad``. The times are theirs: a voice in the foreground has
+    edges. A window the tagger calls speech is taken whole only where the
+    other two placed nothing in it: that is a murmur of many voices, which
+    has no edges to find.
     """
     duration = float(detection["duration_s"])
-    fine = _vad_runs(detection, rules) + [(a, b) for a, b, _ in sure_words(detection, rules)]
+    windows = [
+        (float(w["start_s"]), float(w["end_s"]), _score(w, VOICE_TAGS))
+        for w in detection.get("tags") or ()
+    ]
+
+    def heard(a: float, b: float) -> bool:
+        """Whether the tagger gives a voice its weak yes somewhere over ``a`` to ``b``."""
+        if not windows:
+            return True
+        return any(c < b and d > a and score >= rules.second_tag for c, d, score in windows)
+
+    vad = detection.get("vad") or {"frame_s": 1.0, "speech": []}
+    step, frames = float(vad["frame_s"]), vad["speech"]
+
+    def voiced(a: float, b: float) -> bool:
+        first, last = int(max(a - rules.pad_s, 0.0) / step), int((b + rules.pad_s) / step) + 1
+        return max(frames[first:last], default=0.0) >= rules.second_vad
+
+    fine = [(a, b) for a, b in _vad_runs(detection, rules) if heard(a, b)]
+    fine += [(a, b) for a, b, _ in sure_words(detection, rules) if heard(a, b) or voiced(a, b)]
     spans = list(fine)
     for a, b in _tag_runs(detection, rules):
         if not any(c < b and d > a for c, d in fine):
