@@ -1,4 +1,4 @@
-.PHONY: check lint typecheck test test-parallel test-full test-quarantine test-slow format
+.PHONY: check lint typecheck test test-parallel test-full test-slow format
 
 check: lint typecheck test
 
@@ -30,13 +30,7 @@ test-parallel:
 # nightly, with the coverage table. The full workflow runs it on every push to
 # main and to the integration branch, and every night.
 test-full:
-	$(PARALLEL) -m "not slow and not quarantine" --cov --cov-report=term-missing --durations=40
-
-# The tests that do not give one result every run on the CI, kept running and
-# in sight in a job that blocks nothing until their cause is closed. Without
-# tests/conftest.py, which keeps the other tests out of the way of that cause.
-test-quarantine:
-	pytest -m quarantine -v --noconftest
+	$(PARALLEL) -m "not slow" --cov --cov-report=term-missing --durations=40
 
 # The tests that need the HSSD download, excluded from the default run and from
 # CI because neither has it. They pin the room rules of ADR 0010 against the
