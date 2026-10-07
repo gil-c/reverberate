@@ -234,6 +234,8 @@ def pin(keys: Iterable[HostKey], host: str, port: int, path: Path) -> Path:
 
 
 def forget(instance_id: int, directory: Path | None = None) -> None:
-    """Remove an instance's pinned keys, once it is destroyed."""
-    with contextlib.suppress(FileNotFoundError):
-        pinned_path(instance_id, directory).unlink()
+    """Remove an instance's pinned keys, and what was measured of its host, once it is gone."""
+    path = pinned_path(instance_id, directory)
+    for held in (path, Path(str(path) + ".transfer.json")):
+        with contextlib.suppress(FileNotFoundError):
+            held.unlink()

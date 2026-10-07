@@ -211,6 +211,9 @@ class Instance:
     #: both: ``public_ipaddr`` and ``ports["22/tcp"][0]["HostPort"]``. ``None`` otherwise,
     #: and ``ssh_host`` and ``ssh_port``, the proxy's, are then the only way in.
     direct: tuple[str, int] | None = None
+    #: Every TCP port of the instance the host maps, with the host's port for it
+    #: (:func:`mapped_ports`): ssh's, and those the rental asked for beside it.
+    ports: tuple[tuple[int, int], ...] = ()
 
     @classmethod
     def from_api(cls, raw: dict[str, Any]) -> Instance:
@@ -225,6 +228,7 @@ class Instance:
             start_date=float(start) if start else None,
             status_msg=" ".join(str(raw.get("status_msg") or "").split()),
             direct=direct_address(raw),
+            ports=mapped_ports(raw),
         )
 
     def uptime_hours(self, now: float | None = None) -> float:
@@ -278,6 +282,31 @@ def direct_address(raw: dict[str, Any]) -> tuple[str, int] | None:
     return (address, port) if port > 0 else None
 
 
+def mapped_ports(raw: dict[str, Any]) -> tuple[tuple[int, int], ...]:
+    """The instance's TCP ports the host maps, each with the host's port, from the record.
+
+    Docker's own map, as :func:`direct_address` reads it for ssh:
+    ``{"8443/tcp": [{"HostIp": "0.0.0.0", "HostPort": "50000"}]}``. The
+    host's port is not the instance's. An entry that is malformed is left
+    out.
+    """
+    ports = raw.get("ports")
+    if not isinstance(ports, dict):
+        return ()
+    found = []
+    for inside, outside in ports.items():
+        number, _, kind = str(inside).partition("/")
+        if kind != "tcp" or not number.isdigit():
+            continue
+        try:
+            port = int(outside[0]["HostPort"])
+        except (TypeError, KeyError, IndexError, ValueError):
+            continue
+        if port > 0:
+            found.append((int(number), port))
+    return tuple(sorted(found))
+
+
 def search_query(
     gpu_name: str = "RTX 4090",
     num_gpus: int = 1,
@@ -288,6 +317,7 @@ def search_query(
     min_gpu_ram_gb: float = 0.0,
     min_cpu_cores: int = 0,
     min_cpu_ghz: float = 0.0,
+    min_inet_up_mbps: int = 0,
 ) -> str:
     """Build a Vast.ai offer query string.
 
@@ -303,6 +333,11 @@ def search_query(
     matches nothing and the search returns zero offers with no error at all. The
     default was written with an underscore and silently found nothing until it
     was checked against the raw offer records.
+
+    ``min_inet_up_mbps`` is a floor on what the host says its line **sends**
+    (``inet_up``, megabits a second), which is what a result comes home on;
+    ``inet_down`` bounds only what the machine itself fetches. Both are the
+    host's own measurement of itself, an advertisement and not a promise.
     """
     tokens = [
         f"num_gpus={num_gpus}",
@@ -322,6 +357,8 @@ def search_query(
         # The one filter that matters for a CPU-bound stage, and the one that
         # was missing: see Offer.cpu_ghz for what its absence cost.
         tokens.append(f"cpu_ghz>={min_cpu_ghz}")
+    if min_inet_up_mbps > 0:
+        tokens.append(f"inet_up>{int(min_inet_up_mbps)}")
     return " ".join(tokens)
 
 
@@ -598,7 +635,9 @@ class VastClient:
             if not direct or error.status != 400:
                 raise
             self.direct_refused = True
-            payload = self.request("PUT", f"/asks/{offer_id}/", {**body, "runtype": RUNTYPE_PROXY})
+            # As it always was: through the proxy, where a mapped port would serve nothing.
+            plain = {name: value for name, value in body.items() if name != "env"}
+            payload = self.request("PUT", f"/asks/{offer_id}/", {**plain, "runtype": RUNTYPE_PROXY})
         if not payload.get("success"):
             raise VastError(f"vast refused to create an instance on offer {offer_id}")
         return int(payload["new_contract"])
@@ -785,7 +824,9 @@ def wait_for_ssh(
                 # read through the proxy that just answered: pinned, or not used.
                 from reverberate.gpu import direct
 
-                pinned: Machine = direct.upgrade(machine, instance_id, client=client)
+                pinned: Machine = direct.upgrade(
+                    machine, instance_id, client=client, mapped=instance.ports
+                )
                 return pinned
         time.sleep(15)
     raise TimeoutError(f"instance {instance_id} never answered on ssh")
@@ -948,8 +989,11 @@ def rent_one(
     avoid: set[int] | None = None,
     refuse: Callable[[Any], str | None] | None = None,
     say: Callable[[str], None] = print,
+    ports: Sequence[int] = (),
 ) -> tuple[Any, int]:
     """Down the list until one rents, answers and is accepted; the machine and its id.
+
+    ``ports`` are ports of the instance to map on the host beside ssh (:func:`rent`).
 
     Every offer tried is removed from ``offers`` in place, rented or not, so a
     caller renting several boxes from one list never returns to a host that
@@ -979,7 +1023,9 @@ def rent_one(
             )
         say(f"  credit {credit:.2f} USD before renting {candidate.id}")
         try:
-            rental = rent(client, candidate, hours=hours, image=image, disk_gb=disk_gb)
+            rental = rent(
+                client, candidate, hours=hours, image=image, disk_gb=disk_gb, ports=tuple(ports)
+            )
         except VastError as refusal:
             say(f"  {candidate.id} would not rent ({refusal})")
             continue

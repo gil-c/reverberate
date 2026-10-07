@@ -47,6 +47,17 @@ connections, resumed and verified, past the proxy where the instance has
 an address of its own), in the order of what the run is for: the pack,
 then the reports, then the pair cache if it was asked for.
 
+**The fastest way that works on the host is taken, and the pack does not
+wait for the campaign's end** (:mod:`reverberate.gpu.transfer`). A rental
+asks its host to map one port more; where the host does, a server on the
+machine gives the run's output folder alone, over TLS, to the bearer of a
+token made for the run, and the pack comes in as many ranges at once as
+still bring it faster. Where it does not, ssh at the machine's own address,
+then the proxy. While the campaign runs the machine is looked at every
+:data:`EARLY_POLL_S`: the pack is brought the moment it is written, while
+the campaign checks it, and the campaign's end is seen then and not at the
+next look of five minutes.
+
 **A campaign that failed says what to do.** The last lines of a run that
 leaves its machine rented are what is on it, what a resume keeps and makes
 again, the command that resumes it, and what an hour of leaving it costs.
@@ -69,7 +80,7 @@ from reverberate import auth
 from reverberate.accel.bundle import HOME_ITEMS
 from reverberate.accel.lattice import sim_constants
 from reverberate.accel.solve import OUTPUT_SAMPLE_BYTES_PATCHED
-from reverberate.gpu import direct, vast
+from reverberate.gpu import direct, transfer, vast
 from reverberate.gpu.homecoming import WORKERS, fastest, fetch_file, fetch_tree
 from reverberate.wave.remote import one_at_a_time, run_on
 from reverberate.wave.remote_voxelise import grid_shape_of, provision, rsync
@@ -174,6 +185,17 @@ ACCEL_PYTHON = "/root/accel-venv/bin/python"
 
 #: How often the laptop looks.
 POLL_S = 300.0
+#: How often the machine is asked, on a kept connection, whether the pack is written and
+#: whether the campaign has ended (:class:`reverberate.gpu.transfer.Early`), s. A look of
+#: :data:`POLL_S` found a finished campaign two and a half minutes late in the mean, on a
+#: machine billed meanwhile.
+EARLY_POLL_S = 20.0
+#: What is brought home as soon as it is written, before the campaign's end.
+EARLY_ITEMS = ("pack.h5",)
+#: The floor on what a host says its line sends, megabits a second: 25 MB/s were it true,
+#: under which a pack of 9.5 GB keeps its machine six minutes and more. Of 248 hosts
+#: offered under 0.25 USD/h on 2026-10-05, every one said more.
+MIN_INET_UP_MBPS = 200
 #: How often what ``sync`` names is brought home while the campaign runs, and how long one
 #: such pass may take: every look, and less than the time between two looks, so that the
 #: watch is never late for a transfer. A pass that reaches its limit is ended and keeps
@@ -587,6 +609,7 @@ def search_offers(client: Any, need: MachineNeed, *, min_gpus: int = 1) -> list[
                 min_reliability=0.97,
                 min_inet_down_mbps=300,
                 min_cpu_cores=8,
+                min_inet_up_mbps=MIN_INET_UP_MBPS,
             ),
             limit=400,
         )
@@ -811,6 +834,8 @@ def rent(
         avoid=avoid,
         refuse=lambda machine: occupied_cards(machine, say),
         say=say,
+        # One port more than ssh's on the host: the run's files come home by it, in ranges.
+        ports=(transfer.HOMECOMING_PORT,),
     )
     return machine, instance, ranked[len(ranked) - len(good) - 1]
 
@@ -863,14 +888,28 @@ def provision_machine(
         what="provision",
         timeout=3600,
     )
-    rsync(machine, [str(repo / "src"), str(repo / "scripts")], REMOTE_SRC + "/", download=False)
+    # Past the proxy where the machine has an address of its own: the proxy carried 3 to 5
+    # MB/s from the laptop where the direct route carried the laptop's own 10.
+    way = fastest(machine, say=say)
+    push(way, machine, [str(repo / "src"), str(repo / "scripts")], REMOTE_SRC + "/", say)
     provision_s = round(time.time() - t0, 1)
     say(f"provisioned in {provision_s / 60:.1f} min")
     t0 = time.time()
-    rsync(machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", download=False)
+    push(way, machine, [str(bundle) + "/"], REMOTE_BUNDLE + "/", say)
     push_s = round(time.time() - t0, 1)
     say(f"bundle pushed in {push_s / 60:.1f} min")
     return {"provision_s": provision_s, "push_s": push_s, "engine_built": bool(engine_build)}
+
+
+def push(way: Any, machine: Any, sources: list[str], destination: str, say: Any) -> None:
+    """``sources`` up to the machine by ``way``, and through the proxy where that fails."""
+    if way is not machine:
+        try:
+            rsync(way, sources, destination, download=False, attempts=2)
+            return
+        except Exception as error:  # noqa: BLE001 - the proxy is the way that is known to work
+            say(f"  the direct way up failed ({str(error)[:120]}); through the proxy")
+    rsync(machine, sources, destination, download=False)
 
 
 def pairs_home(pulled: Path) -> int:
@@ -1010,8 +1049,13 @@ def watch(
     say: Any,
     sync: Collection[str] = (),
     sync_s: float = SYNC_S,
+    early: Any = None,
 ) -> str:
     """Look every ``poll_s`` until the campaign ends; the outcome, and the watches in ``record``.
+
+    ``early`` (:class:`reverberate.gpu.transfer.Early`) ends the pause between two looks
+    the moment the campaign's end appears on the machine, so that the look that follows
+    finds it; without it the pause is always whole.
 
     A failed or stalled campaign is relaunched once from its state on disk;
     the second time it is the outcome. Every ``sync_s`` what ``sync`` names
@@ -1071,7 +1115,84 @@ def watch(
             # Counted from the pass's start: one that took its whole limit is not skipped next.
             synced = began
             record["synced"] = {"at": began + spent, "complete": came, "items": list(sync)}
-        time.sleep(max(0.0, poll_s - spent))
+        (time.sleep if early is None else early.wait)(max(0.0, poll_s - spent))
+
+
+def bring_large(
+    machine: Any,
+    item: str,
+    pulled: Path,
+    say: Any,
+    fetched: dict[str, Any],
+    *,
+    workers: int = WORKERS,
+    ways: list[Any] | None = None,
+) -> None:
+    """One large entry of the run home, by the first way that brings it; ``fetched`` says how.
+
+    ``ways`` are :func:`reverberate.gpu.transfer.ways`'s, opened here and
+    ended here when not given: HTTPS ranges where the host maps the port,
+    the instance's own address, the proxy. A way that fails, whatever
+    failed, hands over to the next with the chunks it brought, and after
+    the last the entry comes by ``rsync``, the way that was. The pair
+    cache is thousands of small files: it comes as batches of whole files
+    over ssh, never in ranges.
+    """
+    end = None
+    if ways is None:
+        ways, end = transfer.ways(machine, REMOTE_OUT, direct=fastest(machine, say=say), say=say)
+    began = time.time()
+    why = ""
+    try:
+        for way in ways:
+            tree = item in FETCH_LAST
+            if tree and way.name == transfer.HTTPS:
+                continue
+            try:
+                if tree:
+                    told: dict[str, Any] = fetch_tree(
+                        way.through,
+                        f"{REMOTE_OUT}/{item}",
+                        pulled / item,
+                        exclude=PARTIAL_PATTERNS,
+                        workers=workers,
+                    )
+                    if not told["complete"]:
+                        raise RuntimeError(
+                            f"{told['left']} file(s) of {item} did not come:"
+                            f" {told.get('error', '')}"
+                        )
+                else:
+                    told = fetch_file(
+                        way.through, f"{REMOTE_OUT}/{item}", pulled / item, say=say, **way.options()
+                    )
+            except Exception as error:  # noqa: BLE001 - the next way is tried
+                why = str(error)[:160]
+                if way is not ways[-1]:
+                    kind = "the direct way" if way.name == transfer.SSH_DIRECT else way.name
+                    say(f"  {item}: {kind} failed ({why}); the next way")
+                continue
+            fetched[item] = {
+                k: told[k]
+                for k in ("bytes", "seconds", "bytes_per_s", "failures", "workers", "already_home")
+                if k in told
+            }
+            fetched[item]["direct"] = bool(way.direct)
+            fetched[item]["by"] = way.name
+            return
+        say(f"  {item}: not home in chunks ({why}); by rsync")
+        rsync(
+            machine,
+            [f"{REMOTE_OUT}/{item}"],
+            str(pulled) + "/",
+            download=True,
+            compress=False,
+            exclude=PARTIAL_PATTERNS,
+        )
+        fetched[item] = {"seconds": round(time.time() - began, 1), "by": "rsync"}
+    finally:
+        if end is not None:
+            end()
 
 
 def fetch(
@@ -1096,11 +1217,12 @@ def fetch(
     pack, the reports, then the pair cache where it is not left. The pack
     comes in chunks, resumed and verified against the machine's own digest
     (:func:`reverberate.gpu.homecoming.fetch_file`), and the pair cache as
-    batches of whole files; both past the proxy where the instance has an
-    address of its own and it answers, and through the proxy otherwise. A
-    chunked transfer that fails for another reason than its connection is
-    made again by ``rsync``, the way that was. ``record`` receives what
-    each large transfer was (``fetched``): bytes, seconds, bytes a second.
+    batches of whole files; each by the first way that brings it
+    (:func:`bring_large`): ranges over HTTPS, ssh at the instance's own
+    address, ssh through the proxy, then ``rsync``, the way that was. A
+    pack that came while the campaign still ran is not brought again.
+    ``record`` receives what each large transfer was (``fetched``): bytes,
+    seconds, bytes a second, and the way it came by.
     """
     pulled = home / "pulled"
     pulled.mkdir(exist_ok=True)
@@ -1112,65 +1234,30 @@ def fetch(
     small = [item for item in items if item not in FETCH_AS_IS]
     large = [item for item in items if item in FETCH_AS_IS]
     fetched: dict[str, Any] = {} if record is None else record.setdefault("fetched", {})
-    way = fastest(machine, say=say) if large else machine
-
-    def as_it_was(item: str) -> None:
-        rsync(
-            machine,
-            [f"{REMOTE_OUT}/{item}"],
-            str(pulled) + "/",
-            download=True,
-            compress=False,
-            exclude=PARTIAL_PATTERNS,
-        )
-
-    def bring(through: Any, item: str) -> dict[str, Any]:
-        if item not in FETCH_LAST:
-            found: dict[str, Any] = fetch_file(
-                through, f"{REMOTE_OUT}/{item}", pulled / item, workers=workers, say=say
-            )
-            return found
-        told: dict[str, Any] = fetch_tree(
-            through,
-            f"{REMOTE_OUT}/{item}",
-            pulled / item,
-            exclude=PARTIAL_PATTERNS,
-            workers=workers,
-        )
-        if not told["complete"]:
-            raise RuntimeError(
-                f"{told['left']} file(s) of {item} did not come: {told.get('error', '')}"
-            )
-        return told
+    # The ways are opened once for all that is large, and ended when it is home.
+    opened, end = (
+        transfer.ways(machine, REMOTE_OUT, direct=fastest(machine, say=say), say=say)
+        if large
+        else ([], lambda: None)
+    )
 
     def in_chunks(item: str) -> None:
-        began = time.time()
-        # The instance's own address where it answered, then the proxy, then the way that was.
-        ways = [way] if way is machine else [way, machine]
-        why = ""
-        for through in ways:
-            try:
-                told = bring(through, item)
-            except Exception as error:  # noqa: BLE001 - the next way is tried
-                why = str(error)[:160]
-                if through is not machine:
-                    say(f"  {item}: the direct way failed ({why}); through the proxy")
-                continue
-            fetched[item] = {
-                k: told[k] for k in ("bytes", "seconds", "bytes_per_s", "failures") if k in told
-            }
-            fetched[item]["direct"] = through is not machine
-            return
-        say(f"  {item}: not home in chunks ({why}); by rsync")
-        as_it_was(item)
-        fetched[item] = {"seconds": round(time.time() - began, 1), "by": "rsync"}
+        bring_large(machine, item, pulled, say, fetched, workers=workers, ways=opened)
 
-    for item in (item for item in large if item not in FETCH_LAST):
-        in_chunks(item)
-    if small:
-        rsync(machine, [f"{REMOTE_OUT}/{item}" for item in small], str(pulled) + "/", download=True)
-    for item in (item for item in large if item in FETCH_LAST):
-        in_chunks(item)
+    try:
+        for item in (item for item in large if item not in FETCH_LAST):
+            in_chunks(item)
+        if small:
+            rsync(
+                machine,
+                [f"{REMOTE_OUT}/{item}" for item in small],
+                str(pulled) + "/",
+                download=True,
+            )
+        for item in (item for item in large if item in FETCH_LAST):
+            in_chunks(item)
+    finally:
+        end()
     if "selfcheck" in listing:
         (pulled / "selfcheck").mkdir(exist_ok=True)
         try:
@@ -1200,6 +1287,49 @@ def fetch(
         else:
             say("grids: every key of the bundle is installed here already, none fetched")
     return pulled
+
+
+def early_homecoming(
+    machine: Any,
+    home: Path,
+    say: Any,
+    record: dict[str, Any],
+    *,
+    leave: Collection[str] = (),
+    poll_s: float = EARLY_POLL_S,
+) -> transfer.Early:
+    """The looks that go on beside the watch, started: see :class:`reverberate.gpu.transfer.Early`.
+
+    What :data:`EARLY_ITEMS` names and ``leave`` does not is brought into
+    ``home/pulled`` as soon as the machine holds it whole, by
+    :func:`bring_large`, and ``record`` says so (``fetched``, and
+    ``early`` for when). The looks go at the machine's own address where
+    it has one, on a connection that is kept.
+    """
+    pulled = Path(home) / "pulled"
+    fetched: dict[str, Any] = record.setdefault("fetched", {})
+
+    def bring(item: str) -> None:
+        pulled.mkdir(parents=True, exist_ok=True)
+        began = time.time()
+        bring_large(machine, item, pulled, say, fetched)
+        record.setdefault("early", {})[item] = {
+            "at": time.time(),
+            "seconds": round(time.time() - began, 1),
+        }
+
+    direct = getattr(machine, "directly", None)
+    way = (direct() if direct is not None else None) or machine
+    sharing = getattr(way, "sharing", None)
+    return transfer.Early(
+        way if sharing is None else sharing("early"),
+        REMOTE_OUT,
+        bring,
+        items=[item for item in EARLY_ITEMS if item not in leave],
+        poll_s=poll_s,
+        say=say,
+        ask=lambda *a, **k: run_on(*a, **k),
+    ).start()
 
 
 def campaign_done(machine: Any) -> bool:
@@ -1504,19 +1634,27 @@ def run(
             record["outcome"] = "done"
         else:
             launch()
-            record["outcome"] = watch(
-                client,
-                instance,
-                machine,
-                launch,
-                deadline=deadline if deadline is not None else started + DEFAULT_HOURS * 3600.0,
-                poll_s=poll_s,
-                record=record,
-                home=home,
-                say=say,
-                sync=sync,
-                sync_s=sync_s,
-            )
+            early = early_homecoming(machine, home, say, record, leave=leave)
+            try:
+                record["outcome"] = watch(
+                    client,
+                    instance,
+                    machine,
+                    launch,
+                    deadline=deadline if deadline is not None else started + DEFAULT_HOURS * 3600.0,
+                    poll_s=poll_s,
+                    record=record,
+                    home=home,
+                    say=say,
+                    sync=sync,
+                    sync_s=sync_s,
+                    early=early,
+                )
+            except BaseException:
+                early.finish(wait=False)
+                raise
+            # A pack on its way is waited for: the fetch below then finds it home.
+            early.finish()
     except BaseException as error:
         record["outcome"] = "error"
         record["error"] = repr(error)[:2000]

@@ -149,8 +149,12 @@ class TestFetchFile:
         assert record["sha256"] == hashlib.sha256(held).hexdigest()
         assert record["chunks"] == 4 and record["failures"] == 0
         assert sorted(chunk for chunk, _ in transport.reads) == [0, 1, 2, 3]
-        # Nothing of the transfer is left beside the file, and the connections are closed.
-        assert sorted(p.name for p in (tmp_path / "home").iterdir()) == ["pack.h5"]
+        # Nothing of the transfer is left beside the file but the note of which file of the
+        # machine it is, and the connections are closed.
+        assert sorted(p.name for p in (tmp_path / "home").iterdir()) == [
+            "pack.h5",
+            "pack.h5.home.json",
+        ]
         assert transport.closed == 1
         assert "4 chunks" in said[0] and "verified" in said[-1]
 
