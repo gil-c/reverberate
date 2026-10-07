@@ -15,7 +15,7 @@ from reverberate.viz.walk_config import find_config, load_config
 
 PORT = 8783
 #: What the stems kept on disk may take before the oldest scenes are forgotten, GB.
-CACHE_GB = 8.0
+CACHE_GB = 12.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
             ahead_s=args.ahead,
             dry=DrySources(args.clips or data_root() / "clips", data_root() / "voices"),
         )
+        # The scene's first seconds are rendered while the browser opens: pressing play is heard.
+        streamed.want(0)
         told = streamed.status()
         print(f"playing {streamed.pack_path}: {', '.join(streamed.sources)}")
         print(

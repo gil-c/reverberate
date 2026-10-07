@@ -46,6 +46,7 @@ function fill(row, report) {
   const [snr, cost, rules] = row.late;
   const heard = report.speech_over_noise;
   snr.textContent = heard ? `${heard.least_db} dB at worst, ${heard.median_db} dB typical` : "";
+  snr.className = "n w";
   cost.textContent = report.cost && report.cost.usd !== undefined ? `${report.cost.usd.toFixed(2)} USD, ${Math.round(report.cost.hours * 60)} min` : "";
   rules.textContent = report.valid ? "kept" : `${report.violations.length} broken`;
   rules.className = report.valid ? "good" : "p-bad";

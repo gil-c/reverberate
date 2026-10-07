@@ -71,7 +71,7 @@ def trim(cache: Path, *, budget_gb: float, keep: str | None = None) -> int:
     """Forget the stems of packs, the one opened longest ago first, until within budget.
 
     Called before a pack is opened: a scene listened to whole is some
-    65 MB a second, and what was kept of it goes too once the folder is
+    50 MB a second, and what was kept of it goes too once the folder is
     over, the last of all since it was opened last. ``keep`` names a
     folder that is never forgotten. Only folders named as a pack's stems
     are touched (sixteen hex digits); the bytes freed are returned.
@@ -124,6 +124,8 @@ class Streamed:
         chunk_s = self.session.chunk_samples / float(header.sample_rate_hz)
         self.service.window_chunks = max(1, math.ceil(ahead_s / chunk_s))
         self.session.window_chunks = self.service.window_chunks
+        # Never the rest of the scene behind the listener's back: what is heard, and a little.
+        self.session.background = False
         self.rate = float(header.sample_rate_hz)
         self.frames_total = int(header.samples)
         self.channels = int(header.channels)

@@ -241,8 +241,12 @@ export function createSceneView(element, scene, { gainOf = () => 1, lit: litBy =
   const framed = action.isEmpty() ? box : action;
   const centre = framed.getCenter(new THREE.Vector3());
   centre.y = floorY + 0.8;
-  const reach = Math.max(framed.getSize(new THREE.Vector3()).length(), 5);
-  camera.position.set(centre.x + reach * 0.08, floorY + reach * 0.85, centre.z + reach * 0.62);
+  // From above and a little to the south, far enough that the whole of it is in the picture.
+  const radius = Math.max(framed.getSize(new THREE.Vector3()).length() / 2, 2.5);
+  const away = radius / Math.tan((camera.fov / 2) * RAD);
+  // What is nearest the camera is largest: the picture is aimed a little to the south of the middle.
+  centre.z += 0.12 * framed.getSize(new THREE.Vector3()).z;
+  camera.position.copy(centre).add(new THREE.Vector3(0.06, 0.82, 0.57).normalize().multiplyScalar(away));
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.copy(centre);
   controls.maxPolarAngle = Math.PI / 2 - 0.05;

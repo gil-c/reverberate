@@ -84,7 +84,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .p-track-rows { display: grid; gap: 4px; margin-bottom: 10px; }
 .p-track { display: grid; grid-template-columns: 14px 6.5em auto auto minmax(120px, 1fr) 4.5em 90px; align-items: center; gap: 8px; }
 .p-track.silent .p-name, .p-track.silent .p-said { opacity: 0.45; }
-.p-chip { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.p-chip { width: 12px; height: 12px; border-radius: 50%; display: inline-block; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22); }
 .p-chip.noise { border-radius: 2px; transform: rotate(45deg); }
 .p-solo.on { background: #e0a100; border-color: #e0a100; }
 .p-mute.on { background: var(--bad); border-color: var(--bad); }
@@ -103,7 +103,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .p-dial.led { cursor: default; }
 
 /* The timeline. */
-.p-timeline { --names: 17.5em; }
+.p-timeline { --names: 19em; }
 .p-tl-box { position: relative; }
 .p-tl-rows { display: grid; gap: 3px; }
 .p-tl-row { display: grid; grid-template-columns: var(--names) 1fr; align-items: center; }
