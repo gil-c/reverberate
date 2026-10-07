@@ -95,12 +95,14 @@ def check_pack(
     sphere_head: bool = False,
     settings: CheckSettings | None = None,
     families: Iterable[str] = ("pack", "impulse", "continuity", "mix"),
+    keep: Callable[[str, int, np.ndarray], None] | None = None,
 ) -> dict[str, Any]:
     """Every check on ``pack``; the results, and what the files and plots are made from.
 
     ``measured_head`` is the SOFA file the page's decoder is designed on;
     without it the ears are checked on the analytic sphere when
-    ``sphere_head`` is set, and not at all otherwise.
+    ``sphere_head`` is set, and not at all otherwise. ``keep`` is handed the
+    mix's stems, order 7, a piece at a time (:func:`.run.mix_of`).
     """
     settings = settings or CheckSettings()
     h = pack.header
@@ -155,6 +157,7 @@ def check_pack(
             stop * n,
             settings,
             decoder,
+            keep,
         )
         results.extend(made)
     return {

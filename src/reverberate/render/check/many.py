@@ -22,6 +22,11 @@ taken by ear, among all of them, and nothing here judges.
   which says which is which and is not readable at a glance: ``python -m
   reverberate.render unseal blind/key.sealed`` prints it once the owner
   has written down what he heard.
+- **Order 7, when asked** (``ambisonic/<name>_<source>.f32``): each source's
+  stem as the engine rendered it, in the scene's fixed frame and on the
+  pack's physical scale, for a player whose listener turns his own head
+  (:mod:`reverberate.render.check.ambisonic`); and with ``signals``, the
+  same sources fed clicks or pink noise where they are heard.
 
 **Which packs may be compared.** Those of one recipe; and those of two
 recipes that are one scene solved at another rail pitch, which a variant of
@@ -44,10 +49,18 @@ import numpy as np
 
 from reverberate.render.check import measure
 from reverberate.render.check.against import EARLY_S, FAINT_DB, _table, difference
+from reverberate.render.check.ambisonic import (
+    BYTES_A_SECOND,
+    SIGNALS,
+    StemFiles,
+    head_track,
+    probe_ears,
+)
+from reverberate.render.check.binaural import page_decoder
 from reverberate.render.check.clips import ClipSource
 from reverberate.render.check.report import check_pack, write_ears
 from reverberate.render.check.run import CheckSettings
-from reverberate.render.pack import ScenePack, read_pack
+from reverberate.render.pack import ScenePack, read_pack, sources_of
 from reverberate.render.variant import label_of, summary
 
 __all__ = ["SCHEMA", "blind_set", "run", "same_scene", "unseal"]
@@ -134,13 +147,22 @@ def run(
     measured_head: Path | None = None,
     settings: CheckSettings | None = None,
     blind_seed: int | None = None,
+    ambisonic: bool = False,
+    signals: Iterable[str] = ("clips",),
     say: Callable[[str], None] = print,
 ) -> dict[str, Any]:
     """``python -m reverberate.render check REF.h5 --against V1.h5 V2.h5 ... --out DIR``.
 
     ``names`` names the packs, the reference first; left out, each is named
-    by its ``variant.json`` or by where it lies.
+    by its ``variant.json`` or by where it lies. ``ambisonic`` keeps every
+    source's order 7 stem beside the two ears, 12.3 MB a second it sounds;
+    ``signals`` adds to the recipe's clips what else the sources are fed
+    (:data:`reverberate.render.check.ambisonic.SIGNALS`).
     """
+    extras = [name for name in dict.fromkeys(signals) if name != "clips"]
+    unknown = [name for name in extras if name not in SIGNALS]
+    if unknown:
+        raise SystemExit(f"no signal named {', '.join(unknown)}: one of {', '.join(SIGNALS)}")
     started = time.time()
     settings = settings or CheckSettings()
     settings.say = say
@@ -181,9 +203,35 @@ def run(
         if not both:
             raise SystemExit("the packs hold no source in common")
 
+        # Order 7 beside the two ears: by variant, then by signal, the headers by source.
+        stems: dict[str, dict[str, dict[str, Path]]] = {}
+        probes: dict[str, dict[str, dict[str, np.ndarray]]] = {}
+
+        def kept(label: str, signal: str) -> StemFiles | None:
+            suffix = "" if signal == "clips" else f"_{signal}"
+            return StemFiles(out / "ambisonic", label, suffix) if ambisonic else None
+
+        def closed(
+            label: str, signal: str, held: StemFiles | None, window: tuple[float, float]
+        ) -> None:
+            if held is not None:
+                lo, hi = (int(round(t / ref.header.step_s)) * n for t in window)
+                stems.setdefault(label, {})[signal] = held.close(
+                    hi - lo,
+                    sample_rate_hz=rate,
+                    order=ref.header.order,
+                    extra={
+                        "recipe_sha256": ref.header.recipe_sha256,
+                        "variant": label,
+                        "signal": signal,
+                        "window_s": list(window),
+                    },
+                )
+
         def mixed(label: str, pack: ScenePack) -> dict[str, Any]:
             say(f"{label}: the mix of {len(both)} source(s)")
-            return check_pack(
+            held = kept(label, "clips")
+            outcome: dict[str, Any] = check_pack(
                 pack,
                 recipe=recipe,
                 clips=clips,
@@ -193,10 +241,30 @@ def run(
                 sphere_head=True,
                 settings=settings,
                 families=("mix",),
+                keep=None if held is None else held.keep,
             )
+            window = outcome["window_s"]
+            closed(label, "clips", held, window)
+            lo, hi = (int(round(t / pack.header.step_s)) * n for t in window)
+            for signal in extras:
+                say(f"{label}: {signal} through {len(both)} source(s)")
+                held = kept(label, signal)
+                probes.setdefault(label, {})[signal] = probe_ears(
+                    pack,
+                    list(sources_of(pack, both)),
+                    signal,
+                    lo,
+                    hi,
+                    settings,
+                    page_decoder(measured_head, pack.header.order, rate),
+                    None if held is None else held.keep,
+                )
+                closed(label, signal, held, window)
+            return outcome
 
         one = mixed(labels[0], ref)
         first, stop = (int(round(t / ref.header.step_s)) for t in one["window_s"])
+        head = head_track(ref, first, stop)
         # A pack at a time: its ears are kept for the files, and nothing else of it.
         ears: dict[str, dict[str, np.ndarray]] = {
             labels[0]: {"mix": one["mix"]["mix_ears"], **one["mix"]["ears"]}
@@ -236,6 +304,36 @@ def run(
                     files[key] = str(folder / f"{key}.wav")
                     if over:
                         clipped[key] = over
+        # What is there to hear, a line a file: the page's gain alone, which a player's level
+        # makes up; a path is the folder's own, so that a folder moved is still read.
+        listen: list[dict[str, Any]] = []
+
+        def listed(label: str, source: str, signal: str, key: str) -> None:
+            header = stems.get(label, {}).get(signal, {}).get(source)
+            if key in files:
+                listen.append(
+                    {
+                        "variant": label,
+                        "source": source,
+                        "signal": signal,
+                        "wav": str(Path(files[key]).relative_to(out)),
+                        "ambisonic": None if header is None else str(header.relative_to(out)),
+                    }
+                )
+
+        for label, held in ears.items():
+            for name in held:
+                listed(label, name, "clips", f"{label}_{name}")
+            for fed, made in probes.get(label, {}).items():
+                for name, heard in made.items():
+                    if not np.any(heard):
+                        continue
+                    key = f"{label}_{name}_{fed}"
+                    over = write_ears(folder / f"{key}.wav", heard, rate, settings.page_gain)
+                    files[key] = str(folder / f"{key}.wav")
+                    if over:
+                        clipped[key] = over
+                    listed(label, name, fed, key)
         # The blind set is of the set heard at the gain a faint window needs, when there is one.
         suffix = gains[-1][0]
         blind = blind_set(
@@ -271,6 +369,23 @@ def run(
             "files": files,
             "clipped_samples": clipped,
             "blind": blind,
+            "listen": listen,
+            "signals": {name: SIGNALS[name] for name in ["clips", *extras]},
+            "ambisonic": {
+                "format": "reverberate.scene-signal",
+                "order": ref.header.order,
+                "gain_db": 0.0,
+                "frame": "the scene's, fixed: the head is the player's to apply",
+                "megabytes": round(
+                    sum(1 for row in listen if row["ambisonic"])
+                    * ((stop - first) * n / rate)
+                    * BYTES_A_SECOND
+                    / 1e6
+                ),
+            }
+            if ambisonic
+            else None,
+            "head": head,
             "third_octaves_hz": [round(f, 1) for f in measure.THIRD_OCTAVES_HZ],
             "crossover_hz": float(ref.crossover.cutoff_hz),
             "early_s": EARLY_S,

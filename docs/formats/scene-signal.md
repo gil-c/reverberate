@@ -107,7 +107,8 @@ of each stem to float32 (rule 4 below), and a single stem untouched.
 `python -m reverberate.render check <pack.h5> [--recipe R.json] [--clips DIR]
 [--manifest M.json] [--out DIR] [--window START STOP] [--sources ...]
 [--measured-head H.sofa] [--reference FIELD.h5] [--reference-point]
-[--against B.h5] [--probe-seconds S]`
+[--against B.h5 ...] [--ambisonic] [--signals clips clicks pink]
+[--probe-seconds S]`
 (`reverberate.render.check`) renders what it needs through the engine and
 holds it to what a listener would reject. It writes, in `--out`:
 
@@ -142,6 +143,29 @@ holds it to what a listener would reject. It writes, in `--out`:
   the window (`clips`); a band 60 dB under the response's loudest is left
   empty. It judges nothing: the files are for someone to hear. Two packs of
   two recipes, or of two windows, are refused;
+- with `--against` and several packs, `--names`, `--ambisonic` or
+  `--signals`, these alone (`reverberate.render.check.many`, and
+  `docs/open-questions/listening-variants.md`): `listen/<name>_mix.wav` and
+  each source's for every pack, `variants.json`, `variants.md` and the
+  blind set. `variants.json` lists what it wrote under `listen`, a line a
+  file (`variant`, `source`, `signal`, `wav`, `ambisonic`, the paths from
+  the folder), and holds the scene's own head over the window under `head`
+  (`step_s`, and `yaw_deg`, `pitch_deg`, `roll_deg` a step).
+  **`--ambisonic`** keeps each source's stem as the engine rendered it,
+  `ambisonic/<name>_<source>.f32` and its header: this format, order 7 in
+  the scene's fixed frame, on the pack's physical scale (no gain: a player
+  applies the page's level), with `variant`, `signal` and `window_s` added
+  to the header. A piece in which the source is silent is not written and
+  stays a hole; a source silent over the whole window has no file; no mix is
+  written, since it is its stems summed. 12.3 MB a second a source sounds:
+  a window of 20 s, not a scene. **`--signals`** feeds the same sources,
+  beside the recipe's clips, `clicks` (one sample of full scale a second)
+  and `pink` (the check's pink noise at an rms of 0.1) over the whole
+  window, written as `listen/<name>_<source>_<signal>.wav` and, with
+  `--ambisonic`, `ambisonic/<name>_<source>_<signal>.f32`. They sound where
+  the scene's source is heard: a pack holds no path for a step at which its
+  source is silent. `python -m reverberate.apps.compare` plays the folder
+  (`docs/apps.md`);
 - with `--reference-point`, these alone: `reference_point.md` and
   `reference_point.json` (`reverberate.render.check.reference`). For a pack
   whose source stands within 5 cm of the validated field's own, with its
