@@ -31,11 +31,11 @@ from typing import Any
 import numpy as np
 
 from reverberate.scenes.kinematics import (
+    anchor_at,
     listener_state,
     polyline_length,
     rail_length,
     sample_times,
-    source_state,
 )
 from reverberate.scenes.layout import SEAT_REACH_M, SEAT_WALL_M, Floor
 from reverberate.scenes.levels import conversation_snr, effort_range_db
@@ -510,7 +510,7 @@ def _clearances(recipe: Recipe) -> list[Violation]:
     out: list[Violation] = []
     times = _instants(recipe)
     head = listener_state(recipe, times).position
-    mouths = [source_state(recipe, source.id, times).position for source in recipe.sources]
+    mouths = [anchor_at(recipe, source.id, times) for source in recipe.sources]
     # A carried source is where its carrier is, and a footstep is under a walker: neither
     # is a body to keep clear of. Its carrier is held apart in its stead.
     carried = [source.attach is not None for source in recipe.sources]

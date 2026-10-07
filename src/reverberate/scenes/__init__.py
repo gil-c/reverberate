@@ -11,6 +11,10 @@ trace reads them, both through the functions below.
 - :mod:`.validate`: the numbered rules.
 - :mod:`.layout`: a storey's stations and rails.
 - :mod:`.generate`: a recipe from ranges and a seed, deterministic.
+- :mod:`.social`: the second generator, of recipes of version 2: who talks
+  with whom, the wearer's own voice, movement that costs no wave solve.
+- :mod:`.levels`: levels in free field, vocal effort, speech over noise.
+- :mod:`.cost`: what a recipe will cost to trace, counted from the recipe.
 - :mod:`.describe`: a recipe in words.
 - :mod:`.clips`: the library of dry clips the generator names: its manifest,
   and the files built from the bucket, digests checked

@@ -41,6 +41,7 @@ __all__ = [
     "AUDIBLE_TAIL_S",
     "FLOOR_SOURCE_HEIGHT_M",
     "YAW_STEP_S",
+    "anchor_at",
     "ListenerState",
     "LowBandPositions",
     "SourceState",
@@ -419,6 +420,28 @@ def source_state(recipe: Recipe, source_id: str, t: ArrayLike) -> SourceState:
     )
 
 
+def anchor_at(recipe: Recipe, source_id: str, t: ArrayLike) -> np.ndarray:
+    """``source_state(...).position`` alone, ``[time, 3]``: where the source is without its sway.
+
+    For a reader that wants no yaw: the yaw is a recurrence over the whole
+    scene, and a level or a clearance does not ask for it.
+    """
+    source = recipe.source(source_id)
+    times = np.atleast_1d(np.asarray(t, dtype=float))
+    attach = source.attach
+    if attach is None:
+        return _place(recipe, source, times, None)[0]
+    if attach.at == "floor":
+        return _footfalls(recipe, source, times)
+    if attach.to != LISTENER:
+        return anchor_at(recipe, attach.to, times)
+    head = listener_state(recipe, times)
+    axes = _head_axes(head.yaw_deg, head.pitch_deg, head.roll_deg)
+    offset = np.asarray(attach.offset_m or (0.0, 0.0, 0.0), dtype=float)
+    out: np.ndarray = head.position + np.einsum("a,tak->tk", offset, axes)
+    return out
+
+
 def _head_axes(yaw_deg: np.ndarray, pitch_deg: np.ndarray, roll_deg: np.ndarray) -> np.ndarray:
     """The head's front, left and up in the scene's frame: ``[time, 3 axes, 3]``.
 
@@ -493,9 +516,7 @@ def _carried(recipe: Recipe, source: Source, times: np.ndarray) -> SourceState:
             position = _footfalls(recipe, source, times)
             sway = still
         else:
-            axes = _head_axes(head.yaw_deg, head.pitch_deg, head.roll_deg)
-            offset = np.asarray(attach.offset_m or (0.0, 0.0, 0.0), dtype=float)
-            position = head.position + np.einsum("a,tak->tk", offset, axes)
+            position = anchor_at(recipe, source.id, times)
             sway = head.sway_m if head.sway_m is not None else still
         return SourceState(
             t=times,

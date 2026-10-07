@@ -368,12 +368,21 @@ class _Person:
     turn_rate: float = 180.0
     shelves: dict[str, _Voice] = field(default_factory=dict)
     spoken: list[Activity] = field(default_factory=list)
-    free_from: float = 0.0
     #: The listener's own way, where the person is the listener: ``(t, x, y, z, station)``.
     frames: list[tuple[float, float, float, float, str | None]] = field(default_factory=list)
 
     def block_at(self, t: float) -> _Block | None:
         return next((b for b in self.blocks if b.start_s <= t < b.end_s), None)
+
+    def free_from(self, t: float, span: float = 0.0) -> float:
+        """The first instant from ``t`` at which this voice is silent for ``span`` and a breath."""
+        moved = True
+        while moved:
+            moved = False
+            for said in self.spoken:
+                if said.start_s - 0.2 < t + span and t < said.end_s + 0.2:
+                    t, moved = said.end_s + 0.2, True
+        return t
 
     def group_at(self, t: float) -> str | None:
         group = None
@@ -495,7 +504,7 @@ class _Social:
         self.change_membership()
         self.listener_way()
         turned = self.sways()
-        for _ in range(12):
+        for _ in range(4 * len(self.fixed) + 2):
             self.talk()
             sources = self.sources(turned)
             recipe = self.recipe(sources, self.frames_at_rest())
@@ -669,7 +678,8 @@ class _Social:
         if worst is None or worst[2] >= self.p.snr_floor_db + 0.5:
             return False
         interval = recipe.source(worst[0]).activity[worst[1]]
-        times = np.array([interval.start_s, 0.5 * (interval.start_s + interval.end_s)])
+        span = interval.end_s - interval.start_s
+        times = interval.start_s + span * np.array([0.0, 0.5, 0.999])
         head = kinematics.listener_state(recipe, times).position
         loudest, level = None, -math.inf
         for item in self.fixed:
@@ -678,7 +688,10 @@ class _Social:
             here = float(level_at(recipe, recipe.source(item.id), times, head).max())
             if here > level:
                 loudest, level = item, here
-        if loudest is None:
+        speech = level_at(recipe, recipe.source(worst[0]), times, head)
+        voices = replace(recipe, sources=tuple(s for s in recipe.sources if s.kind == "voice"))
+        babble = masker_level_at(voices, times, head)
+        if loudest is None or float((speech - babble).min()) < self.p.snr_floor_db + 0.5:
             raise _Stuck("voices outside the conversation mask it, and no noise can be turned down")
         need = self.p.snr_floor_db + 1.5 - worst[2]
         if loudest.level_db - need >= loudest.span_db[0]:
@@ -779,9 +792,12 @@ class _Social:
         for number, station in enumerate(first[1:], start=1):
             person(f"talker_{number}", station, "g1")
         number = partners
+        # Another group talks at twice the listener's reach to its own, or further:
+        # 6 dB of distance between a partner's voice and a stranger's.
+        reach = max(math.dist(first[0].xz, station.xz) for station in first[1:])
         for group in range(2, others + 2):
             size = int(rng.integers(self.p.other_group_size[0], self.p.other_group_size[1] + 1))
-            found = self.circle(rng, size, taken, 2.5)
+            found = self.circle(rng, size, taken, max(2.5, 2.0 * reach))
             if found is None:
                 continue
             for station in found:
@@ -809,11 +825,12 @@ class _Social:
     # -- moves -----------------------------------------------------------------
 
     def route(
-        self, start: str, goal: str, occupied: list[tuple[float, float, float]]
+        self, start: str, goal: str, occupied: list[tuple[float, float, float, float]]
     ) -> list[tuple[str, str, str]] | None:
         """Rails from one station to another that pass clear of everybody who stays.
 
-        ``occupied`` is ``(x, z, clearance)`` of each of them.
+        ``occupied`` is ``(x, z, clearance, drop)`` of each of them, the drop
+        being how far under a walker's mouth theirs is.
         """
         ends = (self.stations[start].xz, self.stations[goal].xz)
 
@@ -823,8 +840,9 @@ class _Social:
             far = np.ones(len(probes), dtype=bool)
             for end in ends:
                 far &= np.linalg.norm(probes - np.asarray(end), axis=1) > 0.3
-            for x, z, keep in occupied:
-                if (np.linalg.norm(probes[far] - np.array([x, z]), axis=1) < keep).any():
+            for x, z, keep, drop in occupied:
+                flat = np.linalg.norm(probes[far] - np.array([x, z]), axis=1)
+                if (np.hypot(flat, drop) < keep).any():
                     return False
             return True
 
@@ -871,8 +889,9 @@ class _Social:
                 spot = self.place_of(other, leave)
                 # The head and a mouth are kept further apart than two mouths.
                 keep = _KEEP_M if me in (person, other) else _KEEP_M - 0.1
-                others.append((float(spot[0]), float(spot[2]), keep))
-        others += [(x, z, _KEEP_M) for x, z in self.keep_out()]
+                drop = self.floor_y + self.heights.standing_m - float(spot[1])
+                others.append((float(spot[0]), float(spot[2]), keep, drop))
+        others += [(x, z, _KEEP_M, 0.0) for x, z in self.keep_out()]
         way = self.route(block.station, goal.id, others)
         if way is None:
             return None
@@ -1072,7 +1091,8 @@ class _Social:
     ) -> Activity | None:
         """One interval of somebody's voice, at the effort the noise there asks for."""
         level = lombard_level_db(person.level_db, self.noise_at(person, start)) - under_db
-        if event == "turn" and self.calm >= 0.85 and rng.uniform() < 0.15:
+        if event == "turn" and self.hushed and rng.uniform() < 0.15:
+            # A whisper: in a calm dwelling where nobody else talks.
             level = EFFORT_LEVEL_DB["whisper"] + (person.level_db - VOICE_REFERENCE_DB) / 2.0
         effort = effort_of(level)
         low, high = effort_range_db(effort)
@@ -1089,14 +1109,15 @@ class _Social:
             spurt, gain_db=round(level - person.level_db, 2) + 0.0, effort=effort, event=event
         )
         person.spoken.append(said)
-        person.free_from = said.end_s + 0.2
         return said
 
     def talk(self) -> None:
         """Every group's turns, each group by itself."""
         self.noise = self.shell(tuple(self.fixed_sources()))
+        named = {group for person in self.people for _, group in person.member}
+        self.hushed = self.calm >= 0.85 and len(named - {None}) == 1
         for person in self.people:
-            person.spoken, person.free_from = [], 0.0
+            person.spoken = []
             for reader in person.shelves.values():
                 reader.which, reader.offset, reader.next = 0, 0.0, 0
         groups = sorted({g for p in self.people for _, g in p.member if g is not None})
@@ -1126,15 +1147,15 @@ class _Social:
                 if holds and previous is not None
                 else others[int(rng.integers(len(others)))]
             )
-            start = round(max(t, speaker.free_from), 3)
+            start = round(speaker.free_from(t), 3)
             block = speaker.block_at(start)
             wanted = float(np.clip(rng.lognormal(math.log(p.turn_median_s), 0.7), *p.turn_s))
             said = None
-            if block is not None:
+            if block is not None and speaker.group_at(start) == group:
                 limit = self.duration if block.end_s >= self.duration else block.end_s - _GUARD_S
                 said = self.say(rng, speaker, start, wanted, limit)
             if said is None:
-                t, previous = start + 1.0, None
+                t, previous = t + 1.0, None
                 continue
             span = said.end_s - said.start_s
             for other in here:
@@ -1143,7 +1164,7 @@ class _Social:
                     continue
                 for _ in range(int(rng.poisson(span / p.backchannel_every_s))):
                     when = float(rng.uniform(said.start_s + 0.8, said.end_s - 0.2))
-                    if when >= other.free_from and other.block_at(when + 2.0) is not None:
+                    if other.free_from(when, 0.7) == when and other.block_at(when + 2.0):
                         self.say(
                             rng, other, round(when, 3), float(rng.uniform(0.3, 0.7)),
                             said.end_s + 0.5, "backchannel", 3.0,
@@ -1154,7 +1175,7 @@ class _Social:
                     if (
                         "laughter" in other.shelves
                         and rng.uniform() < 0.6
-                        and when >= other.free_from
+                        and other.free_from(when, 1.8) == when
                         and other.block_at(when + 3.2) is not None
                     ):
                         self.say(
@@ -1242,7 +1263,7 @@ class _Social:
         return neutral + float(np.clip(share * turn, -80.0, 80.0))
 
     def facings(self, person: _Person, block: _Block) -> list[tuple[float, float]]:
-        """When a talker's head turns during a stay and to what yaw: to who speaks or is spoken to."""
+        """When a talker's head turns during a stay, and to what yaw: who speaks, who is heard."""
         rng = self.rng(f"facing:{person.id}:{block.start_s:.3f}")
         out = [(block.start_s, self.neutral(person, block))]
         for start, _, speaker in self.turns_of(person.group_at(block.start_s + 0.5)):

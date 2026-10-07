@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from reverberate.scenes.kinematics import listener_state, source_state
+from reverberate.scenes.kinematics import anchor_at, listener_state
 from reverberate.scenes.recipe import LISTENER, Recipe, Source
 
 __all__ = [
@@ -92,7 +92,7 @@ def level_at(recipe: Recipe, source: Source, times: np.ndarray, points: np.ndarr
     if source.level_spl_1m_db is None:
         raise ValueError(f"source {source.id} says no level: the recipe is not of version 2")
     gain = _gain_at(source, times)
-    away = np.linalg.norm(source_state(recipe, source.id, times).position - points, axis=1)
+    away = np.linalg.norm(anchor_at(recipe, source.id, times) - points, axis=1)
     level = source.level_spl_1m_db + gain - 20.0 * np.log10(np.maximum(away, NEAREST_M))
     out: np.ndarray = np.where(np.isnan(gain), -np.inf, level)
     return out
@@ -145,7 +145,9 @@ def conversation_snr(recipe: Recipe) -> list[tuple[str, int, float]]:
 
     A turn is an interval whose ``event`` is ``turn``, of a voice that is of
     the conversation when it starts. The ratio is read at the turn's start,
-    middle and end, at the listener's head, and the least is kept.
+    middle and end, at the listener's head, and the least is kept; an
+    instant at which the voice is no longer of the conversation, the
+    listener having left in the middle of the turn, is not read.
     """
     rows: list[tuple[str, int, float]] = []
     for source in recipe.sources:
@@ -163,6 +165,7 @@ def conversation_snr(recipe: Recipe) -> list[tuple[str, int, float]]:
         times = np.concatenate([starts[which] + share * span for share in (0.0, 0.5, 0.999)])
         head = listener_state(recipe, times).position
         ratio = level_at(recipe, source, times, head) - masker_level_at(recipe, times, head)
+        ratio = np.where(in_conversation(source, times), ratio, np.inf)
         least = ratio.reshape(3, which.size).min(axis=0)
         rows += [(source.id, int(n), float(v)) for n, v in zip(which, least, strict=True)]
     return rows
