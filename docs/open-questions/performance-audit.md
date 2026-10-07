@@ -600,6 +600,16 @@ says.
   chunks of 32 MB on four streams. The offers are still priced with the
   proxy's 4.4 MB/s unless `--line` says otherwise, which makes a host with
   a fast line look as dear as one without.
+- **Since lot L35** (`docs/open-questions/direct-connection.md`, "The pack's
+  way home"; nothing of it has run on a machine): the pack comes in ranges
+  over HTTPS on 16 to 32 connections where the host maps the port, the
+  count of connections grows while it pays, and a host's own bench orders
+  the ways; the machine is asked every 20 s whether the pack is written and
+  whether the campaign has ended, where a look of 300 s found the end 150 s
+  late in the mean; the bundle goes up beside the provisioning and past the
+  proxy; an offer must say it sends 200 Mbit/s. What the audit's table calls
+  "the bundle up" and "the fetch" are then bounded by the laptop's own
+  line, 4 to 10 MB/s up and 60 to 70 MB/s down to Europe.
 
 ## 8. The laptop
 

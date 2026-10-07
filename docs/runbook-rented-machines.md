@@ -491,7 +491,10 @@ python -m reverberate.trace ledger --home H_full --gpu "RTX 3090" --gpus 8 --gpu
 | the pack's low band | `bins,int16`: the bins of each response under the crossover's top, in 16 bits; 78 dB under the response in the worst third octave measured, 0.357 of the bytes | `--low-levers none` (the samples), `--low-levers bins,int16,decay=60` (a listening variant, 0.14) |
 | the pair cache's form | compact where the pack is: every bin to 2 kHz in 16 bits, every degree whole, 0.51 of the bytes; a cache reads both forms | follows `--low-levers`; `none` keeps the samples |
 | the pair cache | home for the whole scene, every five minutes while it runs, in batches of whole files; left for a smoke run | `--fetch-pairs`, `--no-fetch-pairs` |
-| the way home | the pack first, in chunks of 32 MB on four kept connections, resumed and verified; the instance's own address tried first, the proxy otherwise | |
+| the way home | the pack first, in chunks of 32 MB, resumed and verified, by the first way that brings it: ranges over HTTPS from a server on the machine (16 to 32 connections), ssh at the instance's own address (4 to 8), ssh through the proxy (4), `rsync` | the order and the counts are the host's own where `python -m reverberate.gpu.transfer_bench --instance N` was run on it |
+| when the pack comes | the moment the machine has written it, while the trace checks it; the machine is asked every 20 s on a kept connection, and the campaign's end is seen then | |
+| the way up | the bundle goes up beside the provisioning, at the instance's own address where it answers | |
+| what the host's line must send | 200 Mbit/s, as the host says of itself (`inet_up`) | `gpu.onebox.MIN_INET_UP_MBPS` |
 | how the offers' fetch is priced | through the proxy, 4.4 MB/s measured | `--line direct`, once a direct connection has been seen to work |
 | the early tables | left on the machine | `--fetch-early`, for a second run's `--reuse-from` |
 | a run that failed twice | fetched, kept for inspection, named in the last line | `--destroy-failed` |
@@ -508,7 +511,10 @@ its low band and on which grid (`trace.low`); a flag overrules the bundle.
 The watcher looks every five minutes, relaunches a stalled run once (a
 trace resumes: pairs in their cache, paths in `early/`, histograms in
 `tails/`, seams in `level.jsonl`), and every five minutes brings home what is
-new of the pair cache, where it was asked for.
+new of the pair cache, where it was asked for. Beside it, every 20 s and
+on one kept connection, the machine is asked two things: whether
+`pack.h5` is written, which is then brought at once, and whether the
+campaign has ended, which ends the watcher's pause.
 
 | what happens | what the driver does |
 | --- | --- |
@@ -518,7 +524,9 @@ new of the pair cache, where it was asked for.
 | a host is destroyed and not verified gone | the run stops there; the last line names it |
 | a look fails (the API, the laptop's line) | said, and taken again |
 | the driver itself fails after the launch | the pair cache is asked for once more, the instance destroyed and verified; outcome `error`, the traceback in `onebox.json` |
-| the campaign is `done` | the pack fetched in chunks and verified, then the reports, then the pair cache if asked; destroyed, verified |
+| the pack is written (`pack.h5` appears; the trace still checks it) | fetched at once, in chunks, verified; three tries, then left to the fetch at the end |
+| the campaign is `done` | seen within 20 s; the pack fetched in chunks and verified unless it is home already (its digest on the machine is the one that came), then the reports, then the pair cache if asked; destroyed, verified |
+| a way home fails (no port mapped, a server that does not start, thirty failures in a row) | the next way goes on from the chunks that are home: HTTPS, direct ssh, the proxy, `rsync` |
 | a stream of the fetch drops or stalls | its chunk alone is asked for again, after a pause every stream shares; thirty failures in a row end the fetch |
 | the fetch of a finished run fails | the instance is kept, since what it made is on it; the last lines say what it bills until its watchdog and the command that fetches again, from the chunks that are home |
 | the campaign failed twice | fetched and kept; the last lines say what the machine holds, what a resume makes again, the command, and the hourly cost; destroyed with `--destroy-failed` |
@@ -731,6 +739,80 @@ stored response is the plain one's to 83 dB (sixty pairs of scene A) and no
 onset moves. A cache reads either form pair by pair, a pair's key does not
 say its form, and a pair goes from cache to cache, to the bundle and to
 the store in the form it is in.
+
+### The fastest way a host has (lot L35: not yet run on a machine)
+
+What bounds a pack's way home, what was weighed and what each figure rests
+on are in `docs/open-questions/direct-connection.md`, "The pack's way
+home". In short: the proxy is out of the path; ssh's cipher is ten times
+faster than any line; what bounds a far host is one connection's window,
+and `sshd` refuses many connections; from Europe four streams already
+reach nine tenths of the laptop's line. So:
+
+- **a rental asks its host for one port more** (8443 of the instance, on
+  a port of the host's choosing). Where the host maps it, the fetch starts
+  `gpu/rangeserver.py` on the machine over the pinned ssh connection: the
+  run's output folder alone, to read, over TLS, to the bearer of a token
+  made for that start. The laptop believes the one certificate it read
+  back over ssh. The pack then comes in ranges on sixteen connections,
+  thirty-two while doubling them still brings a sixth more, and is
+  verified against the SHA-256 the machine says over ssh, as before;
+- **where the host maps no port, or the server does not start**, the log
+  says why in one line and the pack comes by ssh at the instance's own
+  address, on four connections that may become eight; then through the
+  proxy on four; then by `rsync`. Each way goes on from the chunks the one
+  before brought;
+- **the pack does not wait for the watcher**: the machine is asked every
+  20 s, on a kept connection, whether `pack.h5` is written and whether the
+  campaign has ended. A pack that came early is not fetched again
+  (`pulled/pack.h5.home.json` says which file of the machine it is);
+- **the bundle goes up beside the provisioning**, at the instance's own
+  address;
+- **an offer must say it sends 200 Mbit/s** (`inet_up`).
+
+**At the start of a rental, measure the host** (two minutes, some hundreds
+of megabytes, nothing rented or destroyed; the driver goes on beside it):
+
+```sh
+python -m reverberate.gpu.transfer_bench --instance N
+```
+
+It writes a file of random bytes on the machine, reads it by every way
+for five seconds each (the proxy; direct ssh on 1, 4 and 8 connections,
+with two ciphers, on one shared connection; `rsync`; HTTPS on 1 to 32
+connections; then the way up), prints the table and keeps its verdict
+beside the instance's pinned keys
+(`<runs>/known_hosts/instance_N.transfer.json`). The driver's fetch reads
+it: the ways in the order of what each brought on that host, each starting
+on the count of connections it was the fastest on, ssh with the cipher
+that won if one did. Without it the order is HTTPS, direct ssh, the proxy.
+The laptop's own line, to read the table against:
+`python -m reverberate.experiments.w47_direct_connection line`.
+
+How the table reads:
+
+| what it shows | what bounds the host |
+| --- | --- |
+| one stream far under four, and sixteen ranges over four | a connection's window: a far host. More connections are the remedy and HTTPS has them |
+| a rate that stops growing with the connections, under the laptop's line | the machine's line, whatever its offer said |
+| the same, at the laptop's line | the laptop |
+| two ciphers that differ | a processor, the machine's or the laptop's |
+| HTTPS "not open" | the host maps no port, or the image lacks `python3` or `openssl`: the line says which. ssh is the way |
+
+**What a pack of 9.5 GB takes**, at 1.38 USD/h: 36 minutes and 0.83 USD
+at the proxy's 4.4 MB/s; 7.9 minutes and 0.18 USD at 20 MB/s; 3.2 minutes
+and 0.07 USD at 50; 1.6 minutes and 0.04 USD at 100, which is more than
+the laptop's line has carried from anywhere. Beside the line: the laptop's
+own digest of the file (10 s), and up to 20 s before the end is
+seen, where it was up to 300. The pack's 16 bit payload does not deflate
+(15.53 bits of information in 16, measured on scene B's), so the bytes are
+what they are.
+
+**Not seen on a machine**: every rate of this section; that a host maps
+the port every time it is asked; the looks every 20 s beside a run of
+hours. Tried on 127.0.0.1, against a range server and an `sshd` of the
+laptop's own with a line slowed and cut on purpose: the tests'
+`test_transfer.py`, and the figures of `direct-connection.md`.
 
 ### When a run fails after its solves
 

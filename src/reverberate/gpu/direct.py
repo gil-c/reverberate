@@ -110,6 +110,9 @@ class DirectMachine(Machine):
 
     #: The file that pins this instance's host keys (:func:`hostkeys.pin`).
     known_hosts: Path | None = None
+    #: The instance's ports the host maps, each with the host's port for it
+    #: (:func:`reverberate.gpu.vast.mapped_ports`): where a range server is reached.
+    mapped: tuple[tuple[int, int], ...] = ()
 
     def _options(self) -> list[str]:
         if self.known_hosts is None:
@@ -143,6 +146,7 @@ class PinnedMachine(Machine):
     """
 
     known_hosts: Path | None = None
+    mapped: tuple[tuple[int, int], ...] = ()
 
     def _options(self) -> list[str]:
         return [*_words([*_LEND_NOTHING, *_KEY_ONLY]), *super()._options()]
@@ -158,6 +162,7 @@ class PinnedMachine(Machine):
             identity=self.identity,
             control=self.control,
             known_hosts=self.known_hosts,
+            mapped=self.mapped,
         )
 
 
@@ -216,6 +221,7 @@ def upgrade(
     say: Callable[[str], None] = print,
     run: Callable[..., str] | None = None,
     probe: Callable[..., str] | None = None,
+    mapped: Sequence[tuple[int, int]] = (),
 ) -> Any:
     """``machine`` with its own address pinned, or without that address.
 
@@ -240,6 +246,11 @@ def upgrade(
     that no longer rests on the proxy's first connection. It costs one
     call to the API and some ten seconds; it is off until it has been seen
     on more hosts than the one it was tried on.
+
+    ``mapped`` is the instance's ports the host maps, as the API's record
+    gives them (:func:`reverberate.gpu.vast.mapped_ports`); the pinned
+    machine carries them, for a range server
+    (:func:`reverberate.gpu.transfer.serve`).
     """
     address = getattr(machine, "direct", None)
     if address is None:
@@ -264,6 +275,8 @@ def upgrade(
             direct=(host, port),
             control=machine.control,
             known_hosts=path,
+            # The ports the host maps beside ssh, for a range server (``gpu.transfer``).
+            mapped=tuple((int(a), int(b)) for a, b in mapped),
         )
         direct = pinned.directly()
         if direct is None:

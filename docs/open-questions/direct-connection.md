@@ -11,6 +11,12 @@ fallback, and the homecoming of `gpu.homecoming` takes the direct route
 first. Written for lot L16 of ADR 0016. The measurements are
 `python -m reverberate.experiments.w47_direct_connection offers | line | measure`.
 
+Lot L35 (2026-10-07) adds the last section but one, "The pack's way home":
+what bounds the rate, the range server that is now in the code, and the
+bench that measures every way on a host. **No machine was rented for it**:
+what it says is reasoned from the measurements of this note, or measured
+on 127.0.0.1 and on the pack of the first scene as it lies on the laptop.
+
 ## The answer
 
 A rented machine can be reached at its host's own address, and it is worth
@@ -148,7 +154,7 @@ be the default once it has been seen on more hosts.
 | --- | --- |
 | `rsync` over direct ssh | In the code: `rsync` is given the route's own shell (`direct.rsync_shell`). 21 MB came in 2.3 s directly and 8.6 s through the proxy from France |
 | one kept connection (`ControlMaster`) | Kept **one a worker**, as `homecoming` does. A command on a kept connection costs 0.12 s (France) or 0.36 s (North Carolina) against 0.7 to 2.9 s. Four streams on **one** shared connection carried as much as four connections from France (45 MB/s) and little over half from North Carolina (12 against 21): on a long path one TCP connection is one window |
-| HTTPS with byte ranges | Built for the measurement only (`w47`): nginx on a mapped port, a certificate made on the machine for the host's address and read back through ssh, the only one `curl` is told to believe (`--cacert`), a token made for the run. Without the token it answers 403; with the system's certificates alone `curl` refuses it. One stream is twice ssh's (16 to 26 MB/s against 6 to 15); four ranges are 39 to 40 MB/s, which four ssh streams reach once they are up. Not put in the code: at four streams it brings nothing ssh does not, and it is a daemon, a port and a secret more. Worth returning to if more than four streams are wanted, since it does not pass through `MaxStartups` |
+| HTTPS with byte ranges | Built for the measurement only (`w47`): nginx on a mapped port, a certificate made on the machine for the host's address and read back through ssh, the only one `curl` is told to believe (`--cacert`), a token made for the run. Without the token it answers 403; with the system's certificates alone `curl` refuses it. One stream is twice ssh's (16 to 26 MB/s against 6 to 15); four ranges are 39 to 40 MB/s, which four ssh streams reach once they are up. Left out of the code by lot L16: at four streams it brings nothing ssh does not, and it is a daemon, a port and a secret more. **In the code since lot L35**, for more than four streams, since it does not pass through `MaxStartups`: without nginx or any package, and with what it may do written down ("The pack's way home", below) |
 | WireGuard, Tailscale | Not built. Either needs a private key or an account's token on the rented machine, which its owner can read and then use to join the laptop's network: the opposite of lending nothing. A container is not usually given a tunnel device, and an overlay adds nothing to a TCP port that is already open |
 
 ## What each route carried
@@ -219,7 +225,10 @@ How this reads:
    (`Machine.sharing`), which costs a tenth of a second.
 2. **Four streams, each on a connection it keeps.** Not one connection
    shared by four, which halves the rate on a long path; not more than
-   four, which leaves the instance's `sshd` room under its ten.
+   four, which leaves the instance's `sshd` room under its ten. Since
+   lot L35 a transfer by ssh may grow to eight, opened as the count
+   doubles and never together, and takes them back at the first refusal;
+   what wants more goes in ranges over HTTPS ("The pack's way home").
 3. **For a run whose result is large, a host in Europe**:
    `direct.rank(offers, ["FR", "GB", "DE", ...])`, a preference and not a
    filter. A pack of 9.5 GB is 36 minutes at the 4.4 MB/s of the proxy,
@@ -237,6 +246,254 @@ How this reads:
 5. **The figures a fetch is priced with** (`--line direct` of the trace:
    70 MB/s for Europe, 17 for the United States) can be set by these:
    40 to 57 for France and 20 to 40 for the east coast on four streams.
+
+## The pack's way home (lot L35, 2026-10-07)
+
+No machine was rented for this lot. Each figure below says where it comes
+from: the measurements above, 127.0.0.1 (a range server and an `sshd` of the
+laptop's own, a line slowed and cut on purpose), or the pack of scene B as
+it lies on the laptop. The first rental's bench replaces the reasoning by
+figures:
+
+```sh
+python -m reverberate.gpu.transfer_bench --instance <the instance the driver just rented>
+```
+
+### What limits the rate
+
+| what | is it the limit | by what |
+| --- | --- | --- |
+| Vast's proxy | it was, and it is out of the path | 2.0 to 2.3 MB/s a stream and 4.4 on four from California; 12 to 14 on four on the two hosts above; 0.05 once, after 8 GB |
+| ssh's cipher | no | on 127.0.0.1, both ends on the laptop, one stream carries 477 MB/s with ssh's own choice and four carry 920; four with `aes128-gcm` 681, with `chacha20-poly1305` 340, with `aes128-ctr` 305. Ten times any line measured. Compression is off by default, the bench says so in so many words, and the payload does not deflate (below) |
+| one connection shared by the streams (`ControlMaster`) | yes, twice over | one TCP window on a long path, 12.5 MB/s against 21 from North Carolina; and one process's encryption, 275 MB/s on four sessions of one connection on 127.0.0.1 where four connections carry 920. A worker keeps a connection of its own, as since lot L16 |
+| one connection's window | yes, on a long path | one ssh stream brought 7 to 8 MB/s from North Carolina where four brought 21 to 22 (40 to 43 late) and one HTTPS stream 16, on a line whose one stream to that coast carries 18. From France one ssh stream is 6 to 15 and four are 41 to 57 |
+| how many connections `sshd` takes | yes, for ssh | `MaxStartups 10:30:100`: twelve handshakes at once were refused together. It bounds what is opened at once, which is why four. Ranges over HTTPS do not pass it |
+| the machine's line | not known | an offer says `inet_up` and `inet_down`, the host's own measurement of itself. Nothing compared it with what came. **It was not read when an offer was chosen**: the search asked `inet_down > 300` and nothing of `inet_up`, and the prediction caps the fetch at four fifths of `inet_up` under `--line direct` alone |
+| the laptop's line | yes, from Europe | 63 to 70 MB/s to France on one stream; four direct ssh streams reached 57 late |
+
+So, from a host in Europe, four direct streams are already at nine tenths
+of the laptop's line: nothing makes that part faster, and what is left to
+gain is when the transfer starts. From across the Atlantic the bound is a
+connection's window, more connections are the remedy, `sshd` refuses them
+and a range server does not: four ranges brought 39 to 40 MB/s, and what
+sixteen or thirty-two bring is the first bench's to say. The ceiling there
+is the laptop's line that way, which no measurement of this note reached.
+
+**The offers.** A floor now stands in the search: an offer must say it
+sends 200 Mbit/s (`inet_up`, `gpu.onebox.MIN_INET_UP_MBPS`), 25 MB/s were
+it true, under which a pack keeps its machine six minutes and more. Of the
+248 hosts counted above every one said more, so the floor costs no offer
+today and keeps out the one that would. The preference exists already and
+stays as it is: under `--line direct` an offer's fetch is priced at the
+lesser of the laptop's line to its region and four fifths of what it says
+it sends. It is not the default because no rental has yet shown what
+`inet_up` is worth; the bench's table beside the offer's figure is that
+comparison.
+
+### What was weighed
+
+| way | verdict |
+| --- | --- |
+| more direct ssh connections, their count found as the transfer goes | In the code: four to start, eight at most, opened as the count doubles and not together (`transfer.Lanes`). Eight on 127.0.0.1 carry no more than four (792 against 920 MB/s), which is the laptop's processor and says nothing of a line |
+| ranges over HTTPS from a server on the machine | In the code, and the first way tried where the host maps the port: sixteen connections to start, thirty-two at most. `gpu/rangeserver.py` is one file for the system's `python3`, sent down the pinned ssh connection; no nginx, no package. On 127.0.0.1 one connection carries 170 MB/s and thirty-two 1100, with the old interpreter of the laptop as the server |
+| `rsync` | Kept as the last way, when nothing else brought the file. One stream, so one window: on 127.0.0.1 131 MB/s where `cat` over ssh carries 477, the difference being its own checksums |
+| a `tar` stream | Is one ssh stream. It is how the pair cache comes, thousands of files of half a megabyte in batches of 32 MB on four connections (`fetch_tree`), and stays so: ranges serve large files |
+| starting before the campaign ends | In the code for what is whole: the machine is asked every 20 s, the pack is brought the moment it is renamed into place, and the campaign's end is seen then. **Not** for a pack that is still being written: see below |
+| smaller data | Measured, below: the pack's 16 bit payload does not deflate. Nothing done |
+| the store as the middle step | Not weighed: no storage credential goes on a rented machine |
+
+### The range server: what it may do
+
+`reverberate.gpu.rangeserver`, started by `transfer.serve`:
+
+1. **It is started over the pinned ssh connection and no other.** `serve`
+   refuses any machine but a `DirectMachine` with its `known_hosts` file.
+   The token goes down that connection's stdin, never on a command line;
+   the certificate the machine makes comes back on its stdout.
+2. **It serves one folder, to read.** `GET` and `HEAD`, whole or one range.
+   A path is resolved with its links and served only where the result is a
+   regular file under the run's output folder: no listing, and a link that
+   points out of the folder is 404. Its own files (the key, the token, the
+   log) are in `/root/.rv-serve`, beside the folder and not in it.
+3. **To the bearer of the run's token.** 256 bits from `secrets`, made on
+   the laptop for each start, compared in constant time before the path is
+   looked at. Without it every request is 401 with no body. A server that is
+   started again has a new token and a new key; the one before is killed.
+4. **Over TLS 1.2 or later, to a client that believes one certificate.** An
+   RSA key and a certificate made on the machine by `openssl` for the run.
+   The laptop's context holds that certificate as its only authority and
+   then compares the SHA-256 of what the server shows with it. A server
+   with another certificate is refused as the command's failure, never
+   tried again. The certificate names no host: it is believed byte for
+   byte, not by a name.
+5. **Nothing of it is left.** The key's and the token's files are removed
+   once the server has read them; the server ends itself after twelve
+   hours, is ended when the fetch is over (`transfer.stop`, which removes
+   its folder), and goes with the instance. It holds 96 connections at
+   most and closes a handshake that takes more than 15 s.
+
+What that leaves: whoever holds the machine reads the token in the
+server's memory, as they read the run's output on its disk. Whoever steals
+the token reads the run's output folder until the server ends, and can
+write nothing. The digest a fetched file is judged by is asked over ssh,
+not of the server: the bytes and their digest come by two channels, both
+ending on the same machine.
+
+### How many connections, tried on 127.0.0.1
+
+The server slows its line when told (`--limit-stream`, `--limit-total`) and
+cuts bodies (`--drop-after`, `--drops`); a file is then fetched whole by
+`fetch_file`, digest and all, so the rates below include the verification.
+
+| the line | workers | came at | |
+| --- | --- | --- | --- |
+| not slowed, 2 GB | 1, 4, 8 | 375, 473, 471 MB/s | the two digests of the file are the rest |
+| 3.6 MB/s a connection, as a window does | 4 | 14.5 MB/s | |
+| | 16 | 55.9 MB/s | |
+| | 16 to 32, 3 GB | 74.2 MB/s | windows of 60 MB/s on 16 and 115 on 32: doubled, kept |
+| the same, and 60 MB/s in all, as a line does | 16 to 32, 3 GB | 51.0 MB/s | windows of 49 MB/s on 16 and 59 on 32: a fifth more, so kept, for a line that 16 nearly fill |
+| | 4 to 8, 3 GB | 23.6 MB/s | windows of 13 MB/s on 4 and 26 on 8 |
+| 20 MB/s a connection, three bodies cut at 20 MB of 32 | 4 | 31.6 MB/s | three failures, 3 workers after them, the file whole |
+| | 16 to 32 | 103.2 MB/s | three failures, 12 workers after them, the file whole |
+
+Through the laptop's own `sshd` (a throwaway one on 127.0.0.1, its key
+pinned as a rented machine's is), the whole path ran as it will on a
+machine: the server started by `serve` over ssh, its certificate read
+back, 2 GB fetched in ranges and verified at 112 MB/s; the same by direct
+ssh at 117; a second call for the file brought nothing ("home already").
+Three things that would have failed on a rented machine were found there
+and are in the code: the server's start waited five seconds on the
+resolver for the host's own name, which it never reads; a key on a curve
+was refused by an old TLS library, so the key is RSA; a body cut by the
+server read as a short chunk and then as a second failure on the dead
+connection, so it is now one.
+
+### Before the campaign ends
+
+A rental was looked at every 300 s, so a finished campaign waited 150 s in
+the mean for its fetch to start, and 300 at worst: 0.06 to 0.12 USD on the
+eight card host, and the wall time. The machine is now asked every 20 s,
+on one kept connection (a command there costs 0.12 to 0.36 s), whether
+`pack.h5` is there and whether `campaign.done` or `campaign.failed` is.
+The pack is fetched at once; the end ends the watcher's pause.
+
+The trace renames its pack into place when it is whole, then checks it. On
+the whole scene the check reads the pack back in half a second (`read`),
+so the pack comes hardly sooner than the end; on a smoke run the check
+renders (`full`) and the pack comes meanwhile. A pack fetched early is not
+fetched again: `pack.h5.home.json` beside it says which file of the
+machine came, by its size and its SHA-256 there, and a file that changed
+on the machine since (a relaunch writes it again) is brought again.
+
+**The pack as it is being written does not come early, and why.** The
+write lasts 120 to 153 s, in which 6 to 7.5 GB could come at 50 MB/s. But
+a pack that is still open is not yet the pack: HDF5 keeps the index of an
+appended dataset in memory and writes it at the close, into places it
+reserved all along the file. Tried here on a file written the way the
+pack's writer writes (a dataset appended to in chunks of 65 536 values, a
+table written a row at a time, six sources, 2.75 GB): of the 80 chunks of
+32 MB that a reader saw whole while the file grew, **17 were the same
+after the close**. Each of the others differs by a few kilobytes and would
+be fetched twice. With the file flushed every 80 MB written, 67 of the 80
+are the same. So this needs the writer to flush as it goes
+(`render/pack.py`, not this lot's), after which a fetch that follows the
+growing file would have five sixths of the pack home when the write ends
+and the existing verification would mend the rest. Not done.
+
+### Smaller data
+
+A sample of 500 MB of scene B's `sources/far_2/low/compact/data`, the 16
+bit bins that are 6.85 GB of that pack's 8.09 (85 per cent), and its
+`tail/moments` (0.89 GB, 11 per cent), under `nice`:
+
+| what | how | of its bytes | packed at | unpacked at |
+| --- | --- | --- | --- | --- |
+| `low/compact/data`, int16 | zstd -3 | 1.000 | 1262 MB/s | 1652 MB/s |
+| | bytes shuffled, zstd -3 | 0.967 | 914 MB/s | 979 MB/s |
+| | bytes shuffled, zstd -19 | 0.946 | 24 MB/s | 668 MB/s |
+| | bytes shuffled, gzip -1, HDF5's own filter | 0.967 | 20 MB/s | 273 MB/s |
+| `tail/moments`, float32, half of it zeros | zstd -3 | 0.353 | 558 MB/s | 658 MB/s |
+| | bytes shuffled, zstd -3 | 0.280 | 665 MB/s | 677 MB/s |
+| | bytes shuffled, gzip -1, HDF5's own filter | 0.319 | 61 MB/s | 400 MB/s |
+| `early/gain`, float32 | bytes shuffled, gzip -1 | 0.224 | 108 MB/s | 608 MB/s |
+
+The bins hold 15.53 bits of information in their 16: the scale of each
+row already fills the range. **Nothing is to be had from the pack's
+payload**, by any coder at any speed. The tail's moments and the early
+gains would give back 0.66 GB of the 8.09 (8 per cent) under HDF5's own
+shuffle and gzip, for some fifteen seconds of one core at the write: 13 s
+of fetch at 50 MB/s, 33 s at 20. It is the format's to decide
+(`docs/formats/scene-pack.md`) and is worth about what it costs; not done.
+
+What else comes home: the reports (7 MB) and, when asked for, the pair
+cache, which is larger than the pack (15.2 GB for scene A's 12 371 pairs
+as samples; 621 kB a pair in the compact form, 10.5 GB for the scene's
+16 887). It comes while the run lasts and never held the machine; a run
+that will not trace the dwelling again can leave it (`--no-fetch-pairs`).
+
+### The way up
+
+Scene B's bundle is 3.4 GB: 126 MB of the mirror's prepared scene, 88 MB
+of models, and **3.2 GB of pairs carried** from the laptop's cache so that
+they are not solved again (2 615 of them). On the laptop's line, 4 to 10
+MB/s up, the 215 MB of a first run are half a minute and the carried pairs
+five to thirteen, on a machine that is billed and has nothing else to do.
+Three things changed:
+
+- **the bundle goes past the proxy** where the machine has an address of
+  its own: 10 MB/s to France against 3 to 5 through the proxy, measured
+  above. It went through the proxy until now;
+- **it goes up beside the provisioning**, which takes minutes of the
+  machine's own downloading on another line, and not after it;
+- the dwelling's part deflates on the way, as `rsync -z` always did: to
+  0.26 of its bytes for the mirror's scene and 0.31 for the
+  models (gzip -6).
+
+What the machine could fetch or build itself and does not: the models and
+the pairs are on the project's store, which needs a credential the machine
+is not given; the models are also public at their source, behind a
+licence's token, which is a credential too. The mirror's scene is built
+from the models by the laptop in minutes and could be built there; that is
+the trace's bundle to change, not the transfer's. The bound that remains
+is the laptop's own line up.
+
+### What a pack of 9.5 GB takes
+
+| what the line carries | the pack | at 1.38 USD/h | the limit then |
+| --- | --- | --- | --- |
+| 4.4 MB/s, the proxy, as the first scene | 36 min | 0.83 USD | the proxy |
+| 20 MB/s | 7.9 min | 0.18 USD | the machine's line, or one coast's distance: the bench's table says which |
+| 50 MB/s | 3.2 min | 0.07 USD | within a fifth of the laptop's line to Europe (63 to 70 MB/s) |
+| 100 MB/s | 1.6 min | 0.04 USD | more than the laptop's line has carried from anywhere: not reached from this laptop, whatever the host sends |
+
+Beside the line, and not shortened by it: the machine's own SHA-256 of the
+file, which runs while the chunks come; the laptop's, after the last
+chunk, 933 MB/s here, so 10 s for the pack; the server's start,
+under two seconds; the first windows of the count of connections, some
+ten seconds; and up to 20 s before the end is seen, where it was up to
+300. At 50 MB/s the machine is free some four minutes after its last
+stage, of which three are the laptop's line.
+
+### What is not verified without a machine
+
+- **That a host maps the port and says so.** Two hosts did for the
+  measurement above (`ports["8443/tcp"]` in the instance's record). The
+  rental now asks for it every time. Where the record does not name it the
+  instance's environment is asked (`VAST_TCP_PORT_8443`), which has never
+  been read on a machine. A host that maps none keeps ssh, and says why.
+- **That the image holds `python3` and `openssl`.** The driver already runs
+  `python3` on a machine before anything is installed; `openssl` comes
+  with the image's certificates. Where either is missing the server is not
+  started and ssh is the way.
+- **Every rate.** Nothing here says what sixteen or thirty-two ranges bring
+  from a host, nor that eight ssh connections are admitted where four
+  were. The count of workers looks for it as it goes and the bench says it
+  in two minutes; the default order (HTTPS, direct ssh, proxy) is a
+  reasoned one until then.
+- **The looks every 20 s beside a run of hours**: a kept connection that
+  lasts, a pack fetched while the trace checks it.
+- **The bundle pushed beside the provisioning**: two transfers and the
+  machine's own downloads at once, on a host's `sshd`.
 
 ## What was not tested
 

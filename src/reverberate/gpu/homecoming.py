@@ -36,6 +36,13 @@ trying again at once are what it was refusing.
 **A direct connection is tried first** (:func:`fastest`) where the
 instance says it has one, and the proxy is what is fallen back on.
 
+**The ranges need not come over ssh.** :mod:`reverberate.gpu.transfer`
+reads them over HTTPS from a server it starts on the machine
+(:class:`~reverberate.gpu.transfer.HttpsTransport`), and says how many
+workers work at a time (``lanes``): what this module keeps whatever the
+way is the chunks, their ledger, the pauses, and the file's SHA-256 against
+the machine's at the end.
+
 Nothing here knows Vast or a trace: a machine is addressed over ssh, and
 :class:`Transport` is the four things asked of it, which the tests answer
 from a directory.
@@ -95,6 +102,8 @@ PAUSE_S = 3.0
 PAUSE_CAP_S = 120.0
 #: Failures in a row, over all workers, after which the homecoming gives up.
 GIVE_UP_AFTER = 30
+#: How long a worker that is not among those working waits before it looks again, s.
+LANE_WAIT_S = 0.2
 #: Streams a file of a directory is asked for in, in one pass, before it is left to the next.
 FILE_TRIES = 3
 
@@ -189,9 +198,12 @@ class Transport(Protocol):
 class SshTransport:
     """The machine over ssh: a kept connection a worker, ``dd`` for a range, ``tar`` for files."""
 
-    def __init__(self, machine: Machine, *, share: bool = True) -> None:
+    def __init__(self, machine: Machine, *, share: bool = True, cipher: str | None = None) -> None:
         self.machine = machine
         self.share = share
+        #: The cipher the ranges are read with (``ssh -c``); the client's own choice when
+        #: none is named. A host's bench names one where it was the faster there.
+        self.cipher = cipher
         self._kept: dict[int, Machine] = {}
 
     def _machine(self, worker: int) -> Machine:
@@ -236,6 +248,8 @@ class SshTransport:
             f"dd if={shlex.quote(remote)} bs={BLOCK_BYTES} skip={offset // BLOCK_BYTES}"
             f" count={blocks} 2>/dev/null"
         )
+        if self.cipher:
+            argv = [argv[0], "-c", self.cipher, *argv[1:]]
         limit = max(120.0, count / STALLED_BYTES_PER_S)
         # What ssh says goes to a file and not to a pipe: the connection that is kept
         # outlives the command, and a pipe it held open would be waited on with it.
@@ -392,6 +406,17 @@ def _sha256(path: Path, start: int = 0, count: int | None = None) -> str:
     return digest.hexdigest()
 
 
+def _arrived(note: Path, remote: str, size: int) -> str | None:
+    """The digest ``note`` says came home for ``remote`` of ``size`` bytes, or ``None``."""
+    try:
+        held = json.loads(note.read_text())
+        if (held["remote"], int(held["size"])) == (remote, size):
+            return str(held["sha256"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
 def fetch_file(
     machine: Machine | None,
     remote: str,
@@ -402,6 +427,7 @@ def fetch_file(
     say: Any = None,
     transport: Transport | None = None,
     pace: Pace | None = None,
+    lanes: Any = None,
 ) -> dict[str, Any]:
     """``remote`` on the machine as ``local``, verified; what the transfer was.
 
@@ -410,7 +436,15 @@ def fetch_file(
     a run that is interrupted, or fails, leaves both, and the next call
     asks only for what is missing. A file whose size on the machine is not
     the one the chunks were of starts again. ``local`` appears, whole, when
-    its SHA-256 is the machine's.
+    its SHA-256 is the machine's, and ``<local>.home.json`` then says which
+    file of the machine it is: a later call for the same file, by its size
+    and its digest there, brings nothing (``already_home``), whatever was
+    written into the local copy since.
+
+    ``lanes`` (:class:`reverberate.gpu.transfer.Lanes`) says how many of
+    the workers work at a time, and is told of every chunk and every
+    failure; its ``most`` is then the number of workers. Without it
+    ``workers`` all work, as they always did.
 
     Raises :class:`reverberate.wave.remote.ConnectionLost` when the
     connection fails :data:`GIVE_UP_AFTER` times in a row, and
@@ -429,10 +463,28 @@ def fetch_file(
     local.parent.mkdir(parents=True, exist_ok=True)
     partial = local.with_name(local.name + ".partial")
     ledger = local.with_name(local.name + ".chunks.json")
+    arrived = local.with_name(local.name + ".home.json")
+    if lanes is not None:
+        workers = int(lanes.most)
     started = time.time()
     try:
         size = transport.size(remote)
         count = -(-size // chunk_bytes)
+        was = _arrived(arrived, remote, size) if local.is_file() else None
+        if was is not None and transport.sha256(remote) == was:
+            say(f"  {Path(remote).name}: home already, the machine's file is the one that came")
+            return {
+                "file": str(local),
+                "bytes": size,
+                "sha256": was,
+                "chunks": count,
+                "chunks_resumed": count,
+                "chunks_refetched": 0,
+                "failures": 0,
+                "seconds": round(time.time() - started, 1),
+                "bytes_per_s": 0,
+                "already_home": True,
+            }
         done: set[int] = set()
         if ledger.is_file() and partial.is_file():
             with contextlib.suppress(ValueError, KeyError, TypeError):
@@ -449,7 +501,12 @@ def fetch_file(
         resumed = len(done)
         say(
             f"  {Path(remote).name}: {size / 1e9:.2f} GB in {count} chunks of"
-            f" {chunk_bytes / 2**20:g} MB, {workers} streams"
+            f" {chunk_bytes / 2**20:g} MB,"
+            + (
+                f" {workers} streams"
+                if lanes is None or lanes.allowed >= workers
+                else f" {lanes.allowed} streams, {workers} at most"
+            )
             + (f"; {resumed} chunks already home" if resumed else "")
         )
         # The machine reads its file once for the digest while the chunks come.
@@ -485,6 +542,13 @@ def fetch_file(
 
             def work(worker: int) -> None:
                 while not failure:
+                    if lanes is not None and not lanes.may(worker):
+                        # Not one of those that work now: it looks again, until all is taken.
+                        with lock:
+                            if not queue:
+                                return
+                        time.sleep(LANE_WAIT_S)
+                        continue
                     with lock:
                         if not queue:
                             return
@@ -501,6 +565,8 @@ def fetch_file(
                                     None,
                                 )
                         except ConnectionLost as error:
+                            if lanes is not None:
+                                lanes.failed()
                             try:
                                 pace.failed(str(error))
                             except ConnectionLost as last:
@@ -510,6 +576,8 @@ def fetch_file(
                             failure.append(error)
                             continue
                         pace.succeeded()
+                        if lanes is not None:
+                            lanes.brought(want)
                         with lock:
                             with partial.open("r+b") as whole, piece.open("rb") as part:
                                 whole.seek(chunk * chunk_bytes)
@@ -562,6 +630,7 @@ def fetch_file(
             if _sha256(partial) != wanted:
                 raise RemoteError(f"{remote} still differs from the machine's after {wrong}")
         partial.replace(local)
+        arrived.write_text(json.dumps({"remote": remote, "size": size, "sha256": wanted}))
         ledger.unlink(missing_ok=True)
         shutil.rmtree(scratch, ignore_errors=True)
     finally:
@@ -580,6 +649,8 @@ def fetch_file(
         "seconds": round(seconds, 1),
         "bytes_per_s": rate,
     }
+    if lanes is not None:
+        record["workers"] = int(lanes.allowed)
     say(
         f"  {Path(remote).name}: home and verified in {seconds / 60:.1f} min,"
         f" {rate / 1e6:.1f} MB/s, {pace.failures} failure(s) on the way"
