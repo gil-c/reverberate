@@ -782,6 +782,116 @@ def test_several_packs_are_written_at_one_gain_named_by_their_variant_with_a_bli
         many.run(homes["reference"], [homes["grid-7.2"], homes["low-0.8s"]], out, names=["a"])
 
 
+def test_order_seven_is_kept_beside_the_ears_with_clicks_and_noise_when_asked(
+    two_packs: dict[str, Any], tmp_path: Path
+) -> None:
+    from reverberate.render.check.ambisonic import SIGNALS, probe_signal
+    from reverberate.render.check.run import _pose_at
+    from reverberate.render.output import open_signal
+
+    out = tmp_path / "kit"
+    extra = ["--ambisonic", "--signals", "clips", "clicks", "pink", "--blind-seed", "1"]
+    # One other pack, and still the several packs' document: it is what lists the files.
+    code = main(
+        ["check", str(two_packs["a"]), "--against", str(two_packs["b"]), "--out", str(out)]
+        + extra
+        + two_packs["arguments"]
+    )
+    assert code == 0
+    document = json.loads((out / "variants.json").read_text())
+    assert document["reference"]["name"] == "A" and list(document["variants"]) == ["B"]
+    assert document["signals"] == SIGNALS
+    rows = {(r["variant"], r["source"], r["signal"]): r for r in document["listen"]}
+    assert set(rows) == {
+        (variant, source, signal)
+        for variant in ("A", "B")
+        for source, signal in (("mix", "clips"), ("s1", "clips"), ("s1", "clicks"), ("s1", "pink"))
+    }
+    # A path is the folder's own, and no mix is written in order 7: it is its stems.
+    assert rows[("A", "s1", "clips")]["wav"] == "listen/A_s1.wav"
+    assert rows[("A", "mix", "clips")]["ambisonic"] is None
+    pack = two_packs["pack"]
+    rate, samples = pack.header.sample_rate_hz, document["samples"]
+    held = {}
+    for key, row in rows.items():
+        if key[1] == "mix":
+            continue
+        signal = open_signal(out / row["ambisonic"])
+        header = signal.header
+        assert (header["frames"], header["channels"]) == (samples, pack.header.channels)
+        assert header["sources"] == ["s1"] and header["window_s"] == document["window_s"]
+        assert (header["variant"], header["signal"]) == (key[0], key[2])
+        assert header["recipe_sha256"] == pack.header.recipe_sha256
+        held[key] = signal.read(0, samples)
+        assert header["peak"] == pytest.approx(float(np.abs(held[key]).max()))
+    said = document["ambisonic"]
+    megabytes = 6 * samples * pack.header.channels * 4 / 1e6
+    assert said["gain_db"] == 0.0 and said["megabytes"] == round(megabytes)
+    # The stem is the engine's, on the pack's own scale: the pack made twice as loud is twice.
+    stem = held[("A", "s1", "clips")]
+    track = feed_of(pack, "s1", json.loads(pack.recipe), ClipSource(tmp_path)).track
+    engine = Engine(pack, {"s1": track}, settings=RenderSettings(workers=1))
+    assert np.array_equal(stem, engine.stem("s1", 0, samples).astype(np.float32))
+    assert np.allclose(held[("B", "s1", "clips")], 2.0 * stem, atol=1e-6 * np.abs(stem).max())
+    # Silence is a hole, and reads as the zeros it is.
+    assert np.any(stem[:, 24576:49152]) and not np.any(stem[:, 98304:])
+    # Decoded under the scene's own head, it is the file of two ears beside it.
+    assert len(document["head"]["yaw_deg"]) == samples // pack.header.step_samples + 1
+    ears = PageDecoder(page_decoder(None, pack.header.order, rate)).decode(stem, _pose_at(pack))
+    written, _ = soundfile.read(str(out / rows[("A", "s1", "clips")]["wav"]))
+    assert np.abs(written.T - ears * 10.0 ** (document["gain_db"] / 20.0)).max() < 4.0 / 2**23
+    # A click a second, and noise: fed where the recipe's clip is not, since the source is heard.
+    dry = probe_signal("clicks", samples, rate)
+    assert np.flatnonzero(dry).tolist() == [12000, 60000, 108000]
+    clicks = np.abs(held[("A", "s1", "clicks")][0])
+    # Nothing before the first click but the delay line's own ring, 160 dB under it.
+    assert clicks[:11000].max() < 1e-6 * clicks.max()
+    loud = np.flatnonzero(clicks > 0.5 * clicks.max())
+    assert loud.size >= 2 and np.all(np.diff(loud)[np.diff(loud) > 100] > 40000)
+    noise = held[("A", "s1", "pink")][0]
+    assert np.sqrt(np.mean(noise[108000:] ** 2)) > 0.0 and np.any(noise[:24000])
+    assert (out / "listen" / "B_s1_pink.wav").is_file()
+    with pytest.raises(SystemExit, match="no signal named"):
+        main(
+            ["check", str(two_packs["a"]), "--against", str(two_packs["b"]), "--out", str(out)]
+            + ["--signals", "tones"]
+            + two_packs["arguments"]
+        )
+
+
+def test_the_comparator_writes_its_folder_from_packs_and_plays_it(
+    two_packs: dict[str, Any], tmp_path: Path
+) -> None:
+    import argparse
+
+    from reverberate.apps import compare
+    from reverberate.apps.compare.__main__ import _written
+
+    asked = argparse.Namespace(
+        packs=[two_packs["a"], two_packs["b"]],
+        names=["ref", "loud"],
+        window=[0.0, 2.5],
+        sources=None,
+        signals=["clips"],
+        out=tmp_path / "written",
+        measured_head=tmp_path / "none.sofa",
+    )
+    folder = _written(asked)
+    server, kit, media = compare.build(folder, tmp_path / "decoders", measured_head=tmp_path / "x")
+    assert kit.variants == ("ref", "loud") and set(kit.sets) == {"clips"}
+    # One source: it is the mix, in order 7, and the second pack is twice the first.
+    assert list(kit.sets["clips"]) == ["mix"]
+    one, two = (kit.library.item(kit.sets["clips"]["mix"][name]) for name in ("ref", "loud"))
+    assert one.kind == "ambisonic" and one.frames == 120000
+    quiet = kit.library.frames(one.id, 0, one.frames)
+    assert np.allclose(kit.library.frames(two.id, 0, one.frames), 2.0 * quiet, atol=1e-6)
+    told = server.handle("GET", "/api/kit").json()
+    assert told["window_s"] == [0.0, 2.5] and len(told["head"]["yaw_deg"]) == 51
+    clips = told["differences"]["by_variant"]["loud"]["s1"]["clips"]
+    assert [v for v in clips if v is not None][0] == pytest.approx(6.02, abs=0.02)
+    assert media.results == tmp_path / "written_listening"
+
+
 def test_packs_of_another_scene_are_refused_and_of_another_rail_pitch_are_not(
     two_packs: dict[str, Any], tmp_path: Path
 ) -> None:

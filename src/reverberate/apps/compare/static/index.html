@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Compare</title>
+    <link rel="stylesheet" href="parts/parts.css" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <main class="p-page">
+      <header>
+        <h1>Compare</h1>
+        <p id="what"></p>
+      </header>
+
+      <section class="p-card">
+        <div class="p-row">
+          <div class="p-seg" id="mode">
+            <button type="button" class="p-button on" data-mode="free" title="Switch between the variants and see what differs">Listen freely</button>
+            <button type="button" class="p-button" data-mode="blind" title="Decide without knowing which is which">Blind test</button>
+          </div>
+          <label class="p-field" id="signal-field"><span>Signal</span><span class="p-seg" id="signals"></span></label>
+          <label class="p-field" id="track-field"><span>Source</span><select id="tracks"></select></label>
+        </div>
+
+        <div id="free">
+          <div class="p-row" id="variants"></div>
+          <p class="p-note" id="variant-note"></p>
+        </div>
+
+        <div id="blind" hidden>
+          <div id="blind-setup">
+            <div class="p-row">
+              <div class="p-seg" id="blind-kind">
+                <button type="button" class="p-button on" data-kind="abx" title="A and B are known, X is one of them: say which">ABX</button>
+                <button type="button" class="p-button" data-kind="rank" title="The variants under hidden names: put them in the order you prefer">Ranking</button>
+              </div>
+              <label class="p-field" id="blind-pair"><span>A is</span><select id="blind-a"></select><span>B is</span><select id="blind-b"></select></label>
+              <label class="p-field"><span>Trials</span><input type="number" id="blind-trials" min="1" max="200" value="16" /></label>
+              <button type="button" class="p-button on" id="blind-start">Start</button>
+            </div>
+            <p class="p-note" id="blind-says"></p>
+          </div>
+          <div id="blind-run" hidden>
+            <div class="p-row">
+              <strong id="blind-trial"></strong>
+              <span class="p-note" id="blind-hint"></span>
+              <button type="button" class="p-button p-small" id="blind-stop" title="End the test here; what was answered is written">Stop the test</button>
+            </div>
+            <div class="p-row" id="blind-listen"></div>
+            <div class="p-row" id="blind-answer"></div>
+          </div>
+          <div id="blind-result" hidden></div>
+        </div>
+
+        <div id="transport"></div>
+      </section>
+
+      <section class="p-card" id="look">
+        <div class="p-row">
+          <h2>Sonograms</h2>
+          <div class="p-seg" id="view">
+            <button type="button" class="p-button p-small on" data-view="side">One under the other</button>
+            <button type="button" class="p-button p-small" data-view="difference">Difference from the reference</button>
+          </div>
+        </div>
+        <div id="sonogram"></div>
+      </section>
+
+      <section class="p-card" id="measured">
+        <div class="p-row">
+          <h2>Measured difference, by third octave</h2>
+          <label class="p-field"><span>Variant</span><select id="diff-variant"></select></label>
+          <label class="p-field"><span>Source</span><select id="diff-source"></select></label>
+        </div>
+        <div id="bands"></div>
+        <p class="p-note" id="bands-note"></p>
+        <table id="worst"></table>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

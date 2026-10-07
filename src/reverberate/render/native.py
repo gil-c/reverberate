@@ -20,6 +20,14 @@ text, operation for operation**: every sum is taken in the text's order and
 no product is fused with a sum (``-ffp-contract=off``), so a machine with
 no compiler renders the same bits, and the tests hold one against the other
 to the bit.
+
+**Threads.** An engine renders a run's intervals on a thread each
+(:func:`reverberate.render.early.run_all`), and the first run of a process
+is where the library is loaded and the delay table made. Both are made
+once, under :data:`_FIRST`, and never replaced: a thread that asks while
+another makes waits for it and is given the same one. Whatever a loop in C
+is given the address of is held in a name of the caller's until the loop
+returns, so nothing it reads can be given back under it.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ import hashlib
 import os
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -195,7 +204,13 @@ void rv_upsample(
 }
 """
 
-_state: dict[str, Any] = {"off": 0, "library": None, "why": None, "tried": False}
+_state: dict[str, Any] = {"off": 0, "library": None, "why": None, "tried": False, "table": None}
+#: Held by whoever makes the library or the delay table, the first time one is asked
+#: for, and by whoever turns the text off or on. The threads of a process's first run
+#: all ask at once: without it each made a table and the one stored last freed the one
+#: a loop in C was reading, and a thread that asked for the library while another was
+#: building it was told there was none.
+_FIRST = threading.Lock()
 _POINTER = ctypes.c_void_p
 
 
@@ -262,11 +277,15 @@ def _library() -> ctypes.CDLL | None:
     if _state["off"] or os.environ.get("REVERBERATE_NO_NATIVE"):
         return None
     if not _state["tried"]:
-        _state["tried"] = True
-        try:
-            _state["library"] = _build()
-        except OSError as error:
-            _state["why"] = str(error)
+        with _FIRST:
+            if not _state["tried"]:
+                try:
+                    _state["library"] = _build()
+                except OSError as error:
+                    _state["why"] = str(error)
+                # Said last: until then another thread waits here and does not go on
+                # without the library.
+                _state["tried"] = True
     found: ctypes.CDLL | None = _state["library"]
     return found
 
@@ -289,23 +308,38 @@ def why_not() -> str | None:
 
 @contextlib.contextmanager
 def disabled() -> Iterator[None]:
-    """The ``numpy`` twins for the length of a block: what the tests hold the text against."""
-    _state["off"] += 1
+    """The ``numpy`` twins for the length of a block: what the tests hold the text against.
+
+    For the whole process, every thread of it, and counted: blocks nest.
+    """
+    with _FIRST:
+        _state["off"] += 1
     try:
         yield
     finally:
-        _state["off"] -= 1
+        with _FIRST:
+            _state["off"] -= 1
 
 
 def _table() -> np.ndarray:
-    found = _state.get("table")
+    """The delay kernel in single precision: one array a process, made once, not written.
+
+    A caller that gives its address to a loop in C keeps what is returned in
+    a name until the loop is back.
+    """
+    found: np.ndarray | None = _state["table"]
     if found is None:
-        found = np.ascontiguousarray(delay.kernel_table(), dtype=np.float32)
-        _state["table"] = found
-    return np.asarray(found)
+        with _FIRST:
+            found = _state["table"]
+            if found is None:
+                found = np.ascontiguousarray(delay.kernel_table(), dtype=np.float32)
+                found.setflags(write=False)
+                _state["table"] = found
+    return found
 
 
 def _read_twin(y: np.ndarray, origin: float, base: np.ndarray) -> np.ndarray:
+    y = np.asarray(y, dtype=np.float32)  # as the text reads it
     position = 2.0 * (base - origin)
     whole = np.floor(position)
     scaled = (position - whole) * delay.PHASES
@@ -363,12 +397,21 @@ def early_interval(
     harmonics = np.ascontiguousarray(harmonics, dtype=np.float32)
     library = _library()
     if library is not None:
+        if out.dtype != np.float32 or not out.flags.c_contiguous:
+            raise ValueError("the loop in C adds to float32 in one block of memory")
+        # Everything the loop reads through an address is in a name of this frame until
+        # the loop returns: the table, and each end's signal as the text reads it (the
+        # very array when it is float32 in one block, which the engine's are).
+        table = _table()
         ends = []
         for side in (first, second):
-            address = np.array([0 if e is None else e[0].ctypes.data for e in side], dtype=np.int64)
-            length = np.array([0 if e is None else e[0].size for e in side], dtype=np.int64)
+            read = [
+                None if e is None else np.ascontiguousarray(e[0], dtype=np.float32) for e in side
+            ]
+            address = np.array([0 if y is None else y.ctypes.data for y in read], dtype=np.int64)
+            length = np.array([0 if y is None else y.size for y in read], dtype=np.int64)
             origin = np.array([0.0 if e is None else e[1] for e in side], dtype=np.float64)
-            ends.append((address, length, origin))
+            ends.append((address, length, origin, read))
         base = np.empty(step, dtype=np.float64)
         work = np.empty(4 * step, dtype=np.float32)
         failed = library.rv_early_interval(
@@ -391,7 +434,7 @@ def early_interval(
             ends[0][2].ctypes.data,
             ends[1][2].ctypes.data,
             harmonics.ctypes.data,
-            _table().ctypes.data,
+            table.ctypes.data,
             out.ctypes.data,
             base.ctypes.data,
             work.ctypes.data,

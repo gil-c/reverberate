@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recipes</title>
+    <link rel="stylesheet" href="parts/parts.css" />
+    <style>
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+      th { color: var(--soft); font-weight: 600; }
+      tbody tr { cursor: pointer; }
+      tbody tr:hover, tbody tr.on { background: var(--ground); }
+      pre { font: 12.5px/1.5 ui-monospace, monospace; white-space: pre-wrap; margin: 8px 0 0; }
+      .verdict { font-weight: 600; }
+      .verdict.good { color: var(--good); }
+      input { font: inherit; padding: 4px 6px; width: 9em; }
+      ul { margin: 6px 0 0; padding-left: 20px; }
+    </style>
+  </head>
+  <body>
+    <main class="p-page">
+      <header>
+        <h1>Recipes</h1>
+        <p id="what"></p>
+      </header>
+      <section class="p-card">
+        <table>
+          <thead><tr><th>Recipe</th><th>Dwelling</th><th>Seed</th><th>Length</th><th>Sources</th><th>Identity</th></tr></thead>
+          <tbody id="list"></tbody>
+        </table>
+      </section>
+      <section class="p-card" id="generate">
+        <div class="p-row">
+          <h2 style="margin: 0">Generate</h2>
+          <label class="p-field"><span>Dwelling</span><input id="dwelling" placeholder="hssd_0076" /></label>
+          <label class="p-field"><span>Seed</span><input id="seed" type="number" min="0" value="0" /></label>
+          <button type="button" class="p-button on" id="draw">Generate</button>
+          <button type="button" class="p-button" id="save" disabled>Save</button>
+          <span class="p-note" id="generate-note"></span>
+        </div>
+      </section>
+      <section class="p-card" id="one" hidden>
+        <div class="p-row"><h2 style="margin: 0" id="one-name"></h2><span class="verdict" id="verdict"></span></div>
+        <ul id="violations"></ul>
+        <pre id="summary"></pre>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

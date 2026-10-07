@@ -92,34 +92,3 @@ jobs:
         run: |
           files=$(ls tests/test_*.py | awk -v third=${{ matrix.third }} 'NR % 3 == third' | tr '\n' ' ')
           make test-parallel FILES="$files"
-
-  # The tests marked quarantine: kept running and in sight on every pull
-  # request, three times over so that a run says how often they fail. The job
-  # is red when one fails and the pull request is not held by it, until the
-  # cause is closed (docs/open-questions/engine-speed.md, "the same bytes").
-  quarantine:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          cache-dependency-glob: requirements*.txt
-
-      - name: Install project
-        run: uv pip install --system --compile-bytecode -r requirements-dev.txt
-
-      - name: make test-quarantine, three times
-        run: |
-          failed=0
-          for run in 1 2 3; do
-            make test-quarantine || failed=$((failed + 1))
-          done
-          echo "failed $failed of 3"
-          test "$failed" -eq 0

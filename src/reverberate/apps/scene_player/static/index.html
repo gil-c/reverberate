@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scene player</title>
+    <link rel="stylesheet" href="parts/parts.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      #renders { margin-left: auto; }
+      #scene-note { margin: 8px 0 0; }
+    </style>
+  </head>
+  <body>
+    <main class="p-page">
+      <header>
+        <h1>Scene player</h1>
+        <p id="what"></p>
+      </header>
+      <section class="p-card">
+        <div id="scene"></div>
+        <p class="p-note" id="scene-note">A head is a voice, a cube is a noise; each lights while it sounds. The white head is you. Drag to look around, wheel to zoom.</p>
+      </section>
+      <section class="p-card">
+        <div class="p-row" id="render-row"><span class="p-note">Render</span><span class="p-seg" id="renders"></span></div>
+        <div id="transport"></div>
+      </section>
+      <section class="p-card">
+        <h2>Sources</h2>
+        <div id="tracks"></div>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

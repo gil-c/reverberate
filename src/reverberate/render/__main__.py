@@ -173,6 +173,20 @@ def main(argv: list[str] | None = None) -> int:
         " named by the variant.json beside it",
     )
     sound.add_argument("--blind-seed", type=int, help="the blind set's order, for a test")
+    sound.add_argument(
+        "--ambisonic",
+        action="store_true",
+        help="with --against: keep each source's order 7 stem beside the two ears, for a player"
+        " whose listener turns his head; 12.3 MB a second a source sounds",
+    )
+    sound.add_argument(
+        "--signals",
+        nargs="+",
+        default=["clips"],
+        metavar="SIGNAL",
+        help="with --against: what the sources are fed, among clips (the recipe's), clicks and"
+        " pink",
+    )
     sound.add_argument("--probe-seconds", type=float, default=5.0, help="of each steady probe")
     sound.add_argument("--workers", type=int, default=-1, help="threads of the transforms")
     args = parser.parse_args(argv)
@@ -266,7 +280,8 @@ def main(argv: list[str] | None = None) -> int:
                     pack, found["reference"], args.out, sources=args.sources, workers=args.workers
                 )
             return 0
-        if args.against is not None and (len(args.against) > 1 or args.names):
+        several = bool(args.names) or args.ambisonic or args.signals != ["clips"]
+        if args.against is not None and (len(args.against) > 1 or several):
             from reverberate.render.check import many
 
             many.run(
@@ -282,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
                 measured_head=found["measured_head"],
                 settings=CheckSettings(probe_seconds=args.probe_seconds, workers=args.workers),
                 blind_seed=args.blind_seed,
+                ambisonic=args.ambisonic,
+                signals=args.signals,
             )
             return 0
         if args.against is not None:

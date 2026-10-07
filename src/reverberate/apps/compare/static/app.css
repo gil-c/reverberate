@@ -1,0 +1,16 @@
+#variants, #blind-listen, #blind-answer { margin-top: 14px; }
+#variants .p-button kbd, #blind-listen .p-button kbd { margin-right: 8px; }
+#transport { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+#look h2, #measured h2 { margin: 0; flex: 1; }
+#sonogram, #bands { margin-top: 10px; }
+#blind-trials { width: 4.5em; font: inherit; padding: 4px 6px; }
+select { font: inherit; padding: 4px 6px; }
+#blind-result { margin-top: 14px; }
+#blind-result .score { font-size: 20px; font-weight: 600; }
+table { border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
+th, td { text-align: right; padding: 3px 10px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--soft); font-weight: 600; }
+.rank-order { min-height: 2.4em; }
+#blind-setup, #blind-run { margin-top: 14px; }
+#blind-result table { margin-bottom: 10px; }

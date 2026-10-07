@@ -149,7 +149,15 @@ of those under the crossover and over it) and `blind/`: the mixes as
 `X1.wav` ... in an order drawn at random, with `key.sealed`, which `python
 -m reverberate.render unseal` reads.
 
-On the page, every pack given by `--pack` that is the scene of the pack
+`python -m reverberate.apps.compare DIR` (`docs/apps.md`) is the page made
+for this decision and nothing else: the variants as buttons switched at the
+same instant, the sonograms, the tables above as curves, and a blind test
+(ABX or a ranking) whose result is written beside `DIR`. With `--ambisonic`
+the check also keeps each source's order 7 stem, which that page decodes
+under the head its listener turns, and with `--signals clips clicks pink`
+it feeds the sources clicks and pink noise beside the speech.
+
+On the inspector's page, every pack given by `--pack` that is the scene of the pack
 heard has a button in the sound bar. A press, or `[` and `]`, changes the
 pack heard at the same instant; the note beside it says which variant is
 heard, what the whole scene is predicted to cost with it and what its own

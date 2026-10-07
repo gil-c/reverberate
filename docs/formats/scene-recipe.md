@@ -1,6 +1,10 @@
 # The scene recipe
 
 Status: proposed with [ADR 0016](../adr/0016-a-scene-moves-and-one-engine-renders-it.md).
+**Two versions are read.** What follows is version 1, the first scene's, as it
+was; [version 2](#version-2), at the end, is what the owner's decisions after
+listening added, and is what a recipe is written in from now on by the second
+generator.
 Written and validated by `reverberate.scenes` (lot L2), drawn by the
 application (L3), read by the trace stage (L6). Where a source and the
 listener are at a time `t` is computed by `reverberate.scenes.kinematics` and
@@ -91,7 +95,7 @@ that passed is recorded under `generator.parameters.attempt`.
 | key | type | meaning |
 | --- | --- | --- |
 | `schema` | string | `"reverberate.scene-recipe"` |
-| `schema_version` | int | `1` |
+| `schema_version` | int | `1`; `2` adds the keys of [version 2](#version-2) |
 | `dwelling` | object | which storey |
 | `assets` | object | the versions of everything the recipe was generated against |
 | `seed` | int | `0 <= seed < 2^53` |
@@ -402,7 +406,7 @@ that has not says so.
 
 ## Example
 
-A complete recipe of twenty seconds: a near voice that speaks from an
+A complete recipe of version 1, of twenty seconds: a near voice that speaks from an
 armchair, then rises and walks to the kitchen; a television; a listener who
 walks towards the voice and turns to it. Indented here; its identity is that
 of its canonical form. The positions are illustrative and were not checked
@@ -593,6 +597,232 @@ against the dwelling.
       },
       "rails": {"pitch_m": 0.08, "max_length_m": 12.0}
     }
+  }
+}
+```
+
+## Version 2
+
+Written by the second generator (`reverberate.scenes.social`) after the
+owner listened to the first scene; the choices and their cost are in
+[`docs/open-questions/recipes-v2.md`](../open-questions/recipes-v2.md).
+**A version 1 recipe is read as before and keeps its bytes and its
+identity**; a recipe says its version and every key below is refused in
+version 1. Everything above holds in version 2 but what this section
+changes. The engine does not yet honour all of it: what the trace and the
+render must learn is listed in the note.
+
+**The principle.** What costs is a place a source is heard from under the
+crossover. Version 2 therefore keeps apart *where the low band is read*,
+which is the stations, rails and keyframes of version 1 and nothing else,
+and *what moves for nothing*: a sway, a turn of a head or of a talker, a
+source carried by somebody. `reverberate.scenes.kinematics` gives both:
+`position` is the first, `sway_m` the second, `mouth` and `head` their sum.
+
+### Top level
+
+| key | type | meaning |
+| --- | --- | --- |
+| `schema_version` | int | `2` |
+| `scene` | object | `{"calmness": c, "snr_floor_db": f}`: `calmness` from 0, as lively as a home gets, to 1, nearly silent; `snr_floor_db` the floor of rule 16 |
+
+### Stations: `fixture`
+
+A fourth `kind`, `"fixture"`, with `height` `"fixed"`: where a fixed source
+stands, in the air by the object it belongs to (`object`), at the height it
+was put at. No rail ends at one and nobody walks there. A `dwell` at a
+fixture says `"height": "fixed"`.
+
+### Sources
+
+| key | type | meaning |
+| --- | --- | --- |
+| `kind` | string | `"voice"`, `"own_voice"`, `"media_voice"` or `"noise"` |
+| `subtype` | string | for a `media_voice`: `"television"` or `"radio"`; for a `noise`: `"appliance"`, `"music"`, `"water"`, `"other"`, `"body"`, `"steps"` or `"outside"`; absent for the two voices |
+| `level_spl_1m_db` | float | the level at 1 m, dB SPL, of what the source emits at an interval gain of zero, its own `gain_db` included; for a voice its active speech level |
+| `sway` | array | the source's small movement, below; empty for none |
+| `roles` | array | a `voice` only: what it is to the listener, by interval |
+| `attach` | object or absent | a source that is carried, below |
+| `opening` | object or absent | a noise of `outside` only: `{"object": "<the window's or the door's name>", "state": "open" or "closed"}` |
+
+**Distance is no role.** `near_voice` and `far_voice` are gone: the
+listener moves, and a voice is near at one time and far at another. A
+`voice` is a person. **`roles`** cover the scene without gap, each
+`{"start_s", "end_s", "role", "group"}`: `role` is `"conversation"` while the
+voice is of the group the listener talks in, `"outside"` otherwise;
+`group` names the group the voice talks in, whichever the role, and is left
+out where it is in none. **It is the training label**: per source, per
+interval. The listener's own membership is `listener.conversation`.
+
+**`own_voice`** is the wearer's own: one at most, carried at the listener's
+mouth, a stem of its own. **`media_voice`** is speech that is never a
+target: a television, a radio.
+
+**No gain sets a role apart.** `gain_db` keeps its meaning, a departure from
+the level the clip is stored at. For a voice it is the talker's own level
+about the normal effort; for a noise it brings the clip to the level its
+class has at 1 m. `level_spl_1m_db` says the result, so that a reader need
+not know the library to know how loud a source is.
+
+**`sway`** is a list of sinusoids, each
+`{"axis": "x" | "y" | "z", "amplitude_m", "period_s", "phase_deg"}` or
+`{"axis": "yaw", "amplitude_deg", "period_s", "phase_deg"}`: the offset is
+the sum of `amplitude * sin(2 pi t / period_s + phase)`, along the scene's
+axes in metres, about the up axis in degrees. The mirror above the
+crossover is traced from the source with its sway; **the low band is read
+where the source is without it**. The yaw's sway is added to the yaw.
+
+**`attach`**: a carried source has no `segments` (the array is empty).
+
+| key | type | meaning |
+| --- | --- | --- |
+| `to` | string | `"listener"`, or the id of a `voice` |
+| `at` | string | `"mouth"`: where the carrier's mouth is. `"floor"`: under the carrier, 0.05 m above the floor, at the footfall nearest to it |
+| `yaw_offset_deg` | float | its yaw is its carrier's turned by this |
+| `offset_m` | `[front, left, up]` | carried at the listener's mouth only, and then required: from the centre of the head, in the head's own frame, turning with its yaw, pitch and roll |
+| `stride_m` | float | carried at the floor only, and then required: the footfalls stand at arc lengths `j * stride_m` from the rail's `a`, and at its `b`, along each rail the carrier travels; for the listener along its keyframes on the plan, from the first |
+
+A source carried at a mouth reads its carrier's low band positions and adds
+none. One carried at the floor is at one footfall until its carrier is
+nearer the next: it hops, and each place it sounds from is a place that
+does not move. The wearer's own voice is 0.10 m from where the field is
+taken, inside any array that could hear it: no wave solve answers it, and
+the recipe says only where it is.
+
+An activity interval of a `voice` or an `own_voice` has two more keys:
+`effort`, one of `"whisper"`, `"relaxed"`, `"normal"`, `"raised"`,
+`"loud"`, the vocal effort the turn is spoken at; and `event`, `"turn"`,
+`"backchannel"` (an acknowledgement inside somebody else's turn) or
+`"laughter"`. The effort names the clip that is wanted, whose spectrum is a
+raised or a whispered voice's; the level is the interval's `gain_db`, as
+ever. The ladder is ISO 9921's, at 1 m: relaxed 54 dB, normal 60, raised
+66, loud 72, and a whisper at 45; an effort names the levels nearer to it
+than to its neighbours.
+
+### Listener
+
+| key | type | meaning |
+| --- | --- | --- |
+| `sway` | array | as a source's, without `yaw`: the head's small movement about the keyframes |
+| `conversation` | array | `{"start_s", "end_s", "group"}` covering the scene: the group the listener talks in; `group` left out where it talks in none |
+| `gaze` | array | `{"start_s", "end_s", "mode", "target"}` in order: what the head was turned to, as the generator meant it. `mode` is `"talker"`, `"glance"`, `"event"` (each with a `target`, a source's id), `"reading"`, `"away"` or `"walk"` |
+
+The keyframes are where the low band's cells stand, as in version 1; the
+head's turning is the keyframes' angles, dense, and its sway is `sway`.
+`gaze` is a record for the audit and moves nothing. A keyframe at rest at a
+standing spot names it, as one at a seat does.
+
+### Rules of version 2
+
+Rules 2 to 11 hold, read as follows: a carried source has no segments and
+is not held to rule 2's cover, nor to rules 5 and 8, its carrier being;
+rule 8 is read on `position`, without the sways; a fixture is at most
+0.50 m outside the walkable outline and 3.5 m above the floor (rule 3), and
+only a `dwell` that says `"fixed"` is at one (rule 5).
+
+12. **Carried and fixed.** No source is named `listener`. A carried source
+    has no segments; its carrier is the listener or a `voice` that is not
+    itself carried; a stride lies in 0.3 to 1.0 m; an `offset_m` is 0.05 to
+    0.25 m long. At most one `own_voice`, carried at the listener's mouth.
+    A `voice` is not carried. A noise of `body` is carried at a mouth, one
+    of `steps` at the floor. Every other noise and every `media_voice` is
+    fixed: `dwell` segments at one station. A noise of `outside`, and no
+    other source, names an `opening`, and is at the fixture of that object.
+13. **Roles.** `listener.conversation` covers the scene in order, without
+    gap; so do the `roles` of every `voice`. At every instant a voice is
+    `"conversation"` exactly when its group is the listener's.
+14. **Sways.** No amplitude is negative and no period under 0.5 s. The
+    amplitudes of a body's `x`, `y` and `z` sinusoids sum to 0.05 m at most
+    (`SWAY_RADIUS_M`), those of its `yaw` to 30 degrees. A carried source
+    has no sway of its own.
+15. **Levels.** `level_spl_1m_db` lies in 0 to 100. A voice's interval that
+    says an effort is at a level, `level_spl_1m_db + gain_db`, that the
+    effort names.
+16. **The conversation is heard.** For every interval whose `event` is
+    `"turn"`, of a voice that is of the conversation when it starts, the
+    speech to noise ratio at the listener is at least `scene.snr_floor_db`.
+    It is read in free field (`reverberate.scenes.levels`): each source at
+    `level_spl_1m_db + gain_db - 20 log10(d)`, `d` no less than 0.3 m, with
+    no wall and no room; the noise is the power sum of every `noise` and
+    `media_voice` and of the voices outside the conversation, the
+    listener's own voice and body apart; at the turn's start, middle and
+    end, while the voice is of the conversation.
+17. **Gaze.** The intervals are in order, do not overlap and lie in the
+    scene; a `talker`, a `glance` and an `event` name a source of the
+    recipe, and the other modes name none.
+
+### `generator`, version 2
+
+`name` is `"reverberate.scenes"` still and `version` the second
+generator's own, `1.0.0`. `parameters` is flat: every field of
+`reverberate.scenes.social.SocialParameters`, a scalar or a two element
+range (`calmness`, `snr_floor_db`, `partners`, `membership_changes`,
+`gaze_share`, `floor_transfer_mean_s`, `sway_m`, ...), then `clips`,
+`attempt`, and `left_out`: the kinds of sound the scene would hold and the
+clip library does not, each `true` (`backchannel`, `laughter`, `body`,
+`steps`, `radio`, `outside`).
+
+### Example of what version 2 adds
+
+A voice that joins the listener's conversation at 99 s, the wearer's own
+voice, a breath at a talker's mouth, a television. Trimmed: the keys of
+version 1 are as above.
+
+```json
+{
+  "schema_version": 2,
+  "scene": {"calmness": 0.5, "snr_floor_db": 0.0},
+  "sources": [
+    {
+      "id": "talker_2",
+      "kind": "voice",
+      "level_spl_1m_db": 58.7,
+      "gain_db": -1.3,
+      "sway": [
+        {"axis": "x", "amplitude_m": 0.006, "period_s": 23.4, "phase_deg": 112.0},
+        {"axis": "yaw", "amplitude_deg": 3.2, "period_s": 17.9, "phase_deg": 250.0}
+      ],
+      "roles": [
+        {"start_s": 0.0, "end_s": 84.77, "role": "outside", "group": "g2"},
+        {"start_s": 84.77, "end_s": 99.105, "role": "outside"},
+        {"start_s": 99.105, "end_s": 180.0, "role": "conversation", "group": "g1"}
+      ],
+      "activity": [
+        {"start_s": 101.4, "end_s": 104.2, "clip": {}, "clip_offset_s": 0.0,
+         "gain_db": 4.1, "effort": "raised", "event": "turn"}
+      ]
+    },
+    {
+      "id": "own_voice",
+      "kind": "own_voice",
+      "level_spl_1m_db": 59.0,
+      "segments": [],
+      "attach": {"to": "listener", "at": "mouth", "yaw_offset_deg": 0.0, "offset_m": [0.09, 0.0, -0.05]}
+    },
+    {
+      "id": "talker_2_body",
+      "kind": "noise",
+      "subtype": "body",
+      "level_spl_1m_db": 31.5,
+      "segments": [],
+      "attach": {"to": "talker_2", "at": "mouth", "yaw_offset_deg": 73.0}
+    },
+    {
+      "id": "television_1",
+      "kind": "media_voice",
+      "subtype": "television",
+      "level_spl_1m_db": 63.0,
+      "segments": [{"type": "dwell", "station": "tv_32", "height": "fixed", "start_s": 0.0,
+                    "end_s": 180.0, "facing": {"mode": "fixed", "yaw_deg": 90.0}}]
+    }
+  ],
+  "listener": {
+    "sway": [{"axis": "z", "amplitude_m": 0.004, "period_s": 5.1, "phase_deg": 30.0}],
+    "conversation": [{"start_s": 0.0, "end_s": 180.0, "group": "g1"}],
+    "gaze": [
+      {"start_s": 0.0, "end_s": 6.4, "mode": "talker", "target": "talker_1"},
+      {"start_s": 6.4, "end_s": 9.0, "mode": "reading"}
+    ]
   }
 }
 ```
