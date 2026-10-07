@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recipe viewer</title>
+    <link rel="stylesheet" href="parts/parts.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      main.p-page { max-width: 1180px; }
+      #scene { height: 460px; }
+      #timeline { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    </style>
+  </head>
+  <body>
+    <main class="p-page">
+      <header>
+        <h1>Recipe viewer</h1>
+        <p id="what"></p>
+      </header>
+      <section class="p-card">
+        <div id="scene"></div>
+        <p class="p-scene-said" id="said"></p>
+        <p class="p-note" id="scene-note">No sound: this is the recipe alone, before anything is computed. A head is a person, a cube is a noise. Each lights while the recipe says it sounds. The white head is you, and the people you talk with stand on a green ring. Drag to look around, wheel to zoom.</p>
+      </section>
+      <section class="p-card">
+        <div id="transport"></div>
+        <div id="timeline"></div>
+      </section>
+    </main>
+    <script type="module" src="viewer.js"></script>
+  </body>
+</html>

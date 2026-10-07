@@ -10,6 +10,12 @@
  *
  * Keys, unless a field has the focus: space plays and stops, `L` loops, the
  * arrows turn the head by five degrees, `0` centres it.
+ *
+ * An application leaves out what it has no use for: `bar: false` where a
+ * timeline is clicked instead, `level: false` and `head: false` where nothing
+ * sounds (`createClock`). With `follow: true` the head has a switch: on, it
+ * is the scene's own and the dial shows it; off, it is the listener's and the
+ * dial turns it.
  */
 const el = (tag, attributes = {}, ...children) => {
   const node = document.createElement(tag);
@@ -27,7 +33,7 @@ const clock = (seconds) => {
   return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 };
 
-export function createTransport(element, player, { keys = true } = {}) {
+export function createTransport(element, player, { keys = true, bar: withBar = true, level: withLevel = true, head: withHead = true, follow: withFollow = false } = {}) {
   const play = el("button", { type: "button", class: "p-button p-play", title: "Play or stop (space)" });
   const loop = el("button", { type: "button", class: "p-button", title: "Loop the region, or the whole (L)", text: "Loop" });
   const time = el("span", { class: "p-time" });
@@ -47,18 +53,18 @@ export function createTransport(element, player, { keys = true } = {}) {
     '<rect x="20" y="-6" width="5" height="12" rx="2" class="p-dial-ear"/></g></svg>';
   const headSaid = el("span", { class: "p-said" });
   const centre = el("button", { type: "button", class: "p-button p-small", title: "Back on the scene's own head (0)", text: "Centre" });
+  const follow = el("button", { type: "button", class: "p-button p-small on", title: "On: your head is the listener's of the scene, where he looks. Off: you turn it yourself.", text: "Follow the listener" });
   const note = el("span", { class: "p-note" });
   element.classList.add("p-transport");
-  element.append(
-    el("div", { class: "p-row" }, play, loop, time, bar),
-    el(
-      "div",
-      { class: "p-row" },
-      el("label", { class: "p-field" }, el("span", { text: "Level" }), level, levelSaid, clip),
-      el("div", { class: "p-field p-head" }, el("span", { text: "Head" }), dial, headSaid, centre),
-      note
-    )
-  );
+  const first = el("div", { class: "p-row" }, play, loop, time);
+  // With its bar the transport is two rows; without, what is left sits on one.
+  const second = withBar ? el("div", { class: "p-row" }) : first;
+  if (withBar) first.append(bar);
+  if (withLevel) second.append(el("label", { class: "p-field" }, el("span", { text: withBar ? "Level" : "Volume" }), level, levelSaid, clip));
+  if (withHead) second.append(el("div", { class: "p-field p-head" }, el("span", { text: withFollow ? "Your head" : "Head" }), dial, headSaid, withFollow ? follow : centre));
+  second.append(note);
+  element.append(first);
+  if (withBar) element.append(second);
 
   let clipTimer = 0;
   function show() {
@@ -69,11 +75,20 @@ export function createTransport(element, player, { keys = true } = {}) {
     levelSaid.textContent = `${state.levelDb >= 0 ? "+" : ""}${state.levelDb} dB`;
     const { yaw, pitch } = state.turned;
     const fixed = state.kind === "binaural";
-    dial.classList.toggle("off", fixed);
-    dial.querySelector(".p-dial-head").setAttribute("transform", `rotate(${-yaw})`);
-    headSaid.textContent = fixed
-      ? "fixed"
-      : `${Math.abs(Math.round(yaw))}° ${yaw > 0.5 ? "left" : yaw < -0.5 ? "right" : ""}${Math.abs(pitch) > 0.5 ? `, ${Math.abs(Math.round(pitch))}° ${pitch > 0 ? "up" : "down"}` : ""}`;
+    if (withFollow) {
+      // The head in the scene's frame, as a plan seen from above shows it: 0 degrees faces right.
+      follow.classList.toggle("on", state.following);
+      dial.classList.toggle("off", fixed);
+      dial.classList.toggle("led", state.following);
+      dial.querySelector(".p-dial-head").setAttribute("transform", `rotate(${90 - player.pose().yaw})`);
+      headSaid.textContent = fixed ? "fixed" : state.following ? "the listener's" : "yours: drag to turn";
+    } else {
+      dial.classList.toggle("off", fixed);
+      dial.querySelector(".p-dial-head").setAttribute("transform", `rotate(${-yaw})`);
+      headSaid.textContent = fixed
+        ? "fixed"
+        : `${Math.abs(Math.round(yaw))}° ${yaw > 0.5 ? "left" : yaw < -0.5 ? "right" : ""}${Math.abs(pitch) > 0.5 ? `, ${Math.abs(Math.round(pitch))}° ${pitch > 0 ? "up" : "down"}` : ""}`;
+    }
     note.textContent = state.failure
       ? state.failure
       : fixed
@@ -91,6 +106,7 @@ export function createTransport(element, player, { keys = true } = {}) {
     const { duration } = player.state();
     time.textContent = `${clock(seconds)} / ${clock(duration)}`;
     cursor.style.left = duration ? `${(100 * seconds) / duration}%` : "0";
+    if (withFollow && player.state().following) dial.querySelector(".p-dial-head").setAttribute("transform", `rotate(${90 - player.pose().yaw})`);
   }
   player.on("state", show).on("head", show).on("time", showTime);
   player.on("clip", ({ overDb }) => {
@@ -103,6 +119,8 @@ export function createTransport(element, player, { keys = true } = {}) {
   loop.addEventListener("click", () => player.setLooping(!player.state().looping));
   level.addEventListener("input", () => player.setLevel(Number(level.value)));
   centre.addEventListener("click", () => player.turn({ yaw: 0, pitch: 0 }));
+  follow.addEventListener("click", () => player.setFollowing(!player.state().following));
+  const led = () => withFollow && player.state().following;
 
   // The bar: a click moves, a drag is the loop's region.
   const secondsAt = (event) => {
@@ -114,6 +132,7 @@ export function createTransport(element, player, { keys = true } = {}) {
   // The head: a drag of the dial, 0.5 degrees a pixel.
   let held = null;
   dial.addEventListener("pointerdown", (event) => {
+    if (led()) return;
     held = { x: event.clientX, y: event.clientY, ...player.state().turned };
     dial.setPointerCapture(event.pointerId);
   });
@@ -123,7 +142,7 @@ export function createTransport(element, player, { keys = true } = {}) {
     player.turn({ yaw: held.yaw - (event.clientX - held.x) * 0.5, pitch: held.pitch - (event.clientY - held.y) * 0.5 });
   });
   dial.addEventListener("pointerup", () => (held = null));
-  dial.addEventListener("dblclick", () => player.turn({ yaw: 0, pitch: 0 }));
+  dial.addEventListener("dblclick", () => led() || withFollow || player.turn({ yaw: 0, pitch: 0 }));
 
   if (keys) {
     document.addEventListener("keydown", (event) => {
@@ -134,11 +153,12 @@ export function createTransport(element, player, { keys = true } = {}) {
       const step = event.shiftKey ? 15 : 5;
       if (event.code === "Space") player.toggle();
       else if (event.key === "l" || event.key === "L") player.setLooping(!player.state().looping);
+      else if (!withHead || led()) return;
       else if (event.key === "ArrowLeft") player.turn({ yaw: yaw + step });
       else if (event.key === "ArrowRight") player.turn({ yaw: yaw - step });
       else if (event.key === "ArrowUp") player.turn({ pitch: pitch + step });
       else if (event.key === "ArrowDown") player.turn({ pitch: pitch - step });
-      else if (event.key === "0") player.turn({ yaw: 0, pitch: 0 });
+      else if (event.key === "0" && !withFollow) player.turn({ yaw: 0, pitch: 0 });
       else return;
       event.preventDefault();
     });

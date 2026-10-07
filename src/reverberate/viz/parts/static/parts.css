@@ -99,3 +99,25 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 /* The scene. */
 .p-scene { position: relative; width: 100%; height: 420px; border-radius: 8px; overflow: hidden; }
 .p-scene canvas { display: block; width: 100%; height: 100%; }
+.p-scene-said { margin: 8px 0 0; font-weight: 600; }
+.p-dial.led { cursor: default; }
+
+/* The timeline. */
+.p-timeline { --names: 17.5em; }
+.p-tl-box { position: relative; }
+.p-tl-rows { display: grid; gap: 3px; }
+.p-tl-row { display: grid; grid-template-columns: var(--names) 1fr; align-items: center; }
+.p-tl-name { display: flex; align-items: center; gap: 7px; padding-right: 10px; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.p-tl-name .p-chip { flex: none; }
+.p-chip.you { border: 1px solid var(--soft); }
+.p-tl-lane { position: relative; height: 18px; background: var(--ground); border-radius: 3px; overflow: hidden; }
+.p-tl-block { position: absolute; top: 2px; bottom: 2px; min-width: 2px; border-radius: 2px; }
+.p-tl-block.p-tl-short { top: 7px; }
+.p-tl-block.p-tl-with { top: 0; bottom: 0; color: #ffffff; font: 600 11px/18px system-ui, sans-serif; font-style: normal; padding: 0 6px; overflow: hidden; white-space: nowrap; }
+.p-tl-ruler { background: none; overflow: visible; height: 16px; }
+.p-tl-ruler span { position: absolute; top: 2px; font-size: 10.5px; color: var(--soft); transform: translateX(-50%); }
+.p-tl-ruler span:first-child { transform: none; }
+.p-tl-ruler span:last-child { transform: translateX(-100%); }
+.p-tl-over { position: absolute; top: 0; bottom: 16px; left: var(--names); right: 0; cursor: pointer; touch-action: none; }
+.p-tl-legend { display: flex; gap: 16px; margin: 6px 0 0 var(--names); font-size: 12px; color: var(--soft); }
+.p-tl-key { display: inline-block; width: 12px; height: 8px; border-radius: 2px; margin-right: 6px; }
