@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 from scipy.signal import fftconvolve
 
-from reverberate.render import native
+from reverberate.render import delay, native
 from reverberate.render.benchmark import density_pack
 from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.mix import write_mix
@@ -199,7 +199,7 @@ def test_the_threads_of_a_first_render_are_given_one_library_and_one_table(
     here, so that every thread asks before the first has finished.
     """
     made = {"library": 0, "table": 0}
-    build, kernel = native._build, native.delay.kernel_table
+    build, kernel = native._build, delay.kernel_table
 
     def slow_build() -> Any:
         made["library"] += 1
@@ -209,11 +209,11 @@ def test_the_threads_of_a_first_render_are_given_one_library_and_one_table(
     def slow_kernel() -> np.ndarray:
         made["table"] += 1
         time.sleep(0.05)
-        return kernel()
+        return np.asarray(kernel())
 
     monkeypatch.delenv("REVERBERATE_NO_NATIVE", raising=False)
     monkeypatch.setattr(native, "_build", slow_build)
-    monkeypatch.setattr(native.delay, "kernel_table", slow_kernel)
+    monkeypatch.setattr(delay, "kernel_table", slow_kernel)
     for name, fresh in (("tried", False), ("library", None), ("why", None), ("table", None)):
         monkeypatch.setitem(native._state, name, fresh)
     threads = 8
