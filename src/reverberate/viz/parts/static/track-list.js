@@ -11,6 +11,12 @@
  * download; "Reset" puts every fader back to 0 dB.
  *
  * A fader runs from -60 dB, where the source is silent, to +12 dB.
+ *
+ * With `save: true` the file is the listener's to write: a change is heard at
+ * once and kept by the server, and "Save balance" writes it (`api/balance/save`);
+ * the list says where, and whether what is heard is what the file holds. With
+ * `lanes: false` the levels move the meters and no lane is drawn, for a page
+ * that has a timeline.
  */
 const el = (tag, attributes = {}, ...children) => {
   const node = document.createElement(tag);
@@ -23,13 +29,15 @@ const el = (tag, attributes = {}, ...children) => {
   return node;
 };
 
-export function createTrackList(element, { api = "api", onBalance = () => {} } = {}) {
+export function createTrackList(element, { api = "api", onBalance = () => {}, save: withSave = false, lanes: withLanes = true } = {}) {
   element.classList.add("p-tracks");
   let tracks = [];
   let rows = {};
   let levels = null;
   let timer = 0;
   let saved = null;
+  let target = "";
+  let unsaved = false;
   const listeners = [];
 
   const body = () => ({ sources: Object.fromEntries(tracks.map((t) => [t.id, { gain_db: t.gain_db, mute: t.mute, solo: t.solo }])) });
@@ -40,6 +48,8 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
     const known = Object.fromEntries(tracks.map((track) => [track.id, track]));
     tracks = answer.tracks.map((track) => known[track.id] || track);
     saved = answer.saved;
+    target = answer.file || "";
+    unsaved = Boolean(answer.unsaved);
     onBalance(answer.version);
     listeners.forEach((fn) => fn(tracks));
   }
@@ -64,14 +74,27 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
       row.said.textContent = track.gain_db <= -60 ? "off" : `${track.gain_db > 0 ? "+" : ""}${track.gain_db} dB`;
       row.line.classList.toggle("silent", track.mute || (soloed && !track.solo) || track.gain_db <= -60);
     }
-    file.textContent = saved ? `saved in ${saved}` : "";
+    if (!withSave) file.textContent = saved ? `saved in ${saved}` : "";
+    else file.textContent = unsaved ? `Not saved yet. It will be written in ${target}` : saved ? `Saved in ${saved}` : `Nothing saved yet. It will be written in ${target}`;
+    saveButton.classList.toggle("on", unsaved);
   }
 
   const file = el("span", { class: "p-note" });
   const exportButton = el("button", { type: "button", class: "p-button p-small", text: "Export", title: "Download the balance as JSON" });
+  const saveButton = el("button", { type: "button", class: "p-button p-small", text: "Save balance", title: "Write what the faders say in a file beside the scene" });
   const reset = el("button", { type: "button", class: "p-button p-small", text: "Reset", title: "Every fader back to 0 dB, nothing muted" });
   const list = el("div", { class: "p-track-rows" });
-  element.append(list, el("div", { class: "p-row" }, exportButton, reset, file));
+  element.append(list, el("div", { class: "p-row" }, withSave ? saveButton : exportButton, reset, file));
+
+  saveButton.addEventListener("click", async () => {
+    // What was last moved is sent first: the file holds what is heard.
+    clearTimeout(timer);
+    await fetch(`${api}/balance`, { method: "POST", body: JSON.stringify(body()) });
+    const response = await fetch(`${api}/balance/save`, { method: "POST", body: "{}" });
+    if (response.ok) took(await response.json());
+    else file.textContent = (await response.json()).error || "the balance could not be written";
+    show();
+  });
 
   exportButton.addEventListener("click", () => {
     const blob = new Blob([JSON.stringify({ schema: "reverberate.apps.balance", ...body() }, null, 1)], { type: "application/json" });
@@ -98,7 +121,7 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
       const meter = el("i", { class: "p-meter" });
       const lane = el("canvas", { class: "p-lane", width: "1000", height: "24" });
       const cursor = el("i", { class: "p-cursor" });
-      const line = el("div", { class: "p-track" }, chip, el("span", { class: "p-name", text: track.id }), solo, mute, fader, said, el("span", { class: "p-meter-box" }, meter), el("span", { class: "p-lane-box" }, lane, cursor));
+      const line = el("div", { class: "p-track" }, chip, el("span", { class: "p-name", text: track.label || track.id, title: track.id }), solo, mute, fader, said, el("span", { class: "p-meter-box" }, meter), el("span", { class: "p-lane-box" }, lane, cursor));
       solo.addEventListener("click", () => {
         track.solo = !track.solo;
         show();
@@ -148,6 +171,7 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
     /** The answer of `api/levels`: the meters follow it, and each track's lane is drawn from it. */
     setLevels(answer) {
       levels = answer;
+      if (!withLanes) return;
       element.classList.add("with-lanes");
       for (const track of tracks) {
         const values = levels.stems[track.id];
@@ -176,7 +200,8 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
         const values = levels.stems[track.id];
         const row = rows[track.id];
         if (!values || !row) continue;
-        const db = values[Math.min(at, values.length - 1)] + 20 * Math.log10(Math.max(this.gainOf(track.id), 1e-6));
+        const value = values[Math.min(at, values.length - 1)];
+        const db = (value === null || value === undefined ? -200 : value) + 20 * Math.log10(Math.max(this.gainOf(track.id), 1e-6));
         row.meter.style.width = `${Math.max(0, Math.min(100, ((db + 80) / 60) * 100))}%`;
         row.cursor.style.left = `${Math.min(100, (100 * seconds) / (values.length * levels.hop_s))}%`;
       }

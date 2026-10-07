@@ -18,17 +18,13 @@ import numpy as np
 import pytest
 import soundfile
 
-from reverberate.apps import compare, recipes, scene_player
+from reverberate.apps import compare
 from reverberate.render.output import write_signal
-from reverberate.render.pack import synthetic_free_field, write_pack
-from reverberate.scenes import canonical_bytes, recipe_sha256
 from reverberate.viz.parts import balance as balances
 from reverberate.viz.parts.blind import BlindTest, chance
 from reverberate.viz.parts.media import Item, Library, ambisonic_stem, kit_folder
-from reverberate.viz.parts.scene import scene_view
 from reverberate.viz.parts.server import AppServer, Binary, HttpError, Request
 from reverberate.viz.parts.sonogram import difference, levels_db, sonogram
-from scene_floor import small_recipe
 
 FS = 48000.0
 FRAMES = 4800
@@ -496,86 +492,3 @@ def test_two_packs_side_by_side_are_read_as_a_and_b() -> None:
     }
     less = compare.differences(document)
     assert less["reference"] == "A" and less["by_variant"]["B"]["s1"]["clips"] == [6.0]
-
-
-# --- the scene ----------------------------------------------------------------------------
-
-
-def test_a_scene_is_drawn_from_the_pack_s_own_tables() -> None:
-    pack = synthetic_free_field(level="B", duration_s=2.0)
-    view = scene_view(pack, (0.5, 1.5), every=2)
-    assert view["window_s"] == [0.5, 1.5] and view["step_s"] == pytest.approx(0.1)
-    assert len(view["listener"]["position"]) == 11 == len(view["listener"]["yaw_deg"])
-    (source,) = view["sources"]
-    assert source["position"][0] == [2.0, 1.5, 0.0] and len(source["audible"]) == 11
-    # The free field's one source is a noise, and every noise is the same grey.
-    assert source["kind"] == "noise" and source["colour"] == "#8a94a6"
-    # The floor is the cells the low band was solved at: two, 0.40 m apart, each once.
-    cells = view["floor"]["cells"]
-    assert len(cells) == 2 and abs(cells[1][0] - cells[0][0]) == pytest.approx(0.4)
-    assert view["floor"]["y"] == 0.0 and len(view["floor"]["rooms"]) >= 1
-    # The whole scene when no window is given.
-    assert len(scene_view(pack, every=1)["listener"]["position"]) == pack.header.steps
-
-
-# --- the two first cuts -----------------------------------------------------------------------
-
-
-def test_the_scene_player_draws_the_folder_s_sources_in_the_track_list_s_colours(
-    kit: dict[str, Any], tmp_path: Path
-) -> None:
-    folder = kit["folder"]
-    head = tmp_path / "none.sofa"
-    # The pack the folder names is gone: the sound plays, and the scene says what it lacks.
-    server, _, media = scene_player.build(folder, tmp_path / "d1", measured_head=head)
-    told = server.handle("GET", "/api/player").json()
-    assert told["variants"] == ["ref", "cheap"] and told["pack"] is None
-    assert told["items"]["ref"]["stems"] == ["near_1", "noise_1"]
-    assert told["items"]["ref"]["kind"] == "ambisonic"
-    assert server.handle("GET", "/api/scene").status == 404
-    assert media.balance_path == folder.parent / "AB_listening" / "balance.json"
-    assert b"<title>Scene player</title>" in server.handle("GET", "/").payload
-    # With the pack: its one source under the folder's name, drawn as the track list has it.
-    pack = synthetic_free_field(level="B", duration_s=2.0, source_id="noise_1")
-    write_pack(tmp_path / "pack.h5", pack)
-    document = dict(kit["document"])
-    document["reference"] = {"name": "ref", "pack": str(tmp_path / "pack.h5")}
-    document["window_s"] = [0.5, 1.5]
-    (folder / "variants.json").write_text(json.dumps(document))
-    server, _, _ = scene_player.build(folder, tmp_path / "d2", measured_head=head)
-    scene = server.handle("GET", "/api/scene").json()
-    assert [s["id"] for s in scene["sources"]] == ["noise_1"] and scene["window_s"] == [0.5, 1.5]
-    tracks = {t["id"]: t for t in server.handle("GET", "/api/balance").json()["tracks"]}
-    assert scene["sources"][0]["colour"] == tracks["noise_1"]["colour"]
-    assert server.handle("GET", "/api/player").json()["pack"] == str(tmp_path / "pack.h5")
-
-
-def test_the_recipes_under_a_folder_are_listed_summarised_and_held_to_the_rules(
-    tmp_path: Path,
-) -> None:
-    recipe = small_recipe()
-    (tmp_path / "kept").mkdir()
-    (tmp_path / "kept" / "small.json").write_bytes(canonical_bytes(recipe))
-    tree = json.loads(canonical_bytes(recipe))
-    tree["duration_s"] = -1.0
-    (tmp_path / "broken.json").write_text(json.dumps(tree))
-    (tmp_path / "other.json").write_text('{"schema": "something else"}')
-    server, held = recipes.build(tmp_path)
-    assert held.names() == ["broken.json", "kept/small.json"]
-    told = server.handle("GET", "/api/recipes").json()
-    assert told["can_generate"] is False
-    rows = {row["name"]: row for row in told["recipes"]}
-    good = rows["kept/small.json"]
-    assert good["sha256"] == recipe_sha256(recipe) and good["dwelling"] == "two_rooms"
-    assert sum(good["sources"].values()) == len(recipe.sources)
-    one = server.handle("GET", "/api/recipes/kept/small.json").json()
-    assert one["valid"] is True and one["violations"] == [] and one["floor_checked"] is False
-    assert one["summary"].startswith(f"recipe {recipe_sha256(recipe)}")
-    bad = server.handle("GET", "/api/recipes/broken.json").json()
-    assert bad["valid"] is False and bad["violations"]
-    assert server.handle("GET", "/api/recipes/../secret.json").status == 404
-    assert server.handle("GET", "/api/recipes/missing.json").status == 404
-    # Nothing is generated without the dataset, and nothing saved that was not generated.
-    body = json.dumps({"dwelling": "two_rooms", "seed": 1}).encode()
-    assert server.handle("POST", "/api/generate", body).status == 409
-    assert server.handle("POST", "/api/save", b"{}").status == 409

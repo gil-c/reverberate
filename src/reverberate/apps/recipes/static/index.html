@@ -6,16 +6,25 @@
     <title>Recipes</title>
     <link rel="stylesheet" href="parts/parts.css" />
     <style>
+      main.p-page { max-width: 1180px; }
       table { border-collapse: collapse; width: 100%; font-size: 13px; }
-      th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); }
-      th { color: var(--soft); font-weight: 600; }
+      th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      th { color: var(--soft); font-weight: 600; white-space: nowrap; }
+      td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      td.w { white-space: normal; min-width: 9em; }
+      td:first-child { overflow-wrap: anywhere; }
       tbody tr { cursor: pointer; }
       tbody tr:hover, tbody tr.on { background: var(--ground); }
+      td.do { white-space: nowrap; text-align: right; }
+      td.do .p-button { margin-left: 4px; }
+      .good { color: var(--good); font-weight: 600; }
+      input, select { font: inherit; padding: 4px 6px; }
+      #dwelling { width: 9em; }
+      #seed, #duration { width: 6em; }
       pre { font: 12.5px/1.5 ui-monospace, monospace; white-space: pre-wrap; margin: 8px 0 0; }
-      .verdict { font-weight: 600; }
-      .verdict.good { color: var(--good); }
-      input { font: inherit; padding: 4px 6px; width: 9em; }
       ul { margin: 6px 0 0; padding-left: 20px; }
+      summary { cursor: pointer; color: var(--soft); margin-top: 8px; }
+      #one h2 { margin: 0; text-transform: none; letter-spacing: 0; color: var(--ink); font-size: 14px; }
     </style>
   </head>
   <body>
@@ -25,25 +34,41 @@
         <p id="what"></p>
       </header>
       <section class="p-card">
+        <h2>A new recipe</h2>
+        <div class="p-row">
+          <label class="p-field"><span>Dwelling</span><input id="dwelling" list="dwellings" placeholder="hssd_0076" /><datalist id="dwellings"></datalist></label>
+          <label class="p-field"><span>Seed</span><input id="seed" type="number" min="0" step="1" value="1" title="Another seed is another scene of the same kind" /></label>
+          <span class="p-field"><span>Scene</span><span class="p-seg" id="preset"></span></span>
+          <label class="p-field"><span>Length, seconds</span><input id="duration" type="number" min="20" max="1200" step="10" value="180" /></label>
+          <button type="button" class="p-button on" id="draw">Generate</button>
+        </div>
+        <p class="p-note" id="generate-note"></p>
+      </section>
+      <section class="p-card">
         <table>
-          <thead><tr><th>Recipe</th><th>Dwelling</th><th>Seed</th><th>Length</th><th>Sources</th><th>Identity</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Recipe</th>
+              <th class="n">Length</th>
+              <th class="n" title="The people who talk, the listener's own voice apart">People</th>
+              <th class="n" title="The groups they talk in">Groups</th>
+              <th>Noises</th>
+              <th class="n" title="From 0, as lively as a home gets, to 1, nearly silent">Calmness</th>
+              <th class="n" title="The listener's conversation over the noise where he stands, in free field: the worst turn, and the median">Speech over noise</th>
+              <th class="n" title="What the trace is predicted to cost on the machine the first scene was traced on">Cost to compute</th>
+              <th title="Whether the recipe keeps every rule of the format">Rules</th>
+              <th></th>
+            </tr>
+          </thead>
           <tbody id="list"></tbody>
         </table>
-      </section>
-      <section class="p-card" id="generate">
-        <div class="p-row">
-          <h2 style="margin: 0">Generate</h2>
-          <label class="p-field"><span>Dwelling</span><input id="dwelling" placeholder="hssd_0076" /></label>
-          <label class="p-field"><span>Seed</span><input id="seed" type="number" min="0" value="0" /></label>
-          <button type="button" class="p-button on" id="draw">Generate</button>
-          <button type="button" class="p-button" id="save" disabled>Save</button>
-          <span class="p-note" id="generate-note"></span>
-        </div>
+        <p class="p-note" id="list-note"></p>
       </section>
       <section class="p-card" id="one" hidden>
-        <div class="p-row"><h2 style="margin: 0" id="one-name"></h2><span class="verdict" id="verdict"></span></div>
+        <div class="p-row"><h2 id="one-name"></h2><span id="verdict"></span></div>
         <ul id="violations"></ul>
-        <pre id="summary"></pre>
+        <p class="p-note" id="one-note"></p>
+        <details><summary>Everything the recipe says</summary><pre id="summary"></pre></details>
       </section>
     </main>
     <script type="module" src="app.js"></script>

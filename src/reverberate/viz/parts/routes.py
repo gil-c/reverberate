@@ -14,6 +14,8 @@ An application hands its :class:`~reverberate.viz.parts.media.Library` to
   meter.
 - ``GET  balance`` and ``POST balance``: the track list's faders; a POST
   saves them and answers with the version a player asks its frames under.
+  Where the application keeps the file for a button (``autosave=False``), a
+  POST only changes what is heard and ``POST balance/save`` writes it.
 - ``GET  blind``, ``POST blind/start``, ``POST blind/answer``,
   ``POST blind/stop``: a blind test, one at a time.
 """
@@ -23,7 +25,7 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +54,24 @@ class Media:
         results: Path,
         *,
         context: Mapping[str, Any] | None = None,
+        tracks: Sequence[Mapping[str, Any]] | None = None,
+        balance_path: Path | None = None,
+        autosave: bool = True,
+        saved_with: Callable[[Mapping[str, Mapping[str, Any]]], Mapping[str, Any]] | None = None,
     ) -> None:
         self.library = library
         #: Where a balance and the blind tests' results are written.
         self.results = Path(results)
         self.context = dict(context or {})
+        #: What the application knows of a source, ``id`` and any of ``label``, ``kind``,
+        #: ``colour``; a source it does not name is told by its name alone.
+        self.tracks = {str(row["id"]): dict(row) for row in tracks or ()}
+        self._balance_path = None if balance_path is None else Path(balance_path)
+        #: Whether every change of a fader is written at once; else ``balance/save`` writes.
+        self.autosave = bool(autosave)
+        #: What is added to the context of a balance when it is written, from the balance.
+        self.saved_with = saved_with
+        self._dirty = False
         self.blind: BlindTest | None = None
         self._lock = threading.Lock()
         self._sonograms: OrderedDict[str, Sonogram] = OrderedDict()
@@ -72,7 +87,7 @@ class Media:
 
     @property
     def balance_path(self) -> Path:
-        return self.results / "balance.json"
+        return self._balance_path or self.results / "balance.json"
 
     def mount(self, server: AppServer, prefix: str = "api") -> None:
         server.route("GET", f"{prefix}/items", lambda request: self.library.describe())
@@ -171,12 +186,14 @@ class Media:
             counts = {"voice": 0, "noise": 0}
             tracks = []
             for name in self.sources:
-                kind = kind_of(name)
+                known = self.tracks.get(name, {})
+                kind = str(known.get("kind") or kind_of(name))
                 tracks.append(
                     {
                         "id": name,
+                        "label": known.get("label") or name,
                         "kind": kind,
-                        "colour": colour_of(counts[kind], kind),
+                        "colour": known.get("colour") or colour_of(counts[kind], kind),
                         **self._balance[name],
                     }
                 )
@@ -186,9 +203,28 @@ class Media:
                 "tracks": tracks,
                 "fader_db": list(balances.FADER_DB),
                 "saved": str(self.balance_path) if self.balance_path.is_file() else None,
+                "file": str(self.balance_path),
+                "unsaved": self._dirty,
             }
 
+    def gains_now(self) -> dict[str, float]:
+        """The factor of each source under the balance as it stands."""
+        with self._lock:
+            return dict(self._versions[next(reversed(self._versions))])
+
+    def _write(self) -> None:
+        context = dict(self.context)
+        if self.saved_with is not None:
+            context.update(self.saved_with(self._balance))
+        balances.save(self.balance_path, self._balance, context)
+        self._dirty = False
+
     def set_balance(self, request: Request) -> dict[str, Any]:
+        if request.parts == ("save",):
+            self._write()
+            return self.balance()
+        if request.parts:
+            raise HttpError(404, f"a balance is not told {request.parts[0]!r}")
         cleaned = balances.clean(request.body, self.sources)
         with self._lock:
             self._balance = cleaned
@@ -196,7 +232,9 @@ class Media:
             self._versions[version] = balances.gains(cleaned)
             while len(self._versions) > 16:
                 self._versions.popitem(last=False)
-        balances.save(self.balance_path, cleaned, self.context)
+            self._dirty = True
+        if self.autosave:
+            self._write()
         return self.balance()
 
     # --- the blind test --------------------------------------------------------------------

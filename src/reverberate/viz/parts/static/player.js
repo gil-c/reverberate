@@ -16,7 +16,9 @@
  *
  * The head is the scene's own, when one is given (`setSceneHead`), turned by
  * what the listener adds (`turn`): with nothing added, order 7 is heard as
- * the kit's files of two ears hold it.
+ * the kit's files of two ears hold it. `setFollowing(false)` frees it: the
+ * head stays where it was and is the listener's alone, in the scene's frame,
+ * until it follows again.
  *
  *   const player = createPlayer();
  *   await player.load(items);         // rows of api/items, of one length
@@ -76,6 +78,7 @@ export function createPlayer({ api = "api", decoders = "decoders", worklet = "re
   let loopHead = null; // the loop's first chunk, kept so that a turn of the loop does not wait
   let levelDb = 0;
   let sceneHead = null;
+  let following = true;
   let turned = { yaw: 0, pitch: 0 };
   let lastHead = [NaN, NaN, NaN];
   let failure = "";
@@ -140,7 +143,7 @@ export function createPlayer({ api = "api", decoders = "decoders", worklet = "re
 
   /** The head now: the scene's at this instant, turned by what the listener added. */
   function pose() {
-    const scene = headAt(sceneHead, time());
+    const scene = following ? headAt(sceneHead, time()) : { yaw: 0, pitch: 0, roll: 0 };
     return { yaw: scene.yaw + turned.yaw, pitch: Math.max(-89, Math.min(89, scene.pitch + turned.pitch)), roll: scene.roll };
   }
 
@@ -266,6 +269,7 @@ export function createPlayer({ api = "api", decoders = "decoders", worklet = "re
     levelDb,
     kind: item ? item.kind : null,
     turned: { ...turned },
+    following,
     head: decoder ? decoder.head : null,
     failure,
   });
@@ -382,6 +386,17 @@ export function createPlayer({ api = "api", decoders = "decoders", worklet = "re
     setSceneHead(track) {
       sceneHead = track;
       turnHead();
+    },
+    /** Whether the head is the scene's own. Freed, it stays where it was; followed again, nothing is added. */
+    setFollowing(on) {
+      if (Boolean(on) === following) return;
+      const now = pose();
+      following = Boolean(on);
+      turned = following ? { yaw: 0, pitch: 0 } : { yaw: ((((now.yaw + 180) % 360) + 360) % 360) - 180, pitch: Math.max(-80, Math.min(80, now.pitch)) };
+      lastHead = [NaN, NaN, NaN];
+      turnHead();
+      emit("head", { ...turned });
+      emit("state", state());
     },
     /** What the listener adds to the scene's head, degrees; `yaw` is to his left. */
     turn({ yaw = turned.yaw, pitch = turned.pitch } = {}) {

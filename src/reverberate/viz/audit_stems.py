@@ -417,8 +417,15 @@ def _rss_bytes() -> int:
     return int(peak if os.uname().sysname == "Darwin" else peak * 1024)
 
 
-def _worker(connection: Any) -> None:
-    """A worker process: chunks in, their descriptions out, until told to stop."""
+def _worker(connection: Any, nice: int = 0) -> None:
+    """A worker process: chunks in, their descriptions out, until told to stop.
+
+    ``nice`` is added to the process's niceness before anything is rendered,
+    so that a render yields to whatever else the machine does.
+    """
+    if nice > 0:
+        with contextlib.suppress(OSError):
+            os.nice(nice)
     engines = _Engines()
     while True:
         try:
@@ -463,6 +470,8 @@ class Session:
         self.cursor = 0
         self.audible: list[str] = list(self.order)
         self.background = True
+        #: Chunks ahead of the cursor rendered before anything else.
+        self.window_chunks = WINDOW_CHUNKS
         # Asleep until somebody says where the listener is: nothing is rendered unasked.
         self.touched = float("-inf")
 
@@ -486,7 +495,7 @@ class Session:
     def pick(self, built: Iterable[str] = ()) -> tuple[str, int] | None:
         """The chunk to render next: see the module for the order."""
         cursor = min(max(self.cursor, 0), self.chunks - 1)
-        window = min(self.chunks, cursor + WINDOW_CHUNKS)
+        window = min(self.chunks, cursor + self.window_chunks)
         heard = [s for s in self.order if s in self.audible]
         others = [s for s in self.order if s not in self.audible]
         known = set(built)
@@ -555,8 +564,14 @@ class StemService:
         workers: int | None = None,
         processes: bool = True,
         dry: DrySources | None = None,
+        nice: int = 0,
+        window_chunks: int = WINDOW_CHUNKS,
     ) -> None:
         self.cache_root = Path(cache_root)
+        #: Added to the niceness of every worker process; 0 leaves them as the server is.
+        self.nice = int(nice)
+        #: How far ahead of the cursor a session is rendered before anything else, chunks.
+        self.window_chunks = int(window_chunks)
         self.dry = dry or DrySources()
         count = workers if workers is not None else min(DEFAULT_WORKERS, (os.cpu_count() or 2) - 1)
         self.workers = max(1, count)
@@ -633,6 +648,7 @@ class StemService:
                 stems[source_id] = self._stems[folder]
             session = Session(pack_path, digest, pack, settings, self.dry, stems, plans)
             session.processes = self.processes
+            session.window_chunks = self.window_chunks
             self._sessions[name] = session
             self._start()
             self._lock.notify_all()
@@ -722,7 +738,7 @@ class StemService:
         def spawn() -> tuple[Any, Any]:
             context = multiprocessing.get_context("spawn")
             near, far = context.Pipe()
-            made = context.Process(target=_worker, args=(far,), daemon=True)
+            made = context.Process(target=_worker, args=(far, self.nice), daemon=True)
             made.start()
             far.close()
             built.clear()
