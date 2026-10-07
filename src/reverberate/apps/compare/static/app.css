@@ -12,3 +12,5 @@ th, td { text-align: right; padding: 3px 10px; border-bottom: 1px solid var(--li
 th:first-child, td:first-child { text-align: left; }
 th { color: var(--soft); font-weight: 600; }
 .rank-order { min-height: 2.4em; }
+#blind-setup, #blind-run { margin-top: 14px; }
+#blind-result table { margin-bottom: 10px; }

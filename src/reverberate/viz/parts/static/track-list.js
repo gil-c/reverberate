@@ -35,7 +35,10 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
   const body = () => ({ sources: Object.fromEntries(tracks.map((t) => [t.id, { gain_db: t.gain_db, mute: t.mute, solo: t.solo }])) });
 
   function took(answer) {
-    tracks = answer.tracks;
+    // The rows hold their track, and a fader may have moved again since this was asked: a
+    // track the list has already is kept as it stands here.
+    const known = Object.fromEntries(tracks.map((track) => [track.id, track]));
+    tracks = answer.tracks.map((track) => known[track.id] || track);
     saved = answer.saved;
     onBalance(answer.version);
     listeners.forEach((fn) => fn(tracks));
@@ -93,7 +96,9 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
       const fader = el("input", { type: "range", min: "-60", max: "12", step: "1", class: "p-fader", title: "Volume, dB; at the bottom the source is silent" });
       const said = el("span", { class: "p-said" });
       const meter = el("i", { class: "p-meter" });
-      const line = el("div", { class: "p-track" }, chip, el("span", { class: "p-name", text: track.id }), solo, mute, fader, said, el("span", { class: "p-meter-box" }, meter));
+      const lane = el("canvas", { class: "p-lane", width: "1000", height: "24" });
+      const cursor = el("i", { class: "p-cursor" });
+      const line = el("div", { class: "p-track" }, chip, el("span", { class: "p-name", text: track.id }), solo, mute, fader, said, el("span", { class: "p-meter-box" }, meter), el("span", { class: "p-lane-box" }, lane, cursor));
       solo.addEventListener("click", () => {
         track.solo = !track.solo;
         show();
@@ -114,7 +119,7 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
         show();
         send();
       });
-      rows[track.id] = { line, solo, mute, fader, said, meter };
+      rows[track.id] = { line, solo, mute, fader, said, meter, lane, cursor };
       list.append(line);
     }
     show();
@@ -140,8 +145,28 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
       if (track.mute || (soloed && !track.solo) || track.gain_db <= -60) return 0;
       return 10 ** (track.gain_db / 20);
     },
+    /** The answer of `api/levels`: the meters follow it, and each track's lane is drawn from it. */
     setLevels(answer) {
       levels = answer;
+      element.classList.add("with-lanes");
+      for (const track of tracks) {
+        const values = levels.stems[track.id];
+        const row = rows[track.id];
+        if (!values || !row) continue;
+        const context = row.lane.getContext("2d");
+        const { width, height } = row.lane;
+        context.clearRect(0, 0, width, height);
+        context.fillStyle = track.colour;
+        for (let x = 0; x < width; x++) {
+          const from = Math.floor((x * values.length) / width);
+          const to = Math.max(from + 1, Math.floor(((x + 1) * values.length) / width));
+          let top = -160;
+          for (let k = from; k < to; k++) top = Math.max(top, values[k]);
+          // The meter's own scale: silent at -80 dB, full at -20.
+          const tall = Math.max(0, Math.min(1, (top + 80) / 60)) * height;
+          if (tall > 0) context.fillRect(x, height - tall, 1, tall);
+        }
+      }
     },
     /** Move the meters to `seconds`: each source's level there, under its fader. */
     setTime(seconds) {
@@ -153,6 +178,7 @@ export function createTrackList(element, { api = "api", onBalance = () => {} } =
         if (!values || !row) continue;
         const db = values[Math.min(at, values.length - 1)] + 20 * Math.log10(Math.max(this.gainOf(track.id), 1e-6));
         row.meter.style.width = `${Math.max(0, Math.min(100, ((db + 80) / 60) * 100))}%`;
+        row.cursor.style.left = `${Math.min(100, (100 * seconds) / (values.length * levels.hop_s))}%`;
       }
     },
   };

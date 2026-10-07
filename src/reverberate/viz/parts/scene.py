@@ -15,6 +15,7 @@ from above.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -30,11 +31,17 @@ def _rounded(values: np.ndarray, digits: int = 3) -> list[Any]:
 
 
 def scene_view(
-    pack: ScenePack, window_s: tuple[float, float] | None = None, *, every: int = 2
+    pack: ScenePack,
+    window_s: tuple[float, float] | None = None,
+    *,
+    every: int = 2,
+    only: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """The floor, the listener and the sources of ``pack`` over ``window_s``, a value in ``every``.
 
     Times in the answer run from the window's start, as a player's do.
+    ``only`` names the sources drawn, in the order a track list holds them,
+    so that a source has one colour in both.
     """
     h = pack.header
     last = h.steps - 1
@@ -51,7 +58,8 @@ def scene_view(
         seen.setdefault((round(float(place[0]), 3), round(float(place[2]), 3)), rooms.index(room))
     counts = {"voice": 0, "noise": 0}
     sources = []
-    for name, source in pack.sources.items():
+    for name in list(pack.sources) if only is None else [n for n in only if n in pack.sources]:
+        source = pack.sources[name]
         kind = "noise" if source.kind == "noise" else "voice"
         sources.append(
             {

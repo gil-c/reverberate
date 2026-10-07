@@ -340,6 +340,15 @@ function showResult() {
     }
     box.append(table, el("p", { text: result.answered ? `The probability that some variant comes first this often when the order is chance: ${percent(result.chance)}.` : "No trial was answered." }));
   }
+  if (blind.trials_done && blind.trials_done.length) {
+    const abx = blind.kind === "abx";
+    const told = el("table", {}, el("tr", {}, ...(abx ? ["Trial", "X was", "you said", ""] : ["Trial", "your order, the preferred first"]).map((text) => el("th", { text }))));
+    for (const trial of blind.trials_done) {
+      const cells = abx ? [trial.x, trial.answer, trial.right ? "right" : "wrong"] : [trial.ranking.join(", ")];
+      told.append(el("tr", {}, el("td", { text: `${trial.trial}` }), ...cells.map((text) => el("td", { text }))));
+    }
+    box.append(told);
+  }
   if (blind.answered < blind.trials) box.append(el("p", { class: "p-note", text: `Stopped after ${blind.answered} of ${blind.trials} trials.` }));
   if (blind.saved) box.append(el("p", { class: "p-note", text: `Written in ${blind.saved}` }));
   const again = el("button", { type: "button", class: "p-button", text: "Another test" });

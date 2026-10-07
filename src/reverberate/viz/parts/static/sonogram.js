@@ -17,7 +17,7 @@
 import { attachRegion } from "./transport.js";
 
 //: The scale of a level, dB re full scale at the page's level: from black to the brightest.
-export const LEVEL_DB = [-110, -40];
+export const LEVEL_DB = [-110, -30];
 //: The scale of a difference, dB: blue where the item is under the other, red where over.
 export const DIFFERENCE_DB = 12;
 

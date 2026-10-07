@@ -391,6 +391,8 @@ export function createPlayer({ api = "api", decoders = "decoders", worklet = "re
     },
     /** What the audio thread last made: its block's peak at the level heard, dB re full scale. */
     heard: () => ({ peakDb: 20 * Math.log10(Math.max(peak * (item ? gainOf(levelDb + item.level_db) : 1), 1e-9)), starved }),
+    /** The node the two ears leave by, once something has played: for a meter or a recorder. */
+    output: () => gain,
     time,
     state,
     pose,

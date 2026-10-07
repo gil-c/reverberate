@@ -9,7 +9,7 @@ from pathlib import Path
 
 from reverberate.apps.compare import build
 
-PORT = 8770
+PORT = 8780
 
 
 def main(argv: list[str] | None = None) -> int:

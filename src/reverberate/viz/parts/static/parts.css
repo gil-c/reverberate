@@ -13,6 +13,7 @@
   color: var(--ink);
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--ground); }
 main.p-page { max-width: 1080px; margin: 0 auto; padding: 20px 20px 48px; display: grid; gap: 14px; }
 .p-page h1 { font-size: 18px; margin: 0; }
@@ -71,7 +72,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .p-sono-legend canvas { width: 180px; height: 10px; border-radius: 3px; }
 
 /* Numbers a third octave. */
-.p-bands { width: 100%; height: auto; display: block; }
+.p-bands { width: 100%; max-width: 760px; height: auto; display: block; }
 .p-bands .p-grid { stroke: var(--line); stroke-width: 1; }
 .p-bands .p-zero { stroke: var(--soft); stroke-width: 1; }
 .p-bands .p-mark { stroke: var(--soft); stroke-width: 1; stroke-dasharray: 4 3; }
@@ -90,6 +91,10 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .p-fader { width: 100%; }
 .p-meter-box { height: 8px; background: var(--ground); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .p-meter { display: block; height: 100%; width: 0; background: var(--good); }
+.p-lane-box { display: none; position: relative; grid-column: 2 / -1; height: 24px; background: var(--ground); border-radius: 4px; overflow: hidden; }
+.with-lanes .p-lane-box { display: block; }
+.with-lanes .p-track { margin-bottom: 6px; }
+.p-lane { width: 100%; height: 100%; display: block; }
 
 /* The scene. */
 .p-scene { position: relative; width: 100%; height: 420px; border-radius: 8px; overflow: hidden; }

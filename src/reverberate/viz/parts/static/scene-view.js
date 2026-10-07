@@ -136,10 +136,15 @@ export function createSceneView(element, scene, { gainOf = () => 1 } = {}) {
     return { source, ...made, halo, name, lit: 0 };
   });
 
+  // The camera frames where the listener and the sources are over the window, not the storey.
+  const action = new THREE.Box3();
+  for (const track of [scene.listener, ...scene.sources]) {
+    for (const place of track.position) action.expandByPoint(new THREE.Vector3(...place));
+  }
   const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
-  const centre = box.getCenter(new THREE.Vector3());
-  const reach = Math.max(box.getSize(new THREE.Vector3()).length(), 4);
-  camera.position.set(centre.x + reach * 0.15, floorY + reach * 0.8, centre.z + reach * 0.75);
+  const centre = (action.isEmpty() ? box : action).getCenter(new THREE.Vector3());
+  const reach = Math.max((action.isEmpty() ? box : action).getSize(new THREE.Vector3()).length(), 5);
+  camera.position.set(centre.x + reach * 0.1, floorY + reach * 0.75, centre.z + reach * 0.7);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.copy(centre);
   controls.maxPolarAngle = Math.PI / 2 - 0.05;
@@ -147,12 +152,13 @@ export function createSceneView(element, scene, { gainOf = () => 1 } = {}) {
 
   let levels = null;
   let seconds = 0;
+  let turned = 0;
 
   function place() {
     const u = seconds / scene.step_s;
     const here = at(scene.listener.position, u);
     listener.group.position.set(...here);
-    listener.group.rotation.y = at(scene.listener.yaw_deg, u) * RAD;
+    listener.group.rotation.y = (at(scene.listener.yaw_deg, u) + turned) * RAD;
     ring.position.set(here[0], floorY + 0.01, here[2]);
     you.position.set(here[0], here[1] + 0.45, here[2]);
     for (const entry of sources) {
@@ -202,6 +208,10 @@ export function createSceneView(element, scene, { gainOf = () => 1 } = {}) {
     },
     setLevels(answer) {
       levels = answer;
+    },
+    /** What the listener adds to the scene's head, degrees to his left: his head is drawn turned. */
+    setTurn(degrees) {
+      turned = degrees;
     },
     /** How lit each source is now, 0 to 1: what the picture shows, for a test or a legend. */
     lights: () => Object.fromEntries(sources.map((entry) => [entry.source.id, entry.lit])),

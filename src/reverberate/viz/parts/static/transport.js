@@ -34,7 +34,7 @@ export function createTransport(element, player, { keys = true } = {}) {
   const region = el("div", { class: "p-region" });
   const cursor = el("div", { class: "p-cursor" });
   const bar = el("div", { class: "p-bar", title: "Click to move; drag to set the loop's region; double click to clear it" }, region, cursor);
-  const level = el("input", { type: "range", min: "-30", max: "20", step: "1", value: "0", class: "p-level", title: "Level, dB over the default" });
+  const level = el("input", { type: "range", min: "-30", max: "30", step: "1", value: "0", class: "p-level", title: "Level, dB over the default" });
   const levelSaid = el("span", { class: "p-said" });
   const clip = el("span", { class: "p-clip" });
   const dial = el("div", { class: "p-dial", title: "Drag to turn your head; arrow keys; 0 centres it", tabindex: "0" });

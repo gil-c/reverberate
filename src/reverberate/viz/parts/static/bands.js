@@ -38,7 +38,7 @@ export function drawBands(element, { bandsHz, series, rangeDb = 12, markHz = nul
     svg.append(make("text", { x: x(f), y: height - bottom + 14, "text-anchor": "middle", class: "p-tick" }, f >= 1000 ? `${f / 1000} k` : `${f}`));
   }
   svg.append(make("text", { x: width - right, y: height - 2, "text-anchor": "end", class: "p-tick" }, "Hz, by third octave"));
-  svg.append(make("text", { x: 4, y: top + 4, class: "p-tick" }, unit));
+  svg.append(make("text", { x: 4, y: height - 2, class: "p-tick" }, unit));
   if (markHz) {
     svg.append(make("line", { x1: x(markHz), x2: x(markHz), y1: top, y2: height - bottom, class: "p-mark" }));
   }

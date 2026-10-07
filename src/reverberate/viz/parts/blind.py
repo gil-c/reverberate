@@ -127,6 +127,7 @@ class BlindTest:
         }
         if self.finished:
             told["result"] = self.result()
+            told["trials_done"] = self.done
             told["saved"] = None if self.saved is None else str(self.saved)
         return told
 
