@@ -53,6 +53,7 @@ from reverberate.scenes.kinematics import (
     source_state,
 )
 from reverberate.scenes.layout import (
+    Fixture,
     Floor,
     Layout,
     LayoutSettings,
@@ -72,15 +73,23 @@ from reverberate.scenes.recipe import (
     recipe_sha256,
     save_recipe,
 )
+from reverberate.scenes.social import (
+    SOCIAL_GENERATOR_VERSION,
+    SocialParameters,
+    generate_social,
+    placeholder_social_clips,
+)
 from reverberate.scenes.validate import Violation, check, validate, validate_text
 
 __all__ = [
     "AUDIBLE_TAIL_S",
     "GENERATOR_NAME",
     "GENERATOR_VERSION",
+    "SOCIAL_GENERATOR_VERSION",
     "YAW_STEP_S",
     "ClipEntry",
     "ClipLibrary",
+    "Fixture",
     "Floor",
     "GenerationError",
     "Layout",
@@ -92,6 +101,7 @@ __all__ = [
     "Room",
     "SeatObject",
     "LowBandPositions",
+    "SocialParameters",
     "SourceState",
     "Violation",
     "audible_steps",
@@ -100,6 +110,7 @@ __all__ = [
     "check",
     "describe",
     "generate",
+    "generate_social",
     "listener_state",
     "load_clip_library",
     "load_hssd_floor",
@@ -110,6 +121,7 @@ __all__ = [
     "parse_recipe",
     "placeholder_assets",
     "placeholder_clips",
+    "placeholder_social_clips",
     "quantise",
     "rail_arc_lengths",
     "rail_length",

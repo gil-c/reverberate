@@ -10,6 +10,21 @@ no faster than the rate. That is a recurrence, and a recurrence needs a step
 to be the same number for two readers. The step is :data:`YAW_STEP_S`, the
 pack's 50 ms: the yaw is advanced on that grid from the scene's start and is
 linear between two grid instants. It is not wrapped, like the listener's.
+
+**Version 2: ``position`` is where the low band is read, and ``sway_m`` is
+what the mirror adds.** Somebody at rest is never still, and a sway of a few
+centimetres must not cost a wave solve. So a state keeps two things apart:
+``position``, the station, the rail or the keyframes, which is what the band
+under the crossover is solved at and read from, exactly as in version 1; and
+``sway_m``, the small movement about it (:class:`~.recipe.Sway`), which only
+the band above the crossover follows. ``mouth`` and ``head`` are their sum,
+where the body really is. A source's yaw carries its own sway: a rotation
+is applied at render and is free in every band.
+
+**A carried source has no segments.** Its state is its carrier's
+(:class:`~.recipe.Attach`): at the mouth, the same position, and so the same
+solves; at the floor, the footfall nearest under the carrier, a place that
+does not move while it sounds.
 """
 
 from __future__ import annotations
@@ -20,15 +35,17 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import ArrayLike
 
-from reverberate.scenes.recipe import Dwell, Rail, Recipe, Rise, Source
+from reverberate.scenes.recipe import LISTENER, Dwell, Rail, Recipe, Rise, Source, Sway
 
 __all__ = [
     "AUDIBLE_TAIL_S",
+    "FLOOR_SOURCE_HEIGHT_M",
     "YAW_STEP_S",
     "ListenerState",
     "LowBandPositions",
     "SourceState",
     "audible_steps",
+    "footfall_arcs",
     "listener_state",
     "low_band_source_positions",
     "polyline_length",
@@ -38,6 +55,7 @@ __all__ = [
     "sample_times",
     "seat_rail_heights",
     "source_state",
+    "sway_offset",
     "yaw_of_direction",
 ]
 
@@ -48,6 +66,9 @@ YAW_STEP_S = 0.05
 #: A source stays audible this long after an activity interval ends: the
 #: length of a low band response, the pack's ``low_samples / low_sample_rate_hz``.
 AUDIBLE_TAIL_S = 1.2
+
+#: A source carried at the floor, a footstep, is this far above it.
+FLOOR_SOURCE_HEIGHT_M = 0.05
 
 #: A last sample closer than this to ``b`` is ``b``; a micrometre.
 _SAME_M = 1e-6
@@ -132,6 +153,26 @@ def sample_times(recipe: Recipe, step_s: float = YAW_STEP_S) -> np.ndarray:
     return times
 
 
+def footfall_arcs(length: float, stride_m: float) -> np.ndarray:
+    """Arc lengths of the footfalls along a way of this length: every stride, and its end."""
+    return _arc_lengths(float(length), float(stride_m)) if length > _SAME_M else np.zeros(1)
+
+
+def sway_offset(sway: tuple[Sway, ...] | None, times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The sum of a sway's sinusoids at ``times``: metres ``[time, 3]`` and degrees of yaw."""
+    offset = np.zeros((times.size, 3))
+    yaw = np.zeros(times.size)
+    for part in sway or ():
+        wave = part.amplitude * np.sin(
+            2.0 * np.pi * times / part.period_s + np.radians(part.phase_deg)
+        )
+        if part.axis == "yaw":
+            yaw += wave
+        else:
+            offset[:, "xyz".index(part.axis)] += wave
+    return offset, yaw
+
+
 # --------------------------------------------------------------------------
 # the listener
 # --------------------------------------------------------------------------
@@ -150,6 +191,13 @@ class ListenerState:
     height_m: np.ndarray
     #: Index of the keyframe at or before each time (the last interval for the end).
     keyframe: np.ndarray
+    #: ``[time, 3]``: the head's small movement about ``position``; zero in version 1.
+    sway_m: np.ndarray | None = None
+
+    @property
+    def head(self) -> np.ndarray:
+        """Where the head is: what the band above the crossover hears from."""
+        return self.position if self.sway_m is None else self.position + self.sway_m
 
 
 def listener_state(recipe: Recipe, t: ArrayLike) -> ListenerState:
@@ -168,6 +216,7 @@ def listener_state(recipe: Recipe, t: ArrayLike) -> ListenerState:
         roll_deg=np.interp(times, knots, [frame.roll_deg for frame in frames]),
         height_m=position[:, 1] - recipe.dwelling.floor_y_m,
         keyframe=index,
+        sway_m=sway_offset(recipe.listener.sway, times)[0],
     )
 
 
@@ -198,6 +247,13 @@ class SourceState:
     sample_a: np.ndarray
     sample_b: np.ndarray
     weight: np.ndarray
+    #: ``[time, 3]``: the small movement about ``position``; zero in version 1.
+    sway_m: np.ndarray | None = None
+
+    @property
+    def mouth(self) -> np.ndarray:
+        """Where the source is: what the band above the crossover is traced from."""
+        return self.position if self.sway_m is None else self.position + self.sway_m
 
 
 def _ease(profile: str, tau: np.ndarray) -> np.ndarray:
@@ -243,9 +299,12 @@ def _place(
         moment = times[here]
         tangent: np.ndarray | None = None
         if isinstance(segment, Dwell):
-            x, z = recipe.station(segment.station).xz
+            station = recipe.station(segment.station)
+            x, z = station.xz
             xz = np.tile([x, z], (moment.size, 1))
-            height = np.full(moment.size, heights.of(segment.height))
+            # A fixture keeps the height it was put at.
+            rest = station.position[1] - floor if segment.height == "fixed" else None
+            height = np.full(moment.size, heights.of(segment.height) if rest is None else rest)
         elif isinstance(segment, Rise):
             x, z = recipe.station(segment.station).xz
             xz = np.tile([x, z], (moment.size, 1))
@@ -342,17 +401,137 @@ def source_state(recipe: Recipe, source_id: str, t: ArrayLike) -> SourceState:
     """Where the source's mouth is at ``t``, which way it faces, and between which samples."""
     source = recipe.source(source_id)
     times = np.atleast_1d(np.asarray(t, dtype=float))
+    if source.attach is not None:
+        return _carried(recipe, source, times)
     position, _, index, sample_a, sample_b, weight = _place(recipe, source, times, None)
     tracks = _tracks(recipe)
+    sway, turn = sway_offset(source.sway, times)
     return SourceState(
         t=times,
         position=position,
-        yaw_deg=np.interp(times, tracks.grid, tracks.yaw(source)),
+        yaw_deg=np.interp(times, tracks.grid, tracks.yaw(source)) + turn,
         height_m=position[:, 1] - recipe.dwelling.floor_y_m,
         segment=index,
         sample_a=sample_a,
         sample_b=sample_b,
         weight=weight,
+        sway_m=sway,
+    )
+
+
+def _head_axes(yaw_deg: np.ndarray, pitch_deg: np.ndarray, roll_deg: np.ndarray) -> np.ndarray:
+    """The head's front, left and up in the scene's frame: ``[time, 3 axes, 3]``.
+
+    The format's convention: yaw about the up axis, 0 facing ``+x`` and +90
+    facing ``-z``; then pitch about the head's own left axis, positive
+    looking up; then roll about its own front axis, positive lowering the
+    right ear.
+    """
+    yaw, pitch, roll = np.radians(yaw_deg), np.radians(pitch_deg), np.radians(roll_deg)
+    zero = np.zeros_like(yaw)
+    ahead = np.stack([np.cos(yaw), zero, 0.0 - np.sin(yaw)], axis=1)
+    side = np.stack([0.0 - np.sin(yaw), zero, 0.0 - np.cos(yaw)], axis=1)
+    up = np.tile([0.0, 1.0, 0.0], (yaw.size, 1))
+    front = ahead * np.cos(pitch)[:, None] + up * np.sin(pitch)[:, None]
+    over = up * np.cos(pitch)[:, None] - ahead * np.sin(pitch)[:, None]
+    left = side * np.cos(roll)[:, None] + over * np.sin(roll)[:, None]
+    top = over * np.cos(roll)[:, None] - side * np.sin(roll)[:, None]
+    return np.stack([front, left, top], axis=1)
+
+
+def _listener_way(recipe: Recipe) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The listener's keyframes on the plan: their times, ``(x, z)`` and the length walked."""
+    frames = recipe.listener.keyframes
+    knots = np.array([frame.t_s for frame in frames])
+    flat = np.array([[frame.position[0], frame.position[2]] for frame in frames], dtype=float)
+    return knots, flat, _cumulative(flat)
+
+
+def _footfalls(recipe: Recipe, source: Source, times: np.ndarray) -> np.ndarray:
+    """Where a source carried at the floor is: ``[time, 3]``."""
+    attach = source.attach
+    assert attach is not None and attach.stride_m is not None
+    y = recipe.dwelling.floor_y_m + FLOOR_SOURCE_HEIGHT_M
+    stride = attach.stride_m
+    if attach.to == LISTENER:
+        knots, flat, walked = _listener_way(recipe)
+        falls = footfall_arcs(float(walked[-1]), stride)
+        arc = np.interp(times, knots, walked)
+        nearest = falls[np.argmin(np.abs(falls[None, :] - arc[:, None]), axis=1)]
+        xz = np.stack([np.interp(nearest, walked, flat[:, axis]) for axis in range(2)], axis=1)
+        return np.stack([xz[:, 0], np.full(times.size, y), xz[:, 1]], axis=1)
+    carrier = recipe.source(attach.to)
+    position, _, index, *_ = _place(recipe, carrier, times, None)
+    position = position.copy()
+    position[:, 1] = y
+    for number, segment in enumerate(carrier.segments):
+        here = index == number
+        if not here.any() or isinstance(segment, Dwell | Rise):
+            continue
+        rail = recipe.rail(segment.rail)
+        points = np.asarray(rail.points, dtype=float)
+        length = polyline_length(points)
+        eased = _ease(segment.profile, _progress(segment.start_s, segment.end_s, times[here]))
+        arc = length * (eased if segment.origin == rail.a else 1.0 - eased)
+        falls = footfall_arcs(length, stride)
+        nearest = falls[np.argmin(np.abs(falls[None, :] - arc[:, None]), axis=1)]
+        xz = _along(points, nearest)
+        position[here, 0], position[here, 2] = xz[:, 0], xz[:, 1]
+    return position
+
+
+def _carried(recipe: Recipe, source: Source, times: np.ndarray) -> SourceState:
+    """The state of a source that is carried, by the listener or by another source."""
+    attach = source.attach
+    assert attach is not None
+    none = np.full(times.size, -1, dtype=np.int64)
+    still = np.zeros((times.size, 3))
+    floor = recipe.dwelling.floor_y_m
+    if attach.to == LISTENER:
+        head = listener_state(recipe, times)
+        if attach.at == "floor":
+            position = _footfalls(recipe, source, times)
+            sway = still
+        else:
+            axes = _head_axes(head.yaw_deg, head.pitch_deg, head.roll_deg)
+            offset = np.asarray(attach.offset_m or (0.0, 0.0, 0.0), dtype=float)
+            position = head.position + np.einsum("a,tak->tk", offset, axes)
+            sway = head.sway_m if head.sway_m is not None else still
+        return SourceState(
+            t=times,
+            position=position,
+            yaw_deg=head.yaw_deg + attach.yaw_offset_deg,
+            height_m=position[:, 1] - floor,
+            segment=np.zeros(times.size, dtype=np.int64),
+            sample_a=none,
+            sample_b=none,
+            weight=np.zeros(times.size),
+            sway_m=sway,
+        )
+    carrier = source_state(recipe, attach.to, times)
+    if attach.at == "floor":
+        position = _footfalls(recipe, source, times)
+        return SourceState(
+            t=times,
+            position=position,
+            yaw_deg=carrier.yaw_deg + attach.yaw_offset_deg,
+            height_m=position[:, 1] - floor,
+            segment=carrier.segment,
+            sample_a=none,
+            sample_b=none,
+            weight=np.zeros(times.size),
+            sway_m=still,
+        )
+    return SourceState(
+        t=times,
+        position=carrier.position,
+        yaw_deg=carrier.yaw_deg + attach.yaw_offset_deg,
+        height_m=carrier.height_m,
+        segment=carrier.segment,
+        sample_a=carrier.sample_a,
+        sample_b=carrier.sample_b,
+        weight=carrier.weight,
+        sway_m=carrier.sway_m,
     )
 
 
@@ -383,8 +562,8 @@ class LowBandPositions:
 
     #: ``[position, 3]`` in metres, scene frame, on whole millimetres.
     positions: np.ndarray
-    #: Per position: ``"station"``, ``"rail"`` or ``"seat_rail"``. An end a rail
-    #: shares with a station is the rail's.
+    #: Per position: ``"station"``, ``"rail"``, ``"seat_rail"`` or, in version 2,
+    #: ``"floor"``, a footfall. An end a rail shares with a station is the rail's.
     kind: tuple[str, ...]
     #: The rows each source reads, sorted.
     by_source: dict[str, tuple[int, ...]]
@@ -398,10 +577,11 @@ class LowBandPositions:
             "stations": self.kind.count("station"),
             "rail_samples": self.kind.count("rail"),
             "seat_rail_samples": self.kind.count("seat_rail"),
+            **({"footfalls": self.kind.count("floor")} if "floor" in self.kind else {}),
         }
 
 
-_KIND_RANK = {"rail": 0, "seat_rail": 1, "station": 2}
+_KIND_RANK = {"rail": 0, "seat_rail": 1, "station": 2, "floor": 3}
 
 
 def low_band_source_positions(
@@ -424,6 +604,14 @@ def low_band_source_positions(
 
     Positions are told apart to the millimetre, so a rail's end and the
     standing station it starts from are one solve.
+
+    Version 2. A sway moves nothing here: a source is read where it is
+    without it. A source carried at another's mouth reads its carrier's
+    positions, at the steps where it is itself audible, so a breath costs no
+    solve its talker's voice has not paid. One carried at the floor reads
+    its footfalls. One carried at the listener's mouth, the wearer's own
+    voice, reads none: no wave solve answers a source inside the array that
+    hears it (``docs/open-questions/recipes-v2.md``).
     """
     floor = recipe.dwelling.floor_y_m
     standing = floor + recipe.heights.standing_m
@@ -451,15 +639,27 @@ def low_band_source_positions(
 
     for source in recipe.sources:
         mine = by_source.setdefault(source.id, set())
+        mover = source
+        if source.attach is not None:
+            if source.attach.at == "floor":
+                times = sample_times(recipe, step_s)
+                if audible_only:
+                    times = times[audible_steps(recipe, source.id, step_s=step_s, tail_s=tail_s)]
+                if times.size:
+                    add(mine, _footfalls(recipe, source, times), "floor")
+                continue
+            if source.attach.to == LISTENER:
+                continue
+            mover = recipe.source(source.attach.to)
         if audible_only:
             times = sample_times(recipe, step_s)
             heard = audible_steps(recipe, source.id, step_s=step_s, tail_s=tail_s)
             if not heard.any():
                 continue
             position, _, index, sample_a, sample_b, weight = _place(
-                recipe, source, times[heard], None
+                recipe, mover, times[heard], None
             )
-        for number, segment in enumerate(source.segments):
+        for number, segment in enumerate(mover.segments):
             if audible_only:
                 here = index == number
                 if not here.any():
@@ -471,8 +671,11 @@ def low_band_source_positions(
                     )
                 )
             if isinstance(segment, Dwell):
-                x, z = recipe.station(segment.station).xz
-                add(mine, np.array([x, floor + recipe.heights.of(segment.height), z]), "station")
+                station = recipe.station(segment.station)
+                x, z = station.xz
+                fixed = segment.height == "fixed"
+                y = station.position[1] if fixed else floor + recipe.heights.of(segment.height)
+                add(mine, np.array([x, y, z]), "station")
             elif isinstance(segment, Rise):
                 x, z = recipe.station(segment.station).xz
                 heights = rungs[chosen] if audible_only else rungs
