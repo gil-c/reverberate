@@ -1506,11 +1506,14 @@ def mix_of(
     hi: int,
     settings: CheckSettings,
     decoder: BinauralDecoder | None,
+    keep: Callable[[str, int, np.ndarray], None] | None = None,
 ) -> tuple[list[Result], dict[str, Any]]:
     """The recipe's clips through the engine: levels, the two ears, silence, the edges.
 
     Returns the results and, for the files and the plots, each source's
-    omnidirectional channel and two ears and those of the mix.
+    omnidirectional channel and two ears and those of the mix. ``keep`` is
+    handed every piece of every stem as it is rendered, order 7: the
+    source, the piece's first sample from ``lo``, ``[channel, sample]``.
     """
     h = pack.header
     rate = h.sample_rate_hz
@@ -1530,6 +1533,8 @@ def mix_of(
         for a in range(lo, hi, piece):
             b = min(a + piece, hi)
             stem = engine.stem(source.id, a, b)
+            if keep is not None:
+                keep(source.id, a - lo, stem)
             if np.any(stem) or np.any(before):
                 omni[source.id][a - lo : b - lo] = stem[0]
                 if page is not None:
