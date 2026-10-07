@@ -10,7 +10,7 @@ The owner listened to the first scene and found five things. In short:
 
 | found | answer | where |
 | --- | --- | --- |
-| the noise tracks hold voices, which dominate them | SECTION2SUMMARY | 2 |
+| the noise tracks hold voices, which dominate them | **yes, and it is the television**: 10 of the 30.6 minutes of noise are EARS monologues, one clear talker at a talker's level; beside it, passers-by in the street clip. Three detectors find such passages (2.5 % of speech missed at +5 dB, 20.5 % at -15 dB); the screen removes them or routes the clip. A sample of the bucket's noises holds speech in 0 to 95 % of its time, by dataset | 2 |
 | is the speech spontaneous or read? | **read**: all nine voices are VCTK, newspaper sentences read in a hemi-anechoic chamber. The only free speech of the scene is its television, five EARS monologues | 1.3 |
 | vocal effort: louder in noise, quiet and whispered in quiet | the bucket holds loud and whispered speech of 107 talkers (EARS, 11.5 h, anechoic, non commercial); it holds no Lombard speech and no soft speech. AVID and Lombard GRID fill both under CC BY 4.0 | 1.3, 4 |
 | breathing and body noises are missing | the bucket holds them and the library took none: EARS non-verbal and vegetative sounds (3.2 h, anechoic), FSD50K breathing, coughs, footsteps, zips, doors (hours, per-clip licences). No class of chair or clothing sounds exists there; FoleySet is the candidate | 1.4, 4 |
@@ -38,7 +38,7 @@ length or rate. The format of 16 files a group was read from their first
 for WAV, within a few per cent for FLAC and MP3, which are scaled from the
 16 files). An array recording counts once a file, and a talker with two
 microphones twice: the hours are hours of files. In all 0.33 GB of metadata
-and 1.4 GB of audio samples were read; nothing was written.
+and 1.6 GB of audio samples were read (2.0 GB in all, of the 5 GB allowed); nothing was written.
 
 ### 1.1 Speech
 
@@ -152,7 +152,195 @@ About 78 per cent of FSD50K is CC0 or CC BY (43 379 of 51 197 clips); the
 rest is non commercial or Sampling+, and each clip's licence is in the
 sidecar.
 
-SECTION2
+## 2. Speech in the noise clips
+
+### 2.1 The first library: the voice in the noise is the television
+
+All 96 clips went through three detectors on the laptop
+(`scripts/clip_speech_detect.py`): a voice detector (Silero VAD), a tagger
+(the Audio Spectrogram Transformer trained on AudioSet) and a recogniser
+(Whisper `small`). Share of each clip's time in which speech was found:
+
+| clips | minutes | voice detector | tagger | recogniser's words | the screen | outcome |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 69 voices (the check that the detectors hear speech) | 70.3 | 0.58 (0.44 to 0.71) | 0.96 (0.90 to 1.00) | 0.70 (0 to 0.83) | 0.98 (0.74 to 1.00) | not screened. The P.56 activity of the same clips is 0.61 (0.46 to 0.74): the voice detector agrees with it |
+| `television_01` to `05` | 10.0 | 0.81 to 0.95 | 1.00 | 218 to 385 words each | 0.98 to 1.00 | routed to `media_voice` |
+| `street_traffic` (DEMAND) | 4.8 | 0.00 | 0.19 | 5, not words | 0.20 | cut: 57.6 s removed, 230.2 s left |
+| `other_kitchen` (DEMAND) | 4.8 | 0.00 | 0.04 | 0 | 0.04 | cut: 10.9 s removed, 276.9 s left |
+| `music_01` to `12` | 6.0 | 0.00 to 0.01 | 0.00 | 0 | 0.00 | kept |
+| the nine other noises (machines, water, cooking) | 5.0 | 0.00 | 0.00 | 0 | 0.00 | kept |
+
+**Ten of the 30.6 minutes of noise are one person speaking clearly**: the
+five `television` clips are EARS monologues, dry, as close and as clean as
+the scene's own voices, stored at 57 to 62 dB SPL at 1 m, which is the
+level of a talker. The recogniser writes them whole ("Something new that
+I've started doing is art trades. So I have an Instagram account ..."). To
+a model they are a tenth talker with no reference. That is what dominated
+the noise tracks. The rest is small: passers-by at the crossing, whom the
+tagger alone hears (its score for speech reaches 0.47 there), and one
+window of the kitchen.
+
+The screened set is `clarify_v1_screened`
+(`src/reverberate/scenes/library/clarify_v1_screened.json`, files under
+`<data root>/clips/clarify_v1_screened/`, 162 MB; `clips check`: 27 clips,
+0 fail):
+
+| | clips | minutes | hours |
+| --- | ---: | ---: | ---: |
+| noises of `clarify_v1` | 27 | 30.6 | 0.51 |
+| after the screen, in all | 27 | 29.4 | 0.49 |
+| of which routed to `media_voice` (unchanged files) | 5 | 10.0 | 0.17 |
+| of which noise proper | 22 | 19.4 | 0.32 |
+| removed as speech | | 1.1 | 0.02 |
+| rejected | 0 | | |
+
+### 2.2 The bucket's noise classes: a sample
+
+576 files drawn from 14 datasets (seed 31), 1.4 GB, the first 180 s of
+each: 297 minutes. Share of the time with speech by each detector, and
+what the screen would do (a clip is kept, loses its passages, is routed,
+or is rejected when under 5 s or a quarter would remain).
+
+| dataset | clips | minutes | voice detector | tagger | words | the screen | kept | cut | routed | rejected | minutes left |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `wham_noise` (cafés, bars) | 12 | 11.0 | 0.0 % | 95.1 % | 0.0 % | **95.4 %** | 0 | 0 | 0 | 12 | 0.0 |
+| `tau_urban_2019` (public places) | 40 | 6.7 | 0.7 % | 52.5 % | 0.2 % | **48.7 %** | 19 | 1 | 0 | 20 | 3.3 |
+| `demand` (17 places, channel 1) | 17 | 51.0 | 3.1 % | 39.5 % | 3.1 % | **37.5 %** | 8 | 4 | 0 | 5 | 31.1 |
+| `ms_snsd` noise | 40 | 42.2 | 21.5 % | 30.4 % | 7.7 % | **30.5 %** | 25 | 0 | 0 | 15 | 28.7 |
+| `fsd50k` (29 labels, 9 of them of voices) | 178 | 42.4 | 7.2 % | 17.9 % | 6.3 % | 17.5 % | 134 | 13 | 1 | 30 | 33.7 |
+| `musan` noise and music | 52 | 49.7 | 11.9 % | 6.9 % | 5.1 % | 14.4 % | 45 | 3 | 1 | 3 | 41.0 |
+| `noisex92` | 15 | 45.0 | 0.0 % | 13.3 % | 0.0 % | 13.2 % | 13 | 0 | 0 | 2 | 39.0 |
+| `dns5-noise` | 80 | 13.3 | 0.1 % | 12.5 % | 2.5 % | 11.8 % | 67 | 3 | 0 | 10 | 11.6 |
+| `urbansound8k` | 40 | 2.2 | 1.7 % | 12.2 % | 0.0 % | 11.6 % | 35 | 0 | 0 | 5 | 2.0 |
+| `rir_openslr28` point sources | 20 | 9.9 | 0.0 % | 5.9 % | 0.0 % | 6.2 % | 17 | 3 | 0 | 0 | 9.3 |
+| `speech_commands` background | 6 | 6.7 | 0.0 % | 3.8 % | 2.4 % | 5.0 % | 5 | 1 | 0 | 0 | 6.3 |
+| `fma` (24 tracks) | 24 | 12.0 | 2.4 % | 0.0 % | 9.2 % | 4.2 % | 22 | 2 | 0 | 0 | 11.5 |
+| `esc50` (14 home classes) | 42 | 3.5 | 0.5 % | 2.4 % | 0.9 % | 3.6 % | 39 | 0 | 0 | 3 | 3.2 |
+| `mimii_2020` fan, pump | 10 | 1.7 | 0.0 % | 0.0 % | 0.0 % | 0.0 % | 10 | 0 | 0 | 0 | 1.7 |
+| **all** | 576 | 297.2 | | | | | 439 | 30 | 2 | 105 | **222.4** (75 %) |
+
+By place and kind, where it matters to a home:
+
+- **DEMAND.** No speech found in the kitchen, the living room, the washing
+  room, the office, the hallway, the car, the field, the river. Speech all
+  along in the cafeteria, the restaurant, the bus (tagger 100 %), the
+  square (92 %) and the meeting room; in part in the metro (57 %), the
+  park (48 %), the station (37 %), the traffic (23 %). The living room
+  holds **music** (tagger 0.88): it is a living room with a set playing.
+- **MS-SNSD.** Its `Babble`, `Neighbor`, `NeighborSpeaking` and
+  `AirportAnnouncement` files are speech by their names and by every
+  detector; one `AirConditioner` file of two holds a voice. Its
+  `WasherDryer`, `Munching`, `SqueakyChair`, `CopyMachine`, `Car`, `Field`
+  are clean.
+- **WHAM and TAU** are places full of people: of no use as a noise without
+  voices.
+- **MIMII** and most home classes of **ESC-50** and **FSD50K** (fans,
+  baths, boiling, frying, dishes, cutlery, drawers, clocks, toilets) are
+  clean.
+
+### 2.3 The detectors compared
+
+Nothing here was listened to: this is a model without ears. Three checks
+stand in for listening, each with a truth that does not come from a
+detector.
+
+**(a) Known speech in known noise.** Twelve seconds and fifteen seconds of
+a `clarify_v1` voice put into a minute of each of six `clarify_v1` noises,
+at three speech to noise ratios (18 mixtures), and the six noises alone.
+The truth is the voice's own level, frame by frame. Speech missed, and
+noise marked as speech (frames within 0.5 s of an edge not counted):
+
+| speech to noise | voice detector | tagger | words | the screen |
+| --- | --- | --- | --- | --- |
+| +5 dB | 24.1 % missed, 0.0 % marked | 0.7 %, 56.5 % | 17.3 %, 1.0 % | **2.5 %, 1.3 %** |
+| -5 dB | 67.0 %, 0.0 % | 3.8 %, 48.8 % | 50.0 %, 0.5 % | **12.7 %, 12.6 %** |
+| -15 dB | 89.5 %, 0.0 % | 23.7 %, 31.6 % | 100 %, 0.0 % | **20.5 %, 27.2 %** |
+| no speech (five noises of six) | 0.0 % marked | 0.0 % | 0.0 % | 0.0 % |
+
+The sixth noise alone is the street: the tagger marks 75 % of that minute,
+which is its passers-by, not an error that can be counted. The worst
+mixture is the shower at -15 dB: 78 % of the speech missed by everything.
+The tagger's "marked" is its coarseness: it answers for 10 s at a time.
+
+**(b) Labels that people checked.** The 178 FSD50K clips of the sample
+carry labels verified by listeners. Clips in which a detector finds any
+speech:
+
+| labels | clips | voice detector | tagger | words | the screen |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| spoken: `Speech`, `Conversation`, `Whispering`, `Chatter` | 26 | 17 (65 %) | 24 (92 %) | 10 (38 %) | **24 (92 %)** |
+| `Crowd` | 6 | 1 | 3 | 0 | 4 |
+| `Singing` | 8 | 4 | 2 | 3 | 3, one routed |
+| no voice: 20 labels of machines, water, objects, weather | 120 | 8 (6.7 %) | 3 (2.5 %) | 5 (4.2 %) | **4 (3.3 %)** |
+| `Laughter`, `Breathing`, `Cough` | 18 | 10 | 5 | 2 | 8 |
+
+A label says what a clip is, not all it holds: the 4 of 120 are an upper
+bound of the screen's false alarms.
+
+**(c) Transcripts read.** The recogniser's text of the flagged clips was
+read for whether it is language:
+
+| clip | what the recogniser wrote | verdict |
+| --- | --- | --- |
+| `television_01`, `_02` | fluent first person accounts, 326 and 385 words in two minutes | speech; all three detectors agree |
+| DEMAND `OMEETING` | "the database that we are recording is a database, multi-channel noise database ... 16-channel microphone array. The array is planar ..." | speech: the dataset's authors describing it. Voice detector 49 %, tagger 100 %, words 52 % |
+| MS-SNSD `NeighborSpeaking_14` | "... the choral concert did you? I didn't ..." | speech |
+| MS-SNSD `Babble_8` | nothing sure | many voices: voice detector 95 %, tagger 100 %, no word |
+| DEMAND `PCAFETER`, `PRESTO`, `TBUS`; NOISEX `babble` | nothing sure | a murmur: tagger 0.76 to 0.85, **voice detector 0 %**, no word |
+| `appliance_range_hood`, `other_boiling`, `other_frying`, `appliance_washing_machine` | one syllable or a figure repeated to the end of the window, language "nn" | not speech: thrown out by the recogniser's own signs (repetition, probability) |
+| `music_03` (Bach on a piano) | "© BF-WATCH TV 2021", with every sign of being sure | not speech: a word where the tagger gives no voice at all is not believed (`Rules.second_tag`); before that rule the clip was rejected |
+| `music_01` | nothing; the voice detector fires 0.3 s on a note | not speech: same rule |
+| NOISEX `destroyerops` | nothing sure; tagger 0.60 all along | an operations room: voices on an intercom are likely, **not checked** |
+| FMA 3318, 65120 | lines of lyrics, 63 and 15 words | sung words; the voice detector hears 1 % and 54 % of them, the tagger's `Singing` is 0.05 and 0.18 |
+
+**Which is best.** For the question "is there a voice in this clip", **the
+tagger**: 92 % of the spoken clips against the voice detector's 65 % and
+the recogniser's 38 %, with 2.5 % of the voiceless ones flagged; and it is
+the only one that hears a murmur, where the voice detector reads zero in a
+cafeteria. It cannot say where: its answer is ten seconds wide. The voice
+detector says where, for a voice in front, and makes no false mark on a
+steady noise. The recogniser is the test of what can be understood, and
+the least reliable alone: it writes on any noise, and its own confidence
+does not always tell. The screen is the three together: 2.5 % of the
+speech missed at +5 dB, 12.7 % at -5 dB, 20.5 % at -15 dB; 92 % of spoken
+clips caught and at most 3.3 % of voiceless ones touched.
+
+Cost on the laptop, at low priority: about half the length of the audio
+(297 minutes heard in about 55 minutes by three processes of three
+threads), nearly all of it the recogniser's.
+
+### 2.4 The answer to the owner's question
+
+Yes, a network detects those passages, and the screen removes them. It
+**removes, it does not filter**: a clip loses the stretches where someone
+speaks and what is left is joined. Taking the voice out from under a noise
+that goes on (a separation) is the very thing the project's model is for,
+and what such a model leaves behind would be trained into the next one.
+Where speech runs all along (a café, a bus), nothing is left and the clip
+is rejected; such places are not a home's noise anyway.
+
+### 2.5 What the screen does not do
+
+- **Sung voices pass.** Of 24 FMA tracks drawn at random two were flagged;
+  more of them are songs. The tagger's sung classes stay low on a mix and
+  the voice detector is not made for song. Music is better chosen by FMA's
+  own genre labels (its sidecar has them): instrumental genres for
+  `music`, the rest for `media_voice`. One `Singing` clip of eight was
+  routed.
+- **A voice far under the noise passes**: a fifth at -15 dB.
+- **A murmur is taken for speech and removed.** Whether many voices that
+  no one understands are noise or speech for the model is a decision
+  (section 5.4): the rule is one value, `Rules.tag_voice`.
+- **A talker's laugh, cough and breath** are voice to the voice detector
+  in 10 clips of 18 and to the screen in 8: body sounds must not go
+  through this screen with these rules.
+- Five "words" of `street_traffic` are a Japanese long vowel mark the
+  recogniser was sure of; they fall inside a passage the tagger had
+  marked.
+- **The bucket's classes were measured, not built into a library**: the
+  screened set holds the first library's noises only. A selection of home
+  noises from FSD50K, ESC-50, MS-SNSD and DEMAND, curated then screened,
+  is the next step (section 5.1), and was not done in this lot.
 
 ## 3. Levels
 
