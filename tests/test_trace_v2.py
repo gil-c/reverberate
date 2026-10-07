@@ -42,11 +42,13 @@ from reverberate.scenes import Recipe, cost, low_band_source_positions, wave_ban
 from reverberate.scenes.kinematics import FLOOR_SOURCE_HEIGHT_M
 from reverberate.scenes.levels import VOICE_REFERENCE_DB
 from reverberate.trace import machines, mirror_only
+from reverberate.trace.driver import describe
 from reverberate.trace.plan import (
     LOW_PPW,
     NO_SURFACES,
     SOURCE_CLEARANCE_STEPS,
     Profile,
+    estimate,
     make_plan,
     near_a_surface,
     tail_sites_of,
@@ -379,6 +381,10 @@ def test_a_fixture_too_near_a_surface_is_given_to_the_mirror_and_said() -> None:
     plan = make_plan(recipe, held.triangles, low_ppw=7.2)
     assert plan.profile.mirror_only == ("tap",) and plan.record["near_a_surface"] == near
     assert not plan.tracks.sources["tap"].low and plan.record["source_positions"] == 2
+    # And whoever rents reads it before renting.
+    text = describe(plan, estimate(plan, rate_usd_per_hour=0.136, low_ppw=7.2))
+    assert "by the mirror alone, no wave solve: 5 (" in text
+    assert "too near a surface for the wave solver: tap at 0.06 m" in text
     # The machine reads the profile and holds the same positions.
     again = Profile.from_record(json.loads(json.dumps(plan.profile.record())))
     assert again == plan.profile

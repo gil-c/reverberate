@@ -70,6 +70,19 @@ _STAGE_OF = {
 }
 
 
+def _alone(record: dict[str, Any]) -> list[str]:
+    """The sources the mirror renders alone, and those given to it for standing by a surface."""
+    alone = list(record.get("mirror_only") or [])
+    if not alone:
+        return []
+    near = dict(record.get("near_a_surface") or {})
+    lines = [f"  by the mirror alone, no wave solve: {len(alone)} ({', '.join(alone)})"]
+    if near:
+        said = ", ".join(f"{name} at {away:g} m" for name, away in sorted(near.items()))
+        lines.append(f"  of which too near a surface for the wave solver: {said}")
+    return lines
+
+
 def describe(plan: Plan, priced: dict[str, Any]) -> str:
     """The plan and its cost in the lines a person reads before renting."""
     r = plan.record
@@ -78,6 +91,7 @@ def describe(plan: Plan, priced: dict[str, Any]) -> str:
         f"recipe {r['recipe_sha256']}  {r['dwelling']}  {r['duration_s']:g} s, {r['steps']} steps"
         + (f"  profile {r['profile']}" if plan.profile != Profile() else ""),
         f"sources: {len(r['sources'])} ({', '.join(r['sources'])})",
+        *_alone(r),
         f"audible steps: {r['audible_steps_total']}, of which {r['step_pairs']} distinct"
         " (source, head) positions to trace",
         f"listening cells: {cells['cells']} ({cells['rest_places']} rest places of which"
