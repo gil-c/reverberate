@@ -31,13 +31,13 @@ branch `clarify-simulator` at `bbfd2ce4`; what is inferred from it says so.
 2. **What replaces it outdoors is small: the mirror's own image paths
    rendered through the low band.** The pack already has a low band engine
    that is not a solve, the free field stand-in
-   (`trace/engines.py:325-349`). A stand-in that sums the direct path, the
+   (`FreeFieldPairs`, `trace/engines.py:306`). A stand-in that sums the direct path, the
    ground's image and the facades' images is the same idea one step on, costs
    no card, and is exact where the surfaces are large. It is the first lot
    proposed (section 7).
 3. **A fast source breaks the engine in three places that are constants,
    not physics.** The delay line gives the Doppler shift exactly, at any
-   speed (`render/early.py:300-306`). But a recipe refuses any speed over
+   speed (`render/early.py:301-306`). But a recipe refuses any speed over
    1.5 m/s (`scenes/validate.py:60`); a path whose apparent source moves
    more than 0.30 m in a step is cut in two and cross-faded
    (`render/pack.py:87`), which is every path of a source faster than 6 m/s;
@@ -54,9 +54,11 @@ branch `clarify-simulator` at `bbfd2ce4`; what is inferred from it says so.
    changes what every scene sounds like, dwellings with an open window
    included.
 5. **The audio is the harder half, and licences decide it.** Section 5.
-   Dry recordings of vehicles passing, of doors, of announcements barely
-   exist in public; beds exist, mostly first order, mostly with voices in
-   them, and several of the best known sets forbid commercial use.
+   One dataset gives beds at order 4 under a licence that allows commercial
+   use (EigenScape, 10.7 h); the three closest matches to this request
+   forbid it; no bed of a train's interior and no dry recording of a
+   vehicle passing was found at all. And **HSSD itself, on which every
+   present scene stands, is CC BY-NC 4.0** (section 4).
 6. **Neither engine transmits sound through a pane or a shell, and it
    should not be taught to.** A pane as a few secondary sources behind a
    transmission loss filter is one lot and covers the open and the closed
@@ -114,7 +116,7 @@ lines, surfaces and volumes.
 - **A termination at the air's impedance exists already**: one branch
   `[0, 1, 0]`, an admittance of one at every frequency
   (`wave/lowband/outside.py:55`), put on an opening by
-  `outside.without(closure="open")` (`outside.py:176`, `235-239`). It
+  `outside.without(closure="open")` (`outside.py:175`, `235-239`). It
   absorbs a wave that meets it squarely: 45 dB in a duct under its first
   cross mode (measured, `solver-boundary.md` section 5). It is off by
   default.
@@ -139,7 +141,7 @@ field to split.
 | boundary | what it is here | reflection | nodes added | engineering |
 | --- | --- | --- | --- | --- |
 | admittance of one on the open faces | exists (`outside.py:55`); the guard of `problem.py:463` to lift, and the faces to mark | `(1 - cos a) / (1 + cos a)` at `a` from the normal (computed): none at 0, -23 dB at 30 degrees, -15 dB at 45, -9.5 dB at 60, -4.6 dB at 75 | none | half a lot, with a proof in a duct and over a plane |
-| the same, with the box grown | the open face is put further off, so that what it returns is late, weak and near the normal | a ceiling 5 m up and a source 15 m away: -12 dB re the direct sound; 5 m away: -30 dB; a ceiling 10 m up and 15 m away: -24 dB (computed, reflection and spreading) | in proportion to the height added | none more |
+| the same, with the box grown | the open face is put further off, so that what it returns is late, weak and near the normal | a source at 1 m and ears at 1.6 m under an open face 5 m up: -9 dB re the direct sound when they are 15 m apart, -26 dB at 5 m; under one 10 m up and 15 m apart, -21 dB (computed, reflection and spreading) | in proportion to the height added | none more |
 | a graded sponge | the absorbing layer's own update over 20 to 40 nodes with `l Q` rising | -30 to -40 dB over most angles (estimated, not tried here) | 0.45 to 0.9 m a face: 30 % on a garden of 20 x 15 x 5 m, 5.5 % on a street whose sides are facades (computed) | one lot: the mask's two bits become a table, on both kernels and the `numpy` twin |
 | a perfectly matched layer | two to four auxiliary fields a node of the layer and a kernel of its own; where it meets a lossy ground, both updates on one node | -60 dB and better with 8 to 12 nodes (estimated) | 10 % on the garden | two lots at least: a new kernel, its `numpy` twin to the bit, a stability proof beside the branches, slabs |
 
@@ -265,8 +267,7 @@ for the garden and the park only**; a street is hard.
 
 **Vegetation.** As an obstacle it is nearly nothing at these distances:
 ISO 9613-2 gives dense foliage 0.02 to 0.12 dB a metre by octave, for paths
-of 20 m and more through it (estimated from the standard's table, not
-verified by this lot). Ten metres of hedge is a decibel at 4 kHz. It is
+of 20 m and more through it (section 6; read at second hand). Ten metres of hedge is a decibel at 4 kHz. It is
 worth nothing as an obstacle and a great deal as a **source**: wind in
 leaves is a bed.
 
@@ -290,7 +291,7 @@ goes; with one, the grid's step would have to follow.
 **Does the delay line give the Doppler shift? Yes, above the crossover, and
 exactly.** Between two steps the apparent source and the head each move in
 a straight line, the delay is `|q(t) - l(t)| / c` sample by sample
-(`render/early.py:300-306`) and the dry signal is read at that moving delay
+(`render/early.py:301-306`) and the dry signal is read at that moving delay
 through a windowed sinc at twice the rate (`render/delay.py:59-82`; -94 dB
 from 1 to 20 kHz, measured). Nothing in it assumes a slow source. The
 native kernel does the same (`render/native.py:8-9`, `351-353`).
@@ -305,7 +306,7 @@ consequences are inferred, nothing was rendered).
 | the step of 50 ms | `render/pack.py:82` | a straight chord of 0.69 m is exact on a straight road; a path's birth and death (a car passing a gap between buildings) fade over 50 ms, which is 0.7 m of road: acceptable; the direction is evaluated 8 times a step, and a car passing at 5 m turns 0.14 rad a step, 0.2 % of the top order (computed from the format's own bound) |
 | **the low band has no Doppler shift** | `scene-pack.md`, "Source side": the output of two solved positions cross-faded with a weight linear in arc length | at 1.5 m/s the shift is 0.4 %, 8 cents, and its absence is not heard. At 13.9 m/s it is 4 %, 70 cents: an engine's harmonics under 1 kHz stay where they are while its hiss above moves. This is a property of sampling the source, and no pitch of rail cures it |
 | positions every 8 cm | `scene-recipe.md`, "rails" | 1250 positions for 100 m of one lane |
-| tail sites every 0.80 m | `scene-pack.md`, "tail" | 125 sites for the same; 16 s each before lot L24's tracer, a second or less after (`ray-tracer.md`) |
+| tail sites every 0.80 m | `scene-pack.md`, "tail" | 125 sites for the same; 16 s each as ADR 0016 measured it, less with the tracer of `ray-tracer.md` |
 
 So a vehicle cannot have a sampled low band. With the low band by images
 (section 3.1, first remedy) there is nothing to sample: every image is a
@@ -384,18 +385,353 @@ recorded in a vehicle, and the engine renders the voices.
 
 ## 4. Geometry: where the scenes come from
 
-*Being verified against each source's own page; this section is completed
-in the next commit of this lot.*
+**How this section and the next were verified.** Each source's own page was
+opened on 2026-10-07 through a tool that fetches a page and summarises it.
+"Seen" means the fact was on the source's own page that day; "secondary"
+means it was read in a search result or on another site's page; "not
+verified" means the page failed or did not say. A summary is not a legal
+reading: **every licence below is to be read again on its page, by a
+person, before anything is downloaded.**
+
+**First, the dwellings themselves.** HSSD is published under **CC BY-NC
+4.0** (seen, https://huggingface.co/datasets/hssd/hssd-hab): non-commercial.
+Every scene this project has rendered stands on it. That is not this lot's
+question, and it is the first one a commercial use of any render meets; it
+is put to the owner in section 8.
+
+| setting | source | what it holds | licence, commercial use | status |
+| --- | --- | --- | --- | --- |
+| street, terrace, square | 3DBAG, https://docs.3dbag.nl/en/copyright | every building of the Netherlands, some 10 million, LoD1 and LoD2, CityJSON, OBJ, IFC | CC BY 4.0: yes | seen |
+| | swissBUILDINGS3D 3.0, https://www.swisstopo.admin.ch/en/landscape-model-swissbuildings3d-3-0-beta | Switzerland; roofs, facades and footprints apart; 30 to 50 cm | free geodata terms, attribution: yes | seen |
+| | Berlin, Hamburg, Vienna, Montreal LoD2 | CityGML | dl-de/zero-2-0, dl-de/by-2-0, CC BY 4.0, CC BY 4.0: yes | secondary |
+| | PLATEAU, https://www.mlit.go.jp/plateau/open-data/ | 306 Japanese locations, CityGML; its standard defines buildings to LoD4, railways, underground structures | Public Data License 1.0, stated compatible with CC BY 4.0: yes | seen; **whether stations and underground malls at LoD3 or 4 can be downloaded was not verified** |
+| | OpenStreetMap, Overture buildings | footprints, heights where tagged | ODbL: yes, with share-alike on a derived database; whether a render is one is a lawyer's question | seen |
+| | Google Photorealistic 3D Tiles, https://developers.google.com/maps/documentation/tile/policies | | the policy forbids storing, extracting and machine interpretation: **no** | seen |
+| | CARLA's towns, https://github.com/carla-simulator/carla | hand made towns: roads, pavements, buildings, vegetation, with semantic classes | code MIT, assets CC BY: yes | seen; the count of towns and the export to a mesh were not verified |
+| | KITTI-360, Virtual KITTI 2 | | CC BY-NC-SA 3.0: **no** | seen |
+| garden, park, trees | Infinigen, https://github.com/princeton-vl/infinigen | procedural terrain, trees, plants; rooms | BSD 3-Clause: yes | seen |
+| halls, stations, malls | Matterport3D, HM3D, Gibson, Replica | scans of buildings, homes mostly | non-commercial, each: **no** | seen (HM3D, Replica), secondary (the two others) |
+| | Stanford 2D-3D-S, ScanNet++, Structured3D | offices, rooms | own terms, the commercial clause not read | not verified |
+| | an open, labelled, watertight model of a station, a mall or an airport | | **none was found** | |
+| vehicle interiors | Objaverse 1.0, https://huggingface.co/datasets/allenai/objaverse | 800 000 objects; licence by object: CC BY 4.0 for 721 000, CC0 for 3500, non-commercial for 77 000 | yes for the CC BY and CC0 objects, object by object | seen; **how many are a carriage, a bus or a cabin with its interior was not counted** |
+| | an open CAD of a carriage or a cabin made for acoustics | | **none was found** | |
+
+What published acoustic simulation has used: SoundSpaces (Replica,
+Matterport3D), SonicSim (Matterport3D), GWA (furnished houses). All indoor,
+and the first two on scans that forbid commercial use (seen on each
+project's page). No synthetic acoustic dataset of semi-outdoor scenes was
+found.
+
+**The reading.** Three settings have no usable geometry in public: the
+station, the mall, the vehicle. Two have more than is needed: the street
+and the garden. And the acoustics does not ask for what the datasets hold.
+A LoD2 building is a prism with a roof: no window reveals, no balconies, no
+shop fronts, no parked cars, no material. What the band above 1 kHz needs
+of a street is the facades' planes, their share of glass and their
+scattering, and those are parameters, not data.
+
+**Recommended: procedural first, for every setting but the vehicle.**
+
+- *Street*: a ground, two rows of facades drawn from ranges (height 9 to
+  25 m, width 12 to 30 m, gaps and side streets, the share of glazing,
+  balconies as a scattering coefficient), parked vehicles as boxes. A city
+  model is then a source of **ranges** (the distribution of heights and
+  widths in 3DBAG), and later of real blocks.
+- *Terrace, garden, platform*: a ground of one or two materials, zero to
+  three facades, a canopy, boxes for furniture, a hedge as a scattering
+  occluder.
+- *Station, atrium*: a shoebox or two joined, 10 000 to 100 000 m3, with a
+  ceiling's height and a mean absorption drawn to give a decay of 2 to 9 s.
+  At a Schroeder frequency of 20 Hz a hall's decay and its first
+  reflections are what is heard, and a shoebox with the right ones is a
+  station to the ear (estimated; to be judged by listening).
+- *Vehicle*: here shape matters, and the wave band needs it to a
+  centimetre. A parametric carriage is feasible (a tube, rows of seats,
+  glazing strips, luggage racks); a car's cabin is not, and needs a model
+  from Objaverse or a purchase, repaired until watertight by hand.
+
+**Materials and labels needed.** The present catalogue (`materials/data`)
+is a dwelling's and was not opened by this lot to see what it holds of
+these: asphalt, concrete paving, gravel, soil, grass and snow, each with a
+**flow resistivity** and not only an absorption; rendered masonry, brick,
+curtain wall glazing, a shop front; a canopy of steel sheet or glass; a
+seat of foam and cloth, a headliner, a carriage's floor; and for each
+facade its share of glass, which sets both its reflection and what passes
+through it.
+
+**What of `reverberate.scenes` carries over** (read in the code and in
+`scene-recipe.md`).
+
+| | carries over | does not |
+| --- | --- | --- |
+| stations and seats | a bench, a terrace chair, a carriage's seat are seats; a seat as an exact listening position is what a vehicle needs, and nearly all it needs | a station names its `room` by ADR 0010; a street has none |
+| rails | a pavement is a rail; so is a lane, with a speed | `MAX_SPEED_M_S`; a pitch of 8 cm; rails are routed on a storey's free floor (`scenes/layout.py:1-19`, its `Floor` and `Room`) |
+| the free floor | a walkable outline is the same idea outdoors | it is computed from a storey's walls and rooms |
+| the recipe | sources, segments, activity, listener, atmosphere, the seed | `dwelling` and `assets` are a storey's (`export_sha256`, `voxel_low_key`, `rooms_rule`); unknown keys are refused, so a `site` is a new version of the format |
+| heights | 1.70 and 1.20 m | an engine at 0.5 m, a loudspeaker at 4 m, a bird at 8 m: a source needs a height of its own |
+| the generator | the drawing of clips, levels and activity | everything it knows of where people stand in a home |
 
 ## 5. Audio: what has to be found
 
-*Being verified against each dataset's own page; this section is completed
-in the next commit of this lot.*
+### 5.1 What each setting needs
+
+| setting | dry or near-dry points | beds |
+| --- | --- | --- |
+| street | a car, a van, a bus, a motorcycle, a bicycle passing, each at several speeds, **recorded so that its Doppler shift was never there or can be undone**; an engine idling; a horn, a siren, a bell; footsteps on paving; a door, a shutter; roadworks | distant traffic; a wet road; wind between buildings; a crowd on a pavement |
+| garden, park | birds one at a time; a dog; a mower, a hedge trimmer; children; a ball; a gate | wind in leaves; rain on grass; insects; a far road; a dawn chorus |
+| car, bus, train | an indicator, a wiper, a seat belt, a door closing; a door's warning tone; an announcement, dry | **the cabin's noise at several speeds, on several roads, with the window open and shut; a carriage's rolling noise, in the open and in a tunnel**: the gap of this whole inventory |
+| station, mall | an announcement, dry, to be played through a model of loudspeakers; a suitcase's wheels; a ticket gate; an escalator; a train arriving | the hall's own murmur; a crowd; ventilation |
+| terrace | cutlery, a glass, a cup on a saucer; a chair on paving; a coffee machine | babble; the street behind |
+| platform | a train arriving, braking, its doors; a whistle; an announcement | wind; a far train; the canopy in rain |
+
+Voices are not in the table: they are the first library's (VCTK, CC BY
+4.0), with one thing missing. People speak louder and differently in noise,
+and a voice read in a booth at a normal effort, raised by a gain, is not a
+voice in a station. A corpus of Lombard speech is to be found; none was
+looked for by this lot.
+
+### 5.2 The datasets, as read on their own pages
+
+**Usable in a commercial product, by what was seen.**
+
+| dataset | what, how much | form | licence | voices in it |
+| --- | --- | --- | --- | --- |
+| **EigenScape**, https://zenodo.org/records/1012809 | 64 recordings of 10 min, 10.7 h, 127 GB: beach, busy street, park, pedestrian zone, quiet street, shopping centre, train station, woodland, eight of each | **order 4**, 25 channels, 48 kHz, 24 bit, an Eigenmike | CC BY 4.0 | not labelled; passers-by to be expected in three of the eight |
+| **Urban Soundscapes of the World**, https://zenodo.org/records/10106181 | some 130 recordings in nine cities, 6.2 GB | order 1 and binaural, 48 kHz, 24 bit | CC BY 4.0 on Zenodo; the project's own page says "free to use for research and educational purposes": **to be confirmed in writing** | not labelled |
+| **The SoundField library by RØDE**, https://library.soundfield.com/ | "hundreds" of recordings: ambience, animals, people, effects, vehicles | order 1, an NT-SF1 | CC BY 4.0; the terms file by file not verified | not labelled |
+| **Freesound, tagged `ambisonic`**, https://freesound.org/search/?q=ambisonic | 713 sounds; 233 of four channels, of which 113 CC0 and 94 Attribution | order 1 mostly; A and B format mixed, two channel orders mixed, said in free text | by sound: CC0 307, Attribution 276, **NonCommercial 130** | not labelled |
+| **FSD50K**, https://zenodo.org/records/4060432 | 51 197 clips, 108 h, 200 classes | mono, 44.1 kHz; what each author made, seldom dry | by clip: CC0 19 873, CC BY 23 506, **CC BY-NC 6041, Sampling+ 1777**; and the page asks that its authors be contacted for a commercial use | labelled by clip, weakly |
+| **DEMAND**, https://zenodo.org/records/1227121 | 7.4 GB; kitchen, living room, washing, field, park, river, hallway, meeting, office, cafe, restaurant, square, street traffic, bus, car, metro | 16 microphones 5 to 22 cm apart, 48 kHz: **not ambisonic** | CC BY 4.0 by Zenodo's tag, CC BY-SA 3.0 by its own text and by this project's library: **to be read in the archive** | not labelled |
+| **SONYC-UST-V2**, https://zenodo.org/records/3966543 | 18 515 clips of 10 s, 51 h, New York's street sensors | far and reverberant | CC BY 4.0 | **labelled**: talking, shouting, amplified speech, a crowd |
+| **MAVD-traffic**, https://zenodo.org/records/3338727 | Montevideo's roadsides, 1.1 GB, events labelled by vehicle and by time | 48 kHz, 24 bit, from the roadside | CC BY 4.0 | not labelled |
+| **In-Car McVAMPIRE**, https://zenodo.org/records/12806684 | a minivan: responses from 8 seats and 11 head orientations to 14 microphones, 6 loudspeakers, **and driving noise at several speeds** | 14 channels | CC BY 4.0 | none said |
+| **QUT-NOISE**, https://github.com/qutsaivt/QUT-NOISE | 7.7 GB: cafe, car, home, street | | CC BY-SA: yes, and share-alike on what is redistributed | not labelled |
+| **MUSAN**, https://www.openslr.org/17/ | 11 GB: music, speech, noise | reported at 16 kHz, too narrow for this output (not verified: its README did not open) | CC BY 4.0 | a speech part of its own |
+| **STARSS23**, https://zenodo.org/records/7880637 | 11 h in 16 rooms, events labelled in time and direction | order 1, 24 kHz | MIT | speech is most of it, labelled; indoor, and half the band: of little use here |
+
+**Not usable in a commercial product.** Each licence forbids commercial
+use. None was seen to forbid training as such; the BBC's is reported to.
+
+| dataset | licence, as seen | what is lost with it |
+| --- | --- | --- |
+| TAU Urban Acoustic Scenes 2019, 2020 Mobile, Audio-Visual 2021 (https://zenodo.org/records/2589280, https://zenodo.org/records/3819968, https://zenodo.org/records/4477542) | "Other (Non-Commercial)"; the full text is in the archive and was not read | 40, 64 and 34 h of airport, mall, metro station, street, tram, bus, metro, park: the closest match to this request there is |
+| **ARTE**, https://zenodo.org/records/3386569 | tagged CC BY 4.0, **and the record's text says "only to be used for non-commercial personal, educational or research purposes"** | 13 scenes made for hearing aid research, mixed order to 4 and to 7 in the plane: cafes, a food court, a train station, a street balcony. Worth one letter to its authors |
+| WHAM!, WHAMR!, WHAM!48kHz, http://wham.whisper.ai/ | CC BY-NC 4.0 | 78 h of restaurants, cafes, bars and parks, binaural, from which intelligible speech was already cut |
+| ESC-50, https://github.com/karolpiczak/ESC-50 | CC BY-NC (its subset ESC-10 is CC BY) | 2000 clips |
+| UrbanSound8K, https://zenodo.org/records/1203745 | CC BY-NC 4.0 | 8732 clips: horns, sirens, idling engines |
+| IDMT-Traffic, https://zenodo.org/records/7551553 | CC BY-NC-ND 4.0 | 17 506 vehicle passes |
+| TAU-NIGENS (https://zenodo.org/records/4844825), TUT Sound Events 2017 (https://zenodo.org/records/814831); TAU-SRIR (secondary) | CC BY-NC 4.0 or non-commercial | task data of DCASE |
+| AudioSet, https://research.google.com/audioset/download.html | the labels CC BY 4.0, the ontology CC BY-SA 4.0, **the audio under no licence**: it is YouTube's uploaders' | the audio; the ontology and the taggers trained on it stay useful |
+| the DNS Challenge's noise, https://github.com/microsoft/DNS-Challenge | "the original terms": a part is AudioSet's audio | all but its Freesound CC0 and DEMAND parts |
+| BBC Sound Effects, https://sound-effects.bbcrewind.co.uk/licensing | **not verified**: the page could not be read; reported as RemArc, personal, educational and research use, a paid licence for the rest | 33 000 effects |
+| CHiME-3 and 4 backgrounds, https://www.chimechallenge.org/challenges/chime4/data; NOISEX-92 | no licence on the page; none found | bus, cafe, street; treat as closed |
+
+L3DAS22 (CC BY 4.0 for its responses, seen), 3D-MARCo, ISOBEL and Clotho
+were read and hold nothing these settings need.
+
+### 5.3 What the inventory says
+
+1. **Beds exist for the street, the park, the station and the mall, at
+   order 4, under CC BY 4.0, in one dataset: EigenScape.** 10.7 h, 80
+   minutes a class. It is the first thing to fetch, and it is not much: a
+   model trained on thousands of hours will hear each of its 64 recordings
+   many times.
+2. **No bed of a train's interior was found at any order under an open
+   licence**, and of a car's only a 14 microphone array (McVAMPIRE) and 16
+   spaced microphones (DEMAND). Vehicles are where the solver is cheapest
+   and the audio is missing. It has to be recorded, or bought.
+3. **No dry recording of a vehicle passing was found.** Every pass in every
+   dataset read was recorded from a roadside: it carries its own Doppler
+   shift, its own ground reflection and its own street. Rendering it as a
+   moving source applies all three twice. What a moving source needs is
+   the source's signal in its own frame: an engine recorded on board, a
+   synthesis (harmonics of the firing rate, and tyre noise), or a roadside
+   recording whose shift is undone. This is a piece of work, not a
+   download.
+4. **Announcements have no cleared source.** A voice of the library, or a
+   licensed synthesis, played through a loudspeaker model is the way; it is
+   also the truer one, since it then has the hall's response.
+5. **The three best matches are closed**: TAU Urban Acoustic Scenes, ARTE,
+   WHAM!. Letters could open them.
+6. **Share-alike** (DEMAND perhaps, QUT-NOISE) allows commercial use and
+   binds whatever is redistributed. What it means for a model trained on a
+   render is a lawyer's question, not answered here. The first library
+   already holds three DEMAND recordings.
+7. **Attribution is an obligation on every CC BY clip**: a manifest by clip
+   (author, licence, address) from the first day. The clip library's
+   manifest is the place.
+
+### 5.4 Voices in the noise
+
+The owner found voices dominating the present noise clips. They will be in
+every recording of a public place.
+
+| dataset | speech in it | what tells |
+| --- | --- | --- |
+| SONYC-UST | yes | its labels, by clip |
+| FSD50K | in some clips of every class | its labels by clip, which are weak: a clip tagged as a car may hold a voice |
+| STARSS23 | most of it | its labels, by frame and direction |
+| WHAM! | intelligible speech was cut by its authors; babble stays | (closed in any case) |
+| EigenScape, Urban Soundscapes, DEMAND, QUT-NOISE, Freesound, the SoundField library, MAVD | to be expected in the public places (estimated: no page says) | nothing |
+
+**How to screen**, from practice, not tried by this lot on these
+recordings:
+
+1. The dataset's labels, to reject and never to accept.
+2. A tagger trained on AudioSet, on windows of one to two seconds, with a
+   low threshold on its speech classes (0.1 to 0.2, not 0.5), and its
+   babble and crowd classes read apart. The licence of the tagger's weights
+   is to be checked.
+3. A voice activity detector as a second vote: alone it fires on birds and
+   horns and misses babble.
+4. **The test that answers the owner's complaint is intelligibility**: a
+   speech recogniser on each window, rejected when it returns confident
+   words, and only when the tagger agrees, since a recogniser invents words
+   in noise.
+5. On an ambisonic bed, **beam first**: a talker is clear in one of twelve
+   beams and buried in channel 0.
+6. Cut what is flagged, with a fade. Never remove a voice with a
+   separator: it leaves traces a separation model would learn.
+7. Report the worst clip of each dataset, heard, not a mean.
+
+**And one decision before any of it**: whether babble is wanted. A crowd no
+one can follow is what a station is. One intelligible stranger in a bed is
+a voice the training labels do not know about.
 
 ## 6. Validation: how one would know
 
-*Completed in the next commit of this lot.*
+**Analytic cases**, exact, free, and the first thing to hold:
+
+| case | truth | what it tests |
+| --- | --- | --- |
+| a point source over a rigid plane | two paths in closed form | the image low band; the output without a wave band |
+| **a point source over an impedance plane** | the spherical wave reflection coefficient (Weyl and van der Pol's form, as computed by Chien and Soroka), the ground's impedance from its flow resistivity by Delany and Bazley or by Miki; resistivities in kPa s/m2: new snow 10 to 30, grass 150 to 300, worn asphalt over 20 000 (secondary; the papers were not opened by this lot) | the soft ground of section 3.2; and the wave band's own ground, should it be kept |
+| a half plane, a wedge | Maekawa's curve, which the mirror uses, against the exact wedge solution | diffraction round a wall or a van |
+| two parallel rigid planes, the sky open | the image series in closed form | the deep tree of a street, and when to stop it |
+| a source in uniform motion past a listener | the shift and the level in closed form | the Doppler shift at 14 and 30 m/s, the jump rule, both bands |
+| a duct, and a plane wave at an angle | `(1 - cos a) / (1 + cos a)` | the open face of a grid |
+| a foliage belt | ISO 9613-2: 1 dB from 250 Hz to 2 kHz, 2 dB at 4 kHz, 3 dB at 8 kHz for 10 to 20 m; 0.02 to 0.12 dB a metre from 63 Hz to 8 kHz beyond (secondary: as reproduced in a noise mapping manual, https://doku.datakustik.com/CadnaA/en/BebaungBewuchs.html) | that it may be ignored |
+
+**Measurements, as found.**
+
+| what | source | status |
+| --- | --- | --- |
+| a car's cabin: responses from outside to a 64 capsule sphere inside, 8 directions | IR64-CAR, https://zenodo.org/records/15168578, CC BY 4.0 | seen; a Peugeot 208, **with no geometry** |
+| a minivan's cabin, 8 seats | In-Car McVAMPIRE, https://zenodo.org/records/12806684, CC BY 4.0 | seen |
+| four cars, talkers to microphones | CAVEMOVE, https://github.com/SPL-FORTH-ICS/CAVEMOVE, CC BY 4.0 | seen |
+| 271 responses of daily places at 1.5 m, a forest, a restaurant and a supermarket among them | the MIT survey, https://mcdermottlab.mit.edu/Reverb/IR_Survey.html | seen; mono; its licence stated on a mirror only |
+| a forest, in B-format, in summer and under snow | OpenAIR, Koli National Park, https://www.openairlib.net | secondary: the site's certificate had expired; the licence of each entry not verified |
+| a street: decay of 1 to 3 s over 144 streets, longer with the facades' height | a survey of 2019 | secondary; the paper's page refused; authors and DOI not confirmed |
+| a station's waiting hall: 9.2 s at mid frequencies | one paper of 2014 | secondary; one hall is not a range |
+| malls: 1.7 to 3.2 s in four of them; 4 to 5 s elsewhere | conference papers | secondary |
+| a carriage: 0.39 s | one paper; a study of five vehicles at Southampton not read | secondary |
+| a car: 0.05 to 0.1 s | | **not verified: no page read states a figure** |
+| glazing: a 4 mm pane 29 dB weighted, a 4-16-4 unit 30 to 33 dB | trade sources | secondary |
+| an open window's insulation | | **not verified** |
+| a carriage's shell: some 30 dB | a patent's text | secondary |
+
+**No open measured impulse response of a street, a carriage, a bus, a
+station or a covered platform was found.** So the ranges of section 2 rest
+on a handful of papers read at second hand, and three things follow. The
+analytic cases are the validation, and they are enough for the open
+settings, which are a few surfaces. The cabin is the one setting that can
+be held against measurements, and only once a geometry is matched to one
+of the measured cars. And for the station and the street the bar is
+statistical: a decay time and a level against distance inside the
+published ranges, and the owner's ear. A day with a loudspeaker and an
+ambisonic microphone in one street and on one platform would be worth more
+than any dataset found here.
 
 ## 7. A staged proposal
 
+A lot is a pull request of the size of those of ADR 0016. Card costs are
+estimated from the first scene's ledger (`performance-audit.md` section 1):
+a dwelling's scene is 8.6 USD, nine tenths of it the wave solve, and its
+rays 0.13 USD.
+
+**Step 1. The open-air profile: a terrace and a garden.** The smallest
+thing that is a new setting.
+
+| lot | what | card |
+| --- | --- | --- |
+| 1a | a `site` beside a `dwelling` in the recipe: a procedural ground, zero to three facades, a canopy, boxes; stations and rails on its walkable outline; outdoor materials | none |
+| 1b | a low band engine by images, beside the free field stand-in: the direct path and the tree's images under the crossover, in the pack's own form; the tracer's hits counted a bin, and no tail where they say there is none | none |
+| 1c | beds: the source `kind`, the multichannel clip, the pack's group, the engine's sum; EigenScape's park, woodland, quiet street and pedestrian zone fetched and screened for voices | none |
+| 1d | validation: the rigid plane; the impedance plane, as a truth that says how wrong a soft ground is before the engine has one; two planes; the open tracer's hit counts | none |
+
+Four lots, and **under 1 USD of card a scene** (estimated: no wave solve;
+the mirror's paths on cores and its rays on a card). What it gives: a
+conversation at a terrace table or in a paved garden, slow sources, a real
+ambience at order 4. What it does not: a soft ground's dip, vehicles, a
+tail worth the name.
+
+**Then, in the order of value over cost.**
+
+| step | what | lots | card a scene (estimated) | why here |
+| --- | --- | --- | --- | --- |
+| 2 | the window: stations on a dwelling's panes, a transmission loss filter, a bed outside | 1 | as a dwelling | it makes every existing dwelling a new scene, with what lot 1c built |
+| 3 | fast sources: the speed limit, the jump rule, a road as a rail, the shift checked in closed form; a source signal for a vehicle (section 5.3, point 3) | 2, and the audio | under 1 USD | the street's signature; needs 1b, since a sampled low band cannot do it |
+| 4 | the street: procedural canyons, the tree to the depth a canyon needs, traffic as points near and a bed far | 2 | 1 to 2 USD | after 3 |
+| 5 | the carriage and the bus: a parametric cavity, the wave band as it is, seats as exact positions, interior beds | 2 to 3, **and the recordings** | 0.2 to 0.5 USD: 10 s a position, a few hundred positions | cheap to solve; blocked by audio, not by the engine |
+| 6 | the soft ground: the spherical reflection as a filter on the ground's image | 1 | none | gardens and parks become right under 1 kHz |
+| 7 | the hall: a tail of 3 to 10 s, the public address as coherent sources with a loudspeaker's directivity | 2 | 1 USD | a long tail is the engine's memory and time: to measure first |
+| 8 | the car: a cabin's model made watertight, the wave band to 2 or 4 kHz, held against IR64-CAR or CAVEMOVE | 3 | under 0.1 USD | the only setting with measurements to meet; its geometry is handwork |
+| 9 | a wave band at a low crossover for the platform and the street, with open faces | 2 | 0.5 to 2 USD | only if step 4, heard, lacks something under 250 Hz |
+
+**Recommended not to do.**
+
+- **A perfectly matched layer.** Two lots for a boundary whose only use is
+  step 9, which may never be needed.
+- **The wave band to 1 kHz in a street, on a platform or in a hall.** Six
+  minutes to eight hours a position (section 3.1), for a field that is not
+  modal.
+- **Transmission through structures**, a vehicle's shell above all.
+- **Refraction, turbulence, wind.** Under 100 m they are below everything
+  else in this list.
+- **Vegetation as an obstacle.** A decibel.
+- **City models as scenes**, before procedural streets have been heard.
+  They bring a pipeline (formats, repair, materials by guess) and no
+  acoustic detail the generator lacks.
+- **First order beds alone as the noise of a scene.** A separation model
+  would learn the blur.
+- **Any audio whose licence is non-commercial, "to try".** What is trained
+  on it cannot be untrained.
+- **A calibration fitted outdoors** on the dwelling's pattern. There is no
+  truth to fit against; use the catalogue's values and the analytic cases.
+- **Scanned public buildings.** Those read are all non-commercial.
+
 ## 8. For the owner
+
+| | question | recommended |
+| --- | --- | --- |
+| 1 | HSSD is CC BY-NC 4.0. Is a model trained on its renders within that licence for Clarify's use? | a lawyer's reading before a dataset is generated, whatever is decided here; procedural scenes carry no such question, which is one more reason for them |
+| 2 | Is the wave band under 1 kHz a requirement of every scene, or of dwellings? ADR 0016 states it without a scope | of rooms that are modal: dwellings and vehicles. Outdoors and in halls, the images from the bottom of the spectrum, shown against the analytic cases |
+| 3 | Which setting first? | the terrace and the garden (step 1), then the window (step 2): they need no audio that does not exist |
+| 4 | Vehicles are the cheapest to solve and have no beds under an open licence. Record, buy, or wait? | record: a day in a car, a bus and a train with an ambisonic microphone of order 3 or more gives what no dataset holds, under the project's own terms |
+| 5 | Is babble wanted in a bed, or is a bed free of all speech? | babble where it is the place's (terrace, station), unintelligible by the recogniser's test; no single intelligible voice anywhere |
+| 6 | A bed at order 1 beside sources at order 7: accept, sharpen, or build beds from points? | order 4 beds (EigenScape) as they are; build from points what has no such recording; no order 1 bed alone |
+| 7 | An announcement is speech, loud, and not the target. How is it labelled for training? | a `kind` of its own, so that training may choose; not `far_voice` |
+| 8 | Is a source beyond 100 m ever a point? | no: it is in a bed |
+| 9 | Do scenes keep 20 C outdoors? | yes while a scene has a wave band; free where a setting has none |
+| 10 | Write to the authors of ARTE and of the TAU scenes for a commercial grant, and to FSD50K's as its page asks? | yes: ARTE was made for hearing aids and is the best material read here |
+| 11 | A day of measurements in a street and on a platform, for validation? | yes, before step 4: nothing public replaces it |
+
+## 9. What this lot did not do
+
+- Nothing was run: no open scene was traced, no grid built, no bed laid on
+  an output. Every cost of section 3 is a scaling of the dwelling's
+  measured solve, and every statement about the mirror outdoors is a
+  reading of its code.
+- The share of rays that return to a receiver outdoors, on which the
+  tail's remedy rests, is not known.
+- No licence was read by a person. The pages were read through a
+  summarising fetch; several could not be opened at all (BBC Sound Effects,
+  OpenAIR, IGN, Helsinki, nuScenes), and the reverberation figures of
+  streets, stations, malls and carriages are at second hand.
+- Whether PLATEAU's stations can be had at LoD3 or 4, how many vehicle
+  interiors Objaverse holds, and the true licence of DEMAND.
+- Lombard speech, loudspeaker directivities and a vehicle's source signal
+  are named as needs and were not searched.
+- The materials catalogue was not opened to see which outdoor materials it
+  already holds, and whether seven series branches fit a porous ground's
+  impedance from 40 to 1500 Hz was not tried.
