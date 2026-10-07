@@ -104,9 +104,10 @@ SSH_PROXY = "proxy ssh"
 
 #: Workers a way starts with and the most it grows to (:class:`Lanes`). Ranges over HTTPS
 #: pass no ``sshd``: sixteen to start, thirty-two at most. Direct ssh starts with the four
-#: that were measured and may reach eight, one connection opened at a time: what refused
-#: twelve streams was twelve handshakes at once (``MaxStartups 10:30:100``), not twelve
-#: sessions. The proxy keeps its four: more brought little and were refused together.
+#: that were measured and may reach eight, four more opened once the first four are up:
+#: what refused twelve streams was twelve handshakes at once (``MaxStartups 10:30:100``),
+#: not twelve sessions. The proxy keeps its four: more brought little and were refused
+#: together.
 LANES = {HTTPS: (16, 32), SSH_DIRECT: (WORKERS, 8), SSH_PROXY: (WORKERS, WORKERS)}
 
 
