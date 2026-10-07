@@ -38,6 +38,12 @@ Stated once, here.
 | the engine | applies no normalisation: the source's `gain_db` and the interval's multiply the samples, and the free field gain is `1 / d`. A voice at `gain_db = 0` is therefore heard at 1 m at 60 dB SPL, if full scale of the output is read as 86 dB SPL |
 | `gain_db` of a recipe | a departure from the stored level: `-6` is a quiet voice (54 dB at 1 m), and a noise at `-12` is 12 dB under what its entry says. The generator draws a voice's from -6 to 0 and a noise's from -6 to +6, about its stored level |
 
+A recipe of version 2 also says `level_spl_1m_db` of a source: the level
+its clips are stored at plus its `gain_db`, so that a reader need not know
+the library. **It is a label and nothing applies it**: the gain is laid
+once, by the engine, from the two `gain_db`
+([`scene-signal.md`](scene-signal.md), "The labels").
+
 The **active speech level** is measured after ITU-T P.56, method B
 (`active_speech_level`): the envelope is the rectified signal through two
 low passes of 30 ms; the signal is active while the envelope is above a

@@ -30,6 +30,7 @@ import pytest
 from scipy.signal import butter, sosfiltfilt
 
 from reverberate.compute import Devices
+from reverberate.gpu import onebox
 from reverberate.mirror.moving import MovingSettings, prepare, trace_early
 from reverberate.mirror.moving_onset import onset_field
 from reverberate.mirror.render import band_pulse_energy
@@ -40,8 +41,9 @@ from reverberate.render.pack import KIND_DIRECT, PackError, band_map, read_pack,
 from reverberate.scenes import Recipe, cost, low_band_source_positions, wave_band
 from reverberate.scenes.kinematics import FLOOR_SOURCE_HEIGHT_M
 from reverberate.scenes.levels import VOICE_REFERENCE_DB
-from reverberate.trace import mirror_only
+from reverberate.trace import machines, mirror_only
 from reverberate.trace.plan import (
+    LOW_PPW,
     NO_SURFACES,
     SOURCE_CLEARANCE_STEPS,
     Profile,
@@ -50,6 +52,9 @@ from reverberate.trace.plan import (
     tail_sites_of,
     tracks_of,
 )
+from scene_floor import FLOOR_Y_M
+from test_preflight import Client, Offer, a_bundle
+from test_scenes_social import social_recipe
 from test_trace import CLIP, assets, dwell, station, traced
 
 DURATION = 1.5
@@ -390,6 +395,78 @@ def test_more_positions_a_step_leave_a_source_of_the_mirror_alone_without_any() 
     assert own.rail_slot is not None and np.all(own.rail_slot == -1)
     assert own.rail_weight is not None and not own.rail_weight.any()
     assert not own.low and all(tracks.sources[name].low for name in SOLVED)
+
+
+# --------------------------------------------------------------------------
+# what the second generator writes, planned and priced without a machine
+# --------------------------------------------------------------------------
+
+
+def shell(x: float, y0: float, y1: float, z: float) -> np.ndarray:
+    """The six faces of a box from the origin, ``[12, 3, 3]``: a dwelling's outer surfaces."""
+    c = np.array([[a, b, d] for a in (0.0, x) for b in (y0, y1) for d in (0.0, z)])
+    quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    return np.array([c[[q[i], q[j], q[k]]] for q in quads for i, j, k in ((0, 1, 2), (0, 2, 3))])
+
+
+@pytest.mark.parametrize("preset", ["quiet", "medium", "lively"])
+def test_a_scene_of_the_second_generator_is_planned_and_priced_without_a_machine(
+    preset: str, tmp_path: Path
+) -> None:
+    """Every kind of source the generator draws, through the plan and onto fake offers."""
+    recipe = social_recipe(preset)
+    plan = make_plan(recipe, shell(9.0, FLOOR_Y_M, FLOOR_Y_M + 2.6, 4.0), low_ppw=LOW_PPW)
+    record = plan.record
+    alone = {s.id for s in recipe.sources if not wave_band(s)}
+    assert "own_voice" in alone and set(record["mirror_only"]) == alone
+    assert {s.subtype for s in recipe.sources if s.id in alone} >= {"body"}
+    # The plan and the recipe's cost count the same solves, sites and early positions; the
+    # dwelling's walls can only add cells, where one of the listener's way stands by them.
+    counted = cost.counts(recipe)
+    assert record["source_positions"] == low_band_source_positions(recipe).count
+    for key in ("source_positions", "tail_sites", "step_pairs", "audible_steps_total"):
+        assert counted[key] == record[key], key
+    assert counted["cells"] <= plan.cells.count
+    # No source carried and no closed window among the solved, and each of those is read.
+    solved = {name for name, track in plan.tracks.sources.items() if track.low}
+    assert solved.isdisjoint(alone)
+    assert all(
+        (plan.tracks.sources[name].slot >= 0).any() == plan.tracks.sources[name].audible.any()
+        for name in solved
+    )
+    # The offers, priced for this run on the grid a trace takes: one card is the machine.
+    said: list[str] = []
+    offers = [Offer(1, "RTX 3090", 1, 0.173, 24.0), Offer(2, "RTX 3090", 8, 1.382, 24.0)]
+    need = onebox.campaign_need(a_bundle(tmp_path))
+    for count in (1, 8):
+        found = onebox.plan_rental(
+            Client(offers),
+            need,
+            hours=None,
+            predict=machines.predictor(record, low_ppw=LOW_PPW),
+            max_dph=3.0,
+            min_ram_gb=60.0,
+            gpu="",
+            say=said.append,
+            min_gpus=count,
+        )
+        # Among hosts of one card or more the one card is the lowest total, and first.
+        assert [o.id for o in found.offers] == ([1, 2] if count == 1 else [2])
+    one, eight = (
+        machines.predict(
+            record,
+            low_ppw=LOW_PPW,
+            gpu_name="RTX 3090",
+            num_gpus=cards,
+            gpu_ram_gb=24.0,
+            dph_total=rate,
+        )
+        for cards, rate in ((1, 0.173), (8, 1.382))
+    )
+    assert one is not None and eight is not None
+    # A minute of scene: the rental's start and the grid's preparation are most of it.
+    assert one["usd"] < 0.10 and one["hours"] < 0.5 and one["usd"] < eight["usd"]
+    assert one["solves"] == record["source_positions"]
 
 
 # --------------------------------------------------------------------------

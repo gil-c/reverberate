@@ -456,9 +456,20 @@ python -m reverberate.trace rent --recipe R.json --home H_full $M $X \
 python -m reverberate.trace rent ... --low-levers bins,int16,decay=60
 python -m reverberate.trace rent ... --low-levers none
 
-# 6. The same scene with its low band on the coarser grid, in a home of its own.
-python -m reverberate.trace rent --recipe R.json --home H_full_72 $M $X \
-    --low-ppw 7.2 --reuse-from H_full --gpus 4 --max-hours 8 --max-dph 2.0 --yes
+# 6. The same scene with its low band on the validated grid, in a home of its own (a
+#    trace takes 7.2 points unless told, since 2026-10-07).
+python -m reverberate.trace rent --recipe R.json --home H_full_105 $M $X \
+    --low-ppw 10.5 --reuse-from H_full --gpus 4 --max-hours 8 --max-dph 2.0 --yes
+
+# 6b. A short scene of version 2 (docs/open-questions/recipes-v2.md, section 8): one
+#    card is the right machine, the rental's start being most of its bill. The first
+#    one checks in full, no recipe of version 2 having run on a card.
+python -m reverberate.scenes generate --dwelling hssd_0076 --seed 5 --preset medium \
+    --assets data/runs/w45_clarify_scene/assets.json \
+    --clips src/reverberate/scenes/library/clarify_v1.json --out V2_medium.json
+python -m reverberate.trace rent --recipe V2_medium.json --home H_v2_medium $M $X \
+    --gpus 1 --gpu "RTX 3090" --max-hours 1 --max-dph 0.25 --check full --yes
+python -m reverberate.render labels H_v2_medium/pulled/pack.h5
 
 # 7. The two side by side: two files to hear at one gain, and what differs band by band.
 python -m reverberate.render check H_full/pulled/pack.h5 \

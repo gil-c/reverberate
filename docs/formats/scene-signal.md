@@ -102,6 +102,53 @@ A mix served to the page is the chosen stems summed in float64 in the pack's
 order and brought back to float32: the engine's mix to within the rounding
 of each stem to float32 (rule 4 below), and a single stem untouched.
 
+## The labels
+
+What a stem is, interval by interval, is not in the audio: it is the
+recipe's, and a pack holds its recipe. `reverberate.render.labels` writes
+it as one JSON document beside the signal, `<name>.labels.json` for
+`<name>.f32` and `<name>.json`, sorted keys:
+
+```
+python -m reverberate.render labels PACK [OUT]     # <pack>.labels.json unless OUT
+python -m reverberate.render mix PACK OUT          # writes OUT.labels.json beside the mix
+```
+
+| key | meaning |
+| --- | --- |
+| `schema`, `schema_version` | `"reverberate.scene-labels"`, `1` |
+| `recipe_sha256`, `recipe_version`, `dwelling`, `duration_s`, `sample_rate_hz` | the scene |
+| `levels` | `full_scale_spl_1m_db`, 86: what full scale of the signal stands for at 1 m; `applied`, what the engine multiplied a clip by |
+| `scene` | the recipe's `{"calmness", "snr_floor_db"}`; `null` for a recipe of version 1 |
+| `listener` | `conversation`, the group the listener talks in by interval, and `gaze`, what the head was turned to: the recipe's own |
+| `sources` | one a source of the pack, **in the pack's order, which is the stems' order** |
+
+and per source:
+
+| key | meaning |
+| --- | --- |
+| `id`, `kind`, `subtype` | as the recipe; `subtype` `null` where it has none |
+| `roles` | a `voice` of version 2 only: `{"start_s", "end_s", "role", "group"}` over the whole scene, `role` `"conversation"` or `"outside"`. **The training label**: what the voice is to the listener, by interval |
+| `activity` | every interval the source sounds in: `start_s`, `end_s`, `clip`, `clip_library`, `gain_db`; in version 2 `level_spl_1m_db`, and for a voice `effort`, `event`, and `role` and `group` as they are when the interval starts |
+| `gain_db`, `level_spl_1m_db` | the source's own; the level `null` in version 1 |
+| `stem` | `"whole"`: the source as heard in the room. `"room"`: the room's answer alone, the direct sound being the device stage's: the wearer's own voice |
+| `low_band` | what rendered the band under the crossover: `"wave"`, `"mirror"` (with `mirror_only_because`: `"carried"`, `"closed opening"`, `"near a surface"`) or `"none"` in a pack without one |
+| `attach`, `opening` | the recipe's, where the source has one |
+| `band_gain_db`, `band_gain_of` | a colour laid on the source, a band: a closed window's glazing |
+
+**A level is said once and applied once.** A clip is stored at the level
+its library says ([`clip-library.md`](clip-library.md)): a voice at 60 dB
+SPL at 1 m, a noise at its entry's level. The engine multiplies it by the
+source's `gain_db` and the interval's and by nothing else. A source's
+`level_spl_1m_db` is the stored level and the source's gain together, so
+it is a label and no stage applies it; an interval's is that plus the
+interval's gain, what the source is at 1 m in free field while the
+interval lasts. A turn at 63 dB of a voice stored at 60 is rendered 3 dB
+over its clip, measured (`tests/test_trace_v2.py`).
+
+The audit's stems are named by their source's id, so the same document
+labels them.
+
 ## The sound check
 
 `python -m reverberate.render check <pack.h5> [--recipe R.json] [--clips DIR]

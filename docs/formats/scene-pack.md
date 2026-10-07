@@ -149,7 +149,7 @@ Attributes:
 | `ordering`, `normalisation` | str | `"ACN"`, `"N3D"` |
 | `sound_speed_m_s` | float | `343.2`, the solver's at the recipe's temperature |
 | `bands_hz`, `bank_bands_hz` | int array | as above |
-| `has_low`, `has_tail` | bool | whether the two groups exist in every source |
+| `has_low`, `has_tail` | bool | whether the two groups exist: `tail` in every source, `low` in every source but those the mirror renders alone (`mirror_only`, below) |
 | `low_sample_rate_hz` | float | `4000` |
 | `low_samples` | int | `4800`, 1.2 s |
 | `fusion_json` | str | how two cells are fused and which may serve: `{"quadrature_degree": 26, "lambda": 0.001, "exact_under_m": 0.001, "translate_within_m": 0.2, "fuse_within_m": 0.3, "source_share": 0.15, "surface_share": 0.5}` |
@@ -163,8 +163,17 @@ and gains from it, so a pack is rendered without its recipe file.
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `position` | float64 | `[step, 3]` | the centre of the head |
+| `position` | float64 | `[step, 3]` | the centre of the head, **without its sway**: where the low band is moved to and the tail weighed |
 | `orientation` | float32 | `[step, 3]` | yaw, pitch, roll in degrees, the recipe's convention, yaw not wrapped |
+
+A recipe of version 2 gives the head a sway of a few centimetres
+([`scene-recipe.md`](scene-recipe.md), "Version 2"). The arrivals of
+`early` were traced to the head **with** its sway, and need nothing more to
+be rendered so: a row's apparent source is laid from `position` along its
+`arrival` by its `delay_s`, so the delay and the direction at a step are
+the ones traced whatever `position` holds, and between two steps the path
+is the same line. The low band and the tail are read where the head stands
+without it (the owner's decision of 2026-10-07: a sway asks no solve).
 
 The orientation is carried for the decoder and is **not applied**: the
 engine's output is the order 7 field at the head's centre in the scene's
@@ -202,12 +211,155 @@ One group per source of the recipe, named by its `id`. Attributes: `kind`,
 
 | dataset | dtype | shape | meaning |
 | --- | --- | --- | --- |
-| `position` | float64 | `[step, 3]` | the mouth |
+| `position` | float64 | `[step, 3]` | the mouth, where it is: with its sway in a recipe of version 2, which `early` was traced from. `low/pair_position` is where the low band was solved, without it |
 | `yaw_deg` | float32 | `[step]` | the facing, not wrapped |
 | `audible` | bool | `[step]` | the step lies in an activity interval or within `low_samples / low_sample_rate_hz` after one (`scenes.audible_steps`) |
 
 A step that is not `audible` has no arrivals and `-1` in every index below;
-the trace does not compute it.
+the trace does not compute it. A source no step hears has its group, with
+no row and no histogram.
+
+#### What version 2 adds to a source
+
+A recipe of version 2 says more of a source, and holds sources no wave
+solve answers. Each of the following is an attribute of the source's
+group, **written only where it says something**: a pack of a version 1
+recipe holds none of them and is what it was. `reverberate.trace.mirror_only`
+writes them.
+
+| attribute | type | meaning; what its absence means |
+| --- | --- | --- |
+| `kind`, `subtype` | str | as the recipe: `voice`, `own_voice`, `media_voice`, `noise`; `television`, `radio`, `appliance`, `music`, `water`, `other`, `body`, `steps`, `outside` |
+| `mirror_only` | bool | the mirror renders the source alone: it has **no `low` group**, and the crossover is not applied to it. Absent: false |
+| `mirror_only_because` | str | `"carried"`, `"closed opening"` or `"near a surface"` |
+| `direct` | bool | false where the direct path of `early` is held at no gain: a source at the listener's own mouth. Absent: true |
+| `level_spl_1m_db` | float | the recipe's: the source at 1 m, dB SPL, at an interval gain of zero. **A label: nothing applies it** (`gain_db` is what the engine multiplies by, and already holds it) |
+| `carried_by`, `carried_at` | str | the recipe's `attach`: `listener` or a source's id; `mouth` or `floor` |
+| `opening_object`, `opening_state` | str | the recipe's `opening`: the window or door, `open` or `closed` |
+| `band_gain_db` | float64 `[band]` | a colour the trace laid on the source, **already in `early/gain` and in `tail/scale`**: a closed window's glazing |
+| `band_gain_of` | str | what that colour is, in words |
+
+The roles of a voice, the efforts of its turns and the listener's
+conversation are not attributes: they are intervals, the pack holds its
+recipe, and `reverberate.render.labels` writes them beside the stems
+([`scene-signal.md`](scene-signal.md), "The labels").
+
+#### A source the mirror renders alone
+
+`mirror_only`. Which sources is one rule, `reverberate.scenes.wave_band`,
+and the plan may add to it:
+
+- **a carried source** (`"carried"`): the wearer's own voice, a person's
+  breath and clothes, footsteps. The mouth of the wearer is 0.10 m from
+  where the field is taken, inside any array that could hear it; a
+  footfall would ask a solve a stride, and they were most of a full
+  scene's positions;
+- **the pane of a closed window** (`"closed opening"`, below);
+- **a source too near a surface** (`"near a surface"`): one whose solved
+  position stands under three steps of the low band's grid from the
+  mirror's surfaces (95 mm at 7.2 points to 1500 Hz, 65 mm at 10.5). The
+  solver spreads a source over the eight nodes round it and refuses one
+  that touches a node that is not plain air, with its whole launch, on the
+  rented machine; the plan finds it on the laptop
+  (`trace.plan.near_a_surface`) and the bundle's profile names it
+  (`mirror_only`). It happens to a fixture, which stands by its object.
+
+**What such a source holds.** `early` and `tail` as any source's, traced
+by the mirror from where the source is; no `low`; `level/high_gain_db` and
+`level/band_gain_db` the level the bands above the crossover of every
+source stand at (`20 log10(alignment_gain)` plus the constant: 0 dB in a
+pack on the physical scale), with no pair's seam, having no pair;
+`level/onset_s` the step's first arrival on the pack's clock, which nothing
+reads.
+
+**What its stem holds under the crossover: the mirror's own low octave
+bands, uncrossed.** The engine applies neither mask to it: its arrivals and
+its late part are the whole band, as in a pack without a low band. That is
+image sources and a statistical tail where a solved source has a wave
+field, so:
+
+- the level is right and the response is not: no room mode, no
+  diffraction round furniture, a reflection's gain that of its octave
+  band. The lowest band, 125 Hz, serves everything under it;
+- the octave bank the arrivals go through adds to the whole band from
+  180 Hz up and falls under it: -0.1 dB at 180 Hz, -2.7 dB at 125 Hz,
+  -6.6 dB at 90 Hz, -11.7 dB at 63 Hz, and the low cut of `/mirror` at
+  40 Hz under that. A solved source is whole from 50 Hz;
+- measured in the walled box of the tests (`tests/test_trace_v2.py`), a
+  breath and its talker's voice fed the same noise: from 5.6 kHz up their
+  arrivals are equal to a thousandth; from 250 to 700 Hz the voice's
+  arrivals are masked 20 dB and more under the breath's, which keeps its
+  own, at 7 dB over the voice's wave band, that being a monopole in free
+  air in that test and the mirror's the box.
+
+**The wearer's own voice** (`kind` `own_voice`, `direct` false) holds the
+room's answer and not the direct sound: at the device that is the path
+round the head and through the bone, which no room simulation without a
+head has. The direct path's row is kept in `early` with a gain of zero, so
+that the late part starts 10 ms after it as every source's does. Its tail
+is cast from the head's centre, where a cell stands: `tail/scale` is then
+what a cell beyond the receiver's sphere has, the sphere holding the
+source. The stem is what the room gives back, 20 dB under the direct sound
+at the ears on the first example traced so (56 dB SPL for a voice of
+57 dB at 1 m); the device stage adds the dry clip through a mouth to
+microphone response, which no rotation and no room changes.
+
+**Footsteps** (`subtype` `steps`) are 5 cm above the floor and hop from a
+footfall to the next. The mirror gives the direct sound and the floor's
+reflection 8 cm of path behind it, which is the floor's own comb and is
+right. At a hop every path's apparent source jumps by a stride, more than
+the 0.30 m that make two paths of one (`JUMP_M`): the old place fades out
+and the new one in over the step, so what still rings of the last footfall
+is laid on the new place's response. The tail is its walker's, cast from
+the walker's rail at the height of the mouth.
+
+**A window** (`subtype` `outside`). The recipe puts the noise at the
+opening's fixture, 0.25 m inside the pane. *Open*: an ordinary source
+there, solved under the crossover. It is not placed outside: beyond the
+outer walls the export holds a closed corridor 0.4 m wide and not the
+outdoors (`docs/open-questions/solver-boundary.md`, section 5), and a
+source behind a surface of the mirror, as a pane is, has no arrival
+(measured in the box, below). A point in the opening's plane stands for the
+opening: right for one small against the wavelength, under 300 Hz for a
+window of a metre, and too wide a radiation above, where an opening beams
+what crosses it. *Closed*: the pane radiates. One source at the fixture,
+the mirror's alone, with the glazing's sound reduction index laid on it a
+band at a time: `band_gain_db` is `(R_w + C_tr) - R` in each octave band.
+The recipe's level is what comes in, the street's less one number for the
+glazing, so the level said is kept for road traffic and each band departs
+from it by what the glazing takes there more or less than that number:
+
+| glazing | 125 | 250 | 500 | 1k | 2k | 4k | `R_w (C; C_tr)` | `R_w + C_tr` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| single, 4 mm | 17 | 20 | 26 | 32 | 33 | 26 | 29 (-2; -3) | 25.7 |
+| double, 4 / 6 to 16 / 4 mm | 21 | 17 | 25 | 35 | 37 | 31 | 29 (-1; -4) | 25.1 |
+
+(`R` in dB, EN 12758:2011, generic values for float glass; the single
+number against traffic computed here from ISO 717-1's spectrum No. 2,
+-14, -10, -7, -4, -6 dB from 125 Hz to 2 kHz. **Both quoted from memory of
+the standards, to be checked against them before anything is published
+from them**; they agree with each other, the spectrum through the indices
+giving the single numbers the standard prints.) The double glazing is the
+default, the one the recipes' levels were drawn for; a bundle whose
+`trace.glazing` says `single` takes the other. The band at 8 kHz takes the
+value at 4 kHz and everything under 125 Hz that band's. **Its limits**: one
+point for a pane, so no directivity of a plate and no size (a set of
+points fed one clip would add in pressure under 700 Hz, 6 dB too much for
+four: it needs a signal each, which a pack has no notion of); no mode and
+no low band of the wave solver, where most of what crosses a glazing is;
+the frame, the vents and the wall beside it, which often carry more than
+the glass, are not there; and the reference is an A-weighted traffic
+spectrum, so a clip with more low end than traffic comes out louder than
+the level said.
+
+**Where a fixture stands** is not checked against the mirror's surfaces
+but for the rule above. Measured in the box: 2 mm from a surface a source
+is that surface's reflection at nearly the direct sound's level, as it
+should be; on a surface it loses that surface's image and the rays that
+leave into it (the tail 4 dB down); behind one, outside the shell or in a
+closed solid, it has no arrival and no tail. That last is silence and not
+an error: the trace says it (`steps_without_an_arrival` of its report, and
+a line of its log) and writes the pack.
 
 ### `early`: the arrivals above the crossover
 
@@ -1124,7 +1276,9 @@ Per source, at every output sample, in this order:
 4. **Low side.** The dry signal at `low_sample_rate_hz` convolved with the
    step's responses, crossfaded by `position_weight`, moved to the head by
    `mode`, brought to 48 kHz, times the ratio of the two rates (see the
-   scale of `ir`).
+   scale of `ir`). **A source the mirror renders alone has no low side**,
+   and steps 1 to 3 are laid without the crossover's masks: its high side
+   is its whole band (`Source.crossed`, `render.engine.SourceRenderer`).
 5. **Sum**, times the source's `gain_db` and the interval's. Nothing else
    scales it: the pack is physical and the engine has no gain of its own.
 
@@ -1219,8 +1373,9 @@ The signal is written as `docs/formats/scene-signal.md` says.
 | `low_levers` | present only when the pack holds `low/compact`: the levers it was written with, as `low/compact`'s own `levers_json` |
 | `pair_cache` | present only when the pair cache the responses were read from was kept compact: its levers, `bins,int16` |
 | `low_pairs` | how many pairs were read from the cache (`cached`), carried by the bundle (`carried`) and solved (`solved`) |
+| `mirror_only` | present only when the pack holds sources the mirror renders alone: their ids |
 | `created_utc` | |
-| `profile` | what of the recipe was traced: `{"seconds", "sources", "patch", "start_s"}`, all `null`, `false` and `0` for the whole scene |
+| `profile` | what of the recipe was traced: `{"seconds", "sources", "patch", "start_s"}`, all `null`, `false` and `0` for the whole scene; and `mirror_only`, present only when the plan gave sources to the mirror for standing too near a surface: their ids |
 | `fallback_steps` | how many audible steps no cell could serve by the rule and read the nearest alone |
 | `device`, `timings_s` | the card and the seconds of each stage, as the machine saw them |
 | `cost` | a list, one record per stage |
@@ -1315,10 +1470,10 @@ trace of L5 and what it is expected to cost are in
 2. Step `k` is the scene at `k step_s` exactly, source and listener at the
    same instant.
 3. Where `audible` is false: no rows, `mode` 0, every index `-1`.
-4. Where `audible` is true and `has_low`: `mode` is 1, 2 or 3; `pair[k, 0, 0]`
-   is valid; `pair[k, 1, :]` is valid exactly when `position_weight > 0`;
-   `pair[k, :, 1]` is valid exactly when `mode` is 3. The same for `hist`
-   with its two weights.
+4. Where `audible` is true and the source has a `low` group: `mode` is 1,
+   2 or 3; `pair[k, 0, 0]` is valid; `pair[k, 1, :]` is valid exactly when
+   `position_weight > 0`; `pair[k, :, 1]` is valid exactly when `mode` is 3.
+   The same for `hist` with its two weights, in every source.
 5. `ir[pair[k, a, b]]` was solved from `pair_position` at `cell[k, b]`.
 6. Directions are unit vectors to 1e-6. Gains are finite and not negative.
    `delay_s` is positive and under `low_samples / low_sample_rate_hz`.
@@ -1345,6 +1500,12 @@ trace of L5 and what it is expected to cost are in
     slot 1 exactly where slot `s` is read and `mode` is 3; `slot_weight` is
     finite, zero where its slot is not read, and one at every knot where a
     step reads one position. Invariant 8 does not hold for `slot_weight`.
+14. A source has a `low` group exactly when the pack `has_low` and the
+    source is not `mirror_only`. One that is `mirror_only` is rendered
+    without the crossover: what `early` and `tail` hold is its whole band.
+    Where `direct` is false the rows of `kind` 0 have a gain of zero.
+    `band_gain_db`, where there, is in `early/gain` and `tail/scale`
+    already: a reader applies it to nothing.
 
 ## The synthetic profile
 

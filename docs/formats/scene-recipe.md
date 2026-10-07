@@ -609,8 +609,9 @@ owner listened to the first scene; the choices and their cost are in
 **A version 1 recipe is read as before and keeps its bytes and its
 identity**; a recipe says its version and every key below is refused in
 version 1. Everything above holds in version 2 but what this section
-changes. The engine does not yet honour all of it: what the trace and the
-render must learn is listed in the note.
+changes. **The trace and the engine honour it** (lot L36): what a pack
+holds of each kind of source is in [`scene-pack.md`](scene-pack.md), "What
+version 2 adds to a source", and what is approximated is said there.
 
 **The principle.** What costs is a place a source is heard from under the
 crossover. Version 2 therefore keeps apart *where the low band is read*,
@@ -670,7 +671,8 @@ not know the library to know how loud a source is.
 the sum of `amplitude * sin(2 pi t / period_s + phase)`, along the scene's
 axes in metres, about the up axis in degrees. The mirror above the
 crossover is traced from the source with its sway; **the low band is read
-where the source is without it**. The yaw's sway is added to the yaw.
+where the source is without it**, and so are the listening cells and the
+tail. The yaw's sway is added to the yaw.
 
 **`attach`**: a carried source has no `segments` (the array is empty).
 
@@ -682,12 +684,21 @@ where the source is without it**. The yaw's sway is added to the yaw.
 | `offset_m` | `[front, left, up]` | carried at the listener's mouth only, and then required: from the centre of the head, in the head's own frame, turning with its yaw, pitch and roll |
 | `stride_m` | float | carried at the floor only, and then required: the footfalls stand at arc lengths `j * stride_m` from the rail's `a`, and at its `b`, along each rail the carrier travels; for the listener along its keyframes on the plan, from the first |
 
-A source carried at a mouth reads its carrier's low band positions and adds
-none. One carried at the floor is at one footfall until its carrier is
+A source carried at the floor is at one footfall until its carrier is
 nearer the next: it hops, and each place it sounds from is a place that
-does not move. The wearer's own voice is 0.10 m from where the field is
-taken, inside any array that could hear it: no wave solve answers it, and
-the recipe says only where it is.
+does not move. **A carried source asks for no wave solve**
+(`reverberate.scenes.wave_band`, the owner's decisions of 2026-10-07): the
+mirror renders it alone over the whole band, from where it is. The
+wearer's own voice is 0.10 m from where the field is taken, inside any
+array that could hear it, and its stem holds the room's answer without the
+direct sound, which is the device stage's; a breath and footsteps are
+quiet, and a footfall a stride was most of a full scene's positions.
+
+**`opening`**: a noise of `outside` stands at the fixture of a window or
+an outer door, 0.25 m inside it. `"open"`: it is a source like any other
+there, solved under the crossover. `"closed"`: the pane radiates, and the
+mirror renders it alone, through the glazing's sound reduction index a
+band. Its `level_spl_1m_db` is what comes in either way.
 
 An activity interval of a `voice` or an `own_voice` has two more keys:
 `effort`, one of `"whisper"`, `"relaxed"`, `"normal"`, `"raised"`,
