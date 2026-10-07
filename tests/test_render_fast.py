@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
-from collections.abc import Callable
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -23,7 +25,7 @@ import numpy as np
 import pytest
 from scipy.signal import fftconvolve
 
-from reverberate.render import native
+from reverberate.render import delay, native
 from reverberate.render.benchmark import density_pack
 from reverberate.render.engine import Engine, RenderSettings
 from reverberate.render.mix import write_mix
@@ -186,6 +188,83 @@ def test_the_c_text_and_its_twin_give_the_same_bits() -> None:
     np.testing.assert_array_equal(native.carrier(0xDEADBEEF12345678, streams, 7, 500), drawn)
 
 
+def test_the_threads_of_a_first_render_are_given_one_library_and_one_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process's first run asks from every thread at once: one of each is made, for all.
+
+    Each used to make a table of its own, and the one stored last freed the
+    one a loop in C was reading; and a thread that asked for the library
+    while another built it was told there was none. Both are made slowly
+    here, so that every thread asks before the first has finished.
+    """
+    made = {"library": 0, "table": 0}
+    build, kernel = native._build, delay.kernel_table
+
+    def slow_build() -> Any:
+        made["library"] += 1
+        time.sleep(0.05)
+        return build()
+
+    def slow_kernel() -> np.ndarray:
+        made["table"] += 1
+        time.sleep(0.05)
+        return np.asarray(kernel())
+
+    monkeypatch.delenv("REVERBERATE_NO_NATIVE", raising=False)
+    monkeypatch.setattr(native, "_build", slow_build)
+    monkeypatch.setattr(delay, "kernel_table", slow_kernel)
+    for name, fresh in (("tried", False), ("library", None), ("why", None), ("table", None)):
+        monkeypatch.setitem(native._state, name, fresh)
+    threads = 8
+    together = threading.Barrier(threads)
+
+    def first_use(_: int) -> tuple[Any, np.ndarray]:
+        together.wait()
+        return native._library(), native._table()
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        got = list(pool.map(first_use, range(threads)))
+    assert made == {"library": 1, "table": 1}
+    assert all(library is got[0][0] and table is got[0][1] for library, table in got)
+    assert got[0][1].dtype == np.float32 and not got[0][1].flags.writeable
+    np.testing.assert_array_equal(got[0][1], kernel().astype(np.float32))
+
+
+def test_the_loop_in_c_reads_a_signal_that_is_not_one_block_as_its_twin_does() -> None:
+    """What the loop is given the address of is what it is to read, kept until it is back."""
+    if not native.available():
+        pytest.skip(f"no build of the engine's loops here: {native.why_not()}")
+    rng = np.random.default_rng(3)
+    step, nodes, channels = 240, 4, 4
+    # Every other sample of an array, and one in double precision: neither is the text's.
+    strided = rng.standard_normal(4000).astype(np.float32)[::2]
+    double = rng.standard_normal(2000)
+    given: dict[str, Any] = {
+        "start": 600,
+        "nodes": nodes,
+        "rate": 48000.0,
+        "lead": 0.0,
+        "speed": C,
+        "q0": np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]]),
+        "q1": np.array([[1.2, 0.0, 0.0], [0.0, 2.0, 0.1]]),
+        "l0": np.zeros(3),
+        "l1": np.array([0.05, 0.0, 0.0]),
+        "first": [(strided, 100), None],
+        "second": [(strided, 100), (double, 0)],
+        "harmonics": rng.standard_normal((2, nodes + 1, channels)).astype(np.float32),
+    }
+    out = np.zeros((channels, step), dtype=np.float32)
+    native.early_interval(out, **given)
+    twin = np.zeros((channels, step), dtype=np.float32)
+    with native.disabled():
+        native.early_interval(twin, **given)
+    assert np.abs(twin).max() > 0.0
+    np.testing.assert_array_equal(out, twin)
+    with pytest.raises(ValueError, match="float32 in one block"):
+        native.early_interval(np.zeros((channels, step)), **given)
+
+
 def test_blocks_ranges_and_runs_give_the_same_samples() -> None:
     pack = small_dense()
     dry = {"s1": noise(0.3)}
@@ -273,54 +352,28 @@ def test_a_mix_rendered_here_is_the_file_one_engine_writes_and_a_window_its_samp
     assert not list(tmp_path.glob("carriers-*"))
 
 
-def _engine_readied(sources: int) -> Engine:
-    """:func:`_engine`, the C text loaded and the delay table made before a thread asks."""
-    native.available()
-    native._table()
-    return _engine(sources)
-
-
-def _fresh_processes_write_the_file(tmp_path: Path, factory: Callable[[], Engine]) -> None:
+def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> None:
     engine = _engine(2)
     h = engine.pack.header
     one = write_signal(
         tmp_path / "one", engine.blocks(4800), sample_rate_hz=h.sample_rate_hz, order=h.order
     )
-    # Processes started afresh, three times. On the laptop they write the very bytes
-    # (the first scene's mix has one SHA-256 by four processes, by six and by eight). On
-    # the CI's Linux a fresh process and this one differed one run in two: held here to
-    # 1e-12 of the peak, and the failure's message measures the difference, says where
-    # in the file it is and which part of the engine a fresh process renders otherwise.
+    # Processes started afresh, three times, held to the very bytes this process writes.
+    # For a while they were held to 1e-12 of its peak, because on the CI's Linux the two
+    # did not write one digest one run in two: that was the delay table freed under the
+    # loop reading it, in whichever process rendered for the first time on several
+    # threads (docs/open-questions/engine-speed.md, "the same bytes"), and no difference
+    # of a rounding's size was ever measured. If the digests part again the message
+    # measures it, says where in the file it is and which part of the engine a fresh
+    # process renders otherwise.
     wanted = np.array(open_signal(tmp_path / "one").frames)
     for _ in range(3):
-        two = write_mix(tmp_path / "two", factory, processes=2, scratch=tmp_path)
+        two = write_mix(tmp_path / "two", partial(_engine, 2), processes=2, scratch=tmp_path)
         assert two["frames"] == one["frames"] and two["render"]["processes"] == 2
         made = np.array(open_signal(tmp_path / "two").frames)
         assert hashlib.sha256(made.tobytes()).hexdigest() == two["sha256"]
-        apart = float(np.abs(made - wanted).max() / np.abs(wanted).max())
-        assert apart <= 1e-12, (
-            f"a fresh process is {apart:.3e} of the peak from this one: "
+        assert two["sha256"] == one["sha256"], (
+            f"a fresh process is {off(made, wanted):.3e} of the peak from this one: "
             f"{_what_differs(made, wanted, 2)}"
         )
     assert not list(tmp_path.glob("carriers-*"))
-
-
-# On the CI's Linux a fresh process and this one differ in more than one run in two
-# (docs/open-questions/engine-speed.md has what was measured and the reading of it). The
-# test is as it was, tolerance and all; the mark takes it out of the run a pull request
-# waits for and into a job of its own, which runs it on every pull request and blocks
-# none. What is rendered in this process alone is the test above, in the default run.
-@pytest.mark.quarantine
-def test_several_processes_write_the_file_one_engine_writes(tmp_path: Path) -> None:
-    _fresh_processes_write_the_file(tmp_path, partial(_engine, 2))
-
-
-# The same, each process having loaded the C text and made the delay table before its
-# threads start: the reading of the failure above is that the threads of a fresh process
-# each make the table, and that the loop in C reads one that another thread's has
-# replaced. If this one holds where the other fails, that is where the remedy goes.
-@pytest.mark.quarantine
-def test_processes_readied_before_their_threads_write_the_file_one_engine_writes(
-    tmp_path: Path,
-) -> None:
-    _fresh_processes_write_the_file(tmp_path, partial(_engine_readied, 2))

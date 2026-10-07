@@ -191,19 +191,22 @@ taken as it is written; the file removed afterwards.
 | the mix, 1084 to 1096 s, walking, one process, warm | 1 | 28.7 s (0.42 times real time) | 28.7 s | | 2 to 3 |
 | the audit's stems, 90 s of its service from 280 s | 6 | 16.6 s of stem a second: the scene in 17 min at that rate | | 3.4 GB | 6 to 10 |
 
-The same bytes whatever the processes and whenever, **on the laptop**:
-the two whole renders have one SHA-256 and the window of a minute has one
-with four processes and with eight. **Not on the CI's Linux, and it is not
-rounding.** The test that holds a process started afresh to the test's own
+The same bytes whatever the processes and whenever: the two whole renders
+have one SHA-256 and the window of a minute has one with four processes
+and with eight. For a while that was shown **on the laptop only**. On the
+CI's Linux the test that holds a process started afresh to the test's own
 process (`tests/test_render_fast.py::test_several_processes_write_the_file_one_engine_writes`)
 failed in four of the nine runs of the whole suite that held it between
 its arrival and 2026-10-06, two of them on branches that had not touched
-the engine and were run again until they passed. The test's tolerance is
-as it was, 1e-12 of the peak. It is marked `quarantine`: out of the run a
-pull request waits for, and run three times on every pull request by a job
-of its own that is red when it fails and holds nothing.
+the engine and were run again until they passed. It was not rounding: it
+was a defect of the engine, measured by lot L27 and closed by lot L29.
+While it was open the test was marked `quarantine`, out of the run a pull
+request waits for and run three times on every pull request by a job of
+its own that held nothing; the mark, the job and its `make` target are
+gone with the defect, and the test is in the default run again.
 
-What that job measured (lot L27, nine runs of the CI):
+What that job measured (lot L27, nine runs of the CI), the engine as it
+was then:
 
 - Alone in a process of its own, which then renders for the first time
   itself, it fails in 18 runs of 31. After the other tests of its file,
@@ -236,29 +239,100 @@ What that job measured (lot L27, nine runs of the CI):
   failed on two renders of one pack that were not one, 3 337 samples of
   921 600 apart from frame 57 on, the frames of the list above. Whichever
   test renders first in a process is exposed, and one that holds its
-  render against nothing does not notice. `tests/conftest.py` now makes
-  the table before any test of a process, which keeps every test out of
-  the way of it and is to go when the defect does. The quarantine's job
-  runs without that file (`--noconftest`), so that its test stays as
-  exposed as it was measured; with it, 6 runs of 6 passed.
+  render against nothing does not notice. `tests/conftest.py` then made
+  the table before any test of a process, and the quarantine's job ran
+  without that file (`--noconftest`) so that its test stayed as exposed
+  as it was measured; with the file, 6 runs of 6 passed.
 
-The reading, from those and from the text: `render/native.py` makes the
-delay table on first use with no lock (`_table`), and `early_interval`
-gives the loop in C the table's address without keeping the table for the
-length of the call. In a fresh process the first run's intervals are
-rendered by threads, each finds no table and makes one, and the one stored
-last frees the one a loop in C is still reading, which the allocator hands
-to the next request. `_library` has the same shape (it says it has tried
-before it has built), which costs a thread one call through the numpy twin
-and nothing else. An engine with `workers=1`, which is what the mix's
-processes are given, starts no thread and is not exposed; an engine left
-at its default is, in the first run of every fresh process, on any
-machine whose allocator reuses the block at once. The remedy is three
-lines in `render/native.py` (a lock about the two first uses, and the
-table held in a name across the call); it is not made in the lot that
-found it, which was not to touch the engine, and when it is made the mark
-comes off the test. Until then "the same bytes" is a property of an engine
-on one thread or of a process that has rendered before.
+**The cause.** `render/native.py` made the delay table on first use with
+no lock (`_table`), and `early_interval` gave the loop in C the table's
+address without keeping the table for the length of the call. In a fresh
+process the first run's intervals are rendered by threads, each found no
+table and made one, and the one stored last freed the one a loop in C was
+still reading, which the allocator handed to the next request. An engine
+with `workers=1`, which is what the mix's processes are given, starts no
+thread and was not exposed; an engine left at its default was, in the
+first run of every fresh process, on any machine whose allocator reuses
+the block at once (glibc's does; the laptop's did not in any of eight
+runs of the engine as it was, six of them with `MallocScribble`). The
+audit's stems rendered without processes, a thread a worker with engines
+of its own in the page's process, met the same first use.
+
+**The remedy** (lot L29, `render/native.py`). One lock about the first
+uses: the table is made once, read-only, and never replaced, and a thread
+that asks while another makes it waits and is given the same one. The
+caller holds the table in a name of its own until the loop in C is back.
+What else of `render/native.py` and `render/fast.py` has that shape was
+read, and this is the list:
+
+- *The library's loading* (`_library`) said it had tried before it had
+  built: a thread that asked meanwhile was told there was no library and
+  went through the numpy twin, once. The twin gives the same bits, so
+  nothing was heard of it, but it is now under the same lock and says it
+  has tried only when it has. `disabled`, which counts, counts under it.
+- *The signals of a path's two ends* reach the loop as addresses in a
+  table of integers. The engine's are float32 in one block and held by
+  the caller's lists for the call, so nothing was wrong; but an array that
+  was not (every other sample of another, or double precision) would have
+  been read as if it were. Each is now brought to what the text reads and
+  held beside its address until the loop returns, and the twin reads the
+  same. `out`, which the loop adds to in place, is refused when it is not
+  float32 in one block.
+- *Every other address given to C* (`q0`, `q1`, `l0`, `l1`, the
+  harmonics, `base` and `work` in `early_interval`; the streams and `out`
+  in `carrier`; `low`, the taps turned, `out` and `work` in `upsample`) is
+  of an array in a name of the calling frame: held.
+- *What the threads of a run touch in `render/fast.py`*: only
+  `FastEarly.render`'s `one`, which reads the run's plans, signals and
+  harmonics, all made before the threads start and written by none, and
+  writes a block of its own. `FastEarly._tables`, `FastLow._fast_spectra`,
+  `HeadOperators` and `FastTail._long` are filled on first use with no
+  lock, but by the thread that renders the engine and by no other; none
+  is given to C. The tail's process-wide store (`tail.HELD`) has its own
+  lock, makes outside it, and hands back what it made to who made it: two
+  threads would make a spectrum twice and each keep its own alive. The
+  carrier files the processes of a mix share are written whole and
+  renamed.
+- *Not in those two files and not changed*: `mirror/native.py` loads its
+  library with the same early "tried", so a thread of a trace that asks
+  while another builds goes through that module's twin once. It keeps its
+  arrays beside its structs (`Held`), which is the pattern wanted here.
+
+**What holds it.** Two tests that fail on the engine as it was, on any
+machine and every time:
+`test_the_threads_of_a_first_render_are_given_one_library_and_one_table`
+(eight threads ask at once while the first is still making: one library
+and one table are made, where seven tables were) and
+`test_the_loop_in_c_reads_a_signal_that_is_not_one_block_as_its_twin_does`.
+L27's second test, the same processes readied before their threads, said
+where the remedy went; with the remedy in the engine it is the first test
+twice, and it is removed.
+
+**Measured after** (2026-10-07), the test alone in a process started for
+it, which is the case that failed 18 runs of 31, one run at a time:
+
+| where | the engine | runs | failed |
+| --- | --- | --- | --- |
+| the CI's Linux | as it was, held to 1e-12 of the peak | 30 | 9 |
+| the CI's Linux | as it is, held to the digest | 30 | 0 |
+| the CI's Linux, `MALLOC_PERTURB_` set | as it is, held to the digest | 30 | 0 |
+| the laptop, at the lowest priority | as it is, held to the digest | 30 | 0 |
+
+Each run starts fresh processes three times, so the 60 runs on Linux are
+180 pairs of fresh processes that wrote the digest of the process that
+started them. The runs on Linux were a workflow of a branch made for them
+and removed since; the pull request of lot L29 has their addresses.
+
+**The tolerance is equality again.** The test was held to 1e-12 of the
+peak from the day the digests first parted on the CI, on the reading that
+it might be rounding (the library's vector kernels had just been taken
+out of the engine for that reason, `_mixed_rows` and `_products`, and the
+digests still parted). No difference of that size was ever measured:
+every failure L27 recorded is the defect above, 1.2e-3 of the peak on its
+mildest day. The test compares digests again. Whether the vector kernels
+were ever a cause of their own is not known: they were removed before the
+defect was understood, they are not put back, and the two functions that
+replace them cost nothing that was measured.
 
 One more thing the same lot met, once: in the first run of the CI that
 held the libraries' products to one thread a process (`OMP_NUM_THREADS`,
