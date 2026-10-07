@@ -5,7 +5,14 @@ nothing else. It holds
 
 - **the tracks**: the listener and every source at every step of the pack,
   from the recipe's own kinematics, and the solved positions each audible
-  step of a source lies between (:func:`tracks_of`);
+  step of a source lies between (:func:`tracks_of`). **A track holds two
+  places** since recipes of version 2: ``position``, where the band under
+  the crossover, the cells and the tail read the source, and ``mouth``,
+  where it really is with its sway, which the mirror's early trace alone
+  follows (:attr:`Tracks.head` for the listener). **And some sources are
+  the mirror's alone** (:attr:`SourceTrack.low`,
+  :func:`reverberate.scenes.wave_band`): they read no solved position, no
+  cell and no pair;
 - **the listening cells**: where an order 7 array must stand for the band
   under the crossover (:func:`listening_cells`). One at every place the
   listener rests, at the height it has there; one every 0.15 m of its path;
@@ -26,7 +33,7 @@ so the plan and the pack are one rule applied twice.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +52,9 @@ from reverberate.scenes import (
     recipe_sha256,
     seat_rail_heights,
     source_state,
+    wave_band,
 )
-from reverberate.scenes.recipe import Rail, Rise, Travel
+from reverberate.scenes.recipe import LISTENER, Rail, Rise, Travel
 from reverberate.spatial.lowband import LOW_DURATION_S, solve_fmax_hz
 from reverberate.spatial.rail import band_limited_weights, knots_hz, nearest_samples
 from reverberate.spatial.translate import (
@@ -66,6 +74,7 @@ __all__ = [
     "ARRAY_RADIUS_M",
     "DENSE_PITCH_M",
     "LOW_PPW",
+    "NO_SURFACES",
     "PATH_PITCH_M",
     "RAIL_POSITIONS",
     "REFERENCE_PPW",
@@ -82,6 +91,7 @@ __all__ = [
     "estimate",
     "listening_cells",
     "make_plan",
+    "near_a_surface",
     "on_the_grid",
     "pairs_of",
     "patch_cells",
@@ -114,6 +124,13 @@ REFERENCE_PPW = 10.5
 LOW_PPW = 7.2
 #: A source slot's weight under this is no weight.
 WEIGHT_FLOOR = 1e-9
+#: A solved position stands this many steps of the low band's grid from the nearest
+#: surface, or its source is the mirror's alone. The solver spreads a source over the
+#: eight nodes round it and refuses one that touches a node that is not plain air
+#: (``wave.lowband.solver.drive_for``): a boundary node is a step from its surface and a
+#: corner of the eight a step and three quarters from the source. A station on the free
+#: floor is 0.25 m from a wall; a fixture stands by its object and may be nearer.
+SOURCE_CLEARANCE_STEPS = 3.0
 #: The solved positions a source on a rail reads unless more are asked for: the two round
 #: it, weighted linearly. More are read by ``spatial.rail.band_limited_weights``.
 RAIL_POSITIONS = 2
@@ -228,10 +245,16 @@ class Profile:
     #: The solved positions a source on a rail reads: two, weighted linearly,
     #: or more, weighted per frequency (``docs/open-questions/rail-interpolation.md``).
     rail_positions: int = RAIL_POSITIONS
+    #: Sources the plan found too near a surface for the wave solver
+    #: (:data:`SOURCE_CLEARANCE_STEPS`): the mirror's alone, as those
+    #: :func:`reverberate.scenes.wave_band` names. Decided once, by the plan, and said
+    #: to the machine, so that both read the same solved positions.
+    mirror_only: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not 2 <= int(self.rail_positions) <= 16:
             raise ValueError(f"a source reads 2 to 16 positions, not {self.rail_positions}")
+        object.__setattr__(self, "mirror_only", tuple(sorted(self.mirror_only)))
 
     @property
     def smoke(self) -> bool:
@@ -247,6 +270,8 @@ class Profile:
         # Named only when it is not the first rule's, whose records it leaves as they were.
         if self.rail_positions != RAIL_POSITIONS:
             record["rail_positions"] = int(self.rail_positions)
+        if self.mirror_only:
+            record["mirror_only"] = list(self.mirror_only)
         return record
 
     @classmethod
@@ -257,6 +282,7 @@ class Profile:
             bool(record.get("patch", False)),
             float(record.get("start_s", 0.0)),
             int(record.get("rail_positions", RAIL_POSITIONS)),
+            tuple(str(name) for name in record.get("mirror_only", ())),
         )
 
 
@@ -287,11 +313,30 @@ class SourceTrack:
     #: rule, where :attr:`slot` and :attr:`weight` say it all.
     rail_slot: np.ndarray | None = None
     rail_weight: np.ndarray | None = None
+    #: ``[step, 3]``: where the source really is, its sway added: what the mirror's
+    #: early trace is cast from. ``None``: :attr:`position`, a recipe of version 1.
+    mouth: np.ndarray | None = None
+    #: ``[step, 3]``: where the tail reads a carried source, its carrier's own place
+    #: (the talker's station or rail, the head's centre). ``None``: :attr:`position`.
+    anchor: np.ndarray | None = None
+    #: Whether the band under the crossover is the wave solver's. False for a source the
+    #: mirror renders alone: every slot is ``-1`` and it reads no cell.
+    low: bool = True
 
     def read(self, step: int) -> np.ndarray:
         """The rows of :attr:`Tracks.positions` the step reads, ``-1`` for a slot not read."""
         table = self.slot if self.rail_slot is None else self.rail_slot
         return np.asarray(table[step])
+
+    @property
+    def traced_from(self) -> np.ndarray:
+        """Where the early trace is cast from at each step: the mouth, sway and all."""
+        return self.position if self.mouth is None else self.mouth
+
+    @property
+    def tail_from(self) -> np.ndarray:
+        """Where the tail reads the source at each step: without its sway, its carrier's place."""
+        return self.position if self.anchor is None else self.anchor
 
 
 @dataclass(frozen=True)
@@ -309,14 +354,37 @@ class Tracks:
     positions: np.ndarray
     #: The frequencies the sources' ``rail_weight`` are held at, in Hz.
     rail_knots_hz: np.ndarray | None = None
+    #: ``[step, 3]``: the head with its sway, which the mirror's early trace is heard
+    #: from. :attr:`listener` is the head without it: what the cells are chosen for, the
+    #: low band moved to and the tail weighed at. ``None``: :attr:`listener`.
+    head: np.ndarray | None = None
 
     @property
     def steps(self) -> int:
         return int(self.listener.shape[0])
 
     @property
+    def heard_from(self) -> np.ndarray:
+        """Where the early trace is heard from at each step: the head, sway and all."""
+        return self.listener if self.head is None else self.head
+
+    @property
     def times(self) -> np.ndarray:
         return self.start_s + np.arange(self.steps) * STEP_S
+
+
+#: The plan of a recipe without its dwelling: no surface, so every cell is free and no
+#: cell is added for one. What :func:`reverberate.scenes.cost.counts` hands to
+#: :func:`make_plan`, so that a recipe is counted by the plan's own rule.
+NO_SURFACES = np.zeros((0, 3, 3))
+
+
+def _clearance(points: np.ndarray, triangles: np.ndarray) -> np.ndarray:
+    """:func:`~reverberate.spatial.translate.clearance_m`; without a surface, no limit."""
+    points = np.atleast_2d(np.asarray(points, dtype=float))
+    if not np.asarray(triangles).shape[0]:
+        return np.full(points.shape[0], np.inf)
+    return clearance_m(points, triangles)
 
 
 def _millimetres(points: np.ndarray) -> np.ndarray:
@@ -339,6 +407,10 @@ def _slots(
     slots = np.repeat(state.position[:, None, :], 2, axis=1)
     weight = np.array(state.weight, dtype=float)
     moving = np.zeros(times.size, dtype=bool)
+    if source.attach is not None:
+        # Carried: no segment of its own and no solved position. It moves when it does.
+        moving[1:] = np.linalg.norm(np.diff(state.position, axis=0), axis=1) > 1e-9
+        return state, slots, np.zeros(times.size), moving, None, None
     for number, segment in enumerate(source.segments):
         here = state.segment == number
         if not here.any():
@@ -480,6 +552,11 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
     orientation = np.stack([head.yaw_deg, head.pitch_deg, head.roll_deg], axis=1)
     found: list[tuple[str, Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     count = int(profile.rail_positions)
+    # The sources the wave solver answers; the others read no solved position.
+    solved = {
+        source.id: wave_band(source) and source.id not in profile.mirror_only
+        for source in recipe.sources
+    }
     # More than two positions: which, per source, and whether each is one.
     rails: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for source in recipe.sources:
@@ -488,7 +565,7 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
             continue
         state, slots, weight, moving, nodes, held = _slots(recipe, source.id, times, count)
         found.append((source.id, state, slots, weight, moving, audible))
-        if nodes is not None and held is not None:
+        if nodes is not None and held is not None and solved[source.id]:
             # A source on a solved position, or at rest, reads it alone.
             held &= (audible & (weight > 0.0))[:, None]
             rails[source.id] = (nodes, held)
@@ -499,9 +576,10 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
         found = [item for item in found if item[0] in kept]
     read = [
         np.concatenate([slots[audible, 0], slots[audible & (weight > 0.0), 1]])
-        for _, _, slots, weight, _, audible in found
+        for name, _, slots, weight, _, audible in found
+        if solved[name]
     ]
-    read += [rails[name][0][rails[name][1]] for name, *_ in found if name in rails]
+    read += [rails[name][0][rails[name][1]] for name, *_ in found if name in rails and solved[name]]
     millimetres = (
         np.unique(_millimetres(np.concatenate(read)), axis=0)
         if read and sum(len(r) for r in read)
@@ -513,12 +591,18 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
     for name, state, slots, weight, moving, audible in found:
         slot = np.full((steps, 2), -1, dtype=np.int32)
         keys = _millimetres(slots)
-        for step in np.flatnonzero(audible):
+        if not solved[name]:
+            weight = np.zeros(steps)
+        for step in np.flatnonzero(audible) if solved[name] else ():
             slot[step, 0] = row_of[tuple(int(v) for v in keys[step, 0])]
             if weight[step] > 0.0:
                 slot[step, 1] = row_of[tuple(int(v) for v in keys[step, 1])]
         rail_slot = rail_weight = None
-        if knots is not None:
+        if knots is not None and name not in rails:
+            # The mirror's alone, or carried: the slots of a source that reads nothing.
+            rail_slot = np.full((steps, count), -1, dtype=np.int32)
+            rail_weight = np.zeros((steps, count, knots.size), dtype=np.float32)
+        elif knots is not None:
             nodes, held = rails[name]
             rail_slot = np.full((steps, count), -1, dtype=np.int32)
             rail_slot[:, 0] = slot[:, 0]
@@ -546,6 +630,9 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
             segment=np.asarray(state.segment),
             rail_slot=rail_slot,
             rail_weight=rail_weight,
+            mouth=np.asarray(state.mouth, dtype=float),
+            anchor=_anchor(recipe, name, times, head.position),
+            low=solved[name],
         )
     return Tracks(
         duration_s=duration,
@@ -555,7 +642,26 @@ def tracks_of(recipe: Recipe, profile: Profile | None = None) -> Tracks:
         sources=sources,
         positions=millimetres.astype(float) / 1000.0,
         rail_knots_hz=knots,
+        head=np.asarray(head.head, dtype=float),
     )
+
+
+def _anchor(
+    recipe: Recipe, source_id: str, times: np.ndarray, head: np.ndarray
+) -> np.ndarray | None:
+    """Where the tail reads a carried source: its carrier's place; ``None`` for any other.
+
+    The late part does not need a source to 8 cm (:mod:`reverberate.mirror.tails`),
+    so a breath, a footfall and the wearer's own voice read the sites their
+    carrier's place gives: the talker's station and rails, the head's rests
+    and its way. No ray is cast for them that their carrier's would not be.
+    """
+    attach = recipe.source(source_id).attach
+    if attach is None:
+        return None
+    if attach.to == LISTENER:
+        return np.asarray(head, dtype=float)
+    return np.asarray(source_state(recipe, attach.to, times).position, dtype=float)
 
 
 def busiest_window(recipe: Recipe, seconds: float, sources: int, every_s: float = 5.0) -> float:
@@ -617,7 +723,7 @@ class CellSet:
             position=np.concatenate([self.position, positions]),
             kind=np.concatenate([self.kind, np.full(len(positions), kind, dtype=np.uint8)]),
             origin=np.concatenate([self.origin, np.full(len(positions), origin, dtype=np.uint8)]),
-            clearance_m=np.concatenate([self.clearance_m, clearance_m(positions, triangles)]),
+            clearance_m=np.concatenate([self.clearance_m, _clearance(positions, triangles)]),
         )
 
 
@@ -664,7 +770,9 @@ def assign(
     the nearest surface; ``usable`` leaves out the cells no array stands on
     and those of the validation patch. A step the rule refuses falls back to
     the nearest cell alone, translated, and is returned by name: the scene is
-    not failed for it.
+    not failed for it. A source the mirror renders alone reads no cell: its
+    steps are all ``MODE_INAUDIBLE`` here, which says nothing of what is
+    heard of it above.
     """
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
     rows = np.arange(cells.shape[0]) if usable is None else np.flatnonzero(usable)
@@ -679,7 +787,7 @@ def assign(
         mode = np.full(steps, MODE_INAUDIBLE, dtype=np.uint8)
         cell = np.full((steps, 2), -1, dtype=np.int32)
         fallback = np.zeros(steps, dtype=bool)
-        heard = np.flatnonzero(track.audible)
+        heard = np.flatnonzero(track.audible) if track.low else np.zeros(0, dtype=np.int64)
         if heard.size:
             both = np.concatenate([tracks.listener[heard], track.position[heard]], axis=1)
             jobs, job_of = np.unique(both, axis=0, return_inverse=True)
@@ -778,7 +886,7 @@ def listening_cells(
         position=rest,
         kind=kind,
         origin=np.full(rest.shape[0], ORIGIN_REST, dtype=np.uint8),
-        clearance_m=clearance_m(rest, triangles) if rest.shape[0] else np.zeros(0),
+        clearance_m=_clearance(rest, triangles) if rest.shape[0] else np.zeros(0),
     )
     runs = _runs(listener)
     for first, last in runs:
@@ -839,8 +947,12 @@ def listening_cells(
             continue  # a cell added for an earlier step serves this one
         except LookupError:
             pass
-        mouths = np.asarray([t.position[step] for t in tracks.sources.values() if t.audible[step]])
-        free = float(clearance_m(head[None, :], triangles)[0])
+        # A source of the mirror alone is in no solve: the wearer's own mouth, 0.10 m
+        # from the head, keeps no array off it.
+        mouths = np.asarray(
+            [t.position[step] for t in tracks.sources.values() if t.audible[step] and t.low]
+        )
+        free = float(_clearance(head[None, :], triangles)[0])
         if free < ARRAY_RADIUS_M or (
             mouths.size and float(np.linalg.norm(mouths - head, axis=1).min()) < ARRAY_RADIUS_M
         ):
@@ -859,7 +971,13 @@ def listening_cells(
 
 
 def tail_sites_of(recipe: Recipe, track: SourceTrack) -> TailSites:
-    """Where one source's rays are traced from: the places it rests, and its rails."""
+    """Where one source's rays are traced from: the places it rests, and its rails.
+
+    A carried source's are its carrier's (:attr:`SourceTrack.tail_from`): a
+    talker's, over the steps the carried source is itself heard; and, on
+    the listener, the places the head rests and the ways it walks while
+    the source is heard, which no recipe names as stations and rails.
+    """
     source = recipe.source(track.id)
     floor = recipe.dwelling.floor_y_m
     standing = floor + recipe.heights.standing_m
@@ -867,6 +985,12 @@ def tail_sites_of(recipe: Recipe, track: SourceTrack) -> TailSites:
     stations: list[np.ndarray] = []
     rails: list[np.ndarray] = []
     seen: set[str] = set()
+    where = track.tail_from
+    if source.attach is not None and source.attach.to == LISTENER:
+        return _sites_of_the_head(where, track.audible)
+    if source.attach is not None:
+        # The carrier's segments, which the carried source's state indexes.
+        source = recipe.source(source.attach.to)
     for number, segment in enumerate(source.segments):
         here = (track.segment == number) & track.audible
         if not here.any():
@@ -884,12 +1008,27 @@ def tail_sites_of(recipe: Recipe, track: SourceTrack) -> TailSites:
                 x, z = recipe.station(segment.station).xz
                 rails.append(np.array([[x, seated, z], [x, standing, z]]))
         else:
-            stations.append(track.position[np.flatnonzero(here)[0]])
+            stations.append(where[np.flatnonzero(here)[0]])
     held = np.asarray(stations, dtype=float).reshape(-1, 3)
     if held.shape[0]:
         keys = _millimetres(held)
         held = held[np.sort(np.unique(keys, axis=0, return_index=True)[1])]
     return tail_sites(held, rails)
+
+
+def _sites_of_the_head(head: np.ndarray, audible: np.ndarray) -> TailSites:
+    """The tail's sites of a source the listener carries: its rests, and its ways, where heard."""
+    still = np.ones(head.shape[0], dtype=bool)
+    moved = np.linalg.norm(np.diff(head, axis=0), axis=1) > 1e-9
+    still[:-1] &= ~moved
+    still[1:] &= ~moved
+    rests = head[still & audible]
+    if rests.shape[0]:
+        rests = rests[np.sort(np.unique(_millimetres(rests), axis=0, return_index=True)[1])]
+    ways = [
+        head[first : last + 1] for first, last in _runs(head) if audible[first : last + 1].any()
+    ]
+    return tail_sites(rests.reshape(-1, 3), ways)
 
 
 def tail_cells(cells: np.ndarray, kind: np.ndarray, spacing_m: float = SPACING_M) -> np.ndarray:
@@ -989,6 +1128,39 @@ def patch_cells(
 
 # --------------------------------------------------------------------------
 # the plan
+def near_a_surface(
+    tracks: Tracks, triangles: np.ndarray, *, ppw: float | None = None
+) -> dict[str, float]:
+    """The solved sources too near a surface for the wave solver, and how near, in metres.
+
+    A source one of whose solved positions is nearer the mirror's surfaces
+    than :data:`SOURCE_CLEARANCE_STEPS` steps of the low band's grid. The
+    solver would refuse it on the machine, after the rental's start and
+    with its whole launch (``source ... touches a node that is not plain
+    air``); here it is found on the laptop, and the plan gives the source to
+    the mirror alone. It happens to a fixture, which stands by its object;
+    a station of the free floor is 0.25 m from any wall. **A point deep in
+    a solid is not seen here**: the mirror's surfaces are sheets, and a
+    point further inside one than this distance looks free. The solver
+    still refuses that one.
+    """
+    from reverberate.experiments.run import grid_step
+
+    triangles = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
+    if not tracks.positions.shape[0] or not triangles.shape[0]:
+        return {}
+    step = grid_step(solve_fmax_hz(), REFERENCE_PPW if ppw is None else float(ppw))
+    clearance = clearance_m(tracks.positions, triangles)
+    found: dict[str, float] = {}
+    for name, track in tracks.sources.items():
+        rows = np.unique(track.slot[track.slot >= 0])
+        if track.rail_slot is not None:
+            rows = np.unique(np.concatenate([rows, track.rail_slot[track.rail_slot >= 0]]))
+        if rows.size and float(clearance[rows].min()) < SOURCE_CLEARANCE_STEPS * step:
+            found[name] = round(float(clearance[rows].min()), 3)
+    return found
+
+
 def on_the_grid(
     tracks: Tracks,
     cells: np.ndarray,
@@ -1025,7 +1197,7 @@ def on_the_grid(
     step = grid_step(solve_fmax_hz(), points)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
     stood = np.rint(cells / step) * step
-    clearance = clearance_m(stood, triangles)
+    clearance = _clearance(stood, triangles)
     free = clearance >= ARRAY_RADIUS_STEPS * step
     if not free.any():
         free = np.ones(cells.shape[0], dtype=bool)
@@ -1141,10 +1313,19 @@ def make_plan(
     (:func:`on_the_grid`), which is what a run is priced by. The plan's own
     cells, modes and ``pairs`` are the rule on the cells asked, whatever
     the grid.
+
+    A source that stands too near a surface for the wave solver
+    (:func:`near_a_surface`) is given to the mirror alone, here and once:
+    the plan's profile names it (:attr:`Profile.mirror_only`), and the
+    machine reads the profile.
     """
     profile = profile or Profile()
     triangles = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
     tracks = tracks_of(recipe, profile)
+    near = near_a_surface(tracks, triangles, ppw=low_ppw)
+    if near:
+        profile = replace(profile, mirror_only=(*profile.mirror_only, *near))
+        tracks = tracks_of(recipe, profile)
     cells, cell_record = listening_cells(recipe, tracks, triangles)
     low, refused = assign(tracks, cells.position, cells.clearance_m)
     heard_at = pairs_of(tracks, low)
@@ -1152,7 +1333,7 @@ def make_plan(
     used: set[tuple[int, ...]] = set()
     for name, track in tracks.sources.items():
         if track.audible.any():
-            slots, weight = source_weights(track.position[track.audible], sites[name])
+            slots, weight = source_weights(track.tail_from[track.audible], sites[name])
             rows = np.unique(np.concatenate([slots[:, 0], slots[weight > 0.0, 1]]))
             used.update(
                 tuple(int(v) for v in key) for key in _millimetres(sites[name].positions[rows])
@@ -1164,9 +1345,11 @@ def make_plan(
         added = range(cells.count, cells.count + patch.cells.shape[0])
         heard_at[patch.source] = sorted(set(heard_at[patch.source]) | set(added))
     audible = {name: int(track.audible.sum()) for name, track in tracks.sources.items()}
+    # The early trace's jobs: the mouth and the head as they are, sways and all. With a
+    # sway no two audible steps are one job.
     jobs = 0
     for track in tracks.sources.values():
-        both = np.concatenate([tracks.listener, track.position], axis=1)[track.audible]
+        both = np.concatenate([tracks.heard_from, track.traced_from], axis=1)[track.audible]
         jobs += int(np.unique(both, axis=0).shape[0]) if both.shape[0] else 0
     modes = np.concatenate(
         [low[name].mode[track.audible] for name, track in tracks.sources.items()]
@@ -1185,6 +1368,9 @@ def make_plan(
         "duration_s": tracks.duration_s,
         "steps": tracks.steps,
         "sources": list(tracks.sources),
+        # The sources the mirror renders alone, over the whole band: no solve, no pair.
+        "mirror_only": [name for name, track in tracks.sources.items() if not track.low],
+        "near_a_surface": near,
         "audible_steps": audible,
         "audible_steps_total": int(sum(audible.values())),
         "step_pairs": jobs,

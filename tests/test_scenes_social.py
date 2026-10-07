@@ -38,6 +38,7 @@ from reverberate.scenes import (
     source_state,
     validate,
     validate_text,
+    wave_band,
 )
 from reverberate.scenes.describe import describe, gaze_share
 from reverberate.scenes.kinematics import audible_steps
@@ -224,10 +225,11 @@ def test_nobody_is_audible_on_the_move_but_by_footsteps() -> None:
         assert all(resting), source.id
         walked |= any(not isinstance(segment, Dwell) for segment in source.segments)
     assert walked
+    # Footsteps are the mirror's alone (the owner, 2026-10-07): a footfall asks no solve.
     low = low_band_source_positions(recipe)
-    assert set(low.kind) <= {"station", "floor"}
+    assert set(low.kind) == {"station"}
     steps = [s for s in recipe.sources if s.subtype == "steps"]
-    assert steps and "floor" in low.kind
+    assert steps and not any(wave_band(s) for s in steps)
     for source in steps:
         where = source_state(recipe, source.id, sample_times(recipe)).position
         assert np.allclose(where[:, 1], FLOOR_Y_M + 0.05)
@@ -236,8 +238,10 @@ def test_nobody_is_audible_on_the_move_but_by_footsteps() -> None:
         hops = np.linalg.norm(np.diff(where, axis=0), axis=1)
         assert np.all((hops < 1e-9) | (hops > 0.05))
         walked_m = float(hops.sum())
-        assert 0 < len(low.by_source[source.id]) <= walked_m / 0.64 + 3
-        assert len(low.by_source[source.id]) < walked_m / 0.08 / 4
+        heard = where[audible_steps(recipe, source.id)]
+        places = np.unique(np.round(heard, 3), axis=0).shape[0]
+        assert 0 < places <= walked_m / 0.64 + 3
+        assert low.by_source[source.id] == ()
 
 
 # --------------------------------------------------------------------------
@@ -293,23 +297,21 @@ def test_the_wearers_own_voice_is_at_the_mouth_and_asks_for_no_solve() -> None:
     assert 12 in rules(tree)
 
 
-def test_a_persons_noise_reads_the_positions_its_voice_has_paid() -> None:
+def test_a_persons_noise_is_at_its_talkers_mouth_and_asks_for_no_solve() -> None:
     recipe = social_recipe("medium")
     low = low_band_source_positions(recipe)
     bodies = [
         s for s in recipe.sources if s.subtype == "body" and s.attach and s.attach.to != "listener"
     ]
     assert bodies
+    times = sample_times(recipe)
     for body in bodies:
-        assert body.attach is not None
-        carrier = recipe.source(body.attach.to)
-        rests = {
-            tuple(np.round(source_state(recipe, carrier.id, [s.start_s]).position[0], 3))
-            for s in carrier.segments
-            if isinstance(s, Dwell)
-        }
-        mine = {tuple(np.round(low.positions[row], 3)) for row in low.by_source[body.id]}
-        assert mine and mine <= rests
+        assert body.attach is not None and not wave_band(body)
+        carrier = source_state(recipe, body.attach.to, times)
+        mine = source_state(recipe, body.id, times)
+        # Where its talker's mouth is, sway and all; and the mirror's alone.
+        assert np.array_equal(mine.mouth, carrier.mouth)
+        assert low.by_source[body.id] == ()
     tree = tree_of(recipe)
     source_of(tree, subtype="body").pop("attach")
     assert rules(tree) and set(rules(tree)) <= {2, 12}

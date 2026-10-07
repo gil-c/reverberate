@@ -2,10 +2,11 @@
 
 The reference trace of a scene is the Cartesian grid at 10.5 points per
 wavelength (which a trace takes only when told since 2026-10-07: the
-command of every variant names its grid), rails every 8 cm read from two positions, a low response of
-1.2 s and 100 000 rays. Each of those may be made cheaper by an option that
-changes the result; a **variant** is a name and the options it takes. A
-**set** is a small JSON file of them (``trace/sets/listening_v1.json``):
+command of every variant names its grid), rails every 8 cm read from two
+positions, a low response of 1.2 s and 100 000 rays. Each of those may be
+made cheaper by an option that changes the result; a **variant** is a name
+and the options it takes. A **set** is a small JSON file of them
+(``trace/sets/listening_v1.json``):
 
 .. code-block:: json
 

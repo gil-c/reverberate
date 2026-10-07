@@ -433,8 +433,9 @@ def test_a_trace_is_asked_at_7_2_points_unless_told_and_10_5_is_the_reference() 
     assert coarse is not None and fine is not None
     priced = cost.predict(record, num_gpus=1, dph_total=0.173)
     assert priced["seconds"] == coarse["seconds"]
-    assert cost.predict(record, num_gpus=1, dph_total=0.173, low_ppw=10.5)["seconds"] == (
-        fine["seconds"]
+    assert (
+        cost.predict(record, num_gpus=1, dph_total=0.173, low_ppw=10.5)["seconds"]
+        == (fine["seconds"])
     )
     # A record that names no grid is the reference's, as every run's before 2026-10-07.
     unnamed = machines.predict(record, **one)

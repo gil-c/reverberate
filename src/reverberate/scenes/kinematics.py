@@ -22,9 +22,16 @@ where the body really is. A source's yaw carries its own sway: a rotation
 is applied at render and is free in every band.
 
 **A carried source has no segments.** Its state is its carrier's
-(:class:`~.recipe.Attach`): at the mouth, the same position, and so the same
-solves; at the floor, the footfall nearest under the carrier, a place that
-does not move while it sounds.
+(:class:`~.recipe.Attach`): at the mouth, the same position; at the floor,
+the footfall nearest under the carrier, a place that does not move while it
+sounds.
+
+**Which sources the wave solver answers** is :func:`wave_band`, the one
+rule: every source but those that are carried (the wearer's own voice, a
+person's breath and clothes, footsteps) and the pane of a closed window.
+Those are the mirror's alone over the whole band, and ask for no solve
+(the owner's decisions of 2026-10-07 on
+``docs/open-questions/recipes-v2.md``).
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ __all__ = [
     "seat_rail_heights",
     "source_state",
     "sway_offset",
+    "wave_band",
     "yaw_of_direction",
 ]
 
@@ -561,6 +569,30 @@ def _carried(recipe: Recipe, source: Source, times: np.ndarray) -> SourceState:
 # --------------------------------------------------------------------------
 
 
+def wave_band(source: Source) -> bool:
+    """Whether the band under the crossover of ``source`` is the wave solver's.
+
+    False for a source the mirror renders alone, over the whole band, which
+    then asks for no low band position, no cell and no pair:
+
+    - **a carried source** (``attach``). The wearer's own voice is 0.10 m
+      from where the field is taken, inside any array that could hear it:
+      no wave solve answers it. A person's breath and clothes, and
+      footsteps, are quiet and brief, and a footfall would ask a solve a
+      stride: they were most of a full scene's positions;
+    - **the pane of a closed window** (``opening.state`` ``closed``): what
+      comes in is the pane's own radiation, which is no point source of
+      the room's air (``docs/formats/scene-pack.md``, "A source the mirror
+      renders alone").
+
+    Everything else is solved: a voice, a programme, a fixed noise, and the
+    noise of an open window, at their stations.
+    """
+    if source.attach is not None:
+        return False
+    return not (source.opening is not None and source.opening.state == "closed")
+
+
 def audible_steps(
     recipe: Recipe, source_id: str, *, step_s: float = YAW_STEP_S, tail_s: float = AUDIBLE_TAIL_S
 ) -> np.ndarray:
@@ -583,10 +615,10 @@ class LowBandPositions:
 
     #: ``[position, 3]`` in metres, scene frame, on whole millimetres.
     positions: np.ndarray
-    #: Per position: ``"station"``, ``"rail"``, ``"seat_rail"`` or, in version 2,
-    #: ``"floor"``, a footfall. An end a rail shares with a station is the rail's.
+    #: Per position: ``"station"``, ``"rail"`` or ``"seat_rail"``. An end a rail shares
+    #: with a station is the rail's.
     kind: tuple[str, ...]
-    #: The rows each source reads, sorted.
+    #: The rows each source reads, sorted; none for a source of the mirror alone.
     by_source: dict[str, tuple[int, ...]]
 
     @property
@@ -598,11 +630,10 @@ class LowBandPositions:
             "stations": self.kind.count("station"),
             "rail_samples": self.kind.count("rail"),
             "seat_rail_samples": self.kind.count("seat_rail"),
-            **({"footfalls": self.kind.count("floor")} if "floor" in self.kind else {}),
         }
 
 
-_KIND_RANK = {"rail": 0, "seat_rail": 1, "station": 2, "floor": 3}
+_KIND_RANK = {"rail": 0, "seat_rail": 1, "station": 2}
 
 
 def low_band_source_positions(
@@ -627,12 +658,8 @@ def low_band_source_positions(
     standing station it starts from are one solve.
 
     Version 2. A sway moves nothing here: a source is read where it is
-    without it. A source carried at another's mouth reads its carrier's
-    positions, at the steps where it is itself audible, so a breath costs no
-    solve its talker's voice has not paid. One carried at the floor reads
-    its footfalls. One carried at the listener's mouth, the wearer's own
-    voice, reads none: no wave solve answers a source inside the array that
-    hears it (``docs/open-questions/recipes-v2.md``).
+    without it. A source the mirror renders alone (:func:`wave_band`: one
+    that is carried, and the pane of a closed window) reads no position.
     """
     floor = recipe.dwelling.floor_y_m
     standing = floor + recipe.heights.standing_m
@@ -661,17 +688,8 @@ def low_band_source_positions(
     for source in recipe.sources:
         mine = by_source.setdefault(source.id, set())
         mover = source
-        if source.attach is not None:
-            if source.attach.at == "floor":
-                times = sample_times(recipe, step_s)
-                if audible_only:
-                    times = times[audible_steps(recipe, source.id, step_s=step_s, tail_s=tail_s)]
-                if times.size:
-                    add(mine, _footfalls(recipe, source, times), "floor")
-                continue
-            if source.attach.to == LISTENER:
-                continue
-            mover = recipe.source(source.attach.to)
+        if not wave_band(source):
+            continue
         if audible_only:
             times = sample_times(recipe, step_s)
             heard = audible_steps(recipe, source.id, step_s=step_s, tail_s=tail_s)
