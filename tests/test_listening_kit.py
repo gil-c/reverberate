@@ -257,12 +257,13 @@ def test_a_set_is_priced_on_the_scene_and_the_excerpt_with_a_command_a_variant(
     assert all(record is not None for record in records.values())
     reference: dict[str, Any] = records["reference"] or {}
     cheap: dict[str, Any] = records["all-cheap"] or {}
-    # The reference's command is the reference's recipe and no option; a variant's, its own.
+    # The reference's command is the reference's recipe and its grid by name, which a
+    # trace no longer takes unless told; a variant's, its own.
     home = tmp_path / "kit"
     assert reference["command"] == (
         f"python -m reverberate.trace rent --recipe {tmp_path / 'recipe.json'}"
         f" --home {home / 'reference'} --smoke 0.3 --smoke-start 0.1 --smoke-sources 1"
-        f" --mirror {tmp_path / 'mirror'} --gpus 2 --yes"
+        f" --low-ppw 10.5 --mirror {tmp_path / 'mirror'} --gpus 2 --yes"
     )
     assert reference["command"] in printed and reference["recipe_changed"] is None
     assert (

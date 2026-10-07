@@ -397,3 +397,48 @@ def test_the_cores_counted_are_the_containers_share_and_not_the_hosts(
     monkeypatch.setattr("reverberate.render.early.usable_cores", compute.usable_cores)
     assert workers_of(np, -1) == {"workers": 4} and workers_of(np, 3) == {"workers": 3}
     assert workers_of(object(), -1) == {}
+
+
+# --------------------------------------------------------------------------
+# the grid a trace takes unless told
+# --------------------------------------------------------------------------
+
+
+def test_a_trace_is_asked_at_7_2_points_unless_told_and_10_5_is_the_reference() -> None:
+    """The command line and a recipe's cost name the grid; a record that names none is 10.5."""
+    from reverberate.scenes import cost
+    from reverberate.trace import machines
+    from reverberate.trace.cli import parse
+    from reverberate.trace.plan import LOW_PPW, REFERENCE_PPW
+
+    assert (LOW_PPW, REFERENCE_PPW) == (7.2, 10.5)
+    words = ["bundle", "--recipe", "R.json", "--out", "B"]
+    assert parse(words).low_ppw == 7.2
+    assert parse([*words, "--low-ppw", "10.5"]).low_ppw == 10.5
+    # PFFDTD has the bundle's grid and no other.
+    assert parse([*words, "--low-engine", "pffdtd"]).low_ppw is None
+    record = {
+        "source_positions": 7,
+        "pairs": 559,
+        "cells_a_position": [80] * 6 + [79],
+        "tail_sites": 7,
+        "tail_cells": 12,
+        "step_pairs": 9000,
+        "pairs_of_the_patch": 0,
+        "profile": {},
+    }
+    one = {"gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram_gb": 24.0, "dph_total": 0.173}
+    coarse = machines.predict(record, low_ppw=7.2, **one)
+    fine = machines.predict(record, low_ppw=10.5, **one)
+    assert coarse is not None and fine is not None
+    priced = cost.predict(record, num_gpus=1, dph_total=0.173)
+    assert priced["seconds"] == coarse["seconds"]
+    assert cost.predict(record, num_gpus=1, dph_total=0.173, low_ppw=10.5)["seconds"] == (
+        fine["seconds"]
+    )
+    # A record that names no grid is the reference's, as every run's before 2026-10-07.
+    unnamed = machines.predict(record, **one)
+    assert unnamed is not None and unnamed["seconds"] == fine["seconds"]
+    # Half the card seconds a source position, and a longer preparation.
+    assert coarse["work"]["solve_card_s"] < 0.55 * fine["work"]["solve_card_s"]
+    assert coarse["seconds"]["prepare"] == 240.0 and fine["seconds"]["prepare"] == 110.0

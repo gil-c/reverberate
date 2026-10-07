@@ -130,12 +130,17 @@ def predict(recipe: Recipe | dict[str, Any], **machine: Any) -> dict[str, Any]:
     ``recipe`` is a recipe or a record of :func:`counts` (or a plan's own
     record, which has the same keys). ``machine`` is what
     :func:`reverberate.trace.machines.predict` takes of an offer; left out,
-    the machine of the first scene (:data:`REFERENCE_MACHINE`).
+    the machine of the first scene (:data:`REFERENCE_MACHINE`) and the grid
+    a trace takes unless told, 7.2 points a wavelength
+    (:data:`reverberate.trace.plan.LOW_PPW`).
     """
     from reverberate.trace import machines
 
+    from reverberate.trace.plan import LOW_PPW
+
     record = counts(recipe) if isinstance(recipe, Recipe) else dict(recipe)
-    found = machines.predict(record, **{**REFERENCE_MACHINE, **machine})
+    # On the grid a trace takes unless told; ``low_ppw=10.5`` is the reference.
+    found = machines.predict(record, **{**REFERENCE_MACHINE, "low_ppw": LOW_PPW, **machine})
     if found is None:
         raise ValueError("the trace has no price for this machine")
     return {

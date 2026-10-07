@@ -65,8 +65,10 @@ from reverberate.spatial.translate import (
 __all__ = [
     "ARRAY_RADIUS_M",
     "DENSE_PITCH_M",
+    "LOW_PPW",
     "PATH_PITCH_M",
     "RAIL_POSITIONS",
+    "REFERENCE_PPW",
     "Assignment",
     "CellSet",
     "Patch",
@@ -99,8 +101,17 @@ MERGE_M = 0.03
 ARRAY_RADIUS_M = 0.26
 #: That ball in steps of the low band's grid, whatever the grid.
 ARRAY_RADIUS_STEPS = 12
-#: The validated grid's points per wavelength: what a trace solves on unless told.
-LOW_PPW = 10.5
+#: The validated grid's points per wavelength, the reference (``--low-ppw 10.5``): what a
+#: dwelling's export is voxelised at, and what a plan, a bundle or a run's record that
+#: names no grid (``None``) was counted, built or solved on.
+REFERENCE_PPW = 10.5
+#: **What a trace solves on unless told** (``--low-ppw``, ``scenes.cost.predict``): the
+#: owner compared the two grids by ear on the first scene and hears no difference
+#: (``docs/open-questions/listening-variants.md``, 2026-10-07), and a source position at
+#: 7.2 points is half the card seconds of one at 10.5 (``trace.machines.SOURCE_S``). The
+#: command line and the cost of a recipe say this grid by name wherever they ask for a
+#: plan, so a record always holds the grid it was made for.
+LOW_PPW = 7.2
 #: A source slot's weight under this is no weight.
 WEIGHT_FLOOR = 1e-9
 #: The solved positions a source on a rail reads unless more are asked for: the two round
@@ -1010,7 +1021,7 @@ def on_the_grid(
     """
     from reverberate.experiments.run import grid_step
 
-    points = LOW_PPW if ppw is None else float(ppw)
+    points = REFERENCE_PPW if ppw is None else float(ppw)
     step = grid_step(solve_fmax_hz(), points)
     cells = np.asarray(cells, dtype=float).reshape(-1, 3)
     stood = np.rint(cells / step) * step

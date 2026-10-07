@@ -481,7 +481,7 @@ python -m reverberate.trace ledger --home H_full --gpu "RTX 3090" --gpus 8 --gpu
 | | default | to change it |
 | --- | --- | --- |
 | low band engine | the batched solver (`wave.lowband`) | `--low-engine pffdtd` |
-| low band grid | Cartesian, 10.5 points per wavelength: the validated one | `--low-ppw 7.2`, `--low-scheme fcc` |
+| low band grid | Cartesian, 7.2 points per wavelength (`trace.plan.LOW_PPW`, since 2026-10-07: the owner compared it by ear with the validated grid and hears no difference; half the card seconds a source position) | `--low-ppw 10.5`, the validated grid and the reference; `--low-scheme fcc` |
 | the machine | the lowest predicted total USD among the offers predicted within `--max-hours` | `--gpus N`, `--gpu NAME`, `--max-dph`, `--avoid` |
 | the offers' order | by their predicted totals alone | `--prefer-region FR,GB`: the offers of those regions first, each region's by its totals, none left out |
 | the engine built on the machine | none: the batched solver on its Cartesian grid opens nothing of PFFDTD. `--low-engine pffdtd` and `--low-scheme fcc` build it without being told | `--build-engine` |
@@ -924,7 +924,8 @@ page switches among them at one instant.
 
 ### Two grids, kept side by side
 
-The validated grid and the coarser one are both first class. `--low-ppw`
+The validated grid (10.5 points, the reference) and the coarser one (7.2,
+what a trace takes unless told) are both first class. `--low-ppw`
 is read by `trace rent`, `trace bundle` and the machine's command; the grid
 is voxelised on the machine under its own key, its pairs are cached under
 that key and under a solver's name that says the grid, so a pair of one is
