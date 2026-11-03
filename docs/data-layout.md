@@ -1,43 +1,108 @@
 # What is in `data/`, and what it would cost to lose it
 
-120 GB at the time of writing, on a disk with 1.3 TiB free, so **nothing here is
-urgent for space**. The point of this page is the other question: which of it is
-evidence that exists once, and which is a cache that regenerates itself.
+313 GB at the time of writing. The disk went down to about 100 GB free before
+this measurement, which is why everything below was published. The point of
+this page is still the other question: which of it is evidence that exists once,
+and which is a cache that regenerates itself. Since 2026-11-03 the answer to the
+first is "nothing in `runs`, `cache/vox` or `external`": every file there is also
+in the object store, checked by size and digest.
 
-Measured 2026-09-09. `data/` is not versioned; this page is.
+Measured 2026-11-03 (the previous measurement, 2026-09-09, had 120 GB). `data/`
+is not versioned; this page is.
 
-| Directory | Size | What it is | If it were lost |
-|---|---|---|---|
-| `raw/hssd-hab` | 23 GB | The scene dataset. | Re-download. Slow, free. |
-| `raw/3d-front-midi` | 27 GB | **Dead.** Referenced only by `viz/mesh_viewer.py`, a standalone viewer; the roadmap never mentions it and ADR 0004 removed the geometric engine that wanted it. | Nothing. |
-| `raw/structured3d` | 38 MB | Dead on the same grounds. | Nothing. |
-| `raw/hrtf` | 3.3 MB | `HRIR_L2702.sofa`, the measured head. Carries its own CC 3.0 BY-SA licence, which does not compose with this project's. | Re-download. |
-| `cache/vox` | 59 GB | Voxelisations, content addressed. **14 of the 16 entries are already in the object store**, which the store module calls the source of truth against a local read-through cache. The two that are not are 0.2 GB local variants. | Re-download or recompute. |
-| `cache/carve`, `cache/scenes` | 680 MB | Derived from HSSD and the code. | Recompute. |
-| `cache/colliders` | 3.0 GB | One simulated mesh per HSSD template, 15 684 of them, shared by every apartment that places the piece. **The expensive one**: about 266 hours of one core for the whole dataset, which is why it was built on rented machines and published. | Re-fetch from the store, or two days of rented cores. |
-| `cache/scene_assets` | 0 B here | The render pool. On this machine each entry is a symlink into `raw/hssd-hab`, so it costs nothing; on a machine without the dataset it holds the 8.5 GB fetched from the store. | Re-fetch, or re-link. |
-| `runs` | 10 GB | The measurements. See below. | **Some of it, everything.** |
-| `vendor` | 419 MB | PFFDTD source and its virtualenv. | Rebuild. |
-| `interim/materials` | 204 KB | Impedance fits per material class. | Recompute. |
-| `littrature`, `patches`, `archive` | 350 KB | References and rejected work. | Irreplaceable, trivial to keep. |
+| Directory | Size | What it is | In the store | If it were lost |
+|---|---|---|---|---|
+| `raw/hssd-hab` | 23 GB | The scene dataset. | As `datasets/hssd-hab.tar`. | Re-fetch from the store, or re-download. |
+| `raw/hrtf` | 3.3 MB | `HRIR_L2702.sofa`, the measured head. Carries its own CC 3.0 BY-SA licence, which does not compose with this project's. | No. | Re-download. |
+| `cache/vox` | 72 GB | Voxelisations, content addressed, 25 entries. | **All 25**, every file. | Re-fetch, or recompute. |
+| `cache/carve`, `cache/scenes` | 1.2 GB | Derived from HSSD and the code. | Scenes as manifests. | Recompute. |
+| `cache/colliders` | 3.0 GB | One simulated mesh per HSSD template, 15 684 of them. **The expensive one**: about 266 hours of one core. | Yes. | Re-fetch from the store, or two days of rented cores. |
+| `cache/scene_assets` | 0 B here | The render pool. On this machine each entry is a symlink into `raw/hssd-hab`. | As `scene_pool/`. | Re-fetch, or re-link. |
+| `cache/low-pairs`, `cache/scene_player` | 4.4 GB | Caches of the clarify simulator. | No. | Recompute. |
+| `runs` | 146 GB | The measurements. See below. | **All 44 run directories**, every file, including `w40_volume_field`, which is no longer on the disk. | Re-fetch. |
+| `external` | 63 GB | Published measurements (Motus, RAF, BRAS) and the calibration's state. | **Everything**, every file. | Re-fetch. |
+| `vendor` | 419 MB | PFFDTD source and its virtualenv. | No. | Rebuild. |
+| `clips`, `voices` | 815 MB | Listening material. | Voices as `voices/`. | Re-record or re-fetch. |
+| `interim/materials` | 204 KB | Impedance fits per material class. | No. | Recompute. |
+| `littrature`, `patches`, `archive` | 350 KB | References and rejected work. | No. | Irreplaceable, trivial to keep. |
 
-## The assembled dataset is in the store
+`raw/3d-front-midi` and `raw/structured3d`, dead on the grounds the previous
+version of this page gave, are gone.
 
-`reverberate/scenes/` holds all 176 storeys as manifests, `reverberate/scene_pool/`
-holds the two mesh pools, and `reverberate/scenes/index.json` is the catalogue,
-keyed by this project's own names. `reverberate/datasets/hssd-hab.tar` is the
-dataset itself, 11.2 GB, put there so a rented machine can read it from a
-presigned URL rather than be handed a credential. See ADR 0011.
+## Where it sits in the store
 
-An apartment therefore opens on any machine without HSSD and without an
-assembly. What the local disk keeps is a read-through cache of that, which is
-the ordering `store.py` argues for.
+Every key is under `reverberate/`, because the bucket is shared. A file keeps
+its path under `data/`, with one rename:
+
+    data/runs/<run>/<path>          ->  runs/<run>/<path>
+    data/cache/vox/<key>/<file>     ->  vox/<key>/<file>
+    data/external/<path>            ->  external/<path>
+
+Each object carries its SHA-256 in the `sha256` metadata, which `put_file` writes
+and `get_file` checks. Two run files had changed locally after their first
+publication, `w20_first_listen/report.json` and `w37_three_band/plan.json`. The
+published version was left as it was, and the local one sits next to it as
+`<name>.local-<first 12 hex of its digest>`.
+
+Each backed-up item also has a manifest, `manifests/<item>.json`: every file's
+path under `data/`, its key, size and digest, and any symlink the directory
+held. An item is one run directory (`runs/<run>`), one voxel entry
+(`vox/<key>`), or one entry of a published source (`external/<source>/<entry>`).
+The loose files at the top of `runs/` are `runs/top-level_files`.
+
+The bucket keeps object versions, and a lifecycle rule deletes a hidden version
+one day after it is hidden. Publishing goes through `staging/` and a copy, so a
+large publication briefly holds its bytes twice; that settles within two days.
+In the store, after this publication: `runs` 177 GB, `vox` 77 GB, `external`
+68 GB, `scene_pool` 12 GB, `datasets` 11 GB, 344 GB in all, about 2 USD a month.
+
+## Bringing an item back
+
+From the main checkout:
+
+    PYTHONPATH=src .venv/bin/python scripts/restore_data.py runs/w40_volume_field
+    PYTHONPATH=src .venv/bin/python scripts/restore_data.py --list
+
+The script reads the manifest and fetches each file through the store, so the
+digest is checked before the file takes its name. A file already present with
+the right size is skipped, so an interrupted restore resumes.
+
+## What was removed locally, and what was not
+
+Removed on 2026-11-03, after every file was found in the store with the same
+size and digest:
+
+| Item | Size | Restore |
+|---|---|---|
+| `runs/w40_volume_field` | 19 GB | `PYTHONPATH=src .venv/bin/python scripts/restore_data.py runs/w40_volume_field` |
+
+The walk app lists only the runs it finds on the disk, so `w40_volume_field`
+no longer appears in it until it is restored.
+
+Everything else stays, **although it is in the store**, because something reads
+it from the disk with no fallback to the store:
+
+- `runs/w41_field_hssd_0076` is the run `walk.toml` opens first.
+- `runs/w42_gpu_hssd_0076` holds the fields that `w44_clarify_interpolation`
+  and `w45_clarify_scene` name by absolute path, and the meshes the
+  `w42_gpu_hssd_0076_hybrid` walk points into.
+- `runs/w44_clarify_interpolation` and `runs/w45_clarify_scene` are the
+  clarify simulator's work in progress.
+- `cache/vox`: `entry_from_key` in `experiments/run.py` opens an entry by key on
+  the disk and treats absence as an error. `fetch_entry` exists, but only the
+  voxelise lookup calls it. Giving `entry_from_key` the same fallback would free
+  about 65 GB; the three entries `w44_clarify_interpolation` cites would stay.
+- `external`: the scripts on the real-data branch read `motus/sh_rirs.zip`,
+  `motus/meta`, the BRAS archives and `raf/rir` from the paths given on their
+  command line. `raf/rir` (43 GB) is raw archive parts whose result is already
+  `raf/decay_*.json`; it is the next candidate.
+- Runs under 100 MB, and every run the roadmap quotes its constants from: they
+  cost nothing and they are the evidence.
 
 ## The runs are not symmetrical
 
-Of 37 run directories, **11 are in the object store and 26 exist only on this
-laptop**. The unpublished ones are 6.8 GB and include exactly those the roadmap
-quotes its measured constants from:
+Every run directory is now in the object store. The ones the roadmap quotes its
+measured constants from were, on 2026-09-09, only on this laptop:
 
     w34_audit_16k  1766 MB     w29_16k           295 MB
     w39_living_8k  1379 MB     w2_lateral_margin 205 MB
@@ -48,9 +113,9 @@ quotes its measured constants from:
 error bars of section 9.1 come from. `w25_union` is the T30/T20 of 1.00 to 1.11
 that replaced 1.68 to 1.80. Deleting them does not make the roadmap wrong; it
 makes it **unfalsifiable**, which for a portfolio piece read by people who build
-simulators for a living is worse.
+simulators for a living is worse. They are kept locally as well.
 
-**So the order is: publish, then clear.** Not: clear.
+**So the order is: publish, verify, then clear.** Not: clear.
 
 ## Starting the simulations over
 
